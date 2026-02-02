@@ -3,6 +3,8 @@ defmodule Fastpaca.Observability.Telemetry do
   Centralised telemetry helpers so event names and metadata are consistent.
 
   Exposes small, purpose-built emitters that wrap `:telemetry.execute/3`.
+
+  Note: This is a message substrate - no LLM token budgets or compaction metrics.
   """
 
   @type token_source :: :client | :server
@@ -11,21 +13,21 @@ defmodule Fastpaca.Observability.Telemetry do
   Emit an event when a message is appended, including token counting source.
 
   Measurements:
-    - `:token_count` – integer token count for the message
+    - `:token_count` – integer token count for the message (client metadata)
 
   Metadata:
-    - `:context_id` – context identifier
+    - `:conversation_id` – conversation identifier
     - `:source` – `:client` or `:server` depending on who supplied the count
     - `:role` – message role (user/assistant/system)
   """
   @spec message_appended(token_source(), non_neg_integer(), String.t(), String.t()) :: :ok
-  def message_appended(source, token_count, context_id, role)
+  def message_appended(source, token_count, conversation_id, role)
       when source in [:client, :server] and is_integer(token_count) and token_count >= 0 and
-             is_binary(context_id) and is_binary(role) do
+             is_binary(conversation_id) and is_binary(role) do
     :telemetry.execute(
       [:fastpaca, :messages, :append],
       %{token_count: token_count},
-      %{context_id: context_id, source: source, role: role}
+      %{conversation_id: conversation_id, source: source, role: role}
     )
 
     :ok
@@ -39,7 +41,7 @@ defmodule Fastpaca.Observability.Telemetry do
     - `:attempted` – rows attempted to write
     - `:inserted` – rows successfully inserted (idempotent)
     - `:pending_rows` – total pending rows in ETS after flush
-    - `:pending_contexts` – total contexts with pending rows after flush
+    - `:pending_conversations` – total conversations with pending rows after flush
   """
   @spec archive_flush(
           non_neg_integer(),
@@ -55,14 +57,14 @@ defmodule Fastpaca.Observability.Telemetry do
         attempted,
         inserted,
         pending_rows,
-        pending_contexts,
+        pending_conversations,
         bytes_attempted,
         bytes_inserted
       )
       when is_integer(elapsed_ms) and elapsed_ms >= 0 and is_integer(attempted) and attempted >= 0 and
              is_integer(inserted) and inserted >= 0 and is_integer(pending_rows) and
              pending_rows >= 0 and
-             is_integer(pending_contexts) and pending_contexts >= 0 do
+             is_integer(pending_conversations) and pending_conversations >= 0 do
     :telemetry.execute(
       [:fastpaca, :archive, :flush],
       %{
@@ -70,7 +72,7 @@ defmodule Fastpaca.Observability.Telemetry do
         attempted: attempted,
         inserted: inserted,
         pending_rows: pending_rows,
-        pending_contexts: pending_contexts,
+        pending_conversations: pending_conversations,
         bytes_attempted: bytes_attempted,
         bytes_inserted: bytes_inserted
       },
@@ -87,10 +89,9 @@ defmodule Fastpaca.Observability.Telemetry do
     - `:lag` – last_seq - archived_seq (messages)
     - `:trimmed` – number of entries removed from the tail
     - `:tail_size` – entries currently in the tail after trim
-    - `:llm_token_count` – tokens in the LLM window
 
   Metadata:
-    - `:context_id`
+    - `:conversation_id`
     - `:archived_seq`
     - `:last_seq`
     - `:tail_keep`
@@ -105,26 +106,25 @@ defmodule Fastpaca.Observability.Telemetry do
           non_neg_integer()
         ) :: :ok
   def archive_ack_applied(
-        context_id,
+        conversation_id,
         last_seq,
         archived_seq,
         trimmed,
         tail_keep,
         tail_size,
-        llm_token_count
+        _token_count \\ 0
       )
-      when is_binary(context_id) and is_integer(last_seq) and last_seq >= 0 and
+      when is_binary(conversation_id) and is_integer(last_seq) and last_seq >= 0 and
              is_integer(archived_seq) and
              archived_seq >= 0 and is_integer(trimmed) and trimmed >= 0 and is_integer(tail_keep) and
-             tail_keep > 0 and
-             is_integer(llm_token_count) and llm_token_count >= 0 do
+             tail_keep > 0 do
     lag = max(last_seq - archived_seq, 0)
 
     :telemetry.execute(
       [:fastpaca, :archive, :ack],
-      %{lag: lag, trimmed: trimmed, tail_size: tail_size, llm_token_count: llm_token_count},
+      %{lag: lag, trimmed: trimmed, tail_size: tail_size},
       %{
-        context_id: context_id,
+        conversation_id: conversation_id,
         archived_seq: archived_seq,
         last_seq: last_seq,
         tail_keep: tail_keep
@@ -135,16 +135,16 @@ defmodule Fastpaca.Observability.Telemetry do
   end
 
   @doc """
-  Emit an event per archived batch (per context).
+  Emit an event per archived batch (per conversation).
 
   Measurements:
     - `:batch_rows` – number of rows in batch
     - `:batch_bytes` – total payload bytes in batch (approx)
     - `:avg_message_bytes` – average payload bytes per message in batch
-    - `:pending_after` – pending rows left for this context after trim
+    - `:pending_after` – pending rows left for this conversation after trim
 
   Metadata:
-    - `:context_id`
+    - `:conversation_id`
   """
   @spec archive_batch(
           String.t(),
@@ -153,8 +153,8 @@ defmodule Fastpaca.Observability.Telemetry do
           non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def archive_batch(context_id, batch_rows, batch_bytes, avg_message_bytes, pending_after)
-      when is_binary(context_id) and is_integer(batch_rows) and batch_rows >= 0 and
+  def archive_batch(conversation_id, batch_rows, batch_bytes, avg_message_bytes, pending_after)
+      when is_binary(conversation_id) and is_integer(batch_rows) and batch_rows >= 0 and
              is_integer(batch_bytes) and batch_bytes >= 0 and is_integer(avg_message_bytes) and
              avg_message_bytes >= 0 and is_integer(pending_after) and pending_after >= 0 do
     :telemetry.execute(
@@ -165,14 +165,14 @@ defmodule Fastpaca.Observability.Telemetry do
         avg_message_bytes: avg_message_bytes,
         pending_after: pending_after
       },
-      %{context_id: context_id}
+      %{conversation_id: conversation_id}
     )
 
     :ok
   end
 
   @doc """
-  Emit queue age gauge (seconds) across all contexts.
+  Emit queue age gauge (seconds) across all conversations.
   """
   @spec archive_queue_age(non_neg_integer()) :: :ok
   def archive_queue_age(seconds) when is_integer(seconds) and seconds >= 0 do

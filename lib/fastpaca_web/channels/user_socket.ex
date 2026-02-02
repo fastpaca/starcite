@@ -2,7 +2,7 @@ defmodule FastpacaWeb.UserSocket do
   use Phoenix.Socket
 
   # Channels
-  channel "context:*", FastpacaWeb.ContextChannel
+  channel "conversation:*", FastpacaWeb.ConversationChannel
 
   @impl true
   def connect(_params, socket, _connect_info) do

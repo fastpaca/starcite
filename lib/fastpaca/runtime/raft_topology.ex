@@ -80,7 +80,11 @@ defmodule Fastpaca.Runtime.RaftTopology do
   def handle_call(:ready?, _from, state) do
     # Simple health: do my local groups exist?
     my_groups = compute_my_groups()
-    ready = length(my_groups) > 0 and Enum.count(my_groups, &group_running?/1) >= div(length(my_groups), 2)
+
+    ready =
+      length(my_groups) > 0 and
+        Enum.count(my_groups, &group_running?/1) >= div(length(my_groups), 2)
+
     {:reply, ready, state}
   end
 
@@ -171,6 +175,7 @@ defmodule Fastpaca.Runtime.RaftTopology do
       Enum.each(0..(RaftManager.num_groups() - 1), fn group_id ->
         ensure_group_exists(group_id, cluster)
       end)
+
       Logger.info("RaftTopology: bootstrap complete")
     end)
   end
@@ -184,6 +189,7 @@ defmodule Fastpaca.Runtime.RaftTopology do
       Enum.each(my_groups, fn group_id ->
         wait_and_join_group(group_id)
       end)
+
       Logger.info("RaftTopology: joined #{length(my_groups)} groups")
     end)
   end
@@ -254,19 +260,27 @@ defmodule Fastpaca.Runtime.RaftTopology do
     server_ids = for node <- replica_nodes, do: {server_id, node}
 
     # Use global lock to ensure only one node across cluster bootstraps each group
-    :global.trans({:raft_bootstrap, group_id}, fn ->
-      case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-        {:ok, _started, _not_started} ->
-          :ok
+    :global.trans(
+      {:raft_bootstrap, group_id},
+      fn ->
+        case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
+          {:ok, _started, _not_started} ->
+            :ok
 
-        {:error, {:already_started, _}} ->
-          :ok
+          {:error, {:already_started, _}} ->
+            :ok
 
-        {:error, reason} ->
-          Logger.warning("RaftTopology: failed to bootstrap group #{group_id}: #{inspect(reason)}")
-          {:error, reason}
-      end
-    end, [Node.self() | Node.list()], 10_000)
+          {:error, reason} ->
+            Logger.warning(
+              "RaftTopology: failed to bootstrap group #{group_id}: #{inspect(reason)}"
+            )
+
+            {:error, reason}
+        end
+      end,
+      [Node.self() | Node.list()],
+      10_000
+    )
   end
 
   defp reconcile_group(group_id, cluster) do
@@ -387,8 +401,12 @@ defmodule Fastpaca.Runtime.RaftTopology do
 
   defp parse_expected_cluster_size do
     case System.get_env("CLUSTER_NODES") do
-      nil -> 1
-      "" -> 1
+      nil ->
+        1
+
+      "" ->
+        1
+
       nodes_str ->
         nodes_str
         |> String.split(",")

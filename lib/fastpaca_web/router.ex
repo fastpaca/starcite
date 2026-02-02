@@ -8,21 +8,15 @@ defmodule FastpacaWeb.Router do
   scope "/v1", FastpacaWeb do
     pipe_through :api
 
-    # Context lifecycle
-    put "/contexts/:id", ContextController, :upsert
-    get "/contexts/:id", ContextController, :show
-    delete "/contexts/:id", ContextController, :delete
-    patch "/contexts/:id/metadata", ContextController, :update_metadata
+    # Conversation lifecycle
+    put "/conversations/:id", ConversationController, :upsert
+    get "/conversations/:id", ConversationController, :show
+    delete "/conversations/:id", ConversationController, :delete
 
     # Messages
-    post "/contexts/:id/messages", ContextController, :append
-    get "/contexts/:id/tail", ContextController, :tail
-
-    # LLM interface
-    get "/contexts/:id/context", ContextController, :window
-
-    # Manual compaction
-    post "/contexts/:id/compact", ContextController, :compact
+    post "/conversations/:id/messages", ConversationController, :append
+    get "/conversations/:id/tail", ConversationController, :tail
+    get "/conversations/:id/messages", ConversationController, :replay
   end
 
   scope "/", FastpacaWeb do

@@ -22,4 +22,3 @@ defmodule Fastpaca.ReleaseTasks do
     Application.fetch_env!(@app, :ecto_repos)
   end
 end
-

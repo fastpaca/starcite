@@ -125,9 +125,14 @@ defmodule Fastpaca.Runtime.RaftManager do
 
       if am_bootstrap do
         # Ensure only one node bootstraps this group across the cluster
-        :global.trans({:raft_bootstrap, group_id}, fn ->
-          bootstrap_cluster(group_id, cluster_name, machine, server_ids, {server_id, my_node})
-        end, [Node.self()], 10_000)
+        :global.trans(
+          {:raft_bootstrap, group_id},
+          fn ->
+            bootstrap_cluster(group_id, cluster_name, machine, server_ids, {server_id, my_node})
+          end,
+          [Node.self()],
+          10_000
+        )
       else
         # Retry join until bootstrap node creates cluster
         join_cluster_with_retry(group_id, server_id, cluster_name, machine,
@@ -205,16 +210,16 @@ defmodule Fastpaca.Runtime.RaftManager do
     File.mkdir_p!(data_dir)
 
     # No cluster token enforcement
-      server_conf = %{
-        id: {server_id, my_node},
-        uid: "raft_group_#{group_id}_#{node_name}",
-        cluster_name: cluster_name,
-        log_init_args: %{
-          uid: "raft_log_#{group_id}_#{node_name}",
-          data_dir: data_dir
-        },
-        machine: machine
-      }
+    server_conf = %{
+      id: {server_id, my_node},
+      uid: "raft_group_#{group_id}_#{node_name}",
+      cluster_name: cluster_name,
+      log_init_args: %{
+        uid: "raft_log_#{group_id}_#{node_name}",
+        data_dir: data_dir
+      },
+      machine: machine
+    }
 
     case :ra.start_server(:default, server_conf) do
       :ok ->

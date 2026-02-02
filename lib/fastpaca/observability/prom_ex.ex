@@ -141,5 +141,4 @@ defmodule Fastpaca.Observability.PromEx do
       ]
     )
   end
-
 end

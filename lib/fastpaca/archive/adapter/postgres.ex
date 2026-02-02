@@ -10,7 +10,6 @@ defmodule Fastpaca.Archive.Adapter.Postgres do
   use GenServer
 
   alias Fastpaca.Repo
-  alias Fastpaca.Archive.Message
 
   @impl true
   def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
