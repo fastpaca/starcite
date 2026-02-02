@@ -11,7 +11,7 @@ defmodule FastpacaWeb.Endpoint do
     same_site: "Lax"
   ]
 
-  # WebSocket for context updates
+  # WebSocket for conversation updates
   socket "/socket", FastpacaWeb.UserSocket,
     websocket: [compress: true, timeout: 120_000],
     longpoll: false

@@ -4,6 +4,8 @@ defmodule Fastpaca.Observability.PromEx do
 
   Exposes metrics based on telemetry events emitted by
   Fastpaca.Observability.Telemetry and core libraries.
+
+  Note: This is a message substrate - no LLM token budgets or compaction metrics.
   """
 
   use PromEx, otp_app: :fastpaca
@@ -57,10 +59,10 @@ defmodule Fastpaca.Observability.PromEx do
           measurement: :pending_rows,
           description: "Pending rows in archive ETS queue"
         ),
-        last_value("fastpaca_archive_pending_contexts",
+        last_value("fastpaca_archive_pending_conversations",
           event_name: [:fastpaca, :archive, :flush],
-          measurement: :pending_contexts,
-          description: "Contexts with pending rows in archive ETS queue"
+          measurement: :pending_conversations,
+          description: "Conversations with pending rows in archive ETS queue"
         ),
         summary("fastpaca_archive_flush_duration_ms",
           event_name: [:fastpaca, :archive, :flush],
@@ -91,23 +93,23 @@ defmodule Fastpaca.Observability.PromEx do
         distribution("fastpaca_archive_batch_rows",
           event_name: [:fastpaca, :archive, :batch],
           measurement: :batch_rows,
-          description: "Rows per archive batch (per context)",
+          description: "Rows per archive batch (per conversation)",
           reporter_options: [buckets: [1, 10, 50, 100, 500, 1_000, 2_000, 5_000, 10_000]],
-          tags: [:context_id]
+          tags: [:conversation_id]
         ),
         distribution("fastpaca_archive_batch_bytes",
           event_name: [:fastpaca, :archive, :batch],
           measurement: :batch_bytes,
-          description: "Payload bytes per archive batch (per context)",
+          description: "Payload bytes per archive batch (per conversation)",
           reporter_options: [buckets: [1_024, 10_240, 102_400, 1_048_576, 10_485_760, 52_428_800]],
-          tags: [:context_id]
+          tags: [:conversation_id]
         ),
         distribution("fastpaca_archive_message_bytes",
           event_name: [:fastpaca, :archive, :batch],
           measurement: :avg_message_bytes,
-          description: "Average message bytes per batch (per context)",
+          description: "Average message bytes per batch (per conversation)",
           reporter_options: [buckets: [100, 1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000]],
-          tags: [:context_id]
+          tags: [:conversation_id]
         ),
         last_value("fastpaca_archive_oldest_age_seconds",
           event_name: [:fastpaca, :archive, :queue_age],
@@ -117,26 +119,20 @@ defmodule Fastpaca.Observability.PromEx do
         last_value("fastpaca_archive_lag",
           event_name: [:fastpaca, :archive, :ack],
           measurement: :lag,
-          description: "Archive lag (messages) per context",
-          tags: [:context_id]
+          description: "Archive lag (messages) per conversation",
+          tags: [:conversation_id]
         ),
         last_value("fastpaca_archive_tail_size",
           event_name: [:fastpaca, :archive, :ack],
           measurement: :tail_size,
           description: "In-Raft tail size after trim",
-          tags: [:context_id]
+          tags: [:conversation_id]
         ),
         counter("fastpaca_archive_trimmed_total",
           event_name: [:fastpaca, :archive, :ack],
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
-          tags: [:context_id]
-        ),
-        last_value("fastpaca_archive_llm_token_count",
-          event_name: [:fastpaca, :archive, :ack],
-          measurement: :llm_token_count,
-          description: "LLM window token count",
-          tags: [:context_id]
+          tags: [:conversation_id]
         )
       ]
     )
