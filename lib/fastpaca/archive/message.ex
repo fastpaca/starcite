@@ -8,7 +8,7 @@ defmodule Fastpaca.Archive.Message do
 
   @primary_key false
   schema "messages" do
-    field(:context_id, :string, primary_key: true)
+    field(:conversation_id, :string, primary_key: true)
     field(:seq, :integer, primary_key: true)
     field(:role, :string)
     field(:parts, :map)
@@ -19,9 +19,9 @@ defmodule Fastpaca.Archive.Message do
 
   def changeset(message, attrs) do
     message
-    |> cast(attrs, [:context_id, :seq, :role, :parts, :metadata, :token_count, :inserted_at])
+    |> cast(attrs, [:conversation_id, :seq, :role, :parts, :metadata, :token_count, :inserted_at])
     |> validate_required([
-      :context_id,
+      :conversation_id,
       :seq,
       :role,
       :parts,

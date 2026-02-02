@@ -2,11 +2,11 @@ defmodule Fastpaca.Archive.Adapter do
   @moduledoc """
   Behaviour for archive backends. Implementations persist messages to cold storage.
 
-  An adapter must be idempotent on (context_id, seq) to support at-least-once.
+  An adapter must be idempotent on (conversation_id, seq) to support at-least-once.
   """
 
   @type message_row :: %{
-          required(:context_id) => String.t(),
+          required(:conversation_id) => String.t(),
           required(:seq) => non_neg_integer(),
           required(:role) => String.t(),
           required(:parts) => list(),

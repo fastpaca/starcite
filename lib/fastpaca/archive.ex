@@ -15,16 +15,17 @@ defmodule Fastpaca.Archive do
   alias Fastpaca.Runtime
 
   @messages_tab :fastpaca_archive_messages
-  @contexts_tab :fastpaca_archive_contexts
+  @conversations_tab :fastpaca_archive_conversations
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
   @doc "Append committed messages to the pending archive queue (ETS)."
   @spec append_messages(String.t(), [map()]) :: :ok
-  def append_messages(context_id, messages) when is_binary(context_id) and is_list(messages) do
+  def append_messages(conversation_id, messages)
+      when is_binary(conversation_id) and is_list(messages) do
     case Process.whereis(__MODULE__) do
       nil -> :ok
-      _pid -> GenServer.cast(__MODULE__, {:append, context_id, messages})
+      _pid -> GenServer.cast(__MODULE__, {:append, conversation_id, messages})
     end
 
     :ok
@@ -34,7 +35,7 @@ defmodule Fastpaca.Archive do
   def init(opts) do
     # ETS tables (uncapped by design)
     :ets.new(@messages_tab, [:ordered_set, :public, :named_table, {:read_concurrency, true}])
-    :ets.new(@contexts_tab, [:set, :public, :named_table, {:read_concurrency, true}])
+    :ets.new(@conversations_tab, [:set, :public, :named_table, {:read_concurrency, true}])
 
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.fetch!(opts, :adapter)
@@ -53,13 +54,13 @@ defmodule Fastpaca.Archive do
   end
 
   @impl true
-  def handle_cast({:append, context_id, messages}, state) do
+  def handle_cast({:append, conversation_id, messages}, state) do
     Enum.each(messages, fn msg ->
-      key = {context_id, msg.seq}
+      key = {conversation_id, msg.seq}
       :ets.insert(@messages_tab, {key, msg})
     end)
 
-    :ets.insert(@contexts_tab, {context_id, :pending})
+    :ets.insert(@conversations_tab, {conversation_id, :pending})
     {:noreply, state}
   end
 
@@ -76,13 +77,13 @@ defmodule Fastpaca.Archive do
 
   defp flush_all(%{adapter: adapter} = state) do
     start = System.monotonic_time(:millisecond)
-    contexts = contexts_list()
+    conversations = conversations_list()
 
     {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total} =
-      Enum.reduce(contexts, {0, 0, 0, 0}, fn context_id,
-                                             {attempted_acc, inserted_acc, bytes_att_acc,
-                                              bytes_ins_acc} ->
-        rows = take_pending_rows(context_id, state)
+      Enum.reduce(conversations, {0, 0, 0, 0}, fn conversation_id,
+                                                  {attempted_acc, inserted_acc, bytes_att_acc,
+                                                   bytes_ins_acc} ->
+        rows = take_pending_rows(conversation_id, state)
         attempted = length(rows)
         bytes_attempted = Enum.reduce(rows, 0, fn r, acc -> acc + approx_bytes(r) end)
 
@@ -91,21 +92,21 @@ defmodule Fastpaca.Archive do
             {:ok, _count} ->
               upto_seq = contiguous_upto(rows)
 
-              case Runtime.ack_archived(context_id, upto_seq) do
+              case Runtime.ack_archived(conversation_id, upto_seq) do
                 {:ok, %{archived_seq: _archived, trimmed: _}} ->
-                  trim_local(context_id, upto_seq)
-                  pending_after = pending_count(context_id)
+                  trim_local(conversation_id, upto_seq)
+                  pending_after = pending_count(conversation_id)
                   avg_msg_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
                   Fastpaca.Observability.Telemetry.archive_batch(
-                    context_id,
+                    conversation_id,
                     attempted,
                     bytes_attempted,
                     avg_msg_bytes,
                     pending_after
                   )
 
-                  maybe_clear_context(context_id)
+                  maybe_clear_conversation(conversation_id)
 
                   {attempted_acc + attempted, inserted_acc + attempted,
                    bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
@@ -126,7 +127,7 @@ defmodule Fastpaca.Archive do
 
     elapsed = System.monotonic_time(:millisecond) - start
     pending_rows = :ets.info(@messages_tab, :size) || 0
-    pending_contexts = :ets.info(@contexts_tab, :size) || 0
+    pending_conversations = :ets.info(@conversations_tab, :size) || 0
 
     # Emit queue age gauge
     age_seconds = oldest_age_seconds()
@@ -137,7 +138,7 @@ defmodule Fastpaca.Archive do
       attempted_total,
       inserted_total,
       pending_rows,
-      pending_contexts,
+      pending_conversations,
       bytes_attempted_total,
       bytes_inserted_total
     )
@@ -150,24 +151,26 @@ defmodule Fastpaca.Archive do
     byte_size(Jason.encode!(parts)) + byte_size(Jason.encode!(metadata))
   end
 
-  defp contexts_list do
-    :ets.tab2list(@contexts_tab) |> Enum.map(fn {id, _} -> id end)
+  defp conversations_list do
+    :ets.tab2list(@conversations_tab) |> Enum.map(fn {id, _} -> id end)
   end
 
-  defp take_pending_rows(context_id, _state) do
-    # Select a chunk of rows in seq-ascending order for this context
+  defp take_pending_rows(conversation_id, _state) do
+    # Select a chunk of rows in seq-ascending order for this conversation
     limit = Application.get_env(:fastpaca, :archive_batch_size, 5_000)
 
     ms = [
       {
-        {{context_id, :"$1"}, :"$2"},
+        {{conversation_id, :"$1"}, :"$2"},
         [],
         [{{:"$1", :"$2"}}]
       }
     ]
 
     select_take(@messages_tab, ms, limit)
-    |> Enum.map(fn {seq, msg} -> Map.put(msg, :context_id, context_id) |> Map.put(:seq, seq) end)
+    |> Enum.map(fn {seq, msg} ->
+      Map.put(msg, :conversation_id, conversation_id) |> Map.put(:seq, seq)
+    end)
     |> Enum.sort_by(& &1.seq)
   end
 
@@ -219,11 +222,11 @@ defmodule Fastpaca.Archive do
     |> elem(1)
   end
 
-  defp trim_local(context_id, upto_seq) do
-    # Delete all rows for this context with seq <= upto_seq
+  defp trim_local(conversation_id, upto_seq) do
+    # Delete all rows for this conversation with seq <= upto_seq
     ms = [
       {
-        {{context_id, :"$1"}, :"$2"},
+        {{conversation_id, :"$1"}, :"$2"},
         [{:"=<", :"$1", upto_seq}],
         [true]
       }
@@ -233,26 +236,26 @@ defmodule Fastpaca.Archive do
     :ok
   end
 
-  defp maybe_clear_context(context_id) do
-    # If no rows remain for this context, clear it from contexts_tab
+  defp maybe_clear_conversation(conversation_id) do
+    # If no rows remain for this conversation, clear it from conversations_tab
     ms = [
       {
-        {{context_id, :"$1"}, :"$2"},
+        {{conversation_id, :"$1"}, :"$2"},
         [],
         [true]
       }
     ]
 
     case :ets.select(@messages_tab, ms, 1) do
-      {[], _} -> :ets.delete(@contexts_tab, context_id)
+      {[], _} -> :ets.delete(@conversations_tab, conversation_id)
       _ -> :ok
     end
   end
 
-  defp pending_count(context_id) do
+  defp pending_count(conversation_id) do
     ms = [
       {
-        {{context_id, :"$1"}, :"$2"},
+        {{conversation_id, :"$1"}, :"$2"},
         [],
         [true]
       }
@@ -263,9 +266,9 @@ defmodule Fastpaca.Archive do
 
   defp oldest_age_seconds do
     now = NaiveDateTime.utc_now()
-    contexts = contexts_list()
+    conversations = conversations_list()
 
-    contexts
+    conversations
     |> Enum.map(&first_row_ts/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.map(fn ts -> max(NaiveDateTime.diff(now, ts, :second), 0) end)
@@ -275,10 +278,10 @@ defmodule Fastpaca.Archive do
     end
   end
 
-  defp first_row_ts(context_id) do
+  defp first_row_ts(conversation_id) do
     ms = [
       {
-        {{context_id, :"$1"}, :"$2"},
+        {{conversation_id, :"$1"}, :"$2"},
         [],
         [:"$2"]
       }

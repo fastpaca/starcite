@@ -42,7 +42,7 @@ defmodule Fastpaca.Archive.Adapter.Postgres do
     entries =
       Enum.map(rows, fn row ->
         %{
-          context_id: row.context_id,
+          conversation_id: row.conversation_id,
           seq: row.seq,
           role: row.role,
           # Encode to JSON string for jsonb columns
@@ -54,13 +54,12 @@ defmodule Fastpaca.Archive.Adapter.Postgres do
         }
       end)
 
-    # Use raw SQL to insert with jsonb casting
     Repo.insert_all(
       "messages",
       entries,
       placeholders: %{parts: :string, metadata: :string},
       on_conflict: :nothing,
-      conflict_target: [:context_id, :seq]
+      conflict_target: [:conversation_id, :seq]
     )
   end
 end
