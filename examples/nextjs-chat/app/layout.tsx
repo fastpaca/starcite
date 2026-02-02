@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Fastpaca Chat Demo",
-  description: "Next.js chat example with context management powered by Fastpaca."
+  description: "Next.js chat example with Fastpaca conversation logs."
 };
 
 export default function RootLayout({

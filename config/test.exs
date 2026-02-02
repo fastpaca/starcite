@@ -25,8 +25,6 @@ config :fastpaca, :pubsub_adapter, :local
 # Disable agent webhooks by default in tests
 config :fastpaca, :disable_agent_webhooks, true
 
-config :fastpaca, :persist_context_snapshots, false
-
 # Raft test configuration
 config :fastpaca,
   raft_data_dir: "tmp/test_raft",

@@ -1,15 +1,15 @@
 # Fastpaca × Next.js Chat Example
 
-Minimal chat app demonstrating Fastpaca context management with ai-sdk and Next.js.
+Minimal chat app demonstrating Fastpaca conversation logs with ai-sdk and Next.js.
 
 ![](https://fastpaca.com/images/context-store-demo.gif)
 
 ## Features
 
-- **Pure ai-sdk frontend** - Uses `useChat` hook, no Fastpaca client code needed
+- **Pure ai-sdk frontend** - Uses `useChat`, no Fastpaca client code in the UI
 - **Backend integration** - All Fastpaca calls in the API route
-- **gpt-4o-mini** - 400k context window, affordable
-- **Auto-compaction** - `last_n` strategy keeps last 400 messages
+- **Prompt assembly** - Builds the model prompt from the latest messages (tail)
+- **gpt-4o-mini** - Fast, affordable model for the demo
 
 ## Setup
 
@@ -37,35 +37,33 @@ const { messages, input, handleSubmit } = useChat();
 ```typescript
 // app/api/chat/route.ts
 export async function POST(req: Request) {
-  const { messages } = await req.json();
+  const { messages, conversationId } = await req.json();
 
-  // 1. Get context ID from session/user
-  const contextId = getContextId(req);
-
-  // 2. Append last message to Fastpaca
-  await appendToFastpaca(contextId, messages[messages.length - 1]);
-
-  // 3. Get token-budgeted window from Fastpaca
-  const { messages: contextMessages } = await getFastpacaWindow(contextId);
-
-  // 4. Stream to OpenAI
-  const result = streamText({
-    model: openai('gpt-4o-mini'),
-    messages: convertToModelMessages(contextMessages),
+  // 1. Get conversation ID from session/user
+  const convo = await fastpaca.conversation(conversationId, {
+    metadata: { source: 'nextjs-chat' }
   });
 
-  // 5. Auto-append assistant response after stream
-  await appendAssistantResponse(contextId, result);
+  // 2. Append last user message to Fastpaca
+  await convo.append(messages[messages.length - 1]);
 
-  return result.toUIMessageStreamResponse();
+  // 3. Build prompt from the latest messages
+  const { messages: convoMessages } = await convo.tail({ limit: 50 });
+
+  // 4. Stream to OpenAI
+  return streamText({
+    model: openai('gpt-4o-mini'),
+    messages: convertToModelMessages(convoMessages),
+  }).toUIMessageStreamResponse({
+    onFinish: async ({ responseMessage }) => {
+      await convo.append(responseMessage);
+    },
+  });
 }
 ```
 
-### Compaction
-When `used_tokens > 280k` (70% of 400k), Fastpaca automatically:
-1. Drops oldest messages (keeps last 400)
-2. Updates snapshot on write path
-3. Next `GET /context` returns compacted window
+### Prompt Assembly
+Fastpaca does not build LLM context windows. This demo uses the latest 50 messages as the prompt. Adjust that limit or replace it with your own summarization / retrieval strategy.
 
 ## Architecture
 
@@ -76,8 +74,7 @@ Browser → useChat (ai-sdk)
             ↓
       Fastpaca REST API
        - Append message
-       - Get window (pre-computed!)
-       - Auto-compact (on write)
+       - Tail read (latest messages)
             ↓
       OpenAI gpt-4o-mini
             ↓

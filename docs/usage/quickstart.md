@@ -5,7 +5,7 @@ sidebar_position: 1
 
 # Quick Start
 
-## 1. Run Fastpaca Context Store
+## 1. Run Fastpaca
 
 ```bash
 docker run -d \
@@ -14,24 +14,19 @@ docker run -d \
   ghcr.io/fastpaca/context-store:latest
 ```
 
-The Context Store now listens on `http://localhost:4000/v1`. The container persists data under `fastpaca_data/`.
+Fastpaca listens on `http://localhost:4000/v1`. The container persists data under `fastpaca_data/`.
 
 ---
 
-## 2. Create a context
+## 2. Create a conversation
 
-Create a context with the id `demo-chat`.
+Create a conversation with the id `demo-chat`.
 
 ```bash
-curl -X PUT http://localhost:4000/v1/contexts/demo-chat \
+curl -X PUT http://localhost:4000/v1/conversations/demo-chat \
   -H "Content-Type: application/json" \
   -d '{
-    "token_budget": 1000000,
-    "trigger_ratio": 0.7,
-    "policy": {
-      "strategy": "last_n",
-      "config": { "limit": 200 }
-    }
+    "metadata": { "channel": "web" }
   }'
 ```
 
@@ -42,7 +37,7 @@ curl -X PUT http://localhost:4000/v1/contexts/demo-chat \
 Add a user message with `How do I deploy this?` as text.
 
 ```bash
-curl -X POST http://localhost:4000/v1/contexts/demo-chat/messages \
+curl -X POST http://localhost:4000/v1/conversations/demo-chat/messages \
   -H "Content-Type: application/json" \
   -d '{
     "message": {
@@ -52,46 +47,41 @@ curl -X POST http://localhost:4000/v1/contexts/demo-chat/messages \
   }'
 ```
 
-The Context Store replies with the assigned sequence number and version:
+Fastpaca replies with the assigned sequence number and version:
 
 ```json
-{ "seq": 1, "version": 1, "token_estimate": 24 }
+{ "seq": 1, "version": 1, "token_count": 24 }
 ```
 
-To prevent race conditions when multiple clients append simultaneously, use `if_version`. See the [REST API docs](../api/rest.md#messages) for retry patterns.
+Use `if_version` to prevent race conditions when multiple clients append simultaneously. See the [REST API docs](../api/rest.md#messages) for retry patterns.
 
 ---
 
-## 4. Get the LLM context
+## 4. Read recent messages
 
-The context endpoint returns the current LLM context plus metadata.
+Fetch the most recent messages with tail pagination:
 
 ```bash
-curl http://localhost:4000/v1/contexts/demo-chat/context
+curl "http://localhost:4000/v1/conversations/demo-chat/tail?limit=50"
 ```
 
 Response (trimmed):
 
 ```json
 {
-  "version": 1,
   "messages": [
     {
       "seq": 1,
       "role": "user",
       "parts": [{ "type": "text", "text": "How do I deploy this?" }]
     }
-  ],
-  "used_tokens": 24,
-  "needs_compaction": false
+  ]
 }
 ```
 
-Feed `messages` directly into your LLM client.
-
 ---
 
-## 5. Stream a response (Next.js + ai-sdk)
+## 5. Build a prompt (SDK example)
 
 ```typescript title="app/api/chat/route.ts"
 import { createClient } from '@fastpaca/fastpaca';
@@ -99,27 +89,27 @@ import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 export async function POST(req: Request) {
-  const { contextId, message } = await req.json();
+  const { conversationId, message } = await req.json();
 
   const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-  const ctx = await fastpaca.context(contextId, { budget: 1_000_000 });
+  const convo = await fastpaca.conversation(conversationId, { metadata: { channel: 'web' } });
 
   // Append user message
-  await ctx.append({
+  await convo.append({
     role: 'user',
     parts: [{ type: 'text', text: message }]
   });
 
-  // Get context messages
-  const { messages } = await ctx.context();
+  // Build your prompt from the log (here: last 50 messages)
+  const { messages } = await convo.tail({ limit: 50 });
 
-  // Stream response with auto-append
+  // Stream response and append assistant output
   return streamText({
     model: openai('gpt-4o-mini'),
     messages,
   }).toUIMessageStreamResponse({
     onFinish: async ({ responseMessage }) => {
-      await ctx.append(responseMessage);
+      await convo.append(responseMessage);
     },
   });
 }

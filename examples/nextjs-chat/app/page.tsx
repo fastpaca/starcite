@@ -6,13 +6,13 @@ import { useState, useEffect, useRef } from 'react';
 
 export default function Chat() {
   const [input, setInput] = useState('');
-  // Initialize contextId immediately from localStorage or generate new one
-  const [contextId, setContextId] = useState(() => {
+  // Initialize conversationId immediately from localStorage or generate new one
+  const [conversationId, setConversationId] = useState(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('fastpaca-context-id');
+      const saved = localStorage.getItem('fastpaca-conversation-id');
       if (saved) return saved;
       const newId = `chat-${Date.now()}`;
-      localStorage.setItem('fastpaca-context-id', newId);
+      localStorage.setItem('fastpaca-conversation-id', newId);
       return newId;
     }
     return `chat-${Date.now()}`;
@@ -22,7 +22,7 @@ export default function Chat() {
 
   const { messages, setMessages, sendMessage, status } = useChat({
     transport: new DefaultChatTransport({
-      body: { contextId },
+      body: { conversationId },
     }),
   });
 
@@ -39,7 +39,7 @@ export default function Chat() {
     fetch('/api/chat/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextId }),
+      body: JSON.stringify({ conversationId }),
     })
       .then(res => res.json())
       .then(data => {
@@ -49,28 +49,28 @@ export default function Chat() {
       })
       .catch(err => console.error('Failed to load history:', err))
       .finally(() => setIsLoadingHistory(false));
-  }, [contextId, setMessages]);
+  }, [conversationId, setMessages]);
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!input.trim() || isLoading) return;
 
-    // Send message with contextId in body
-    sendMessage({ text: input }, { body: { contextId } });
+    // Send message with conversationId in body
+    sendMessage({ text: input }, { body: { conversationId } });
     setInput('');
   };
 
-  const handleContextChange = (newContextId: string) => {
-    setContextId(newContextId);
-    localStorage.setItem('fastpaca-context-id', newContextId);
+  const handleConversationChange = (newConversationId: string) => {
+    setConversationId(newConversationId);
+    localStorage.setItem('fastpaca-conversation-id', newConversationId);
     setMessages([]);
 
-    // Fetch history for new context
+    // Fetch history for new conversation
     setIsLoadingHistory(true);
     fetch('/api/chat/history', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ contextId: newContextId }),
+      body: JSON.stringify({ conversationId: newConversationId }),
     })
       .then(res => res.json())
       .then(data => {
@@ -83,8 +83,8 @@ export default function Chat() {
   };
 
   const handleNewChat = () => {
-    const newContextId = `chat-${Date.now()}`;
-    handleContextChange(newContextId);
+    const newConversationId = `chat-${Date.now()}`;
+    handleConversationChange(newConversationId);
   };
 
   return (
@@ -94,7 +94,7 @@ export default function Chat() {
           <div className="flex items-center justify-between">
             <div>
               <h1 className="text-xl font-semibold tracking-tight">Fastpaca Chat Example</h1>
-              <p className="text-sm text-slate-400">Using gpt-4o-mini (128k context window)</p>
+              <p className="text-sm text-slate-400">Using gpt-4o-mini</p>
             </div>
             <button
               onClick={handleNewChat}
@@ -104,13 +104,13 @@ export default function Chat() {
             </button>
           </div>
           <div className="mt-3 flex items-center gap-2">
-            <label className="text-sm text-slate-400">Context ID:</label>
+            <label className="text-sm text-slate-400">Conversation ID:</label>
             <input
               type="text"
-              value={contextId}
-              onChange={(e) => handleContextChange(e.target.value)}
+              value={conversationId}
+              onChange={(e) => handleConversationChange(e.target.value)}
               className="flex-1 rounded-lg border border-white/10 bg-white/5 px-3 py-1.5 text-sm outline-none focus:border-blue-500 focus:ring-1 focus:ring-blue-500/30"
-              placeholder="Enter context ID..."
+              placeholder="Enter conversation ID..."
             />
           </div>
         </div>
@@ -124,7 +124,7 @@ export default function Chat() {
         ) : messages.length === 0 ? (
           <div className="text-center text-slate-400">
             <p className="mb-2 text-base font-medium">Start a conversation</p>
-            <p className="text-sm">Fastpaca manages context on the backend</p>
+            <p className="text-sm">Fastpaca stores the message log</p>
           </div>
         ) : null}
 

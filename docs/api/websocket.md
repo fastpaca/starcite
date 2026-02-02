@@ -5,107 +5,91 @@ sidebar_position: 2
 
 # Websocket API
 
-Fastpaca exposes a backend-only websocket for watching context updates in near real-time.  Use it to trigger compaction workers, fan out updates to other services, or maintain UI state via your own gateway.
+Fastpaca exposes a backend-only websocket for streaming conversation updates in near real time. It is implemented as a Phoenix Channel.
 
 Endpoint:
 
 ```
-ws://HOST/v1/contexts/:id/stream
+ws://HOST/socket/websocket
 ```
 
-## Connection parameters
-
-| Query parameter | Description |
-| --- | --- |
-| `cursor` (optional) | The last version you processed.  Pass `0` to receive everything from the beginning. |
-| `include_messages` (default `true`) | Set to `false` if you only care about context/compaction updates. |
-
-Example:
+Topic:
 
 ```
-ws://localhost:4000/v1/contexts/support-123/stream?cursor=120
+conversation:CONVERSATION_ID
 ```
 
-If authentication is enabled, include the API key via the `Authorization` header (`Bearer …`).
+## Example (Phoenix JS client)
 
-Disable message notifications with `?include_messages=false` if you only need compaction/context signals.
+```typescript
+import { Socket } from "phoenix";
 
-## Message format
+const socket = new Socket("ws://localhost:4000/socket", {
+  params: {}
+});
 
-All messages are JSON objects with `type` and `version`.  Version numbers are strictly increasing.
+socket.connect();
 
-### Message notifications
+const channel = socket.channel("conversation:support-123");
+channel.join();
+
+channel.on("message", payload => {
+  // payload.type === "message"
+  console.log(payload);
+});
+
+channel.on("tombstone", payload => {
+  // payload.type === "tombstone"
+  console.log(payload);
+});
+
+channel.on("gap", payload => {
+  // payload.type === "gap"
+  console.log(payload);
+});
+```
+
+## Event payloads
+
+### Message event
 
 ```json
 {
   "type": "message",
-  "version": 121,
-  "seq": 121,
+  "seq": 101,
+  "version": 101,
   "message": {
-    "role": "user",
-    "parts": [{ "type": "text", "text": "Any updates?" }],
-    "inserted_at": "2025-01-24T12:00:00Z"
+    "role": "assistant",
+    "parts": [{ "type": "text", "text": "Got it - checking now." }],
+    "metadata": { "source": "agent" },
+    "token_count": 27
   }
 }
 ```
 
-Sent whenever a new message is appended to the context.
+Sent whenever a new message is appended to the conversation.
 
-### Context updates
-
-```json
-{
-  "type": "context",
-  "version": 121,
-  "needs_compaction": false,
-  "used_tokens": 512340
-}
-```
-
-Indicates that the cached LLM context should be refreshed via `GET /v1/contexts/:id/context`.
-
-### Compaction acknowledgements
+### Tombstone event
 
 ```json
-{
-  "type": "compaction",
-  "version": 122,
-  "range": { "from_seq": 1, "to_seq": 80 }
-}
+{ "type": "tombstone" }
 ```
 
-Emitted after a successful `/compact` call.
+Sent when the conversation is tombstoned. New appends will be rejected after this event.
 
-### Tombstone notice
+### Gap event
 
 ```json
-{ "type": "tombstoned", "version": 0 }
+{ "type": "gap", "expected": 120, "actual": 124 }
 ```
 
-The context has been deleted.  The server closes the connection after sending this message.
+Indicates the client missed messages. Fetch the missing range via replay:
 
-### Snapshot reset
-
-```json
-{ "type": "reset", "version": 200 }
+```
+GET /v1/conversations/:id/messages?from=120&limit=100
 ```
 
-The snapshot was rebuilt (e.g., after a manual repair). Clients should discard cached state and fetch a fresh LLM context.
+## Notes
 
-## Heartbeats & timeouts
-
-- The server sends a `{"type":"ping"}` heartbeat every 30 seconds.  
-- Clients should respond with `{"type":"pong"}` to keep the connection alive.  
-- Idle connections without heartbeats for 90 seconds are closed.
-
-## Reconnect logic
-
-1. Keep track of the highest `version` you've processed.  
-2. On reconnect, pass that value as `cursor`.  
-3. If the server responds with `{"type":"gap","expected":...,"actual":...}` immediately fetch the missing messages via `GET /v1/contexts/:id/messages` and resume with the returned `version`.
-
-## Limits
-
-- The websocket is intended for backend-to-backend use.  Do not expose it directly to browsers.  
-- To mirror updates to clients, fan out through your own gateway (e.g., WebSocket, SSE, or Pub/Sub).  
-- Maximum concurrent connections per node are configurable; defaults to 512.
+- This websocket is intended for backend-to-backend use. If you need browser updates, fan out through your own gateway (SSE, WebSocket, Pub/Sub).
+- There are no compaction or prompt-window events. This service only streams message-log updates.

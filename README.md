@@ -98,7 +98,7 @@ const prompt = cria.render(messages, { budget: 100_000 });
 
 **Not a fit:**
 - Single-turn Q&A (no conversation state to manage)
-- Apps that want server-side prompt management (use the old context-store)
+- Apps that want server-side prompt management or compaction
 
 ---
 

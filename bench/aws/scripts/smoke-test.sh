@@ -27,29 +27,27 @@ echo "Target node: $FIRST_IP"
 echo "API: $API_BASE"
 echo ""
 
-CONTEXT_ID="bench-smoke-$(date +%s)"
+CONVERSATION_ID="bench-smoke-$(date +%s)"
 
-echo -e "${YELLOW}Step 1: Creating context (${CONTEXT_ID})...${NC}"
-CREATE_RESPONSE=$(curl -s -o /tmp/context_create.json -w "%{http_code}" \
-  -X PUT "$API_BASE/contexts/$CONTEXT_ID" \
+echo -e "${YELLOW}Step 1: Creating conversation (${CONVERSATION_ID})...${NC}"
+CREATE_RESPONSE=$(curl -s -o /tmp/conversation_create.json -w "%{http_code}" \
+  -X PUT "$API_BASE/conversations/$CONVERSATION_ID" \
   -H "Content-Type: application/json" \
   -d '{
-    "token_budget": 100000,
-    "policy": {"strategy": "last_n", "config": {"limit": 50}},
     "metadata": {"bench": true, "scenario": "smoke"}
   }')
 
 if [ "$CREATE_RESPONSE" -lt 200 ] || [ "$CREATE_RESPONSE" -ge 300 ]; then
-  echo -e "${RED}✗ Context creation failed (status $CREATE_RESPONSE)${NC}"
-  cat /tmp/context_create.json
+  echo -e "${RED}✗ Conversation creation failed (status $CREATE_RESPONSE)${NC}"
+  cat /tmp/conversation_create.json
   exit 1
 fi
 
-echo -e "${GREEN}✓ Context created${NC}"
+echo -e "${GREEN}✓ Conversation created${NC}"
 
 echo -e "${YELLOW}Step 2: Appending message...${NC}"
-APPEND_RESPONSE=$(curl -s -o /tmp/context_append.json -w "%{http_code}" \
-  -X POST "$API_BASE/contexts/$CONTEXT_ID/messages" \
+APPEND_RESPONSE=$(curl -s -o /tmp/conversation_append.json -w "%{http_code}" \
+  -X POST "$API_BASE/conversations/$CONVERSATION_ID/messages" \
   -H "Content-Type: application/json" \
   -d '{
     "message": {
@@ -61,48 +59,47 @@ APPEND_RESPONSE=$(curl -s -o /tmp/context_append.json -w "%{http_code}" \
 
 if [ "$APPEND_RESPONSE" -lt 200 ] || [ "$APPEND_RESPONSE" -ge 300 ]; then
   echo -e "${RED}✗ Append failed (status $APPEND_RESPONSE)${NC}"
-  cat /tmp/context_append.json
+  cat /tmp/conversation_append.json
   exit 1
 fi
 
-SEQ=$(jq -r '.seq // empty' /tmp/context_append.json)
-VERSION=$(jq -r '.version // empty' /tmp/context_append.json)
+SEQ=$(jq -r '.seq // empty' /tmp/conversation_append.json)
+VERSION=$(jq -r '.version // empty' /tmp/conversation_append.json)
 
 echo -e "${GREEN}✓ Message appended (seq: ${SEQ:-unknown}, version: ${VERSION:-unknown})${NC}"
 
-echo -e "${YELLOW}Step 3: Fetching LLM context...${NC}"
-WINDOW_RESPONSE=$(curl -s -o /tmp/context_window.json -w "%{http_code}" \
-  "$API_BASE/contexts/$CONTEXT_ID/context")
+echo -e "${YELLOW}Step 3: Fetching tail messages...${NC}"
+TAIL_RESPONSE=$(curl -s -o /tmp/conversation_tail.json -w "%{http_code}" \
+  "$API_BASE/conversations/$CONVERSATION_ID/tail?limit=10")
 
-if [ "$WINDOW_RESPONSE" != "200" ]; then
-  echo -e "${RED}✗ Context window fetch failed (status $WINDOW_RESPONSE)${NC}"
-  cat /tmp/context_window.json
+if [ "$TAIL_RESPONSE" != "200" ]; then
+  echo -e "${RED}✗ Tail fetch failed (status $TAIL_RESPONSE)${NC}"
+  cat /tmp/conversation_tail.json
   exit 1
 fi
 
-WINDOW_MESSAGES=$(jq '.messages | length' /tmp/context_window.json)
-NEEDS_COMPACTION=$(jq '.needs_compaction' /tmp/context_window.json)
+TAIL_COUNT=$(jq '.messages | length' /tmp/conversation_tail.json)
 
-echo -e "${GREEN}✓ Context window retrieved (${WINDOW_MESSAGES} messages, needs_compaction=${NEEDS_COMPACTION})${NC}"
+echo -e "${GREEN}✓ Tail retrieved (${TAIL_COUNT} messages)${NC}"
 
-echo -e "${YELLOW}Step 4: Fetching tail messages...${NC}"
-MESSAGES_RESPONSE=$(curl -s -o /tmp/context_messages.json -w "%{http_code}" \
-  "$API_BASE/contexts/$CONTEXT_ID/messages?from_seq=-10")
+echo -e "${YELLOW}Step 4: Replaying messages...${NC}"
+MESSAGES_RESPONSE=$(curl -s -o /tmp/conversation_replay.json -w "%{http_code}" \
+  "$API_BASE/conversations/$CONVERSATION_ID/messages?from=0&limit=10")
 
 if [ "$MESSAGES_RESPONSE" != "200" ]; then
-  echo -e "${RED}✗ Message tail fetch failed (status $MESSAGES_RESPONSE)${NC}"
-  cat /tmp/context_messages.json
+  echo -e "${RED}✗ Message replay failed (status $MESSAGES_RESPONSE)${NC}"
+  cat /tmp/conversation_replay.json
   exit 1
 fi
 
-TAIL_COUNT=$(jq '.messages | length' /tmp/context_messages.json)
+REPLAY_COUNT=$(jq '.messages | length' /tmp/conversation_replay.json)
 
-echo -e "${GREEN}✓ Tail fetched (${TAIL_COUNT} messages)${NC}"
+echo -e "${GREEN}✓ Replay fetched (${REPLAY_COUNT} messages)${NC}"
 
 echo ""
 echo -e "${GREEN}=== Smoke Test Complete ===${NC}"
-echo "Context ID: $CONTEXT_ID"
+echo "Conversation ID: $CONVERSATION_ID"
 echo "Sample payload:"
-jq '{messages: .messages, used_tokens: .used_tokens, needs_compaction: .needs_compaction}' /tmp/context_window.json
+jq '{messages: .messages}' /tmp/conversation_tail.json
 
-rm -f /tmp/context_create.json /tmp/context_append.json /tmp/context_window.json /tmp/context_messages.json
+rm -f /tmp/conversation_create.json /tmp/conversation_append.json /tmp/conversation_tail.json /tmp/conversation_replay.json

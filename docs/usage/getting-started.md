@@ -5,60 +5,41 @@ sidebar_position: 2
 
 # Getting Started
 
-Understand how Fastpaca Context Store manages contexts and how you work with them day to day.
+Fastpaca is a message backend for AI agents. It stores append-only conversations and streams updates. It does **not** build LLM prompts or manage token budgets. You decide which messages to send to your model.
 
-## Key Terms
+## Key terms
 
-- Context: A named conversation or thread that contains all messages and the current LLM context.
-- Message log: The complete, append-only history users see. Never rewritten.
-- LLM context: The input slice you send to your model (built from the log and kept under a token budget).
-- Snapshot: The stored representation of the LLM context (e.g., summary + live tail) used to serve reads quickly.
-- Token budget: The maximum input tokens allowed in the LLM context for this context.
-- Trigger ratio: When reached, Fastpaca flags that compaction should run to stay under budget.
-- Compaction: Updating the cached LLM context (snapshot); history remains intact.
+- Conversation: a named thread of messages.
+- Message: one entry with a `role` and `parts`.
+- Part: a typed payload inside a message (must include `type`).
+- Seq: strictly increasing sequence number per conversation.
+- Version: optimistic concurrency counter per conversation (bumps on each append).
+- Tail: pagination from the newest messages backward.
+- Replay: fetch messages by sequence range (from a known point).
+- Tombstone: conversation is read-only; new appends are rejected.
+- Archive: optional cold storage for full history beyond the in-memory tail.
+- token_count: optional per-message token count you provide on append.
 
-Token fields
-- token_count: Optional per-message token count you provide on append.
-- token_estimate: Per-message count echoed back in the append response (equals token_count when supplied).
-- used_tokens: Estimated input tokens currently in the LLM context returned by the context endpoint.
+## Create a conversation
 
-Limits
-- policy.config.limit: Message-count limit (number of messages kept) used by strategies like last_n.
-- token_budget: Input token ceiling used when building the LLM context.
-
-## Creating a context
-
-Fastpaca Context Store works with contexts. Each context contains two things:
-
-1. **Message log**: what your users see and care about.
-2. **LLM context**: what the LLM cares about in order to process user requests.
-
-Contexts are created with a unique identifier that you choose. As long as it is globally unique, it works. That way you can track and reuse contexts in your product.
+Conversations are created with a unique id you choose. Create them explicitly before appending.
 
 ```typescript
 import { createClient } from '@fastpaca/fastpaca';
 
 const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-const ctx = await fastpaca.context('123456', {
-  // The input token budget for this context. Tunable and defaults to 8k.
-  budget: 1_000_000,
-  // Optionally tune the compaction trigger, i.e. at what point will we trigger compaction.
-  trigger: 0.7,
-  // You can select a compaction policy manually, and e.g. only retain 400 messages.
-  policy: { strategy: 'last_n', config: { limit: 400 } }
+
+const convo = await fastpaca.conversation('support-123', {
+  metadata: { user_id: 'u_123', channel: 'web' }
 });
 ```
 
-This context acts as your source of truth to recognise in the future and reuse across requests. Note that budget, trigger, and policy are optional; changing them only affects the behaviour of contexts you create after the change.
+## Append messages
 
-*(For more details on how context compaction & management works see [Context Management](./context-management.md))*
-
-## Appending messages
-
-Messages are plain objects with a `role` and an array of `parts`. Each part must include a `type` string. This structure is fully compatible with ai-sdk v5 `UIMessage`, but Fastpaca does not require ai-sdk and works with any message that follows this shape.
+Messages are plain objects with a `role` and an array of `parts`. Each part must include a `type` string. This shape is compatible with ai-sdk v5 `UIMessage`, but Fastpaca does not depend on ai-sdk.
 
 ```typescript
-await ctx.append({
+await convo.append({
   role: 'assistant',
   parts: [
     { type: 'text', text: 'I can help with that.' },
@@ -68,76 +49,54 @@ await ctx.append({
 });
 ```
 
-The Context Store doesn't care about the specific shape of parts or metadata; it only requires that each part has a `type`. Each message is assigned a deterministic sequence number (`seq`) used to order them within a context.
+Each append assigns a deterministic `seq` and increments the conversation `version`.
 
-## Calling your LLM
+## Build your prompt
 
-Request the context whenever you need to call your LLM.
+Fastpaca does not build LLM context windows. You choose what to send to your model. A common pattern is to fetch the most recent messages and build a prompt from them.
 
 ```typescript
-const { used_tokens, messages, needs_compaction } = await ctx.context();
-const result = await generateText({
+const { messages } = await convo.tail({ limit: 50 });
+
+const { text } = await generateText({
   model: openai('gpt-4o-mini'),
   messages
 });
 
-// Append the result - do not forget this.
-await ctx.append({ role: 'assistant', parts: [{ type: 'text', text: result.text }] });
-```
-
-The context also stores an estimated `used_tokens` count and a `needs_compaction` flag. You can safely ignore `needs_compaction` unless you've opted to manage compaction yourself.
-
-## Streaming with your LLM
-
-Stream intermediate results directly to the UI while persisting them to context.
-
-```typescript
-const { messages } = await ctx.context();
-return streamText({
-  model: openai('gpt-4o-mini'),
-  messages,
-}).toUIMessageStreamResponse({
-  onFinish: async ({ responseMessage }) => {
-    await ctx.append(responseMessage);
-  },
+await convo.append({
+  role: 'assistant',
+  parts: [{ type: 'text', text }]
 });
 ```
 
-The `onFinish` callback receives `{ responseMessage }` with the properly formatted UIMessage when streaming completes. Pass it directly to `ctx.append()` to persist to context. Users see tokens stream in real-time while the full message is persisted.
+## Read messages
 
-## Getting messages
-
-Reading messages is straightforward but can be time-consuming. Usually, users don't see every message all at once, as some contexts can span thousands if not hundreds of thousands of messages. Fetching all of that is slow, regardless of what system you use.
-
-The Context Store takes this into account and lets you fetch partial messages based on sequence numbers, which is what you actually render.
+### Tail pagination (newest to oldest)
 
 ```typescript
-const ctx = await fastpaca.context('12345');
-
-// Fetch the last ~50 messages (from the tail)
-const latest = await ctx.getTail({ offset: 0, limit: 50 });
+// Fetch the last ~50 messages
+const latest = await convo.tail({ offset: 0, limit: 50 });
 
 // If the user scrolls, fetch the next page
-const onePageUp = await ctx.getTail({ offset: 50, limit: 50 });
+const older = await convo.tail({ offset: 50, limit: 50 });
 ```
 
----
+### Replay by sequence
 
-## Managing your own compaction
-
-Fastpaca Context Store works best when managing compaction for you so you don't need to think about it, but in case you have a product requirement where you need to manage it by yourself it is supported out of the box.
+Use replay when you know the last seq you processed (for example after a websocket gap event).
 
 ```typescript
-const { needs_compaction, messages } = await ctx.context();
-if (needs_compaction) {
-  const { summary, remainingMessages } = await summarise(messages);
-  await ctx.compact([
-    { role: 'system', parts: [{ type: 'text', text: summary }] },
-    ...remainingMessages
-  ]);
-}
+const { messages } = await convo.replay({ from: 120, limit: 100 });
 ```
 
----
+## Tombstone a conversation
 
-Next step: learn how token budgets and strategies work in [Context Management](./context-management.md).
+Tombstoned conversations reject new writes but remain readable.
+
+```typescript
+await fastpaca.tombstoneConversation('support-123');
+```
+
+## Archive and full history
+
+If you enable the Postgres archive, older messages can be trimmed from the in-memory tail after they are persisted. The REST API only serves messages currently in the tail; for full-history exports, query the archive directly. See [Storage and audit](../storage.md).

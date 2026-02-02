@@ -28,18 +28,18 @@ fi
 echo -e "${GREEN}Found all 5 nodes running${NC}"
 echo ""
 
-# Step 1: Create a test context and write messages
-echo "Step 1: Creating test context and writing messages..."
-CONTEXT_ID="topology-test-$(date +%s)"
+# Step 1: Create a test conversation and write messages
+echo "Step 1: Creating test conversation and writing messages..."
+CONVERSATION_ID="topology-test-$(date +%s)"
 
-CONTEXT=$(curl -s -X PUT http://localhost:4000/v1/contexts/$CONTEXT_ID \
+CONVERSATION=$(curl -s -X PUT http://localhost:4000/v1/conversations/$CONVERSATION_ID \
   -H "Content-Type: application/json" \
-  -d "{\"token_budget\":100000,\"metadata\":{}}")
+  -d "{\"metadata\":{}}")
 
-echo "  Context: $CONTEXT_ID"
+echo "  Conversation: $CONVERSATION_ID"
 
 # Write initial message
-curl -s -X POST http://localhost:4000/v1/contexts/$CONTEXT_ID/messages \
+curl -s -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"initial message\"}]}}" > /dev/null
 echo "  ✓ Initial message written"
@@ -84,7 +84,7 @@ echo ""
 
 # Step 3: Verify cluster still works (should have 4 healthy nodes)
 echo "Step 3: Writing message after node3 failure..."
-MSG_RESP=$(curl -s -X POST http://localhost:4001/v1/contexts/$CONTEXT_ID/messages \
+MSG_RESP=$(curl -s -X POST http://localhost:4001/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"after node3 killed\"}]}}")
 
@@ -113,7 +113,7 @@ echo ""
 
 # Step 5: Verify cluster still works with 3 nodes (minimum for quorum with 3-replica groups)
 echo "Step 5: Writing message with only 3 nodes remaining..."
-MSG_RESP=$(curl -s -X POST http://localhost:4000/v1/contexts/$CONTEXT_ID/messages \
+MSG_RESP=$(curl -s -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"with 3 nodes\"}]}}")
 
@@ -132,7 +132,7 @@ echo "Step 6: Verifying message replication across remaining nodes..."
 for port in 4000 4001 4004; do
   echo "  Checking node on port $port..."
   for i in {1..20}; do
-    MSGS=$(curl -s "http://localhost:$port/v1/contexts/$CONTEXT_ID/tail?limit=10")
+    MSGS=$(curl -s "http://localhost:$port/v1/conversations/$CONVERSATION_ID/tail?limit=10")
     COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
 
     if [ "$COUNT" -ge 3 ]; then
@@ -165,7 +165,7 @@ if curl -s http://localhost:4002/health/ready > /dev/null; then
 
   # Check if it has the messages
   for i in {1..30}; do
-    MSGS=$(curl -s "http://localhost:4002/v1/contexts/$CONTEXT_ID/tail?limit=10")
+    MSGS=$(curl -s "http://localhost:4002/v1/conversations/$CONVERSATION_ID/tail?limit=10")
     COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
 
     if [ "$COUNT" -ge 3 ]; then
@@ -185,9 +185,9 @@ fi
 echo ""
 
 # Cleanup
-echo "Step 9: Cleaning up test context..."
-curl -s -X DELETE http://localhost:4000/v1/contexts/$CONTEXT_ID > /dev/null
-echo -e "  ✓ Context deleted"
+echo "Step 9: Cleaning up test conversation..."
+curl -s -X DELETE http://localhost:4000/v1/conversations/$CONVERSATION_ID > /dev/null
+echo -e "  ✓ Conversation deleted"
 echo ""
 
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

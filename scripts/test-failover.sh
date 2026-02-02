@@ -28,20 +28,20 @@ fi
 echo -e "${GREEN}Found $running_nodes running nodes${NC}"
 echo ""
 
-# Create a test context
-echo "1. Creating test context..."
-CONTEXT_ID="failover-test-$(date +%s)"
+# Create a test conversation
+echo "1. Creating test conversation..."
+CONVERSATION_ID="failover-test-$(date +%s)"
 
-CONTEXT=$(curl -s -X PUT http://localhost:4000/v1/contexts/$CONTEXT_ID \
+CONVERSATION=$(curl -s -X PUT http://localhost:4000/v1/conversations/$CONVERSATION_ID \
   -H "Content-Type: application/json" \
-  -d "{\"token_budget\":100000,\"metadata\":{}}")
+  -d "{\"metadata\":{}}")
 
-echo -e "  ✓ Context: $CONTEXT_ID"
+echo -e "  ✓ Conversation: $CONVERSATION_ID"
 echo ""
 
 # Write a message
 echo "2. Writing initial message to node1..."
-curl -s -X POST http://localhost:4000/v1/contexts/$CONTEXT_ID/messages \
+curl -s -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"before failover\"}]}}" > /dev/null
 echo -e "  ✓ Message written"
@@ -84,7 +84,7 @@ echo ""
 
 # Try to write via node2 (should work via new leader)
 echo "5. Writing message via node2 (tests failover)..."
-FAILOVER_RESP=$(curl -s -X POST http://localhost:4001/v1/contexts/$CONTEXT_ID/messages \
+FAILOVER_RESP=$(curl -s -X POST http://localhost:4001/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"after failover\"}]}}")
 
@@ -100,7 +100,7 @@ echo ""
 # Read from node3 (should have both messages)
 echo "6. Reading messages from node3..."
 for i in {1..20}; do
-  MSGS=$(curl -s "http://localhost:4002/v1/contexts/$CONTEXT_ID/tail?limit=10")
+  MSGS=$(curl -s "http://localhost:4002/v1/conversations/$CONVERSATION_ID/tail?limit=10")
   COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
 
   if [ "$COUNT" -ge 2 ]; then
@@ -123,7 +123,7 @@ echo ""
 # Verify messages on node4 and node5 as well
 echo "7. Reading messages from node4..."
 for i in {1..20}; do
-  MSGS=$(curl -s "http://localhost:4003/v1/contexts/$CONTEXT_ID/tail?limit=10")
+  MSGS=$(curl -s "http://localhost:4003/v1/conversations/$CONVERSATION_ID/tail?limit=10")
   COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
 
   if [ "$COUNT" -ge 2 ]; then
@@ -145,7 +145,7 @@ echo ""
 
 echo "8. Reading messages from node5..."
 for i in {1..20}; do
-  MSGS=$(curl -s "http://localhost:4004/v1/contexts/$CONTEXT_ID/tail?limit=10")
+  MSGS=$(curl -s "http://localhost:4004/v1/conversations/$CONVERSATION_ID/tail?limit=10")
   COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
 
   if [ "$COUNT" -ge 2 ]; then
@@ -166,9 +166,9 @@ done
 echo ""
 
 # Cleanup
-echo "9. Cleaning up test context..."
-curl -s -X DELETE http://localhost:4001/v1/contexts/$CONTEXT_ID > /dev/null
-echo -e "  ✓ Context deleted"
+echo "9. Cleaning up test conversation..."
+curl -s -X DELETE http://localhost:4001/v1/conversations/$CONVERSATION_ID > /dev/null
+echo -e "  ✓ Conversation deleted"
 echo ""
 
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"

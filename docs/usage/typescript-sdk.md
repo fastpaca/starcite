@@ -5,36 +5,33 @@ sidebar_position: 4
 
 # TypeScript SDK
 
-These helpers mirror the REST API shown in the Quick Start / Getting Started guides. They accept plain messages with `role` and `parts` (each part has a `type` string). This shape is fully compatible with ai-sdk v5 `UIMessage`, but the SDK does not depend on ai-sdk.
+These helpers mirror the REST API. They accept plain messages with `role` and `parts` (each part has a `type` string). The shape is compatible with ai-sdk v5 `UIMessage`, but the SDK does not depend on ai-sdk.
 
 ```bash
 npm install @fastpaca/fastpaca
 ```
 
-## 1. Create (or load) a context
+## 1. Create (or load) a conversation
 
 ```typescript
 import { createClient } from '@fastpaca/fastpaca';
 
 const fastpaca = createClient({
-  baseUrl: process.env.FASTPACA_URL ?? 'http://localhost:4000/v1',
-  apiKey: process.env.FASTPACA_API_KEY // optional
+  baseUrl: process.env.FASTPACA_URL ?? 'http://localhost:4000/v1'
 });
 
 // Idempotent create/update when options are provided
-const ctx = await fastpaca.context('123456', {
-  budget: 1_000_000,              // input token budget for this context
-  trigger: 0.7,                   // optional trigger ratio (defaults to 0.7)
-  policy: { strategy: 'last_n', config: { limit: 400 } }
+const convo = await fastpaca.conversation('123456', {
+  metadata: { channel: 'web', user_id: 'u_123' }
 });
 ```
 
-`context(id)` never creates IDs for you; you decide what to use so you can continue the same context later.
+`conversation(id)` does not create IDs for you. Call it with options to ensure the conversation exists.
 
 ## 2. Append messages
 
 ```typescript
-await ctx.append({
+await convo.append({
   role: 'assistant',
   parts: [
     { type: 'text', text: 'I can help with that.' },
@@ -44,7 +41,7 @@ await ctx.append({
 });
 
 // Optionally pass known token count for accuracy
-await ctx.append({
+await convo.append({
   role: 'assistant',
   parts: [{ type: 'text', text: 'OK!' }]
 }, { tokenCount: 12 });
@@ -52,76 +49,47 @@ await ctx.append({
 
 Messages are stored exactly as you send them and receive a deterministic `seq` for ordering.
 
-## 3. Build the LLM context and call your model
+## 3. Read messages
 
 ```typescript
-const { used_tokens, messages, needs_compaction } = await ctx.context();
+// Tail pagination (newest to oldest)
+const latest = await convo.tail({ offset: 0, limit: 50 });
+const previous = await convo.tail({ offset: 50, limit: 50 });
 
-const { text } = await generateText({
-  model: openai('gpt-4o-mini'),
-  messages
-});
-
-await ctx.append({
-  role: 'assistant',
-  parts: [{ type: 'text', text }]
-});
+// Replay by sequence
+const { messages } = await convo.replay({ from: 0, limit: 100 });
 ```
 
-`needs_compaction` is a hint; ignore it unless you’ve opted to handle compaction yourself.
-
-## 4. Stream responses
+## 4. Conversation info and tombstones
 
 ```typescript
-// Fetch context messages
-const { messages } = await ctx.context();
+const info = await fastpaca.getConversation('123456');
 
-// Stream response with ai-sdk and append in onFinish
-return streamText({
-  model: openai('gpt-4o-mini'),
-  messages,
-}).toUIMessageStreamResponse({
-  onFinish: async ({ responseMessage }) => {
-    await ctx.append(responseMessage);
-  },
-});
+await fastpaca.tombstoneConversation('123456');
 ```
 
-The `onFinish` callback receives `{ responseMessage }` in the ai-sdk v5 message shape. Pass it directly to `ctx.append()` to persist to context.
+## 5. Prompt assembly
 
-## 5. Fetch messages for your UI
+Fastpaca does not build LLM prompts. Use tail or replay to select messages, then pass them to your model.
 
 ```typescript
-const latest = await ctx.getTail({ offset: 0, limit: 50 });     // last ~50 messages
-const previous = await ctx.getTail({ offset: 50, limit: 50 });  // next page back in time
+const { messages } = await convo.tail({ limit: 50 });
+const { text } = await generateText({ model: openai('gpt-4o-mini'), messages });
+await convo.append({ role: 'assistant', parts: [{ type: 'text', text }] });
 ```
-
-## 6. Optional: manage compaction yourself
-
-```typescript
-const { needs_compaction, messages } = await ctx.context();
-if (needs_compaction) {
-  const { summary, remainingMessages } = await summarise(messages);
-  await ctx.compact([
-    { role: 'system', parts: [{ type: 'text', text: summary }] },
-    ...remainingMessages
-  ]);
-}
-```
-
-This rewrites only what the LLM will see. Users still get the full message log.
 
 ## Error handling
 
-- Append conflicts return `409 Conflict` when you pass `ifVersion` and the context version changed (optimistic concurrency control). On 409, read the current context version and retry with the updated version.
-- Network retries: On timeout or 5xx errors, retry the same request (version unchanged). On `409 Conflict`, read context to get updated version, then retry.
-- Streaming propagates LLM errors directly; Fastpaca only appends once the stream succeeds.
+- Append conflicts return `409 Conflict` when you pass `ifVersion` and the conversation version changed (optimistic concurrency control).
+- Tombstoned conversations return `410 Gone` for new appends.
+- Missing conversations return `404 Not Found`.
+
+Retry pattern for optimistic concurrency:
+1. Read current version (`getConversation` or append response)
+2. Append with `ifVersion`
+3. On `409 Conflict`, read the conversation again and retry
 
 Notes:
-- The server computes message token counts by default; pass `tokenCount` when you have an accurate value (e.g., from your model provider).
-- Use `ctx.context({ budgetTokens: ... })` to temporarily override the input budget for a single call.
-
-Token usage with ai-sdk v5:
-- `streamText` and `generateText` expose `usage`/`totalUsage`. If your provider returns completion token counts, pass that as `{ tokenCount }` when appending the assistant’s response for maximum accuracy.
+- The server estimates token counts by default; pass `tokenCount` when you have an accurate value from your provider.
 
 See the [REST API reference](../api/rest.md) for exact payloads.
