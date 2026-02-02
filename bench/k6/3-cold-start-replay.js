@@ -5,9 +5,9 @@
  * then replay the full transcript while new writes continue.
  *
  * Profile:
- * - backlogSessions contexts (default 5)
+ * - backlogSessions conversations (default 5)
  * - Phase 1: accumulate backlog for BACKLOG_DURATION
- * - Phase 2: replay entire context while continuing to append
+ * - Phase 2: replay entire conversation while continuing to append
  *
  * Thresholds (Pass/Fail):
  * - replay_latency p95 < 500ms
@@ -78,16 +78,16 @@ export const options = {
 export function setup() {
   console.log('Setting up cold-start replay benchmark...');
   console.log(`Run ID: ${lib.config.runId}`);
-  console.log(`Contexts: ${backlogSessions}`);
+  console.log(`Conversations: ${backlogSessions}`);
   console.log(`Target backlog size: ${backlogSize} messages`);
   console.log(`Backlog phase: ${backlogDuration}`);
   console.log(`Replay phase: ${replayDuration}`);
 
-  const contexts = {};
+  const conversations = {};
 
   for (let vuId = 1; vuId <= backlogSessions; vuId++) {
-    const contextId = lib.contextId('cold-replay', vuId);
-    lib.ensureContext(contextId, {
+    const convId = lib.conversationId('cold-replay', vuId);
+    lib.ensureConversation(convId, {
       metadata: {
         bench: true,
         scenario: 'cold_replay',
@@ -95,13 +95,13 @@ export function setup() {
         run_id: lib.config.runId,
       },
     });
-    contexts[vuId] = { contextId, lastSeq: 0, version: 0 };
+    conversations[vuId] = { conversationId: convId, lastSeq: 0, version: 0 };
   }
 
   return {
     runId: lib.config.runId,
     backlogSize,
-    contexts,
+    conversations,
   };
 }
 
@@ -111,15 +111,15 @@ export function setup() {
 
 export function accumulateBacklog(data) {
   const vuId = __VU;
-  const ctx = data.contexts[vuId];
-  if (!ctx) {
+  const conv = data.conversations[vuId];
+  if (!conv) {
     return;
   }
 
   const messageText = `backlog message vu=${vuId} iter=${__ITER} run=${data.runId}`;
 
   const { res, json } = lib.appendMessage(
-    ctx.contextId,
+    conv.conversationId,
     {
       role: 'user',
       parts: [{ type: 'text', text: messageText }],
@@ -141,10 +141,10 @@ export function accumulateBacklog(data) {
 
   if (json) {
     if (typeof json.seq === 'number') {
-      ctx.lastSeq = json.seq;
+      conv.lastSeq = json.seq;
     }
     if (typeof json.version === 'number') {
-      ctx.version = json.version;
+      conv.version = json.version;
     }
   }
 }
@@ -155,14 +155,15 @@ export function accumulateBacklog(data) {
 
 export function replayUnderLoad(data) {
   const vuId = __VU;
-  const ctx = data.contexts[vuId];
-  if (!ctx) {
+  const conv = data.conversations[vuId];
+  if (!conv) {
     return;
   }
 
   if (__ITER === 0) {
-    const { res, json } = lib.getMessages(ctx.contextId, {
-      from_seq: -data.backlogSize,
+    // Replay from beginning of conversation
+    const { res, json } = lib.getMessages(conv.conversationId, {
+      from_seq: 1,
       limit: data.backlogSize,
     });
 
@@ -176,7 +177,7 @@ export function replayUnderLoad(data) {
     if (ok && json && Array.isArray(json.messages)) {
       messagesReplayed.add(json.messages.length);
       console.log(
-        `VU${vuId}: Replayed ${json.messages.length} messages in ${res.timings.duration}ms from context ${ctx.contextId}`
+        `VU${vuId}: Replayed ${json.messages.length} messages in ${res.timings.duration}ms from conversation ${conv.conversationId}`
       );
     } else if (!ok) {
       console.error(`VU${vuId}: replay failed status=${res.status} body=${res.body}`);
@@ -185,7 +186,7 @@ export function replayUnderLoad(data) {
 
   const appendText = `active message vu=${vuId} iter=${__ITER} run=${data.runId}`;
   const { res, json } = lib.appendMessage(
-    ctx.contextId,
+    conv.conversationId,
     {
       role: 'assistant',
       parts: [{ type: 'text', text: appendText }],
@@ -208,10 +209,10 @@ export function replayUnderLoad(data) {
 
   if (json) {
     if (typeof json.seq === 'number') {
-      ctx.lastSeq = json.seq;
+      conv.lastSeq = json.seq;
     }
     if (typeof json.version === 'number') {
-      ctx.version = json.version;
+      conv.version = json.version;
     }
   }
 }

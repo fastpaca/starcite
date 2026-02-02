@@ -1,13 +1,13 @@
 /**
  * Fastpaca Scenario 4: Durability Cadence
  *
- * Sustained append workload that periodically inspects the context window to
- * ensure compaction signals surface without losing history.
+ * Sustained append workload that periodically reads the tail to ensure
+ * data is durable and sequence numbers are monotonic.
  *
  * Profile:
- * - sessionCount contexts (default 10)
+ * - sessionCount conversations (default 10)
  * - Constant VUs for configurable duration (default 3m)
- * - Every 10th iteration fetches the LLM window to observe needs_compaction
+ * - Every 10th iteration fetches the tail to verify durability
  *
  * Thresholds (Pass/Fail):
  * - append_latency p99 < 200ms
@@ -31,8 +31,7 @@ import * as lib from './lib.js';
 
 const messagesSent = new Counter('messages_sent');
 const appendLatency = new Trend('append_latency', true);
-const windowLatency = new Trend('window_latency', true);
-const needsCompactionTrips = new Counter('needs_compaction_trips');
+const tailLatency = new Trend('tail_latency', true);
 const durabilityCheck = new Rate('durability_check');
 
 // ============================================================================
@@ -70,14 +69,14 @@ export const options = {
 export function setup() {
   console.log('Setting up durability cadence benchmark...');
   console.log(`Run ID: ${lib.config.runId}`);
-  console.log(`Contexts: ${sessionCount}`);
+  console.log(`Conversations: ${sessionCount}`);
   console.log(`Duration: ${duration}`);
 
-  const contexts = {};
+  const conversations = {};
 
   for (let vuId = 1; vuId <= sessionCount; vuId++) {
-    const contextId = lib.contextId('durability', vuId);
-    lib.ensureContext(contextId, {
+    const convId = lib.conversationId('durability', vuId);
+    lib.ensureConversation(convId, {
       metadata: {
         bench: true,
         scenario: 'durability_cadence',
@@ -85,12 +84,12 @@ export function setup() {
         run_id: lib.config.runId,
       },
     });
-    contexts[vuId] = { contextId, appended: 0, lastSeq: 0, version: 0 };
+    conversations[vuId] = { conversationId: convId, appended: 0, lastSeq: 0, version: 0 };
   }
 
   return {
     runId: lib.config.runId,
-    contexts,
+    conversations,
     verifyTailLimit,
   };
 }
@@ -101,16 +100,16 @@ export function setup() {
 
 export default function (data) {
   const vuId = __VU;
-  const ctx = data.contexts[vuId];
-  if (!ctx) {
+  const conv = data.conversations[vuId];
+  if (!conv) {
     return;
   }
 
-  const messageSeq = ctx.appended + 1;
+  const messageSeq = conv.appended + 1;
   const messageText = `durability message run=${data.runId} vu=${vuId} seq=${messageSeq}`;
 
   const { res, json } = lib.appendMessage(
-    ctx.contextId,
+    conv.conversationId,
     {
       role: 'assistant',
       parts: [{ type: 'text', text: messageText }],
@@ -136,29 +135,25 @@ export default function (data) {
     return;
   }
 
-  ctx.appended = messageSeq;
+  conv.appended = messageSeq;
 
   if (json) {
     if (typeof json.seq === 'number') {
-      ctx.lastSeq = json.seq;
+      conv.lastSeq = json.seq;
     }
     if (typeof json.version === 'number') {
-      ctx.version = json.version;
+      conv.version = json.version;
     }
   }
 
-  // Every 10th iteration, fetch the LLM window to check compaction signals.
-  if (ctx.appended % 10 === 0) {
-    const { res: windowRes, json: windowJson } = lib.getContextWindow(ctx.contextId);
-    windowLatency.add(windowRes.timings.duration);
+  // Every 10th iteration, fetch the tail to verify durability
+  if (conv.appended % 10 === 0) {
+    const { res: tailRes } = lib.getTail(conv.conversationId, { limit: 10 });
+    tailLatency.add(tailRes.timings.duration);
 
-    check(windowRes, {
-      'window fetch ok': (r) => r.status === 200,
+    check(tailRes, {
+      'tail fetch ok': (r) => r.status === 200,
     });
-
-    if (windowJson && windowJson.needs_compaction === true) {
-      needsCompactionTrips.add(1);
-    }
   }
 }
 
@@ -167,24 +162,25 @@ export default function (data) {
 // ============================================================================
 
 export function teardown(data) {
-  console.log('Verifying durability tail across contexts...');
+  console.log('Verifying durability tail across conversations...');
 
-  Object.values(data.contexts).forEach((ctx) => {
-    if (!ctx || ctx.appended === 0) {
+  Object.values(data.conversations).forEach((conv) => {
+    if (!conv || conv.appended === 0) {
       durabilityCheck.add(true);
       return;
     }
 
-    const limit = Math.min(ctx.appended, data.verifyTailLimit);
-    const { res, json } = lib.getMessages(ctx.contextId, {
-      from_seq: -limit,
+    const limit = Math.min(conv.appended, data.verifyTailLimit);
+    // Replay from beginning to get all messages
+    const { res, json } = lib.getMessages(conv.conversationId, {
+      from_seq: 1,
       limit,
     });
 
     const ok = res.status === 200 && json && Array.isArray(json.messages);
     if (!ok) {
       console.error(
-        `Durability check failed context=${ctx.contextId} status=${res.status} body=${res.body}`
+        `Durability check failed conversation=${conv.conversationId} status=${res.status} body=${res.body}`
       );
       durabilityCheck.add(false);
       return;
@@ -192,13 +188,13 @@ export function teardown(data) {
 
     const tailLength = json.messages.length;
     const lastMessage = tailLength > 0 ? json.messages[tailLength - 1] : null;
-    const seqMatches = lastMessage ? lastMessage.seq === ctx.lastSeq : ctx.lastSeq === 0;
+    const seqMatches = lastMessage ? lastMessage.seq === conv.lastSeq : conv.lastSeq === 0;
 
     durabilityCheck.add(seqMatches);
 
     if (!seqMatches) {
       console.error(
-        `Seq mismatch context=${ctx.contextId} expected=${ctx.lastSeq} got=${lastMessage ? lastMessage.seq : 'none'}`
+        `Seq mismatch conversation=${conv.conversationId} expected=${conv.lastSeq} got=${lastMessage ? lastMessage.seq : 'none'}`
       );
     }
   });
