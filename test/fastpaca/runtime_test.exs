@@ -296,7 +296,7 @@ defmodule Fastpaca.RuntimeTest do
         assert hd(r1).seq == 1
 
         # Kill the Raft group
-        group_id = RaftManager.group_for_context("conv-failover")
+        group_id = RaftManager.group_for_conversation("conv-failover")
         server_id = RaftManager.server_id(group_id)
         pid = Process.whereis(server_id)
 

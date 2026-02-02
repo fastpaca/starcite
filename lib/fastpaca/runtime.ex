@@ -29,7 +29,7 @@ defmodule Fastpaca.Runtime do
   """
   @spec upsert_conversation(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def upsert_conversation(id, opts \\ []) when is_binary(id) do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :upsert_conversation_local, [id, opts], fn ->
       upsert_conversation_local(id, opts)
@@ -63,7 +63,7 @@ defmodule Fastpaca.Runtime do
   """
   @spec get_conversation(String.t()) :: {:ok, Conversation.t()} | {:error, term()}
   def get_conversation(id) when is_binary(id) do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :get_conversation_local, [id], fn ->
       get_conversation_local(id)
@@ -134,7 +134,7 @@ defmodule Fastpaca.Runtime do
   @spec append_messages(String.t(), [map()], keyword()) ::
           {:ok, [map()]} | {:error, term()} | {:timeout, term()}
   def append_messages(id, message_inputs, opts \\ []) when is_binary(id) do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :append_messages_local, [id, message_inputs, opts], fn ->
       append_messages_local(id, message_inputs, opts)
@@ -184,7 +184,7 @@ defmodule Fastpaca.Runtime do
   def get_messages_tail(id, offset \\ 0, limit \\ 100)
       when is_binary(id) and is_integer(offset) and offset >= 0 and is_integer(limit) and
              limit > 0 do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :get_messages_tail_local, [id, offset, limit], fn ->
       get_messages_tail_local(id, offset, limit)
@@ -232,7 +232,7 @@ defmodule Fastpaca.Runtime do
   def get_messages_replay(id, from_seq \\ 0, limit \\ 100)
       when is_binary(id) and is_integer(from_seq) and from_seq >= 0 and is_integer(limit) and
              limit > 0 do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :get_messages_replay_local, [id, from_seq, limit], fn ->
       get_messages_replay_local(id, from_seq, limit)
@@ -269,7 +269,7 @@ defmodule Fastpaca.Runtime do
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
 
     call_on_replica(group, :ack_archived_local, [id, upto_seq], fn ->
       ack_archived_local(id, upto_seq)
@@ -299,7 +299,7 @@ defmodule Fastpaca.Runtime do
   # ---------------------------------------------------------------------------
 
   defp locate(id) do
-    group = RaftManager.group_for_context(id)
+    group = RaftManager.group_for_conversation(id)
     lane = :erlang.phash2(id, 16)
     server_id = RaftManager.server_id(group)
     {:ok, server_id, lane, group}

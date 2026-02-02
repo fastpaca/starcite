@@ -44,7 +44,7 @@ defmodule FastpacaWeb.ConversationController do
   """
   def show(conn, %{"id" => id}) do
     with {:ok, conversation} <- Runtime.get_conversation(id) do
-      json(conn, conversation)
+      json(conn, Fastpaca.Conversation.to_map(conversation))
     end
   end
 

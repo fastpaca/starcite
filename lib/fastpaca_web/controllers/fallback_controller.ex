@@ -22,13 +22,6 @@ defmodule FastpacaWeb.FallbackController do
     |> json(%{error: "conversation_not_found"})
   end
 
-  # Legacy support during migration
-  def call(conn, {:error, :context_not_found}) do
-    conn
-    |> put_status(:not_found)
-    |> json(%{error: "conversation_not_found"})
-  end
-
   def call(conn, {:error, {:version_conflict, current}}) do
     conn
     |> put_status(:conflict)
@@ -37,13 +30,6 @@ defmodule FastpacaWeb.FallbackController do
 
   # Tombstoned conversations return 410 Gone per spec
   def call(conn, {:error, :conversation_tombstoned}) do
-    conn
-    |> put_status(:gone)
-    |> json(%{error: "conversation_tombstoned", message: "Conversation is tombstoned"})
-  end
-
-  # Legacy support during migration
-  def call(conn, {:error, :context_tombstoned}) do
     conn
     |> put_status(:gone)
     |> json(%{error: "conversation_tombstoned", message: "Conversation is tombstoned"})
@@ -65,11 +51,7 @@ defmodule FastpacaWeb.FallbackController do
       when reason in [
              :invalid_message,
              :invalid_metadata,
-             :invalid_conversation_config,
-             # Legacy
-             :invalid_replacement,
-             :invalid_replacement_message,
-             :invalid_context_config
+             :invalid_conversation_config
            ] do
     conn
     |> put_status(:bad_request)
