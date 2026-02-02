@@ -2,7 +2,6 @@ defmodule Fastpaca.ArchiveTest do
   use ExUnit.Case, async: false
 
   alias Fastpaca.Runtime
-  alias Fastpaca.Context.Config
 
   setup do
     # Ensure clean raft data for isolation
@@ -28,25 +27,27 @@ defmodule Fastpaca.ArchiveTest do
          flush_interval_ms: 100, adapter: Fastpaca.Archive.TestAdapter, adapter_opts: []}
       )
 
-    config = %Config{
-      token_budget: 100_000,
-      trigger_ratio: 0.7,
-      policy: %{strategy: :last_n, config: %{limit: 100}}
-    }
+    conv_id = "conv-arch-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.upsert_conversation(conv_id)
 
-    ctx_id = "ctx-arch-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.upsert_context(ctx_id, config)
+    messages =
+      for i <- 1..5,
+          do: %{
+            role: "user",
+            parts: [%{type: "text", text: "m#{i}"}],
+            metadata: %{},
+            token_count: 1
+          }
 
-    inbound = for i <- 1..5, do: {"user", [%{type: "text", text: "m#{i}"}], %{}, 1}
-    {:ok, _} = Runtime.append_messages(ctx_id, inbound)
+    {:ok, _} = Runtime.append_messages(conv_id, messages)
 
     # Wait until archived_seq catches up
     eventually(
       fn ->
-        {:ok, ctx} = Runtime.get_context(ctx_id)
-        assert ctx.archived_seq == ctx.last_seq
+        {:ok, conv} = Runtime.get_conversation(conv_id)
+        assert conv.archived_seq == conv.last_seq
         # Tail should retain only 2 messages
-        tail = Fastpaca.Context.MessageLog.entries(ctx.message_log)
+        tail = Fastpaca.Conversation.MessageLog.entries(conv.message_log)
         assert length(tail) == 2
       end,
       timeout: 2_000
