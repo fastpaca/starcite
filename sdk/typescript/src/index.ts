@@ -1,9 +1,7 @@
 export { FastpacaClient, createClient } from './client';
-export { Context } from './context';
+export { Conversation } from './conversation';
 export type {
-  ContextPolicy,
-  ContextConfig,
-  ContextWindow,
+  ConversationInfo,
   AppendResponse,
   FastpacaClientConfig,
   FastpacaMessage,
