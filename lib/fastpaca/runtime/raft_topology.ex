@@ -82,8 +82,8 @@ defmodule Fastpaca.Runtime.RaftTopology do
     my_groups = compute_my_groups()
 
     ready =
-      length(my_groups) > 0 and
-        Enum.count(my_groups, &group_running?/1) >= div(length(my_groups), 2)
+      my_groups == [] or
+        Enum.any?(my_groups, &group_running?/1)
 
     {:reply, ready, state}
   end
@@ -95,7 +95,7 @@ defmodule Fastpaca.Runtime.RaftTopology do
     # Wait for expected cluster if CLUSTER_NODES is set (avoids bootstrap races in tests)
     expected = parse_expected_cluster_size()
 
-    if expected > 1 and length(cluster) < expected do
+    if coordinator?(cluster) and expected > 1 and length(cluster) < expected do
       Logger.debug("RaftTopology: waiting for cluster #{length(cluster)}/#{expected}")
       Process.send_after(self(), :bootstrap, 500)
       {:noreply, state}
@@ -180,12 +180,13 @@ defmodule Fastpaca.Runtime.RaftTopology do
     end)
   end
 
-  defp join_my_groups_async(cluster) do
+  defp join_my_groups_async(_cluster) do
     # Join async to avoid blocking GenServer
     # Non-coordinators wait for groups to be bootstrapped by coordinator
-    my_groups = compute_my_groups(cluster)
-
     Task.start(fn ->
+      await_cluster_min_size()
+      my_groups = compute_my_groups()
+
       Enum.each(my_groups, fn group_id ->
         wait_and_join_group(group_id)
       end)
@@ -198,7 +199,7 @@ defmodule Fastpaca.Runtime.RaftTopology do
     server_id = RaftManager.server_id(group_id)
 
     # Poll until group exists somewhere in cluster (coordinator bootstrapping)
-    case wait_for_group_exists(server_id, max_attempts: 60) do
+    case wait_for_group_exists(group_id, server_id, max_attempts: 60) do
       :ok ->
         # Group exists, start locally if not running
         unless group_running?(group_id) do
@@ -210,38 +211,70 @@ defmodule Fastpaca.Runtime.RaftTopology do
     end
   end
 
-  defp wait_for_group_exists(server_id, max_attempts: max) do
-    wait_for_group_exists(server_id, 0, max)
+  defp await_cluster_min_size do
+    expected = parse_expected_cluster_size()
+
+    if expected > 1 do
+      wait_for_min_size(2, 20)
+    else
+      :ok
+    end
   end
 
-  defp wait_for_group_exists(_server_id, attempt, max) when attempt >= max do
+  defp wait_for_min_size(_min_size, 0), do: :ok
+
+  defp wait_for_min_size(min_size, attempts) do
+    if length(all_nodes()) >= min_size do
+      :ok
+    else
+      Process.sleep(500)
+      wait_for_min_size(min_size, attempts - 1)
+    end
+  end
+
+  defp wait_for_group_exists(group_id, server_id, max_attempts: max) do
+    wait_for_group_exists(group_id, server_id, 0, max)
+  end
+
+  defp wait_for_group_exists(_group_id, _server_id, attempt, max) when attempt >= max do
     :timeout
   end
 
-  defp wait_for_group_exists(server_id, attempt, max) do
-    case :ra.members({server_id, Node.self()}) do
-      {:ok, _members, _leader} ->
+  defp wait_for_group_exists(group_id, server_id, attempt, max) do
+    nodes = replicas_for_group(group_id, all_nodes())
+
+    case find_group_member(server_id, nodes) do
+      :ok ->
         :ok
 
-      _ ->
+      :missing ->
         Process.sleep(500)
-        wait_for_group_exists(server_id, attempt + 1, max)
+        wait_for_group_exists(group_id, server_id, attempt + 1, max)
     end
+  end
+
+  defp find_group_member(server_id, nodes) do
+    Enum.reduce_while(nodes, :missing, fn node, _acc ->
+      case :ra.members({server_id, node}) do
+        {:ok, _members, _leader} -> {:halt, :ok}
+        _ -> {:cont, :missing}
+      end
+    end)
   end
 
   defp ensure_group_exists(group_id, cluster) do
     server_id = RaftManager.server_id(group_id)
 
-    case :ra.members({server_id, Node.self()}) do
+    case cluster_members(server_id, cluster) do
       {:ok, _members, _leader} ->
         # Group exists
         :ok
 
-      {:error, :noproc} ->
+      :missing ->
         # Group doesn't exist, bootstrap it
         bootstrap_group(group_id, cluster)
 
-      {:timeout, _} ->
+      :timeout ->
         # Might exist, start locally if we're a replica
         if Node.self() in replicas_for_group(group_id, cluster) do
           RaftManager.start_group(group_id)
@@ -292,13 +325,12 @@ defmodule Fastpaca.Runtime.RaftTopology do
 
   defp rebalance_group(group_id, cluster) do
     server_id = RaftManager.server_id(group_id)
-    my_server = {server_id, Node.self()}
 
     desired_members =
       replicas_for_group(group_id, cluster)
       |> Enum.map(&{server_id, &1})
 
-    case :ra.members(my_server) do
+    case cluster_members(server_id, cluster) do
       {:ok, current, leader} ->
         to_add = desired_members -- current
         to_remove = current -- desired_members
@@ -309,24 +341,43 @@ defmodule Fastpaca.Runtime.RaftTopology do
           )
         end
 
-        # Use leader for membership changes
-        leader_ref = leader || my_server
+        # Use leader for membership changes, fall back to any member
+        leader_ref = leader || List.first(current)
 
-        # Add first
-        Enum.each(to_add, fn member ->
-          add_member(group_id, leader_ref, member)
-        end)
+        if leader_ref do
+          # Add first
+          Enum.each(to_add, fn member ->
+            add_member(group_id, leader_ref, member)
+          end)
 
-        # Then remove
-        Enum.each(to_remove, fn member ->
-          remove_member(group_id, leader_ref, member)
-        end)
+          # Then remove
+          Enum.each(to_remove, fn member ->
+            remove_member(group_id, leader_ref, member)
+          end)
+        end
 
-      {:error, :noproc} ->
+      :missing ->
         :ok
 
-      {:timeout, _} ->
+      :timeout ->
         :ok
+    end
+  end
+
+  defp cluster_members(server_id, cluster) do
+    {result, saw_timeout} =
+      Enum.reduce_while(cluster, {:missing, false}, fn node, {_acc, timed_out} ->
+        case :ra.members({server_id, node}) do
+          {:ok, members, leader} -> {:halt, {{:ok, members, leader}, timed_out}}
+          {:timeout, _} -> {:cont, {:missing, true}}
+          _ -> {:cont, {:missing, timed_out}}
+        end
+      end)
+
+    case result do
+      {:ok, _members, _leader} = ok -> ok
+      :missing when saw_timeout -> :timeout
+      :missing -> :missing
     end
   end
 
@@ -416,12 +467,4 @@ defmodule Fastpaca.Runtime.RaftTopology do
     end
   end
 
-  # Backwards compatibility stubs for DrainCoordinator
-
-  defmodule Presence do
-    def update(_pid, _topic, _key, _meta), do: :ok
-    def list(_topic), do: []
-  end
-
-  def presence_topic, do: "raft:topology"
 end
