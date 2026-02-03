@@ -161,7 +161,19 @@ defmodule Fastpaca.Runtime.RaftManager do
 
       {:error, {:already_started, _}} ->
         Logger.debug("RaftManager: Group #{group_id} exists, joining")
-        join_cluster(group_id, elem(my_server_id, 0), cluster_name, machine)
+
+        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine,
+          retries: 10,
+          attempts: 0
+        )
+
+      {:error, :cluster_not_formed} ->
+        Logger.debug("RaftManager: Cluster not formed for group #{group_id}, joining with retry")
+
+        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine,
+          retries: 10,
+          attempts: 0
+        )
 
       {:error, reason} ->
         Logger.error("RaftManager: Failed to bootstrap group #{group_id}: #{inspect(reason)}")

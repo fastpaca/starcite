@@ -11,7 +11,8 @@ defmodule Fastpaca.Runtime.RoutingTest do
                Runtime.route_target(42,
                  self: self_node,
                  replicas: [self_node, :"node2@127.0.0.1"],
-                 ready_nodes: [self_node]
+                 ready_nodes: [self_node],
+                 local_running: true
                )
     end
 

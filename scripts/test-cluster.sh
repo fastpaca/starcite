@@ -9,6 +9,31 @@ RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
+wait_for_ready() {
+  local port=$1
+  local attempts=${2:-30}
+  local interval=${3:-1}
+  local url="http://localhost:${port}/health/ready"
+  local health=""
+
+  for ((i = 1; i <= attempts; i++)); do
+    health=$(curl -s "$url" || true)
+
+    if echo "$health" | grep -q '"status":"ok"'; then
+      echo -e "  ✓ Node on port $port ready after $((i * interval))s"
+      return 0
+    fi
+
+    sleep "$interval"
+  done
+
+  echo -e "${RED}  ✗ Node on port $port not ready after $((attempts * interval))s${NC}"
+  if [ -n "$health" ]; then
+    echo "    Last response: $health"
+  fi
+  return 1
+}
+
 echo -e "${GREEN}Testing 5-node Raft cluster...${NC}"
 echo ""
 
@@ -24,8 +49,15 @@ for port in 4000 4001 4002 4003 4004; do
 done
 echo ""
 
+# Wait for readiness on all nodes
+echo "2. Waiting for all nodes to become ready..."
+for port in 4000 4001 4002 4003 4004; do
+  wait_for_ready "$port" 30 1
+done
+echo ""
+
 # Create a conversation via node1
-echo "2. Creating test conversation via node1..."
+echo "3. Creating test conversation via node1..."
 CONVERSATION_ID="test-conversation-$(date +%s)"
 
 CONVERSATION=$(curl -s -X PUT http://localhost:4000/v1/conversations/$CONVERSATION_ID \
@@ -42,7 +74,7 @@ fi
 echo ""
 
 # Write a message via node1
-echo "3. Writing message via node1..."
+echo "4. Writing message via node1..."
 MSG_RESP=$(curl -s -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
   -H "Content-Type: application/json" \
   -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"cluster test message\"}]}}")
@@ -60,7 +92,7 @@ echo ""
 
 # Critical test: ALL nodes should be able to READ the conversation
 # Even if only 3 nodes host the Raft replicas, the API layer should handle routing
-echo "4. Testing that ALL nodes can read the conversation..."
+echo "5. Testing that ALL nodes can read the conversation..."
 echo "   (API should route to Raft replicas transparently)"
 echo ""
 
@@ -108,7 +140,7 @@ done
 echo ""
 
 # Verify ALL nodes can read
-echo "5. Verifying request routing..."
+echo "6. Verifying request routing..."
 if [ $failed_nodes -eq 0 ]; then
   echo -e "  ${GREEN}✓ All 5 nodes can serve the conversation (routing works)${NC}"
 else
@@ -124,7 +156,7 @@ fi
 echo ""
 
 # Write from different nodes to verify routing works for writes too
-echo "6. Testing writes from ALL nodes..."
+echo "7. Testing writes from ALL nodes..."
 write_failures=0
 
 for i in {1..5}; do
@@ -158,7 +190,7 @@ fi
 echo ""
 
 # Verify message count on all nodes
-echo "7. Verifying all messages are accessible from all nodes..."
+echo "8. Verifying all messages are accessible from all nodes..."
 expected_msgs=6  # 1 initial + 5 from different nodes
 
 for port in 4000 4001 4002 4003 4004; do
@@ -174,7 +206,7 @@ done
 echo ""
 
 # Cleanup
-echo "8. Cleaning up test conversation..."
+echo "9. Cleaning up test conversation..."
 curl -s -X DELETE http://localhost:4000/v1/conversations/$CONVERSATION_ID > /dev/null
 echo -e "  ✓ Conversation deleted"
 echo ""

@@ -357,11 +357,33 @@ defmodule Fastpaca.Runtime do
           rest = maybe_enqueue_leader(leader, rest, visited)
           try_remote(rest, fun, args, visited, [{node, {:timeout, leader}} | failures])
 
+        {:error, reason} ->
+          if retriable_error?(reason) do
+            Logger.warning("Runtime RPC to #{inspect(node)} errored: #{inspect(reason)}")
+            try_remote(rest, fun, args, visited, [{node, {:error, reason}} | failures])
+          else
+            {:error, reason}
+          end
+
         other ->
           other
       end
     end
   end
+
+  defp retriable_error?(reason)
+       when reason in [
+              :invalid_message,
+              :invalid_metadata,
+              :invalid_conversation_config,
+              :conversation_tombstoned,
+              :conversation_not_found
+            ] do
+    false
+  end
+
+  defp retriable_error?({:version_conflict, _current}), do: false
+  defp retriable_error?(_reason), do: true
 
   defp safe_rpc_call(node, fun, args) do
     :rpc.call(node, __MODULE__, fun, args, @rpc_timeout)
@@ -386,19 +408,29 @@ defmodule Fastpaca.Runtime do
     self_node = Keyword.get(opts, :self, Node.self())
     replicas = Keyword.get(opts, :replicas, RaftManager.replicas_for_group(group_id))
     ready_nodes = Keyword.get(opts, :ready_nodes, RaftTopology.ready_nodes())
+    local_running = Keyword.get(opts, :local_running, group_running?(group_id))
+    remote_replicas = if local_running, do: replicas, else: replicas -- [self_node]
 
     cond do
-      self_node in replicas ->
+      self_node in replicas and local_running ->
+        {:local, self_node}
+
+      self_node in replicas and remote_replicas == [] ->
         {:local, self_node}
 
       true ->
         ready_candidates =
-          replicas
+          remote_replicas
           |> Enum.filter(&(&1 in ready_nodes))
 
-        fallbacks = replicas -- ready_candidates
+        fallbacks =
+          remote_replicas -- ready_candidates
 
         {:remote, Enum.uniq(ready_candidates ++ fallbacks)}
     end
+  end
+
+  defp group_running?(group_id) do
+    Process.whereis(RaftManager.server_id(group_id)) != nil
   end
 end
