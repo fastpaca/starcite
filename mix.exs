@@ -12,7 +12,7 @@ defmodule Fastpaca.MixProject do
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
       description:
-        "Fastpaca Context Store - Context budgeting and compaction for LLM apps. Manages conversation history and token budgets with deterministic compaction policies."
+        "Fastpaca Context Store - Message backend for AI agents. Append-only, replayable, ordered message log with streaming updates."
     ]
   end
 
