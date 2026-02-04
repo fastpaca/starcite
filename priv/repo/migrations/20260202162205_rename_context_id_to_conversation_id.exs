@@ -1,4 +1,4 @@
-defmodule Fastpaca.Repo.Migrations.RenameContextIdToConversationId do
+defmodule FleetLM.Repo.Migrations.RenameContextIdToConversationId do
   use Ecto.Migration
 
   def change do

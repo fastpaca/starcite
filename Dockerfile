@@ -55,7 +55,7 @@ WORKDIR /app
 RUN groupadd --gid 1000 app && \
     useradd --uid 1000 --gid app --home /app --shell /bin/bash app
 
-COPY --from=build /app/_build/prod/rel/fastpaca ./fastpaca
+COPY --from=build /app/_build/prod/rel/fleet_lm ./fleet_lm
 COPY docker-entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh && \

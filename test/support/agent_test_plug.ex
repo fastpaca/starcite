@@ -1,4 +1,4 @@
-defmodule Fastpaca.Agent.TestPlug do
+defmodule FleetLM.Agent.TestPlug do
   @moduledoc """
   Test plug for agent webhooks. Intercepts requests and sends them to the test process.
   """
@@ -14,7 +14,7 @@ defmodule Fastpaca.Agent.TestPlug do
     payload = Jason.decode!(body)
 
     test_pid =
-      case Application.get_env(:fastpaca, :agent_test_pid) do
+      case Application.get_env(:fleet_lm, :agent_test_pid) do
         nil -> raise "No test PID configured"
         pid -> pid
       end

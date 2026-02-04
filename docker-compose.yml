@@ -1,6 +1,6 @@
 services:
   app:
-    image: ${FASTPACA_IMAGE:-ghcr.io/fastpaca/context-store:latest}
+    image: ${FLEETLM_IMAGE:-ghcr.io/fastpaca/fleet-lm:latest}
     environment:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
       PHX_HOST: ${PHX_HOST:-localhost}
@@ -11,7 +11,7 @@ services:
       MIGRATE_ON_BOOT: ${MIGRATE_ON_BOOT:-false}
       # DNS clustering is disabled locally; set DNS_CLUSTER_QUERY in deployments
       DNS_CLUSTER_QUERY: ${DNS_CLUSTER_QUERY:-}
-      DNS_CLUSTER_NODE_BASENAME: ${DNS_CLUSTER_NODE_BASENAME:-fastpaca}
+      DNS_CLUSTER_NODE_BASENAME: ${DNS_CLUSTER_NODE_BASENAME:-fleet_lm}
       DNS_POLL_INTERVAL_MS: ${DNS_POLL_INTERVAL_MS:-5000}
     ports:
       - "4000:4000"
@@ -24,7 +24,7 @@ services:
     profiles:
       - with-db
     environment:
-      POSTGRES_DB: fastpaca_dev
+      POSTGRES_DB: fleet_lm_dev
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
     healthcheck:

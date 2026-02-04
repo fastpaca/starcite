@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # Storage & Audit
 
-Fastpaca separates hot runtime storage (Raft) from optional cold storage used for long-term history and audit. This page covers what is stored where, how retention works, and how to enable an audit-grade archive.
+FleetLM separates hot runtime storage (Raft) from optional cold storage used for long-term history and audit. This page covers what is stored where, how retention works, and how to enable an audit-grade archive.
 
 ---
 
@@ -35,12 +35,12 @@ For legal/compliance export, query the archive by `conversation_id` ordered by `
 
 ## Enabling the Postgres archive
 
-The Postgres adapter is built in and disabled by default. Enable it via env and provide a database URL. Migrations are run by your release process (see `Fastpaca.ReleaseTasks.migrate/0`).
+The Postgres adapter is built in and disabled by default. Enable it via env and provide a database URL. Migrations are run by your release process (see `FleetLM.ReleaseTasks.migrate/0`).
 
 ```bash
--e FASTPACA_ARCHIVER_ENABLED=true \
+-e FLEETLM_ARCHIVER_ENABLED=true \
 -e DATABASE_URL=postgres://user:password@host:5432/db \
--e FASTPACA_ARCHIVE_FLUSH_INTERVAL_MS=5000
+-e FLEETLM_ARCHIVE_FLUSH_INTERVAL_MS=5000
 ```
 
 Details
@@ -51,7 +51,7 @@ Details
 You can adjust batch size and tail retention via application config:
 
 ```elixir
-config :fastpaca,
+config :fleet_lm,
   archive_batch_size: 5_000,
   tail_keep: 1_000
 ```
@@ -69,12 +69,12 @@ config :fastpaca,
 
 Key Prometheus series exposed via `/metrics` (subset):
 
-- `fastpaca_archive_pending_rows` / `fastpaca_archive_pending_conversations`
-- `fastpaca_archive_attempted_total` / `fastpaca_archive_inserted_total`
-- `fastpaca_archive_bytes_attempted_total` / `fastpaca_archive_bytes_inserted_total`
-- `fastpaca_archive_flush_duration_ms`
-- `fastpaca_archive_lag` (per conversation)
-- `fastpaca_archive_tail_size` and `fastpaca_archive_trimmed_total`
+- `fleet_lm_archive_pending_rows` / `fleet_lm_archive_pending_conversations`
+- `fleet_lm_archive_attempted_total` / `fleet_lm_archive_inserted_total`
+- `fleet_lm_archive_bytes_attempted_total` / `fleet_lm_archive_bytes_inserted_total`
+- `fleet_lm_archive_flush_duration_ms`
+- `fleet_lm_archive_lag` (per conversation)
+- `fleet_lm_archive_tail_size` and `fleet_lm_archive_trimmed_total`
 
 Use logs as a secondary audit trail. Structured logs include fields like `type`, `conversation_id`, and `seq` suitable for ingestion by your logging stack.
 

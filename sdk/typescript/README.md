@@ -1,25 +1,25 @@
-# Fastpaca Message Store
+# FleetLM Message Store
 
-**Message backend for AI agents.** Fastpaca is an append-only, replayable message log with streaming updates and optional archival.
+**Message backend for AI agents.** FleetLM is an append-only, replayable message log with streaming updates and optional archival.
 
 This is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) handles prompt assembly.
 
 ## Installation
 
 ```bash
-npm install @fastpaca/fastpaca
+npm install @fleetlm/client
 ```
 
 ## Usage
 
 ```typescript
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
 // Create client
-const fastpaca = createClient({ baseUrl: 'http://localhost:4000/v1' });
+const fleetlm = createClient({ baseUrl: 'http://localhost:4000/v1' });
 
 // Create or get conversation (idempotent)
-const conv = await fastpaca.conversation('chat-123', {
+const conv = await fleetlm.conversation('chat-123', {
   metadata: { user_id: 'u_123', channel: 'web' }
 });
 
@@ -42,15 +42,15 @@ const { messages } = await conv.tail({ limit: 50 });
 const { messages: replay } = await conv.replay({ from: 100, limit: 50 });
 
 // Tombstone conversation (soft delete, prevents writes)
-await fastpaca.tombstoneConversation('chat-123');
+await fleetlm.tombstoneConversation('chat-123');
 ```
 
 ## Cria Integration
 
-Fastpaca stores messages; Cria builds the prompt. Example flow:
+FleetLM stores messages; Cria builds the prompt. Example flow:
 
 ```typescript
-// 1. Fetch messages from Fastpaca
+// 1. Fetch messages from FleetLM
 const { messages } = await conv.tail({ limit: 100 });
 
 // 2. Convert to Cria prompt input and render
@@ -61,7 +61,7 @@ const { messages } = await conv.tail({ limit: 100 });
 
 ### Client
 
-- `createClient(config)` - Create a Fastpaca client
+- `createClient(config)` - Create a FleetLM client
 - `client.conversation(id, opts?)` - Get or create a conversation
 - `client.getConversation(id)` - Get conversation metadata
 - `client.tombstoneConversation(id)` - Tombstone a conversation
@@ -72,4 +72,4 @@ const { messages } = await conv.tail({ limit: 100 });
 - `conv.tail({ offset?, limit? })` - Get messages from tail (newest)
 - `conv.replay({ from?, limit? })` - Replay messages by sequence
 
-See [the docs](https://docs.fastpaca.com/) for full API reference.
+See [the docs](https://fleetlm.com/docs/) for full API reference.

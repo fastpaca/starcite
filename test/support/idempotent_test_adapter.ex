@@ -1,11 +1,11 @@
-defmodule Fastpaca.Archive.IdempotentTestAdapter do
+defmodule FleetLM.Archive.IdempotentTestAdapter do
   @moduledoc """
   Test adapter for archive idempotency tests.
 
   Tracks all write attempts and stores them for inspection,
   allowing tests to verify idempotency behavior.
   """
-  @behaviour Fastpaca.Archive.Adapter
+  @behaviour FleetLM.Archive.Adapter
 
   use GenServer
 

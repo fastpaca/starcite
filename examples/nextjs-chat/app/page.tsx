@@ -9,10 +9,10 @@ export default function Chat() {
   // Initialize conversationId immediately from localStorage or generate new one
   const [conversationId, setConversationId] = useState(() => {
     if (typeof window !== 'undefined') {
-      const saved = localStorage.getItem('fastpaca-conversation-id');
+      const saved = localStorage.getItem('fleetlm-conversation-id');
       if (saved) return saved;
       const newId = `chat-${Date.now()}`;
-      localStorage.setItem('fastpaca-conversation-id', newId);
+      localStorage.setItem('fleetlm-conversation-id', newId);
       return newId;
     }
     return `chat-${Date.now()}`;
@@ -62,7 +62,7 @@ export default function Chat() {
 
   const handleConversationChange = (newConversationId: string) => {
     setConversationId(newConversationId);
-    localStorage.setItem('fastpaca-conversation-id', newConversationId);
+    localStorage.setItem('fleetlm-conversation-id', newConversationId);
     setMessages([]);
 
     // Fetch history for new conversation
@@ -93,7 +93,7 @@ export default function Chat() {
         <div className="mx-auto max-w-4xl px-4 py-4">
           <div className="flex items-center justify-between">
             <div>
-              <h1 className="text-xl font-semibold tracking-tight">Fastpaca Chat Example</h1>
+              <h1 className="text-xl font-semibold tracking-tight">FleetLM Chat Example</h1>
               <p className="text-sm text-slate-400">Using gpt-4o-mini</p>
             </div>
             <button
@@ -124,7 +124,7 @@ export default function Chat() {
         ) : messages.length === 0 ? (
           <div className="text-center text-slate-400">
             <p className="mb-2 text-base font-medium">Start a conversation</p>
-            <p className="text-sm">Fastpaca stores the message log</p>
+            <p className="text-sm">FleetLM stores the message log</p>
           </div>
         ) : null}
 

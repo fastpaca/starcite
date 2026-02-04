@@ -1,9 +1,9 @@
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const FASTPACA_URL = process.env.FASTPACA_URL || 'http://localhost:4000/v1';
+const FLEETLM_URL = process.env.FLEETLM_URL || 'http://localhost:4000/v1';
 
-// Create Fastpaca client
-const fastpaca = createClient({ baseUrl: FASTPACA_URL });
+// Create FleetLM client
+const fleetlm = createClient({ baseUrl: FLEETLM_URL });
 
 export async function POST(req: Request) {
   try {
@@ -14,7 +14,7 @@ export async function POST(req: Request) {
     }
 
     // Get the conversation handle (no server call)
-    const convo = await fastpaca.conversation(conversationId);
+    const convo = await fleetlm.conversation(conversationId);
 
     // Fetch message history
     const { messages } = await convo.tail({ limit: 100 });

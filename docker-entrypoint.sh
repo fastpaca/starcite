@@ -1,13 +1,13 @@
 #!/bin/bash
 set -euo pipefail
 
-APP_BIN="/app/fastpaca/bin/fastpaca"
+APP_BIN="/app/fleet_lm/bin/fleet_lm"
 CMD="${1:-start}"
 MIGRATE_ON_BOOT="${MIGRATE_ON_BOOT:-true}"
 
 run_migrations() {
   # Only attempt migrations when the archiver (Postgres) is enabled
-  case "${FASTPACA_ARCHIVER_ENABLED:-}" in
+  case "${FLEETLM_ARCHIVER_ENABLED:-}" in
     true|1|yes|on)
       : ;;
     *)
@@ -16,14 +16,14 @@ run_migrations() {
       ;;
   esac
 
-  DB_URL="${DATABASE_URL:-${FASTPACA_POSTGRES_URL:-}}"
+  DB_URL="${DATABASE_URL:-${FLEETLM_POSTGRES_URL:-}}"
   if [ -z "$DB_URL" ]; then
     echo "Skipping database migrations (no DATABASE_URL provided)."
     return 0
   fi
 
   echo "Running database migrations..."
-  "$APP_BIN" eval 'Fastpaca.ReleaseTasks.migrate()'
+  "$APP_BIN" eval 'FleetLM.ReleaseTasks.migrate()'
 }
 
 case "$CMD" in

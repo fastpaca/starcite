@@ -8,20 +8,20 @@ sidebar_position: 4
 These helpers mirror the REST API. They accept plain messages with `role` and `parts` (each part has a `type` string). The shape is compatible with ai-sdk v5 `UIMessage`, but the SDK does not depend on ai-sdk.
 
 ```bash
-npm install @fastpaca/fastpaca
+npm install @fleetlm/client
 ```
 
 ## 1. Create (or load) a conversation
 
 ```typescript
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const fastpaca = createClient({
-  baseUrl: process.env.FASTPACA_URL ?? 'http://localhost:4000/v1'
+const fleetlm = createClient({
+  baseUrl: process.env.FLEETLM_URL ?? 'http://localhost:4000/v1'
 });
 
 // Idempotent create/update when options are provided
-const convo = await fastpaca.conversation('123456', {
+const convo = await fleetlm.conversation('123456', {
   metadata: { channel: 'web', user_id: 'u_123' }
 });
 ```
@@ -63,14 +63,14 @@ const { messages } = await convo.replay({ from: 0, limit: 100 });
 ## 4. Conversation info and tombstones
 
 ```typescript
-const info = await fastpaca.getConversation('123456');
+const info = await fleetlm.getConversation('123456');
 
-await fastpaca.tombstoneConversation('123456');
+await fleetlm.tombstoneConversation('123456');
 ```
 
 ## 5. Prompt assembly
 
-Fastpaca does not build LLM prompts. Use tail or replay to select messages, then pass them to your model.
+FleetLM does not build LLM prompts. Use tail or replay to select messages, then pass them to your model.
 
 ```typescript
 const { messages } = await convo.tail({ limit: 50 });

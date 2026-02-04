@@ -1,7 +1,7 @@
 {
-  "name": "@fastpaca/fastpaca",
+  "name": "@fleetlm/client",
   "version": "0.1.1",
-  "description": "TypeScript client for Fastpaca - message backend for AI agents",
+  "description": "TypeScript client for FleetLM - message backend for AI agents",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "publishConfig": {
@@ -16,9 +16,9 @@
     "conversation",
     "message-log",
     "ai",
-    "fastpaca"
+    "fleetlm"
   ],
-  "author": "Fastpaca",
+  "author": "FleetLM",
   "license": "Apache-2.0",
   "peerDependencies": {
     "ai": ">=5.0.0"

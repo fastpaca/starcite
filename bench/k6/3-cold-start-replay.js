@@ -1,5 +1,5 @@
 /**
- * Fastpaca Scenario 3: Cold-Start Replay
+ * FleetLM Scenario 3: Cold-Start Replay
  *
  * Simulates a worker reconnecting after downtime: first build backlog,
  * then replay the full transcript while new writes continue.

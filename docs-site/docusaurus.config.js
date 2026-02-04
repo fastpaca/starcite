@@ -1,11 +1,11 @@
 // @ts-check
 
-const siteUrl = process.env.DOCUSAURUS_SITE_URL || "https://docs.fastpaca.com";
+const siteUrl = process.env.DOCUSAURUS_SITE_URL || "https://fleetlm.com/docs";
 const baseUrl = process.env.DOCUSAURUS_BASE_URL || "/";
 
 const config = {
-  title: "Fastpaca Context Store Docs",
-  tagline: "Self-host Fastpaca Context Store with confidence",
+  title: "FleetLM Docs",
+  tagline: "Self-host FleetLM with confidence",
   url: siteUrl,
   baseUrl,
   onBrokenLinks: "throw",
@@ -25,7 +25,7 @@ const config = {
     announcementBar: {
       id: "wip-banner",
       content:
-        "<strong>Early access:</strong> Fastpaca Context Store is an active work in progress. Expect rapid changes and review carefully before running in production.",
+        "<strong>Early access:</strong> FleetLM is an active work in progress. Expect rapid changes and review carefully before running in production.",
       backgroundColor: "#f97316",
       textColor: "#1f2937",
       isCloseable: false
@@ -40,7 +40,7 @@ const config = {
           path: "../docs",
           routeBasePath: "/",
           sidebarPath: require.resolve("./sidebars.js"),
-          editUrl: "https://github.com/fastpaca/context-store/tree/main/docs/"
+          editUrl: "https://github.com/fastpaca/fleet-lm/tree/main/docs/"
         },
         blog: false,
         theme: {

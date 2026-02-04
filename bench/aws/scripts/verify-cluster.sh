@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 
-echo -e "${GREEN}=== Fastpaca Cluster Verification ===${NC}"
+echo -e "${GREEN}=== FleetLM Cluster Verification ===${NC}"
 
 # Get outputs from Terraform
 cd "$TERRAFORM_DIR"
@@ -36,12 +36,12 @@ INDEX=0
 ALL_HEALTHY=true
 for IP in $INSTANCE_IPS; do
   INDEX=$((INDEX + 1))
-  NODE_NAME="fastpaca-bench-$INDEX"
+  NODE_NAME="fleet_lm-bench-$INDEX"
 
   echo -e "${YELLOW}Checking $NODE_NAME ($IP)...${NC}"
 
   # Check if container is running
-  if ! ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fastpaca" > /dev/null 2>&1; then
+  if ! ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleet_lm" > /dev/null 2>&1; then
     echo -e "${RED}✗ Container not running${NC}"
     ALL_HEALTHY=false
     continue
@@ -58,7 +58,7 @@ for IP in $INSTANCE_IPS; do
   fi
 
   # Check cluster connectivity
-  CLUSTER_OUTPUT=$(ssh $SSH_OPTS ec2-user@$IP "docker exec fastpaca bin/fastpaca rpc 'Node.list()'" 2>&1 || echo "FAIL")
+  CLUSTER_OUTPUT=$(ssh $SSH_OPTS ec2-user@$IP "docker exec fleet_lm bin/fleet_lm rpc 'Node.list()'" 2>&1 || echo "FAIL")
 
   if echo "$CLUSTER_OUTPUT" | grep -q "FAIL"; then
     echo -e "${RED}✗ Failed to query cluster state${NC}"
@@ -68,7 +68,7 @@ for IP in $INSTANCE_IPS; do
   fi
 
   # Count connected nodes (list format is typically: [:"node@ip", :"node@ip"])
-  CONNECTED_COUNT=$(echo "$CLUSTER_OUTPUT" | grep -o "fastpaca@" | wc -l | tr -d ' ')
+  CONNECTED_COUNT=$(echo "$CLUSTER_OUTPUT" | grep -o "fleet_lm@" | wc -l | tr -d ' ')
 
   if [ "$CONNECTED_COUNT" -eq "$EXPECTED_CLUSTER_SIZE" ]; then
     echo -e "${GREEN}✓ Cluster connected ($CONNECTED_COUNT/$EXPECTED_CLUSTER_SIZE nodes)${NC}"
@@ -91,9 +91,9 @@ else
   echo -e "${RED}✗ Some nodes failed health checks${NC}"
   echo ""
   echo -e "${YELLOW}Troubleshooting tips:${NC}"
-  echo "  1. Check logs: ssh ec2-user@<IP> 'docker logs fastpaca'"
+  echo "  1. Check logs: ssh ec2-user@<IP> 'docker logs fleet_lm'"
   echo "  2. Check container: ssh ec2-user@<IP> 'docker ps -a'"
-  echo "  3. Restart node: ssh ec2-user@<IP> 'docker restart fastpaca'"
-  echo "  4. Manual cluster check: ssh ec2-user@<IP> 'docker exec fastpaca bin/fastpaca rpc \"Node.list()\"'"
+  echo "  3. Restart node: ssh ec2-user@<IP> 'docker restart fleet_lm'"
+  echo "  4. Manual cluster check: ssh ec2-user@<IP> 'docker exec fleet_lm bin/fleet_lm rpc \"Node.list()\"'"
   exit 1
 fi

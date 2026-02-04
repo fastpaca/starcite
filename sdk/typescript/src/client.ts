@@ -1,18 +1,18 @@
 import { Conversation } from './conversation';
-import type { FastpacaClientConfig, ConversationInfo } from './types';
+import type { FleetLMClientConfig, ConversationInfo } from './types';
 
 /**
- * Fastpaca client - message backend for AI agents
+ * FleetLM client - message backend for AI agents
  *
  * This is a message substrate. It stores and streams messages
  * but does NOT manage prompt windows, token budgets, or compaction.
  * Prompt assembly is handled by Cria or other prompt systems.
  */
-export class FastpacaClient {
+export class FleetLMClient {
   private baseUrl: string;
   private apiKey?: string;
 
-  constructor(config: FastpacaClientConfig = {}) {
+  constructor(config: FleetLMClientConfig = {}) {
     this.baseUrl = config.baseUrl || 'http://localhost:4000/v1';
     this.apiKey = config.apiKey;
   }
@@ -26,12 +26,12 @@ export class FastpacaClient {
    * @example
    * ```ts
    * // Create/update conversation with metadata
-   * const conv = await fastpaca.conversation('chat-123', {
+   * const conv = await fleetlm.conversation('chat-123', {
    *   metadata: { user_id: 'u_123', channel: 'web' }
    * });
    *
    * // Get existing conversation (no server call)
-   * const conv = fastpaca.conversation('chat-123');
+   * const conv = fleetlm.conversation('chat-123');
    * ```
    */
   async conversation(
@@ -96,8 +96,8 @@ export class FastpacaClient {
 }
 
 /**
- * Create a Fastpaca client
+ * Create a FleetLM client
  */
-export function createClient(config?: FastpacaClientConfig): FastpacaClient {
-  return new FastpacaClient(config);
+export function createClient(config?: FleetLMClientConfig): FleetLMClient {
+  return new FleetLMClient(config);
 }

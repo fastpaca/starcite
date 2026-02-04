@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 
-echo -e "${GREEN}=== Fastpaca Smoke Test ===${NC}"
+echo -e "${GREEN}=== FleetLM Smoke Test ===${NC}"
 
 cd "$TERRAFORM_DIR"
 INSTANCE_IPS=$(terraform output -json instance_ips | jq -r '.[]')
@@ -52,7 +52,7 @@ APPEND_RESPONSE=$(curl -s -o /tmp/conversation_append.json -w "%{http_code}" \
   -d '{
     "message": {
       "role": "user",
-      "parts": [{"type": "text", "text": "Hello from Fastpaca smoke test"}],
+      "parts": [{"type": "text", "text": "Hello from FleetLM smoke test"}],
       "metadata": {"source": "smoke-test"}
     }
   }')

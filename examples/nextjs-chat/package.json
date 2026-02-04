@@ -1,5 +1,5 @@
 {
-  "name": "fastpaca-nextjs-chat",
+  "name": "fleetlm-nextjs-chat",
   "version": "0.1.0",
   "private": true,
   "scripts": {
@@ -12,7 +12,7 @@
     "@ai-sdk/openai": "^2.0.56",
     "@ai-sdk/react": "^2.0.81",
     "ai": "^5.0.81",
-    "@fastpaca/fastpaca": "file:../../sdk/typescript",
+    "@fleetlm/client": "file:../../sdk/typescript",
     "next": "14.2.5",
     "phoenix": "^1.7.15",
     "react": "18.2.0",

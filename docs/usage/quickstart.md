@@ -5,16 +5,16 @@ sidebar_position: 1
 
 # Quick Start
 
-## 1. Run Fastpaca
+## 1. Run FleetLM
 
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v fastpaca_data:/data \
-  ghcr.io/fastpaca/context-store:latest
+  -v fleetlm_data:/data \
+  ghcr.io/fastpaca/fleet-lm:latest
 ```
 
-Fastpaca listens on `http://localhost:4000/v1`. The container persists data under `fastpaca_data/`.
+FleetLM listens on `http://localhost:4000/v1`. The container persists data under `fleetlm_data/`.
 
 ---
 
@@ -47,7 +47,7 @@ curl -X POST http://localhost:4000/v1/conversations/demo-chat/messages \
   }'
 ```
 
-Fastpaca replies with the assigned sequence number and version:
+FleetLM replies with the assigned sequence number and version:
 
 ```json
 { "seq": 1, "version": 1, "token_count": 24 }
@@ -84,15 +84,15 @@ Response (trimmed):
 ## 5. Build a prompt (SDK example)
 
 ```typescript title="app/api/chat/route.ts"
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 export async function POST(req: Request) {
   const { conversationId, message } = await req.json();
 
-  const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-  const convo = await fastpaca.conversation(conversationId, { metadata: { channel: 'web' } });
+  const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
+  const convo = await fleetlm.conversation(conversationId, { metadata: { channel: 'web' } });
 
   // Append user message
   await convo.append({

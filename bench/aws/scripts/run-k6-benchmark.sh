@@ -11,7 +11,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 K6_DIR="$SCRIPT_DIR/../../k6"
 
-echo -e "${GREEN}=== Fastpaca k6 Benchmark ===${NC}"
+echo -e "${GREEN}=== FleetLM k6 Benchmark ===${NC}"
 
 if ! command -v k6 &> /dev/null; then
   echo -e "${RED}Error: k6 is not installed${NC}"

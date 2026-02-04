@@ -1,4 +1,4 @@
-import type { AppendResponse, FastpacaMessage } from './types';
+import type { AppendResponse, FleetLMMessage } from './types';
 
 /**
  * Conversation class - represents a single conversation (append-only message log)
@@ -16,7 +16,7 @@ export class Conversation {
   /**
    * Append a message to the conversation
    *
-   * @param message - Any object with `role` and `parts` (FastpacaMessage-compatible)
+   * @param message - Any object with `role` and `parts` (FleetLMMessage-compatible)
    * @param opts - Optional parameters including token count and version guard
    */
   async append(
@@ -53,7 +53,7 @@ export class Conversation {
    * @param opts.offset - Number of messages to skip from tail (0 = most recent)
    * @param opts.limit - Maximum messages to return
    */
-  async tail(opts?: { offset?: number; limit?: number }): Promise<{ messages: FastpacaMessage[] }> {
+  async tail(opts?: { offset?: number; limit?: number }): Promise<{ messages: FleetLMMessage[] }> {
     const params = new URLSearchParams();
     if (typeof opts?.offset === 'number') params.set('offset', String(opts.offset));
     if (typeof opts?.limit === 'number') params.set('limit', String(opts.limit));
@@ -80,7 +80,7 @@ export class Conversation {
    * @param opts.from - Starting sequence number (inclusive)
    * @param opts.limit - Maximum messages to return
    */
-  async replay(opts?: { from?: number; limit?: number }): Promise<{ messages: FastpacaMessage[] }> {
+  async replay(opts?: { from?: number; limit?: number }): Promise<{ messages: FleetLMMessage[] }> {
     const params = new URLSearchParams();
     if (typeof opts?.from === 'number') params.set('from', String(opts.from));
     if (typeof opts?.limit === 'number') params.set('limit', String(opts.limit));

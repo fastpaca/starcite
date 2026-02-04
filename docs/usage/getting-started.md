@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # Getting Started
 
-Fastpaca is a message backend for AI agents. It stores append-only conversations and streams updates. It does **not** build LLM prompts or manage token budgets. You decide which messages to send to your model.
+FleetLM is a message backend for AI agents. It stores append-only conversations and streams updates. It does **not** build LLM prompts or manage token budgets. You decide which messages to send to your model.
 
 ## Key terms
 
@@ -25,18 +25,18 @@ Fastpaca is a message backend for AI agents. It stores append-only conversations
 Conversations are created with a unique id you choose. Create them explicitly before appending.
 
 ```typescript
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
+const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
 
-const convo = await fastpaca.conversation('support-123', {
+const convo = await fleetlm.conversation('support-123', {
   metadata: { user_id: 'u_123', channel: 'web' }
 });
 ```
 
 ## Append messages
 
-Messages are plain objects with a `role` and an array of `parts`. Each part must include a `type` string. This shape is compatible with ai-sdk v5 `UIMessage`, but Fastpaca does not depend on ai-sdk.
+Messages are plain objects with a `role` and an array of `parts`. Each part must include a `type` string. This shape is compatible with ai-sdk v5 `UIMessage`, but FleetLM does not depend on ai-sdk.
 
 ```typescript
 await convo.append({
@@ -53,7 +53,7 @@ Each append assigns a deterministic `seq` and increments the conversation `versi
 
 ## Build your prompt
 
-Fastpaca does not build LLM context windows. You choose what to send to your model. A common pattern is to fetch the most recent messages and build a prompt from them.
+FleetLM does not build LLM context windows. You choose what to send to your model. A common pattern is to fetch the most recent messages and build a prompt from them.
 
 ```typescript
 const { messages } = await convo.tail({ limit: 50 });
@@ -94,7 +94,7 @@ const { messages } = await convo.replay({ from: 120, limit: 100 });
 Tombstoned conversations reject new writes but remain readable.
 
 ```typescript
-await fastpaca.tombstoneConversation('support-123');
+await fleetlm.tombstoneConversation('support-123');
 ```
 
 ## Archive and full history

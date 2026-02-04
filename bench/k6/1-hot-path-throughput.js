@@ -1,5 +1,5 @@
 /**
- * Fastpaca Scenario 1: Hot-Path Append Throughput
+ * FleetLM Scenario 1: Hot-Path Append Throughput
  *
  * Measures write throughput directly against the conversation append API.
  *
@@ -116,7 +116,7 @@ export default function (data) {
   let lastSeq = conv.lastSeq || 0;
 
   for (let i = 0; i < pipelineDepth; i++) {
-    const text = `fastpaca hot-path run=${data.runId} vu=${vuId} iter=${__ITER} idx=${i}`;
+    const text = `fleetlm hot-path run=${data.runId} vu=${vuId} iter=${__ITER} idx=${i}`;
     const { res, json } = lib.appendMessage(
       conversationId,
       {

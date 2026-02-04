@@ -5,22 +5,22 @@ sidebar_position: 5
 
 # Examples
 
-End-to-end snippets that show how Fastpaca fits into common workflows.
+End-to-end snippets that show how FleetLM fits into common workflows.
 
 ---
 
 ## Streaming chat route (Next.js + ai-sdk)
 
 ```typescript title="app/api/chat/route.ts"
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 import { streamText } from 'ai';
 import { openai } from '@ai-sdk/openai';
 
 export async function POST(req: Request) {
   const { conversationId, message } = await req.json();
 
-  const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-  const convo = await fastpaca.conversation(conversationId, { metadata: { channel: 'web' } });
+  const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
+  const convo = await fleetlm.conversation(conversationId, { metadata: { channel: 'web' } });
 
   await convo.append({
     role: 'user',
@@ -44,12 +44,12 @@ export async function POST(req: Request) {
 ## Non-streaming response (Anthropic)
 
 ```typescript
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 import { generateText } from 'ai';
 import { anthropic } from '@ai-sdk/anthropic';
 
-const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-const convo = await fastpaca.conversation('chat_non_stream', { metadata: { channel: 'web' } });
+const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
+const convo = await fleetlm.conversation('chat_non_stream', { metadata: { channel: 'web' } });
 
 await convo.append({
   role: 'user',
@@ -85,8 +85,8 @@ channel.on('gap', async ({ expected }) => {
 ## Switching providers mid-conversation
 
 ```typescript
-const fastpaca = createClient({ baseUrl: process.env.FASTPACA_URL || 'http://localhost:4000/v1' });
-const convo = await fastpaca.conversation('mixed-sources', { metadata: { channel: 'web' } });
+const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
+const convo = await fleetlm.conversation('mixed-sources', { metadata: { channel: 'web' } });
 
 await convo.append({
   role: 'user',

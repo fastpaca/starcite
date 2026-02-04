@@ -11,24 +11,24 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 K6_DIR="$SCRIPT_DIR/../../k6"
 
-echo -e "${GREEN}=== Fastpaca Remote k6 Benchmark (AWS intra-VPC) ===${NC}"
+echo -e "${GREEN}=== FleetLM Remote k6 Benchmark (AWS intra-VPC) ===${NC}"
 
 cd "$TERRAFORM_DIR"
 BENCHMARK_CLIENT_IP=$(terraform output -raw benchmark_client_ip)
-FASTPACA_PRIVATE_IP=$(terraform output -json instance_private_ips | jq -r '.[0]')
+FLEETLM_PRIVATE_IP=$(terraform output -json instance_private_ips | jq -r '.[0]')
 
 if [ -z "$BENCHMARK_CLIENT_IP" ]; then
   echo -e "${RED}Error: No benchmark client IP found${NC}"
   exit 1
 fi
 
-if [ -z "$FASTPACA_PRIVATE_IP" ]; then
-  echo -e "${RED}Error: No Fastpaca instance IP found${NC}"
+if [ -z "$FLEETLM_PRIVATE_IP" ]; then
+  echo -e "${RED}Error: No FleetLM instance IP found${NC}"
   exit 1
 fi
 
 echo "Benchmark client: $BENCHMARK_CLIENT_IP"
-echo "Fastpaca target: $FASTPACA_PRIVATE_IP (private IP, same VPC)"
+echo "FleetLM target: $FLEETLM_PRIVATE_IP (private IP, same VPC)"
 echo ""
 
 SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o ConnectTimeout=10 -o LogLevel=ERROR"
@@ -62,7 +62,7 @@ echo -e "${GREEN}Scripts copied${NC}"
 
 BENCHMARK="${1:-1-hot-path-throughput}"
 RUN_ID="aws-remote-$(date +%s)"
-API_URL="http://$FASTPACA_PRIVATE_IP:4000/v1"
+API_URL="http://$FLEETLM_PRIVATE_IP:4000/v1"
 
 echo ""
 echo -e "${YELLOW}Benchmark configuration:${NC}"

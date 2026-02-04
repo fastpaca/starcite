@@ -1,6 +1,6 @@
-# Fastpaca AWS Benchmark Infrastructure
+# FleetLM AWS Benchmark Infrastructure
 
-Reproducible Terraform configuration for benchmarking Fastpaca on AWS.
+Reproducible Terraform configuration for benchmarking FleetLM on AWS.
 
 ## ⚠️ WARNING
 
@@ -23,7 +23,7 @@ terraform init
 terraform apply -var="ssh_public_key=$(cat ~/.ssh/id_rsa.pub)"
 ```
 
-**2. Deploy Fastpaca to the nodes:**
+**2. Deploy FleetLM to the nodes:**
 
 ```bash
 cd ../scripts
@@ -60,7 +60,7 @@ Change instance type:
 terraform apply -var="instance_type=c5d.xlarge"
 ```
 
-Fastpaca runs single-container nodes with durable on-disk storage and no external database. Each instance comes up ready to serve requests as soon as Docker starts the release.
+FleetLM runs single-container nodes with durable on-disk storage and no external database. Each instance comes up ready to serve requests as soon as Docker starts the release.
 
 ## Results & Methodology
 

@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # Websocket API
 
-Fastpaca exposes a backend-only websocket for streaming conversation updates in near real time. It is implemented as a Phoenix Channel.
+FleetLM exposes a backend-only websocket for streaming conversation updates in near real time. It is implemented as a Phoenix Channel.
 
 Endpoint:
 

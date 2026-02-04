@@ -1,7 +1,7 @@
 /**
- * Fastpaca k6 Benchmark Library
+ * FleetLM k6 Benchmark Library
  *
- * Helpers for exercising the Fastpaca conversation API during load tests.
+ * Helpers for exercising the FleetLM conversation API during load tests.
  */
 
 import http from 'k6/http';

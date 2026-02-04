@@ -5,7 +5,7 @@ sidebar_position: 3
 
 # Prompt Assembly
 
-Fastpaca stores an append-only message log. It does **not** build LLM context windows, enforce token budgets, or perform compaction. Prompt assembly is entirely your responsibility.
+FleetLM stores an append-only message log. It does **not** build LLM context windows, enforce token budgets, or perform compaction. Prompt assembly is entirely your responsibility.
 
 This is intentional: different products need different prompt policies, and those policies change as models evolve.
 
@@ -33,7 +33,7 @@ const { messages } = await convo.replay({ from: 0, limit: 500 });
 
 ### 3) Client-side summaries
 
-Maintain a summary outside Fastpaca (database, cache, vector store), and combine it with a recent tail.
+Maintain a summary outside FleetLM (database, cache, vector store), and combine it with a recent tail.
 
 ```typescript
 const summary = await loadSummary(convoId); // your storage
@@ -49,19 +49,19 @@ You can also append summaries as regular messages if that fits your product, but
 
 ### 4) External memory (RAG)
 
-Use Fastpaca as the source of truth for raw messages, and build prompt inputs from your own retrieval system. The message log provides deterministic ordering and auditability.
+Use FleetLM as the source of truth for raw messages, and build prompt inputs from your own retrieval system. The message log provides deterministic ordering and auditability.
 
 ---
 
 ## Token counts
 
-Fastpaca accepts an optional `token_count` per message when you append. If you pass accurate values from your model provider, you can enforce budgets or trimming precisely in your own prompt builder. If you omit it, Fastpaca estimates a count from text parts for observability only.
+FleetLM accepts an optional `token_count` per message when you append. If you pass accurate values from your model provider, you can enforce budgets or trimming precisely in your own prompt builder. If you omit it, FleetLM estimates a count from text parts for observability only.
 
 ---
 
 ## Recap
 
-- Fastpaca never rewrites messages.
+- FleetLM never rewrites messages.
 - It does not compact or summarize.
 - You control selection, summarization, and ordering for model input.
 

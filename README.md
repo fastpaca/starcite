@@ -1,16 +1,16 @@
-# Fastpaca Message Store
+# FleetLM
 
-[![Tests](https://github.com/fastpaca/context-store/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/context-store/actions/workflows/test.yml)
-[![Docker Build](https://github.com/fastpaca/context-store/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/context-store/actions/workflows/docker-build.yml)
+[![Tests](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml)
+[![Docker Build](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
 > **Message backend for AI agents.** An append-only, replayable, ordered message log with streaming updates and optional archival.
 
-Fastpaca is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) owns prompt assembly.
+FleetLM is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) owns prompt assembly.
 
 ```
-                      ╔═ fastpaca ════════════════════════╗
+                      ╔═ FleetLM ════════════════════════╗
 ╔══════════╗          ║                                   ║░    ╔═optional═╗
 ║          ║░         ║  ┏━━━━━━━━━━━┓     ┏━━━━━━━━━━━┓  ║░    ║          ║░
 ║  client  ║░───API──▶║  ┃  Message  ┃────▶┃   Raft    ┃  ║░ ──▶║ postgres ║░
@@ -21,11 +21,11 @@ Fastpaca is a **message substrate** — it stores and streams messages, but does
                        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 ```
 
-- [Documentation](https://docs.fastpaca.com/)
-- [Quick start](https://docs.fastpaca.com/usage/quickstart)
-- [API Reference](https://docs.fastpaca.com/api/rest)
+- [Documentation](https://fleetlm.com/docs/)
+- [Quick start](https://fleetlm.com/docs/usage/quickstart)
+- [API Reference](https://fleetlm.com/docs/api/rest)
 
-## What Fastpaca Does
+## What FleetLM Does
 
 - **Store messages** in append-only conversation logs
 - **Stream updates** via WebSocket in real-time
@@ -33,14 +33,14 @@ Fastpaca is a **message substrate** — it stores and streams messages, but does
 - **Archive to Postgres** for full history retention
 - **Sub-150ms p99** append latency via Raft consensus
 
-## What Fastpaca Does NOT Do
+## What FleetLM Does NOT Do
 
 - Build LLM context windows
 - Manage token budgets
 - Run compaction policies
 - Execute tools or call providers
 
-**Prompt assembly is handled by Cria** (or your prompt system of choice). Fastpaca just stores and streams messages.
+**Prompt assembly is handled by Cria** (or your prompt system of choice). FleetLM just stores and streams messages.
 
 ## Quick Start
 
@@ -49,19 +49,19 @@ Start container (postgres is optional — data persists in Raft):
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v fastpaca_data:/data \
-  ghcr.io/fastpaca/context-store:latest
+  -v fleetlm_data:/data \
+  ghcr.io/fastpaca/fleet-lm:latest
 ```
 
 Use the TypeScript SDK:
 
 ```ts
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const fastpaca = createClient({ baseUrl: 'http://localhost:4000/v1' });
+const fleetlm = createClient({ baseUrl: 'http://localhost:4000/v1' });
 
 // Create or get conversation (idempotent)
-const conv = await fastpaca.conversation('chat-123', {
+const conv = await fleetlm.conversation('chat-123', {
   metadata: { user_id: 'u_123', channel: 'web' }
 });
 
@@ -78,17 +78,17 @@ const { messages: replay } = await conv.replay({ from: 50, limit: 50 });
 
 ## Cria Integration
 
-Fastpaca stores messages; Cria builds the prompt:
+FleetLM stores messages; Cria builds the prompt:
 
 ```ts
-// 1. Fetch messages from Fastpaca
+// 1. Fetch messages from FleetLM
 const { messages } = await conv.tail({ limit: 100 });
 
 // 2. Pass to Cria for prompt assembly with your token budget
 const prompt = cria.render(messages, { budget: 100_000 });
 ```
 
-## When to Use Fastpaca
+## When to Use FleetLM
 
 **Good fit:**
 - Multi-turn agent conversations with full history retention
@@ -106,7 +106,7 @@ const prompt = cria.render(messages, { budget: 100_000 });
 
 ```bash
 # Clone and set up
-git clone https://github.com/fastpaca/context-store
+git clone https://github.com/fastpaca/fleet-lm
 cd context-store
 mix setup            # install deps, create DB, run migrations
 

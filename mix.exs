@@ -1,9 +1,9 @@
-defmodule Fastpaca.MixProject do
+defmodule FleetLM.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :fastpaca,
+      app: :fleet_lm,
       version: "0.1.0",
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -12,7 +12,7 @@ defmodule Fastpaca.MixProject do
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
       description:
-        "Fastpaca Context Store - Message backend for AI agents. Append-only, replayable, ordered message log with streaming updates."
+        "FleetLM - Message infra for AI agents & LLMs. Append-only, replayable, ordered message log with streaming updates."
     ]
   end
 
@@ -21,7 +21,7 @@ defmodule Fastpaca.MixProject do
   # Type `mix help compile.app` for more information.
   def application do
     [
-      mod: {Fastpaca.Application, []},
+      mod: {FleetLM.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end

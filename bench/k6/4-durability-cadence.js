@@ -1,5 +1,5 @@
 /**
- * Fastpaca Scenario 4: Durability Cadence
+ * FleetLM Scenario 4: Durability Cadence
  *
  * Sustained append workload that periodically reads the tail to ensure
  * data is durable and sequence numbers are monotonic.

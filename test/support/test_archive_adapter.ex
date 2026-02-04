@@ -1,6 +1,6 @@
-defmodule Fastpaca.Archive.TestAdapter do
+defmodule FleetLM.Archive.TestAdapter do
   @moduledoc false
-  @behaviour Fastpaca.Archive.Adapter
+  @behaviour FleetLM.Archive.Adapter
 
   use GenServer
 

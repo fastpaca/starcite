@@ -5,9 +5,9 @@ sidebar_position: 4
 
 # Architecture
 
-Fastpaca runs a Raft-backed state machine that stores conversation logs and streams updates. Every node exposes the same API; requests can land anywhere and are routed to the appropriate shard.
+FleetLM runs a Raft-backed state machine that stores conversation logs and streams updates. Every node exposes the same API; requests can land anywhere and are routed to the appropriate shard.
 
-![Fastpaca Context Store Architecture](./img/architecture.png)
+![FleetLM Architecture](./img/architecture.png)
 
 ## Components
 

@@ -1,13 +1,13 @@
 import { openai } from '@ai-sdk/openai';
 import { streamText, convertToModelMessages, UIMessage } from 'ai';
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
 export const maxDuration = 30;
 
-const FASTPACA_URL = process.env.FASTPACA_URL || 'http://localhost:4000/v1';
+const FLEETLM_URL = process.env.FLEETLM_URL || 'http://localhost:4000/v1';
 
-// Create Fastpaca client
-const fastpaca = createClient({ baseUrl: FASTPACA_URL });
+// Create FleetLM client
+const fleetlm = createClient({ baseUrl: FLEETLM_URL });
 
 export async function POST(req: Request) {
   const { messages, conversationId } = await req.json();
@@ -17,7 +17,7 @@ export async function POST(req: Request) {
   }
 
   // 1. Get or create conversation (idempotent PUT if config provided)
-  const convo = await fastpaca.conversation(conversationId, {
+  const convo = await fleetlm.conversation(conversationId, {
     metadata: { source: 'nextjs-chat' },
   });
 
@@ -36,7 +36,7 @@ export async function POST(req: Request) {
     messages: convertToModelMessages(convoMessages),
   }).toUIMessageStreamResponse({
     onFinish: async ({ responseMessage }) => {
-      // FastpacaMessage accepts any object with role and parts
+      // FleetLMMessage accepts any object with role and parts
       await convo.append(responseMessage);
     },
   });

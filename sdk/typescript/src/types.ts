@@ -2,15 +2,15 @@
  * Loose message types to avoid coupling to ai-sdk.
  * Shape matches our API: role + parts with a type discriminator.
  */
-export type FastpacaMessagePart = {
+export type FleetLMMessagePart = {
   type: string;
   [key: string]: unknown;
 };
 
-export interface FastpacaMessage {
+export interface FleetLMMessage {
   seq?: number;
   role: string;
-  parts: FastpacaMessagePart[];
+  parts: FleetLMMessagePart[];
   metadata?: Record<string, unknown>;
   token_count?: number;
   inserted_at?: string;
@@ -41,7 +41,7 @@ export interface AppendResponse {
 /**
  * Client configuration
  */
-export interface FastpacaClientConfig {
+export interface FleetLMClientConfig {
   baseUrl?: string;
   apiKey?: string;
 }

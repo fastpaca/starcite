@@ -2,8 +2,8 @@ import type { Metadata } from "next";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Fastpaca Chat Demo",
-  description: "Next.js chat example with Fastpaca conversation logs."
+  title: "FleetLM Chat Demo",
+  description: "Next.js chat example with FleetLM conversation logs."
 };
 
 export default function RootLayout({

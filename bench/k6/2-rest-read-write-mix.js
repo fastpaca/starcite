@@ -1,5 +1,5 @@
 /**
- * Fastpaca Scenario 2: Conversation Read/Write Mix
+ * FleetLM Scenario 2: Conversation Read/Write Mix
  *
  * Exercises alternating append + tail reads to model a busy chat UI.
  *
