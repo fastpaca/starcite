@@ -1,7 +1,7 @@
 # FleetLM
 
-[![Tests](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml)
-[![Docker Build](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml)
+[![Tests](https://github.com/fastpaca/fleetlm/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml)
+[![Docker Build](https://github.com/fastpaca/fleetlm/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
