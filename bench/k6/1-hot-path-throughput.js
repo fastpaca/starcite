@@ -1,10 +1,10 @@
 /**
- * Fastpaca Scenario 1: Hot-Path Append Throughput
+ * FleetLM Scenario 1: Hot-Path Append Throughput
  *
- * Measures write throughput directly against the context append API.
+ * Measures write throughput directly against the conversation append API.
  *
  * Profile:
- * - 20 concurrent VUs writing into dedicated contexts
+ * - 20 concurrent VUs writing into dedicated conversations
  * - Pipeline depth controls how many appends each VU issues per iteration
  * - Ramp shape: 30s ramp → 1m40 steady → 10s ramp down
  *
@@ -79,23 +79,23 @@ export function setup() {
   console.log(`Pipeline depth: ${pipelineDepth}`);
   console.log(`Ramp: ${rampDuration} → Steady: ${steadyDuration} → Down: ${rampDownDuration}`);
 
-  // Wait for cluster to be ready before creating contexts
+  // Wait for cluster to be ready before creating conversations
   lib.waitForClusterReady(90);
 
-  const contexts = {};
+  const conversations = {};
 
   for (let vuId = 1; vuId <= maxVUs; vuId++) {
-    const contextId = lib.contextId('hot-path', vuId);
-    lib.ensureContext(contextId, {
+    const convId = lib.conversationId('hot-path', vuId);
+    lib.ensureConversation(convId, {
       metadata: { bench: true, scenario: 'hot_path', vu: vuId, run_id: lib.config.runId },
     });
-    contexts[vuId] = { contextId, lastSeq: 0 };
+    conversations[vuId] = { conversationId: convId, lastSeq: 0 };
   }
 
   return {
     runId: lib.config.runId,
     pipelineDepth,
-    contexts,
+    conversations,
   };
 }
 
@@ -105,20 +105,20 @@ export function setup() {
 
 export default function (data) {
   const vuId = __VU;
-  const ctx = data.contexts[vuId];
+  const conv = data.conversations[vuId];
 
-  if (!ctx) {
+  if (!conv) {
     return;
   }
 
-  const { contextId } = ctx;
+  const { conversationId } = conv;
   const pipelineDepth = data.pipelineDepth;
-  let lastSeq = ctx.lastSeq || 0;
+  let lastSeq = conv.lastSeq || 0;
 
   for (let i = 0; i < pipelineDepth; i++) {
-    const text = `fastpaca hot-path run=${data.runId} vu=${vuId} iter=${__ITER} idx=${i}`;
+    const text = `fleetlm hot-path run=${data.runId} vu=${vuId} iter=${__ITER} idx=${i}`;
     const { res, json } = lib.appendMessage(
-      contextId,
+      conversationId,
       {
         role: 'user',
         parts: [{ type: 'text', text }],
@@ -152,5 +152,5 @@ export default function (data) {
     }
   }
 
-  ctx.lastSeq = lastSeq;
+  conv.lastSeq = lastSeq;
 }

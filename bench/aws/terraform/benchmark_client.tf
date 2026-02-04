@@ -1,5 +1,5 @@
 # Benchmark client instance for running k6 tests
-# Runs in same VPC as Fastpaca nodes to eliminate WAN latency
+# Runs in same VPC as FleetLM nodes to eliminate WAN latency
 
 resource "aws_instance" "benchmark_client" {
   ami           = data.aws_ami.amazon_linux_2023.id
@@ -17,13 +17,13 @@ resource "aws_instance" "benchmark_client" {
   }
 
   tags = {
-    Name = "fastpaca-bench-client"
+    Name = "fleetlm-bench-client"
   }
 }
 
 # Security group for benchmark client
 resource "aws_security_group" "benchmark_client" {
-  name        = "fastpaca-bench-client"
+  name        = "fleetlm-bench-client"
   description = "Security group for k6 benchmark client"
 
   # SSH
@@ -45,7 +45,7 @@ resource "aws_security_group" "benchmark_client" {
   }
 
   tags = {
-    Name = "fastpaca-bench-client"
+    Name = "fleetlm-bench-client"
   }
 }
 

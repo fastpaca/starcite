@@ -1,150 +1,104 @@
-# Fastpaca Context Store
+# FleetLM
 
-[![Tests](https://github.com/fastpaca/context-store/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/context-store/actions/workflows/test.yml)
-[![Docker Build](https://github.com/fastpaca/context-store/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/context-store/actions/workflows/docker-build.yml)
+[![Tests](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/test.yml)
+[![Docker Build](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/fleet-lm/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
-> Keep long conversations *fast* without compromising user experience.
+> **Message backend for AI agents.** An append-only, replayable, ordered message log with streaming updates and optional archival.
 
-Fastpaca provides full message history + context budgeting with compaction for LLM apps.
-
-- Store messages in fastpaca and optionally archive to postgres.
-- Set token budgets. Conversations stay within bounds.
-- You control the latency/accuracy/cost tradeoff.
+FleetLM is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) owns prompt assembly.
 
 ```
-                      ╔═ fastpaca ════════════════════════╗
+                      ╔═ FleetLM ════════════════════════╗
 ╔══════════╗          ║                                   ║░    ╔═optional═╗
 ║          ║░         ║  ┏━━━━━━━━━━━┓     ┏━━━━━━━━━━━┓  ║░    ║          ║░
-║  client  ║░───API──▶║  ┃  Message  ┃────▶┃  Context  ┃  ║░ ──▶║ postgres ║░
-║          ║░         ║  ┃  History  ┃     ┃  Policy   ┃  ║░    ║          ║░
+║  client  ║░───API──▶║  ┃  Message  ┃────▶┃   Raft    ┃  ║░ ──▶║ postgres ║░
+║          ║░         ║  ┃   Log     ┃     ┃  Storage  ┃  ║░    ║ (archive)║░
 ╚══════════╝░         ║  ┗━━━━━━━━━━━┛     ┗━━━━━━━━━━━┛  ║░    ╚══════════╝░
  ░░░░░░░░░░░░         ║                                   ║░     ░░░░░░░░░░░░
                       ╚═══════════════════════════════════╝░
                        ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 ```
 
-> _Enforces a per-conversation token budget before requests hit your LLM, without compromising user experience._
+- [Documentation](https://fleetlm.com/docs/)
+- [Quick start](https://fleetlm.com/docs/usage/quickstart)
+- [API Reference](https://fleetlm.com/docs/api/rest)
 
-- [Documentation](https://docs.fastpaca.com/)
-- [Quick start](https://docs.fastpaca.com/usage/quickstart)
-- [API Reference](https://docs.fastpaca.com/api/rest)
+## What FleetLM Does
 
-## Long conversations get expensive and slow
+- **Store messages** in append-only conversation logs
+- **Stream updates** via WebSocket in real-time
+- **Replay by sequence** for gap recovery
+- **Archive to Postgres** for full history retention
+- **Sub-150ms p99** append latency via Raft consensus
 
-- Users want to see full conversation history when they talk to LLMs
-- More messages = more tokens = higher cost
-- Larger context = slower responses
-- Eventually you hit the LLMs limit
+## What FleetLM Does NOT Do
 
-## What fastpaca does
+- Build LLM context windows
+- Manage token budgets
+- Run compaction policies
+- Execute tools or call providers
 
-Enforces per-conversation token budgets with deterministic compaction.
-
-- Keep full history for users
-- Compact context for the model
-- Choose your policy (`last_n`, `skip_parts`, `manual`)
-
-<details>
-<summary><b>Example: last_n policy (keep recent messages)</b></summary>
-
-**Before** (10 messages):
-```ts
-[
-  { role: 'user', text: 'What's the weather?' },
-  { role: 'assistant', text: '...' },
-  { role: 'user', text: 'Tell me about Paris' },
-  { role: 'assistant', text: '...' },
-  // ... 6 more exchanges
-  { role: 'user', text: 'Book a flight to Paris' }
-]
-```
-
-**After** `last_n` policy with limited budget (3 messages):
-```ts
-[
-  { role: 'user', text: 'Tell me about Paris' },
-  { role: 'assistant', text: '...' },
-  { role: 'user', text: 'Book a flight to Paris' }
-]
-```
-
-Full history stays in storage. Only compact context goes to the model.
-</details>
-
-<details>
-<summary><b>Example: skip_parts policy (drop heavy content)</b></summary>
-
-**Before** (assistant message with reasoning + tool results):
-```ts
-{
-  role: 'assistant',
-  parts: [
-    { type: 'reasoning', text: '<3000 tokens of chain-of-thought>' },
-    { type: 'tool_use', name: 'search', input: {...} },
-    { type: 'tool_result', content: '<5000 tokens of search results>' },
-    { type: 'text', text: 'Based on the search, here's the answer...' }
-  ]
-}
-```
-
-**After** `skip_parts` policy (keeps message structure, drops bulk):
-```ts
-{
-  role: 'assistant',
-  parts: [
-    { type: 'text', text: 'Based on the search, here's the answer...' }
-  ]
-}
-```
-
-Drops reasoning traces, tool results, images — keeps the final response. Massive token savings while preserving conversation flow.
-</details>
+**Prompt assembly is handled by Cria** (or your prompt system of choice). FleetLM just stores and streams messages.
 
 ## Quick Start
 
-> [!TIP]
-> [See example](./examples/nextjs-chat/README.md) for a more comprehensive look at how it looks in a real chat app!
-
-Start container, note that postgres is optional. Data will persist in memory with a TAIL for message history.
+Start container (postgres is optional — data persists in Raft):
 
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v fastpaca_data:/data \
-  ghcr.io/fastpaca/context-store:latest
+  -v fleetlm_data:/data \
+  ghcr.io/fastpaca/fleet-lm:latest
 ```
 
-Use our typescript SDK
+Use the TypeScript SDK:
 
 ```ts
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const fastpaca = createClient({ baseUrl: 'http://localhost:4000/v1' });
-const ctx = await fastpaca.context('demo', { budget: 1_000_000 });
-await ctx.append({ role: 'user', parts: [{ type: 'text', text: 'Hi' }] });
+const fleetlm = createClient({ baseUrl: 'http://localhost:4000/v1' });
 
-// For your LLM
-const { messages } = await ctx.context();
+// Create or get conversation (idempotent)
+const conv = await fleetlm.conversation('chat-123', {
+  metadata: { user_id: 'u_123', channel: 'web' }
+});
+
+// Append messages
+await conv.append({ role: 'user', parts: [{ type: 'text', text: 'Hello!' }] });
+await conv.append({ role: 'assistant', parts: [{ type: 'text', text: 'Hi there!' }] });
+
+// Get messages for your prompt system
+const { messages } = await conv.tail({ limit: 100 });
+
+// Replay from a specific sequence (for gap recovery)
+const { messages: replay } = await conv.replay({ from: 50, limit: 50 });
 ```
 
-## When to use fastpaca
+## Cria Integration
+
+FleetLM stores messages; Cria builds the prompt:
+
+```ts
+// 1. Fetch messages from FleetLM
+const { messages } = await conv.tail({ limit: 100 });
+
+// 2. Pass to Cria for prompt assembly with your token budget
+const prompt = cria.render(messages, { budget: 100_000 });
+```
+
+## When to Use FleetLM
 
 **Good fit:**
-- Multi-turn conversations that grow unbounded
-- Agent apps with heavy tool use and reasoning traces
-- Apps that need full history retention + compact model context
-- Scenarios where you want deterministic, policy-based compaction
+- Multi-turn agent conversations with full history retention
+- Apps that need real-time message streaming
+- Scenarios requiring replay/gap recovery
+- Separation of message storage from prompt assembly
 
-**Not a fit (yet):**
+**Not a fit:**
 - Single-turn Q&A (no conversation state to manage)
-- Apps that need semantic compaction (we're deterministic, not embedding-based)
-
-## Background
-
-We kept rebuilding the same Redis + Postgres + pub/sub stack to manage conversation state and compaction. It was messy, hard to scale, and expensive to tune.
-Fastpaca turns that pattern into a single service you can drop in.
+- Apps that want server-side prompt management or compaction
 
 ---
 
@@ -152,7 +106,7 @@ Fastpaca turns that pattern into a single service you can drop in.
 
 ```bash
 # Clone and set up
-git clone https://github.com/fastpaca/context-store
+git clone https://github.com/fastpaca/fleet-lm
 cd context-store
 mix setup            # install deps, create DB, run migrations
 
@@ -164,9 +118,9 @@ mix test
 mix precommit        # format, compile (warnings-as-errors), test
 ```
 
-### Storage tiers
+### Storage Tiers
 
-- **Hot (Raft):** LLM context window + bounded message tail. Raft snapshots include these plus watermarks (`last_seq`, `archived_seq`).
+- **Hot (Raft):** Message tail + metadata. 256 Raft groups × 3 replicas for high availability.
 - **Cold (optional):** Archiver persists full history to Postgres and acknowledges a high-water mark so Raft can trim older tail segments.
 
 ---

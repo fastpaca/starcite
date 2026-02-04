@@ -1,15 +1,15 @@
-# Fastpaca × Next.js Chat Example
+# FleetLM × Next.js Chat Example
 
-Minimal chat app demonstrating Fastpaca context management with ai-sdk and Next.js.
+Minimal chat app demonstrating FleetLM conversation logs with ai-sdk and Next.js.
 
-![](https://fastpaca.com/images/context-store-demo.gif)
+![](https://fleetlm.com/images/context-store-demo.gif)
 
 ## Features
 
-- **Pure ai-sdk frontend** - Uses `useChat` hook, no Fastpaca client code needed
-- **Backend integration** - All Fastpaca calls in the API route
-- **gpt-4o-mini** - 400k context window, affordable
-- **Auto-compaction** - `last_n` strategy keeps last 400 messages
+- **Pure ai-sdk frontend** - Uses `useChat`, no FleetLM client code in the UI
+- **Backend integration** - All FleetLM calls in the API route
+- **Prompt assembly** - Builds the model prompt from the latest messages (tail)
+- **gpt-4o-mini** - Fast, affordable model for the demo
 
 ## Setup
 
@@ -30,42 +30,40 @@ npm run dev
 import { useChat } from '@ai-sdk/react';
 
 const { messages, input, handleSubmit } = useChat();
-// That's it! No Fastpaca code in frontend
+// That's it! No FleetLM code in frontend
 ```
 
-### Backend (Fastpaca Integration)
+### Backend (FleetLM Integration)
 ```typescript
 // app/api/chat/route.ts
 export async function POST(req: Request) {
-  const { messages } = await req.json();
+  const { messages, conversationId } = await req.json();
 
-  // 1. Get context ID from session/user
-  const contextId = getContextId(req);
-
-  // 2. Append last message to Fastpaca
-  await appendToFastpaca(contextId, messages[messages.length - 1]);
-
-  // 3. Get token-budgeted window from Fastpaca
-  const { messages: contextMessages } = await getFastpacaWindow(contextId);
-
-  // 4. Stream to OpenAI
-  const result = streamText({
-    model: openai('gpt-4o-mini'),
-    messages: convertToModelMessages(contextMessages),
+  // 1. Get conversation ID from session/user
+  const convo = await fleetlm.conversation(conversationId, {
+    metadata: { source: 'nextjs-chat' }
   });
 
-  // 5. Auto-append assistant response after stream
-  await appendAssistantResponse(contextId, result);
+  // 2. Append last user message to FleetLM
+  await convo.append(messages[messages.length - 1]);
 
-  return result.toUIMessageStreamResponse();
+  // 3. Build prompt from the latest messages
+  const { messages: convoMessages } = await convo.tail({ limit: 50 });
+
+  // 4. Stream to OpenAI
+  return streamText({
+    model: openai('gpt-4o-mini'),
+    messages: convertToModelMessages(convoMessages),
+  }).toUIMessageStreamResponse({
+    onFinish: async ({ responseMessage }) => {
+      await convo.append(responseMessage);
+    },
+  });
 }
 ```
 
-### Compaction
-When `used_tokens > 280k` (70% of 400k), Fastpaca automatically:
-1. Drops oldest messages (keeps last 400)
-2. Updates snapshot on write path
-3. Next `GET /context` returns compacted window
+### Prompt Assembly
+FleetLM does not build LLM context windows. This demo uses the latest 50 messages as the prompt. Adjust that limit or replace it with your own summarization / retrieval strategy.
 
 ## Architecture
 
@@ -74,25 +72,24 @@ Browser → useChat (ai-sdk)
             ↓
       POST /api/chat (Next.js)
             ↓
-      Fastpaca REST API
+      FleetLM REST API
        - Append message
-       - Get window (pre-computed!)
-       - Auto-compact (on write)
+       - Tail read (latest messages)
             ↓
       OpenAI gpt-4o-mini
             ↓
       Stream → Browser
 ```
 
-All Fastpaca logic is hidden in the backend. Frontend is pure ai-sdk.
+All FleetLM logic is hidden in the backend. Frontend is pure ai-sdk.
 
 ## Files
 
 - `app/page.tsx` - Chat UI (standard `useChat`)
-- `app/api/chat/route.ts` - Fastpaca integration + streaming
+- `app/api/chat/route.ts` - FleetLM integration + streaming
 
 ## Running
 
-1. Start Fastpaca: `mix phx.server` (from repo root)
+1. Start FleetLM: `mix phx.server` (from repo root)
 2. Start Next.js: `npm run dev`
 3. Open: http://localhost:3000

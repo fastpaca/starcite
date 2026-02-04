@@ -1,75 +1,88 @@
-import { Context } from './context';
-import type { FastpacaClientConfig, ContextConfig, ContextPolicy } from './types';
+import { Conversation } from './conversation';
+import type { FleetLMClientConfig, ConversationInfo } from './types';
 
 /**
- * Fastpaca client
+ * FleetLM client - message backend for AI agents
+ *
+ * This is a message substrate. It stores and streams messages
+ * but does NOT manage prompt windows, token budgets, or compaction.
+ * Prompt assembly is handled by Cria or other prompt systems.
  */
-export class FastpacaClient {
+export class FleetLMClient {
   private baseUrl: string;
   private apiKey?: string;
 
-  constructor(config: FastpacaClientConfig = {}) {
+  constructor(config: FleetLMClientConfig = {}) {
     this.baseUrl = config.baseUrl || 'http://localhost:4000/v1';
     this.apiKey = config.apiKey;
   }
 
   /**
-   * Get or create a context
+   * Get or create a conversation
    *
-   * If options are provided, calls PUT /v1/contexts/:id (idempotent create/update).
-   * Otherwise returns a Context instance immediately.
+   * If options are provided, calls PUT /v1/conversations/:id (idempotent create/update).
+   * Otherwise returns a Conversation instance immediately.
    *
    * @example
    * ```ts
-   * // Create/update context with config
-   * const ctx = await fastpaca.context('chat-123', {
-   *   budget: 400_000,
-   *   trigger: 0.7,
-   *   policy: { strategy: 'last_n', config: { limit: 400 } }
+   * // Create/update conversation with metadata
+   * const conv = await fleetlm.conversation('chat-123', {
+   *   metadata: { user_id: 'u_123', channel: 'web' }
    * });
    *
-   * // Get existing context (no server call)
-   * const ctx = fastpaca.context('chat-123');
+   * // Get existing conversation (no server call)
+   * const conv = fleetlm.conversation('chat-123');
    * ```
    */
-  async context(
+  async conversation(
     id: string,
     opts?: {
-      budget?: number;
-      trigger?: number;
-      policy?: ContextPolicy;
-      metadata?: Record<string, any>;
+      metadata?: Record<string, unknown>;
     }
-  ): Promise<Context> {
-    // If options provided, create/update the context
+  ): Promise<Conversation> {
+    // If options provided, create/update the conversation
     if (opts) {
-      const response = await fetch(`${this.baseUrl}/contexts/${id}`, {
+      const response = await fetch(`${this.baseUrl}/conversations/${id}`, {
         method: 'PUT',
         headers: {
           'Content-Type': 'application/json',
           ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
         },
         body: JSON.stringify({
-          token_budget: opts.budget,
-          trigger_ratio: opts.trigger,
-          policy: opts.policy,
           metadata: opts.metadata,
         }),
       });
 
       if (!response.ok) {
-        throw new Error(`Failed to create/update context: ${response.statusText}`);
+        throw new Error(`Failed to create/update conversation: ${response.statusText}`);
       }
     }
 
-    return new Context(id, this.baseUrl, this.apiKey);
+    return new Conversation(id, this.baseUrl, this.apiKey);
   }
 
   /**
-   * Delete a context
+   * Get conversation info
    */
-  async deleteContext(id: string): Promise<void> {
-    const response = await fetch(`${this.baseUrl}/contexts/${id}`, {
+  async getConversation(id: string): Promise<ConversationInfo> {
+    const response = await fetch(`${this.baseUrl}/conversations/${id}`, {
+      headers: {
+        ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to get conversation: ${response.statusText}`);
+    }
+
+    return response.json();
+  }
+
+  /**
+   * Tombstone a conversation (soft delete, prevents new writes)
+   */
+  async tombstoneConversation(id: string): Promise<void> {
+    const response = await fetch(`${this.baseUrl}/conversations/${id}`, {
       method: 'DELETE',
       headers: {
         ...(this.apiKey && { Authorization: `Bearer ${this.apiKey}` }),
@@ -77,14 +90,14 @@ export class FastpacaClient {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to delete context: ${response.statusText}`);
+      throw new Error(`Failed to tombstone conversation: ${response.statusText}`);
     }
   }
 }
 
 /**
- * Create a Fastpaca client
+ * Create a FleetLM client
  */
-export function createClient(config?: FastpacaClientConfig): FastpacaClient {
-  return new FastpacaClient(config);
+export function createClient(config?: FleetLMClientConfig): FleetLMClient {
+  return new FleetLMClient(config);
 }

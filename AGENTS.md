@@ -1,6 +1,6 @@
-# Fastpaca Context Store - Agent Guide
+# FleetLM - Agent Guide
 
-Fastpaca Context Store is a clustered Phoenix application that provides context management and compaction for LLM applications. It maintains conversation history and manages token budgets to keep conversations efficient.
+FleetLM is a clustered Phoenix application that provides durable, low-latency message storage for LLM applications. It maintains conversation history with sub-150ms p99 appends via Raft consensus, leaving prompt construction and token management to the client.
 
 ## Ground Rules
 
@@ -20,9 +20,9 @@ Fastpaca Context Store is a clustered Phoenix application that provides context 
 ## Domain Assumptions
 
 - Messages are append-only and replayable with deterministic sequence numbers.
-- Contexts maintain both full message history and compacted LLM context windows.
-- Token budgets are enforced per-context with configurable compaction policies.
-- Raft storage provides distributed consistency with automatic replication and failover.
+- Conversations are stored durably in 256 Raft groups (3 replicas each, quorum writes).
+- No compaction, token budgets, or prompt-window logic—clients own that responsibility.
+- Background flusher streams Raft state to Postgres (non-blocking, idempotent).
 
 ## Phoenix & LiveView Summary
 
@@ -38,14 +38,14 @@ Fastpaca Context Store is a clustered Phoenix application that provides context 
   @import "tailwindcss" source(none);
   @source "../css";
   @source "../js";
-  @source "../../lib/fastpaca_web";
+  @source "../../lib/fleetlm_web";
   ```
 - No inline `<script>` tags. Extend behaviour via `assets/js/app.js` and Phoenix hooks with `phx-update="ignore"` when hooks own the DOM.
 - Build micro-interactions via Tailwind utility classes and CSS transitions; avoid component libraries like daisyUI.
 
 ## Observability & Testing
 
-- Emit telemetry via helpers in `Fastpaca.Observability.Telemetry`; add new events there so tags stay normalised.
+- Emit telemetry via helpers in `FleetLM.Observability.Telemetry`; add new events there so tags stay normalised.
 - When you touch collections rendered in LiveView, prefer streams (`stream/3`) and track counts/empty states separately.
 - Use `mix test`, `mix test --failed`, or file-scoped runs to iterate quickly. End every work session with `mix precommit`.
 

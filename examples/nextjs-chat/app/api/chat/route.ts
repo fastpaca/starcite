@@ -1,48 +1,43 @@
 import { openai } from '@ai-sdk/openai';
 import { streamText, convertToModelMessages, UIMessage } from 'ai';
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
 export const maxDuration = 30;
 
-const FASTPACA_URL = process.env.FASTPACA_URL || 'http://localhost:4000/v1';
+const FLEETLM_URL = process.env.FLEETLM_URL || 'http://localhost:4000/v1';
 
-// Create Fastpaca client
-const fastpaca = createClient({ baseUrl: FASTPACA_URL });
+// Create FleetLM client
+const fleetlm = createClient({ baseUrl: FLEETLM_URL });
 
 export async function POST(req: Request) {
-  const { messages, contextId } = await req.json();
+  const { messages, conversationId } = await req.json();
 
-  if (!contextId) {
-    return Response.json({ error: 'contextId is required' }, { status: 400 });
+  if (!conversationId) {
+    return Response.json({ error: 'conversationId is required' }, { status: 400 });
   }
 
-  // 1. Get or create context (idempotent PUT if config provided)
-  const ctx = await fastpaca.context(contextId, {
-    budget: 128_000,  // gpt-4o-mini context window
-    trigger: 0.7,
-    policy: {
-      strategy: 'last_n',
-      config: { limit: 400 },
-    },
+  // 1. Get or create conversation (idempotent PUT if config provided)
+  const convo = await fleetlm.conversation(conversationId, {
+    metadata: { source: 'nextjs-chat' },
   });
 
   // 2. Append user message (last message in array)
-  const lastMessage = messages[messages.length - 1];
+  const lastMessage = messages[messages.length - 1] as UIMessage | undefined;
   if (lastMessage) {
-    await ctx.append(lastMessage);
+    await convo.append(lastMessage);
   }
 
-  // 3. Get context messages from fastpaca
-  const { messages: contextMessages } = await ctx.context();
+  // 3. Fetch recent messages for prompt assembly
+  const { messages: convoMessages } = await convo.tail({ limit: 50 });
 
   // 4. Stream response
   return streamText({
     model: openai('gpt-4o-mini'),
-    messages: convertToModelMessages(contextMessages),
+    messages: convertToModelMessages(convoMessages),
   }).toUIMessageStreamResponse({
     onFinish: async ({ responseMessage }) => {
-      // FastpacaMessage accepts any object with role and parts
-      await ctx.append(responseMessage);
+      // FleetLMMessage accepts any object with role and parts
+      await convo.append(responseMessage);
     },
   });
 }

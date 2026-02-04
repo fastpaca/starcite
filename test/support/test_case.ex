@@ -1,6 +1,6 @@
-defmodule Fastpaca.TestCase do
+defmodule FleetLM.TestCase do
   @moduledoc """
-  Lean ExUnit case template for Fastpaca.
+  Lean ExUnit case template for FleetLM.
 
   Provides a clean runtime after each test and a small set of helpers tailored
   for the Raft-only runtime.
@@ -10,7 +10,7 @@ defmodule Fastpaca.TestCase do
 
   using _opts do
     quote do
-      import Fastpaca.TestCase
+      import FleetLM.TestCase
     end
   end
 
@@ -18,7 +18,7 @@ defmodule Fastpaca.TestCase do
     previous_config = configure_test_env()
 
     on_exit(fn ->
-      Fastpaca.Runtime.TestHelper.reset()
+      FleetLM.Runtime.TestHelper.reset()
       restore_config(previous_config)
     end)
 
@@ -39,22 +39,22 @@ defmodule Fastpaca.TestCase do
 
   defp configure_test_env do
     previous = %{
-      disable_agent_webhooks: Application.get_env(:fastpaca, :disable_agent_webhooks),
-      agent_dispatch_tick_ms: Application.get_env(:fastpaca, :agent_dispatch_tick_ms),
-      agent_debounce_window_ms: Application.get_env(:fastpaca, :agent_debounce_window_ms)
+      disable_agent_webhooks: Application.get_env(:fleet_lm, :disable_agent_webhooks),
+      agent_dispatch_tick_ms: Application.get_env(:fleet_lm, :agent_dispatch_tick_ms),
+      agent_debounce_window_ms: Application.get_env(:fleet_lm, :agent_debounce_window_ms)
     }
 
-    Application.put_env(:fastpaca, :disable_agent_webhooks, true)
-    Application.put_env(:fastpaca, :agent_dispatch_tick_ms, 10)
-    Application.put_env(:fastpaca, :agent_debounce_window_ms, 0)
+    Application.put_env(:fleet_lm, :disable_agent_webhooks, true)
+    Application.put_env(:fleet_lm, :agent_dispatch_tick_ms, 10)
+    Application.put_env(:fleet_lm, :agent_debounce_window_ms, 0)
 
     previous
   end
 
   defp restore_config(previous) do
     Enum.each(previous, fn
-      {key, nil} -> Application.delete_env(:fastpaca, key)
-      {key, value} -> Application.put_env(:fastpaca, key, value)
+      {key, nil} -> Application.delete_env(:fleet_lm, key)
+      {key, value} -> Application.put_env(:fleet_lm, key, value)
     end)
   end
 

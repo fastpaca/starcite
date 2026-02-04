@@ -1,62 +1,54 @@
 ---
-title: Fastpaca Context Store
+title: FleetLM
 slug: /
 sidebar_position: 0
 ---
 
-# Fastpaca Context Store
+# FleetLM
 
-Context budgeting and compaction for LLM apps. Keep long conversations fast and affordable.
+FleetLM is a message backend for AI agents: an append-only, replayable conversation log with streaming updates and optional archival. It stores messages and sequence numbers. It does **not** build LLM prompts or manage token budgets.
 
-- Set token budgets. Conversations stay within bounds.
-- You control the accuracy/cost tradeoff.
+- Append messages with deterministic `seq` and `version`
+- Tail or replay message history
+- Stream updates over websocket
+- Optional Postgres archive for long-term retention
+- Prompt assembly stays in your app (or Cria)
 
 ```
-                      ╔═ fastpaca ════════════════════════╗
-╔══════════╗          ║                                   ║░    ╔═optional═╗          
-║          ║░         ║  ┏━━━━━━━━━━━┓     ┏━━━━━━━━━━━┓  ║░    ║          ║░         
-║  client  ║░───API──▶║  ┃  Message  ┃────▶┃  Context  ┃  ║░ ──▶║ postgres ║░
-║          ║░         ║  ┃  History  ┃     ┃  Policy   ┃  ║░    ║          ║░         
-╚══════════╝░         ║  ┗━━━━━━━━━━━┛     ┗━━━━━━━━━━━┛  ║░    ╚══════════╝░         
- ░░░░░░░░░░░░         ║                                   ║░     ░░░░░░░░░░░░         
-                      ╚═══════════════════════════════════╝░                      
-                       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+                      +-------------------------------+
++---------+           |           FleetLM             |          +-----------+
+| client  | -- API -->|  Message Log + Stream (Raft)  | -- opt ->| Postgres  |
++---------+           +-------------------------------+          +-----------+
 ```
-
-> _Enforces a per-conversation token budget before requests hit your LLM._
 
 - [Quick start](./usage/quickstart.md)
 - [Getting started](./usage/getting-started.md)
-- [How it Works](./architecture.md)
-- [Policies](./usage/context-management.md)
+- [How it works](./architecture.md)
+- [Prompt assembly](./usage/context-management.md)
 - [Self-hosting](./deployment.md)
-- [Storage & Audit](./storage.md)
-- [API Reference](./api/rest.md)
+- [Storage and audit](./storage.md)
+- [REST API](./api/rest.md)
+- [Websocket API](./api/websocket.md)
 
-# Long conversations get expensive and slow
-
-- More messages = more tokens = higher cost
-- Larger context = slower responses
-- Eventually you hit the model's limit
-
-## What Fastpaca Context Store does
-
-Enforces per-conversation token budgets with deterministic compaction.
-
-- Keep full history for users
-- Compact context for the model
-- Choose your policy (`last_n`, `skip_parts`, `manual`)
-
-## Quick Start
+## Quick taste
 
 ```ts
-const fastpaca = createClient({ baseUrl: 'http://localhost:4000/v1' });
-const ctx = await fastpaca.context('demo', { budget: 1_000_000 });
-await ctx.append({ role: 'user', parts: [{ type: 'text', text: 'Hi' }] });
-const { messages } = await ctx.context();
+import { createClient } from '@fleetlm/client';
+
+const fleetlm = createClient({ baseUrl: 'http://localhost:4000/v1' });
+const convo = await fleetlm.conversation('demo-chat', {
+  metadata: { channel: 'web' }
+});
+
+await convo.append({
+  role: 'user',
+  parts: [{ type: 'text', text: 'Hi there' }]
+});
+
+// Build your prompt from the log (tail, replay, or your own policy)
+const { messages } = await convo.tail({ limit: 50 });
 ```
 
-## Background
+## Why this exists
 
-We kept rebuilding the same Redis + Postgres + pub/sub stack to manage conversation state and compaction. It was messy, hard to scale, and expensive to tune.
-Fastpaca Context Store turns that pattern into a single service you can drop in.
+Most LLM apps need a durable, ordered message log and real-time updates. They also need flexible prompt assembly that changes as models, products, and policies evolve. FleetLM handles the log; you control the prompt.

@@ -1,7 +1,7 @@
 /**
- * Fastpaca k6 Benchmark Library
+ * FleetLM k6 Benchmark Library
  *
- * Helpers for exercising the Fastpaca context API during load tests.
+ * Helpers for exercising the FleetLM conversation API during load tests.
  */
 
 import http from 'k6/http';
@@ -29,8 +29,6 @@ export const config = {
   getNextNode: getNextNode,
   clusterNodes: clusterNodes,
   runId: __ENV.RUN_ID || `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
-  defaultTokenBudget: Number(__ENV.TOKEN_BUDGET || 1_000_000),
-  defaultTriggerRatio: Number(__ENV.TRIGGER_RATIO || 0.7),
 };
 
 export const jsonHeaders = {
@@ -39,19 +37,8 @@ export const jsonHeaders = {
   },
 };
 
-const defaultPolicy = (() => {
-  if (__ENV.CONTEXT_POLICY) {
-    try {
-      return JSON.parse(__ENV.CONTEXT_POLICY);
-    } catch (err) {
-      console.warn(`Failed to parse CONTEXT_POLICY env var, falling back to last_n: ${err}`);
-    }
-  }
-  return { strategy: 'last_n', config: { limit: 400 } };
-})();
-
 // ============================================================================
-// Context helpers
+// Conversation helpers
 // ============================================================================
 
 function buildUrl(path, params = {}, useLoadBalancer = true) {
@@ -96,7 +83,7 @@ export function waitForClusterReady(timeoutSeconds = 60) {
   throw new Error(`Cluster did not become ready within ${timeoutSeconds}s`);
 }
 
-export function contextId(prefix, vuId, extra = '') {
+export function conversationId(prefix, vuId, extra = '') {
   const suffix = extra ? `-${extra}` : '';
   return `${prefix}-${vuId}${suffix}`;
 }
@@ -109,29 +96,28 @@ export function randomId(prefix) {
   return `${prefix}-${Date.now()}-${rand}`;
 }
 
-export function ensureContext(id, overrides = {}) {
-  const payload = {
-    token_budget: overrides.token_budget ?? config.defaultTokenBudget,
-    trigger_ratio: overrides.trigger_ratio ?? config.defaultTriggerRatio,
-    policy: overrides.policy ?? defaultPolicy,
-  };
+/**
+ * Create or update a conversation (idempotent PUT)
+ */
+export function ensureConversation(id, overrides = {}) {
+  const payload = {};
 
   if (overrides.metadata) {
     payload.metadata = overrides.metadata;
   }
 
   const res = http.put(
-    buildUrl(`/contexts/${id}`),
+    buildUrl(`/conversations/${id}`),
     JSON.stringify(payload),
     jsonHeaders
   );
 
   check(res, {
-    [`ensure context ${id}`]: (r) => r.status === 200 || r.status === 201,
+    [`ensure conversation ${id}`]: (r) => r.status === 200 || r.status === 201,
   });
 
   if (res.status >= 400) {
-    throw new Error(`Failed to ensure context ${id}: ${res.status} ${res.body}`);
+    throw new Error(`Failed to ensure conversation ${id}: ${res.status} ${res.body}`);
   }
 
   try {
@@ -141,7 +127,10 @@ export function ensureContext(id, overrides = {}) {
   }
 }
 
-export function appendMessage(contextId, message, opts = {}) {
+/**
+ * Append a message to a conversation
+ */
+export function appendMessage(conversationId, message, opts = {}) {
   const payload = {
     message,
   };
@@ -151,7 +140,7 @@ export function appendMessage(contextId, message, opts = {}) {
   }
 
   const res = http.post(
-    buildUrl(`/contexts/${contextId}/messages`),
+    buildUrl(`/conversations/${conversationId}/messages`),
     JSON.stringify(payload),
     jsonHeaders
   );
@@ -162,9 +151,12 @@ export function appendMessage(contextId, message, opts = {}) {
   };
 }
 
-export function getContextWindow(contextId, params = {}) {
+/**
+ * Get tail of messages (most recent N messages with offset from end)
+ */
+export function getTail(conversationId, params = {}) {
   const res = http.get(
-    buildUrl(`/contexts/${contextId}/context`, params),
+    buildUrl(`/conversations/${conversationId}/tail`, params),
     jsonHeaders
   );
 
@@ -174,9 +166,12 @@ export function getContextWindow(contextId, params = {}) {
   };
 }
 
-export function getMessages(contextId, params = {}) {
+/**
+ * Replay messages from a sequence number
+ */
+export function getMessages(conversationId, params = {}) {
   const res = http.get(
-    buildUrl(`/contexts/${contextId}/messages`, params),
+    buildUrl(`/conversations/${conversationId}/messages`, params),
     jsonHeaders
   );
 
@@ -186,21 +181,11 @@ export function getMessages(contextId, params = {}) {
   };
 }
 
-export function compactContext(contextId, payload) {
-  const res = http.post(
-    buildUrl(`/contexts/${contextId}/compact`),
-    JSON.stringify(payload),
-    jsonHeaders
-  );
-
-  return {
-    res,
-    json: safeParse(res.body),
-  };
-}
-
-export function deleteContext(contextId) {
-  return http.del(buildUrl(`/contexts/${contextId}`), null, jsonHeaders);
+/**
+ * Tombstone (soft delete) a conversation
+ */
+export function tombstoneConversation(conversationId) {
+  return http.del(buildUrl(`/conversations/${conversationId}`), null, jsonHeaders);
 }
 
 function safeParse(body) {

@@ -1,8 +1,8 @@
 import Config
 
 # Configure database (optional - only needed if archiving is enabled)
-config :fastpaca, Fastpaca.Repo,
-  url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost:5432/fastpaca_dev",
+config :fleet_lm, FleetLM.Repo,
+  url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost:5432/fleet_lm_dev",
   pool_size: 10,
   # Don't fail if DB is not available
   queue_target: 5000,
@@ -14,7 +14,7 @@ config :fastpaca, Fastpaca.Repo,
 # The watchers configuration can be used to run external
 # watchers to your application. For example, we can use it
 # to bundle .js and .css sources.
-config :fastpaca, FastpacaWeb.Endpoint,
+config :fleet_lm, FleetLMWeb.Endpoint,
   # Bind to all interfaces for cluster testing to avoid localhost vs 127.0.0.1 issues
   http: [ip: {0, 0, 0, 0}, port: String.to_integer(System.get_env("PORT") || "4000")],
   check_origin: false,
@@ -57,12 +57,12 @@ config :phoenix, :stacktrace_depth, 20
 config :phoenix, :plug_init_mode, :runtime
 
 # Use local PubSub for development (change to :redis for testing horizontal scaling)
-config :fastpaca, :pubsub_adapter, :local
+config :fleet_lm, :pubsub_adapter, :local
 
 # Slower flush interval in dev to keep messages in disk log longer for testing hot path
-config :fastpaca, :storage_flush_interval_ms, 500
+config :fleet_lm, :storage_flush_interval_ms, 500
 
 # Tune agent dispatch engine for development benchmarks
-config :fastpaca,
+config :fleet_lm,
   agent_dispatch_tick_ms: 25,
   agent_debounce_window_ms: 250

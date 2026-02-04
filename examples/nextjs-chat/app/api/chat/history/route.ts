@@ -1,28 +1,28 @@
-import { createClient } from '@fastpaca/fastpaca';
+import { createClient } from '@fleetlm/client';
 
-const FASTPACA_URL = process.env.FASTPACA_URL || 'http://localhost:4000/v1';
+const FLEETLM_URL = process.env.FLEETLM_URL || 'http://localhost:4000/v1';
 
-// Create Fastpaca client
-const fastpaca = createClient({ baseUrl: FASTPACA_URL });
+// Create FleetLM client
+const fleetlm = createClient({ baseUrl: FLEETLM_URL });
 
 export async function POST(req: Request) {
   try {
-    const { contextId } = await req.json();
+    const { conversationId } = await req.json();
 
-    if (!contextId) {
-      return Response.json({ error: 'contextId is required' }, { status: 400 });
+    if (!conversationId) {
+      return Response.json({ error: 'conversationId is required' }, { status: 400 });
     }
 
-    // Get the context
-    const ctx = await fastpaca.context(contextId);
+    // Get the conversation handle (no server call)
+    const convo = await fleetlm.conversation(conversationId);
 
     // Fetch message history
-    const { messages } = await ctx.getTail({ limit: 100 });
+    const { messages } = await convo.tail({ limit: 100 });
 
     return Response.json({ messages });
   } catch (error: any) {
-    // If context doesn't exist yet, return empty array
-    if (error.message?.includes('404') || error.message?.includes('not found')) {
+    // If conversation doesn't exist yet, return empty array
+    if (error.message?.includes('Not Found') || error.message?.includes('not found')) {
       return Response.json({ messages: [] });
     }
 

@@ -1,4 +1,4 @@
-defmodule Fastpaca.Repo.Migrations.CreateMessages do
+defmodule FleetLM.Repo.Migrations.CreateMessages do
   use Ecto.Migration
 
   def change do

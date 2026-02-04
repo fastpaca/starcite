@@ -1,11 +1,9 @@
-export { FastpacaClient, createClient } from './client';
-export { Context } from './context';
+export { FleetLMClient, createClient } from './client';
+export { Conversation } from './conversation';
 export type {
-  ContextPolicy,
-  ContextConfig,
-  ContextWindow,
+  ConversationInfo,
   AppendResponse,
-  FastpacaClientConfig,
-  FastpacaMessage,
-  FastpacaMessagePart,
+  FleetLMClientConfig,
+  FleetLMMessage,
+  FleetLMMessagePart,
 } from './types';
