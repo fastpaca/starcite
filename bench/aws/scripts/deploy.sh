@@ -73,11 +73,11 @@ for IP in $INSTANCE_IPS; do
   done
 
   echo "Stopping any existing FleetLM containers..."
-  ssh $SSH_OPTS ec2-user@$IP "docker stop fleet_lm 2>/dev/null || true"
-  ssh $SSH_OPTS ec2-user@$IP "docker rm fleet_lm 2>/dev/null || true"
+  ssh $SSH_OPTS ec2-user@$IP "docker stop fleetlm 2>/dev/null || true"
+  ssh $SSH_OPTS ec2-user@$IP "docker rm fleetlm 2>/dev/null || true"
 
   echo "Pulling FleetLM image..."
-  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/fastpaca/fleet-lm:latest"
+  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/fastpaca/fleetlm:latest"
 
   PRIVATE_IP=$(ssh $SSH_OPTS ec2-user@$IP "hostname -i" | tr -d '\n')
   HAS_NVME=$(ssh $SSH_OPTS ec2-user@$IP "test -d /mnt/nvme && echo 'yes' || echo 'no'")
@@ -93,7 +93,7 @@ for IP in $INSTANCE_IPS; do
 
   echo "Starting FleetLM container..."
   ssh $SSH_OPTS ec2-user@$IP "docker run -d \
-    --name fleet_lm \
+    --name fleetlm \
     --restart unless-stopped \
     -p 4000:4000 \
     -p 4369:4369 \
@@ -108,17 +108,17 @@ for IP in $INSTANCE_IPS; do
     -e MIX_ENV=prod \
     -e RELEASE_DISTRIBUTION=name \
     -e RELEASE_NODE='fleet_lm@$PRIVATE_IP' \
-    ghcr.io/fastpaca/fleet-lm:latest"
+    ghcr.io/fastpaca/fleetlm:latest"
 
   sleep 5
 
   echo "Checking container status..."
-  if ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleet_lm" > /dev/null; then
+  if ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleetlm" > /dev/null; then
     echo -e "${GREEN}✓ Container is running${NC}"
   else
     echo -e "${RED}✗ Container failed to start${NC}"
     echo "Container logs:"
-    ssh $SSH_OPTS ec2-user@$IP "docker logs fleet_lm"
+    ssh $SSH_OPTS ec2-user@$IP "docker logs fleetlm"
     exit 1
   fi
 done
@@ -143,7 +143,7 @@ for IP in $INSTANCE_IPS; do
 done
 echo ""
 echo -e "${YELLOW}Useful commands:${NC}"
-echo "  View logs: ssh ec2-user@<IP> 'docker logs -f fleet_lm'"
-echo "  Verify cluster: ssh ec2-user@<IP> 'docker exec fleet_lm bin/fleet_lm rpc \"Node.list()\"'"
-echo "  Restart node: ssh ec2-user@<IP> 'docker restart fleet_lm'"
+echo "  View logs: ssh ec2-user@<IP> 'docker logs -f fleetlm'"
+echo "  Verify cluster: ssh ec2-user@<IP> 'docker exec fleetlm bin/fleet_lm rpc \"Node.list()\"'"
+echo "  Restart node: ssh ec2-user@<IP> 'docker restart fleetlm'"
 echo ""

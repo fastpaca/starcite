@@ -1,6 +1,6 @@
 services:
   app:
-    image: ${FLEETLM_IMAGE:-ghcr.io/fastpaca/fleet-lm:latest}
+    image: ${FLEETLM_IMAGE:-ghcr.io/fastpaca/fleetlm:latest}
     environment:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
       PHX_HOST: ${PHX_HOST:-localhost}

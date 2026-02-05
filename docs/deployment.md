@@ -25,7 +25,7 @@ FleetLM is built to run in your own infrastructure. This page covers recommended
 docker run -d \
   -p 4000:4000 \
   -v fleetlm_data:/data \
-  ghcr.io/fastpaca/fleet-lm:latest
+  ghcr.io/fastpaca/fleetlm:latest
 ```
 
 The node serves REST on `:4000`, websockets on the same port (Phoenix channel at `/socket`), and Prometheus metrics on `/metrics`.
@@ -36,20 +36,20 @@ Data persists across restarts as long as the `fleetlm_data` volume remains.
 
 ## Three-node production cluster
 
-Create a DNS entry (or static host list) that resolves to all nodes, e.g. `fleet-lm.internal`.
+Create a DNS entry (or static host list) that resolves to all nodes, e.g. `fleetlm.internal`.
 
 On each node:
 
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v /var/lib/fleet-lm:/data \
-  -e CLUSTER_NODES=fleet-lm-1@fleet-lm.internal,fleet-lm-2@fleet-lm.internal,fleet-lm-3@fleet-lm.internal \
-  -e NODE_NAME=fleet-lm-1 \
-  ghcr.io/fastpaca/fleet-lm:latest
+  -v /var/lib/fleetlm:/data \
+  -e CLUSTER_NODES=fleetlm-1@fleetlm.internal,fleetlm-2@fleetlm.internal,fleetlm-3@fleetlm.internal \
+  -e NODE_NAME=fleetlm-1 \
+  ghcr.io/fastpaca/fleetlm:latest
 ```
 
-Repeat with `NODE_NAME=fleet-lm-2/3`. Nodes discover peers through `CLUSTER_NODES` and form a Raft cluster.
+Repeat with `NODE_NAME=fleetlm-2/3`. Nodes discover peers through `CLUSTER_NODES` and form a Raft cluster.
 
 ### Placement guidelines
 

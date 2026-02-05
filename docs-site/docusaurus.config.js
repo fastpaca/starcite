@@ -40,7 +40,7 @@ const config = {
           path: "../docs",
           routeBasePath: "/",
           sidebarPath: require.resolve("./sidebars.js"),
-          editUrl: "https://github.com/fastpaca/fleet-lm/tree/main/docs/"
+          editUrl: "https://github.com/fastpaca/fleetlm/tree/main/docs/"
         },
         blog: false,
         theme: {
