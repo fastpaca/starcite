@@ -76,18 +76,6 @@ const { messages } = await conv.tail({ limit: 100 });
 const { messages: replay } = await conv.replay({ from: 50, limit: 50 });
 ```
 
-## Cria Integration
-
-FleetLM stores messages; Cria builds the prompt:
-
-```ts
-// 1. Fetch messages from FleetLM
-const { messages } = await conv.tail({ limit: 100 });
-
-// 2. Pass to Cria for prompt assembly with your token budget
-const prompt = cria.render(messages, { budget: 100_000 });
-```
-
 ## When to Use FleetLM
 
 **Good fit:**
