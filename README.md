@@ -12,10 +12,15 @@ If you’re building an agent (or many agents) and want a full conversation hist
 FleetLM stores and streams messages — it does **not** build prompts, manage token budgets, or decide how much history to include. Your app owns prompt assembly and context policy.
 
 ```
-agent/workers ──HTTP──► FleetLM ──websocket──► UI/services
-              (append-only log + replay)        (any stack)
-                      │
-                      └── optional archive ──► Postgres
+                      ╔═ FleetLM ════════════════════════╗
+╔══════════╗          ║                                   ║░    ╔═optional═╗
+║          ║░         ║  ┏━━━━━━━━━━━┓     ┏━━━━━━━━━━━┓  ║░    ║          ║░
+║  client  ║░───API──▶║  ┃  Message  ┃────▶┃   Raft    ┃  ║░ ──▶║ postgres ║░
+║          ║░         ║  ┃   Log     ┃     ┃  Storage  ┃  ║░    ║ (archive)║░
+╚══════════╝░         ║  ┗━━━━━━━━━━━┛     ┗━━━━━━━━━━━┛  ║░    ╚══════════╝░
+ ░░░░░░░░░░░░         ║                                   ║░     ░░░░░░░░░░░░
+                      ╚═══════════════════════════════════╝░
+                       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
 ```
 
 Docs: [Quick start](https://fleetlm.com/docs/usage/quickstart) · [Examples](https://fleetlm.com/docs/usage/examples) · [REST API](https://fleetlm.com/docs/api/rest) · [Websocket API](https://fleetlm.com/docs/api/websocket) · [Deployment](https://fleetlm.com/docs/deployment)
