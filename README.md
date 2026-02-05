@@ -5,46 +5,35 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
-> **Message backend for AI agents.** An append-only, replayable, ordered message log with streaming updates and optional archival.
+> **Conversation infrastructure for agents.** An append-only, replayable, ordered message log with streaming updates and optional archival.
 
-FleetLM is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) owns prompt assembly.
+If you’re building an agent (or many agents) and want a full conversation history that **just works** as you scale out workers, FleetLM gives you the primitives to do it safely: ordered appends, optimistic concurrency, and a built-in recovery story when consumers miss events.
+
+FleetLM stores and streams messages — it does **not** build prompts, manage token budgets, or decide how much history to include. Your app owns prompt assembly and context policy.
 
 ```
-                      ╔═ FleetLM ════════════════════════╗
-╔══════════╗          ║                                   ║░    ╔═optional═╗
-║          ║░         ║  ┏━━━━━━━━━━━┓     ┏━━━━━━━━━━━┓  ║░    ║          ║░
-║  client  ║░───API──▶║  ┃  Message  ┃────▶┃   Raft    ┃  ║░ ──▶║ postgres ║░
-║          ║░         ║  ┃   Log     ┃     ┃  Storage  ┃  ║░    ║ (archive)║░
-╚══════════╝░         ║  ┗━━━━━━━━━━━┛     ┗━━━━━━━━━━━┛  ║░    ╚══════════╝░
- ░░░░░░░░░░░░         ║                                   ║░     ░░░░░░░░░░░░
-                      ╚═══════════════════════════════════╝░
-                       ░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░░
+agent/workers ──HTTP──► FleetLM ──websocket──► UI/services
+              (append-only log + replay)        (any stack)
+                      │
+                      └── optional archive ──► Postgres
 ```
 
-- [Documentation](https://fleetlm.com/docs/)
-- [Quick start](https://fleetlm.com/docs/usage/quickstart)
-- [API Reference](https://fleetlm.com/docs/api/rest)
+Docs: [Quick start](https://fleetlm.com/docs/usage/quickstart) · [Examples](https://fleetlm.com/docs/usage/examples) · [REST API](https://fleetlm.com/docs/api/rest) · [Websocket API](https://fleetlm.com/docs/api/websocket) · [Deployment](https://fleetlm.com/docs/deployment)
 
-## What FleetLM Does
+## Highlights
 
-- **Store messages** in append-only conversation logs
-- **Stream updates** via WebSocket in real-time
-- **Replay by sequence** for gap recovery
-- **Archive to Postgres** for full history retention
-- **Sub-150ms p99** append latency via Raft consensus
+- **Durable conversation history:** append-only messages per conversation
+- **Ordered by default:** strictly increasing `seq` per conversation
+- **Real-time delivery:** websocket stream for updates (`message`, `gap`, `tombstone`)
+- **Replay & recovery:** read by sequence to rebuild state or recover missed events
+- **Multi-writer safe:** optimistic concurrency with `version` + `if_version` (`409 Conflict` on mismatch)
+- **Optional long-term retention:** Postgres archive for audit/analytics
 
-## What FleetLM Does NOT Do
+Works with any agent backend (n8n, LangChain, Python workers, your own API) as long as it can make HTTP calls.
 
-- Build LLM context windows
-- Manage token budgets
-- Run compaction policies
-- Execute tools or call providers
+## Quick start (Docker + curl)
 
-**Prompt assembly is handled by Cria** (or your prompt system of choice). FleetLM just stores and streams messages.
-
-## Quick Start
-
-Start container (postgres is optional — data persists in Raft):
+Start a single-node FleetLM (data persists under `/data`):
 
 ```bash
 docker run -d \
@@ -53,7 +42,54 @@ docker run -d \
   ghcr.io/fastpaca/fleetlm:latest
 ```
 
-Use the TypeScript SDK:
+FleetLM listens on `http://localhost:4000/v1`.
+
+Create a conversation:
+
+```bash
+curl -X PUT http://localhost:4000/v1/conversations/demo-chat \
+  -H "Content-Type: application/json" \
+  -d '{"metadata":{"channel":"web"}}'
+```
+
+Append a message:
+
+```bash
+curl -X POST http://localhost:4000/v1/conversations/demo-chat/messages \
+  -H "Content-Type: application/json" \
+  -d '{"message":{"role":"user","parts":[{"type":"text","text":"Hello!"}]}}'
+```
+
+Read recent messages:
+
+```bash
+curl "http://localhost:4000/v1/conversations/demo-chat/tail?limit=50"
+```
+
+## Common patterns
+
+### Multi-writer safety (version guard)
+
+When multiple workers can append to the same conversation, use a version guard:
+
+- Read the current `version`
+- Append with `if_version`
+- On `409 Conflict`, re-read and retry with the new version
+
+See the REST docs for details: [Handling version conflicts (409)](https://fleetlm.com/docs/api/rest#handling-version-conflicts-409).
+
+### Reconnect & gap recovery (websocket + replay)
+
+If a consumer misses events (disconnect/reconnect), FleetLM can emit a `gap` event with the expected sequence. Replay from there:
+
+```ts
+channel.on('gap', async ({ expected }) => {
+  const { messages } = await convo.replay({ from: expected, limit: 200 });
+  // apply missing messages to your local state
+});
+```
+
+## TypeScript SDK
 
 ```ts
 import { createClient } from '@fleetlm/client';
@@ -61,32 +97,65 @@ import { createClient } from '@fleetlm/client';
 const fleetlm = createClient({ baseUrl: 'http://localhost:4000/v1' });
 
 // Create or get conversation (idempotent)
-const conv = await fleetlm.conversation('chat-123', {
+const convo = await fleetlm.conversation('chat-123', {
   metadata: { user_id: 'u_123', channel: 'web' }
 });
 
 // Append messages
-await conv.append({ role: 'user', parts: [{ type: 'text', text: 'Hello!' }] });
-await conv.append({ role: 'assistant', parts: [{ type: 'text', text: 'Hi there!' }] });
+await convo.append({ role: 'user', parts: [{ type: 'text', text: 'Hello!' }] });
+await convo.append({ role: 'assistant', parts: [{ type: 'text', text: 'Hi there!' }] });
 
-// Get messages for your prompt system
-const { messages } = await conv.tail({ limit: 100 });
+// Read messages for your prompt builder / UI
+const { messages } = await convo.tail({ limit: 100 });
 
 // Replay from a specific sequence (for gap recovery)
-const { messages: replay } = await conv.replay({ from: 50, limit: 50 });
+const { messages: replay } = await convo.replay({ from: 50, limit: 50 });
+
+// Guard writes when multiple workers can append
+const info = await fleetlm.getConversation('chat-123');
+await convo.append(
+  { role: 'assistant', parts: [{ type: 'text', text: 'Safe multi-writer append.' }] },
+  { ifVersion: info.version }
+);
 ```
 
-## When to Use FleetLM
+## Websocket streaming
 
-**Good fit:**
-- Multi-turn agent conversations with full history retention
-- Apps that need real-time message streaming
-- Scenarios requiring replay/gap recovery
-- Separation of message storage from prompt assembly
+FleetLM uses Phoenix Channels for streaming updates:
 
-**Not a fit:**
-- Single-turn Q&A (no conversation state to manage)
-- Apps that want server-side prompt management or compaction
+```ts
+import { Socket } from "phoenix";
+
+const socket = new Socket("ws://localhost:4000/socket/websocket");
+socket.connect();
+
+const channel = socket.channel("conversation:demo-chat");
+await channel.join();
+
+channel.on("message", (payload) => console.log(payload));
+channel.on("gap", (payload) => console.log(payload));
+channel.on("tombstone", (payload) => console.log(payload));
+```
+
+## Concepts (2-minute mental model)
+
+- **Conversation:** a named thread of messages you choose the id for.
+- **Message:** one entry with a `role` and typed `parts`.
+- **Part:** a typed payload inside a message (e.g. `{type:"text"}`, `{type:"tool_call"}`).
+- **`seq`:** strictly increasing sequence number per conversation (ordering).
+- **`version`:** optimistic concurrency counter per conversation (bumps on each append).
+- **Tail:** pagination from newest messages backward.
+- **Replay:** fetch messages by sequence range.
+
+Non-goals (by design): prompt construction/context windows, token budgets/summarization policy, and tool execution/model/provider calls.
+
+## Learn more
+
+- [Getting started](https://fleetlm.com/docs/usage/getting-started)
+- [Examples](https://fleetlm.com/docs/usage/examples)
+- [Websocket gap handling](https://fleetlm.com/docs/api/websocket)
+- [Prompt assembly patterns](https://fleetlm.com/docs/usage/context-management)
+- [Architecture](https://fleetlm.com/docs/architecture) (implementation details live here)
 
 ---
 
@@ -95,8 +164,8 @@ const { messages: replay } = await conv.replay({ from: 50, limit: 50 });
 ```bash
 # Clone and set up
 git clone https://github.com/fastpaca/fleetlm
-cd context-store
-mix setup            # install deps, create DB, run migrations
+cd fleetlm
+mix setup            # install deps, create DB, run migrations (requires Postgres)
 
 # Start server on http://localhost:4000
 mix phx.server
@@ -105,11 +174,6 @@ mix phx.server
 mix test
 mix precommit        # format, compile (warnings-as-errors), test
 ```
-
-### Storage Tiers
-
-- **Hot (Raft):** Message tail + metadata. 256 Raft groups × 3 replicas for high availability.
-- **Cold (optional):** Archiver persists full history to Postgres and acknowledges a high-water mark so Raft can trim older tail segments.
 
 ---
 

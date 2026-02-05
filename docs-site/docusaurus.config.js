@@ -1,18 +1,21 @@
 // @ts-check
 
 const siteUrl = process.env.DOCUSAURUS_SITE_URL || "https://fleetlm.com/docs";
-const baseUrl = process.env.DOCUSAURUS_BASE_URL || "/";
+// Docusaurus `url` must be the site origin (no path); serve under `/docs/` via `baseUrl`.
+const baseUrl = process.env.DOCUSAURUS_BASE_URL || "/docs/";
+
+const canonicalSiteUrl = siteUrl.replace(/\/docs\/?$/, "");
 
 const config = {
   title: "FleetLM Docs",
   tagline: "Self-host FleetLM with confidence",
-  url: siteUrl,
+  url: canonicalSiteUrl,
   baseUrl,
   onBrokenLinks: "throw",
   onBrokenMarkdownLinks: "warn",
   favicon: "https://docusaurus.io/favicon.ico",
   organizationName: "fastpaca",
-  projectName: "context-store",
+  projectName: "fleetlm",
   trailingSlash: false,
   i18n: {
     defaultLocale: "en",

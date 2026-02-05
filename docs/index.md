@@ -6,29 +6,23 @@ sidebar_position: 0
 
 # FleetLM
 
-FleetLM is a message backend for AI agents: an append-only, replayable conversation log with streaming updates and optional archival. It stores messages and sequence numbers. It does **not** build LLM prompts or manage token budgets.
-
-- Append messages with deterministic `seq` and `version`
-- Tail or replay message history
-- Stream updates over websocket
-- Optional Postgres archive for long-term retention
-- Prompt assembly stays in your app (or Cria)
+FleetLM is conversation infrastructure for AI agents: an append-only, replayable conversation log with streaming updates and optional archival. It stores messages and sequence numbers. It does **not** build prompts or manage token budgets.
 
 ```
-                      +-------------------------------+
-+---------+           |           FleetLM             |          +-----------+
-| client  | -- API -->|  Message Log + Stream (Raft)  | -- opt ->| Postgres  |
-+---------+           +-------------------------------+          +-----------+
+agent backend / workers  ──HTTP──►  FleetLM  ──websocket──►  your UI / services
+        (n8n, LangChain,            ordered log + stream         (any stack)
+         custom API, etc)
 ```
+
+## Start here
 
 - [Quick start](./usage/quickstart.md)
 - [Getting started](./usage/getting-started.md)
-- [How it works](./architecture.md)
-- [Prompt assembly](./usage/context-management.md)
-- [Self-hosting](./deployment.md)
-- [Storage and audit](./storage.md)
+- [Examples](./usage/examples.md)
 - [REST API](./api/rest.md)
 - [Websocket API](./api/websocket.md)
+- [Deployment](./deployment.md)
+- [Storage and audit](./storage.md)
 
 ## Quick taste
 
@@ -48,6 +42,12 @@ await convo.append({
 // Build your prompt from the log (tail, replay, or your own policy)
 const { messages } = await convo.tail({ limit: 50 });
 ```
+
+## Prompt assembly
+
+FleetLM does not build LLM context windows. You choose which messages to send to your model.
+
+- [Prompt assembly patterns](./usage/context-management.md)
 
 ## Why this exists
 
