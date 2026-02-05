@@ -41,7 +41,7 @@ for IP in $INSTANCE_IPS; do
   echo -e "${YELLOW}Checking $NODE_NAME ($IP)...${NC}"
 
   # Check if container is running
-  if ! ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleet_lm" > /dev/null 2>&1; then
+  if ! ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleetlm" > /dev/null 2>&1; then
     echo -e "${RED}✗ Container not running${NC}"
     ALL_HEALTHY=false
     continue
@@ -58,7 +58,7 @@ for IP in $INSTANCE_IPS; do
   fi
 
   # Check cluster connectivity
-  CLUSTER_OUTPUT=$(ssh $SSH_OPTS ec2-user@$IP "docker exec fleet_lm bin/fleet_lm rpc 'Node.list()'" 2>&1 || echo "FAIL")
+  CLUSTER_OUTPUT=$(ssh $SSH_OPTS ec2-user@$IP "docker exec fleetlm bin/fleet_lm rpc 'Node.list()'" 2>&1 || echo "FAIL")
 
   if echo "$CLUSTER_OUTPUT" | grep -q "FAIL"; then
     echo -e "${RED}✗ Failed to query cluster state${NC}"
@@ -91,9 +91,9 @@ else
   echo -e "${RED}✗ Some nodes failed health checks${NC}"
   echo ""
   echo -e "${YELLOW}Troubleshooting tips:${NC}"
-  echo "  1. Check logs: ssh ec2-user@<IP> 'docker logs fleet_lm'"
+  echo "  1. Check logs: ssh ec2-user@<IP> 'docker logs fleetlm'"
   echo "  2. Check container: ssh ec2-user@<IP> 'docker ps -a'"
-  echo "  3. Restart node: ssh ec2-user@<IP> 'docker restart fleet_lm'"
-  echo "  4. Manual cluster check: ssh ec2-user@<IP> 'docker exec fleet_lm bin/fleet_lm rpc \"Node.list()\"'"
+  echo "  3. Restart node: ssh ec2-user@<IP> 'docker restart fleetlm'"
+  echo "  4. Manual cluster check: ssh ec2-user@<IP> 'docker exec fleetlm bin/fleet_lm rpc \"Node.list()\"'"
   exit 1
 fi

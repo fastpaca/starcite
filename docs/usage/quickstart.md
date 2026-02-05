@@ -11,7 +11,7 @@ sidebar_position: 1
 docker run -d \
   -p 4000:4000 \
   -v fleetlm_data:/data \
-  ghcr.io/fastpaca/fleet-lm:latest
+  ghcr.io/fastpaca/fleetlm:latest
 ```
 
 FleetLM listens on `http://localhost:4000/v1`. The container persists data under `fleetlm_data/`.
