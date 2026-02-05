@@ -15,7 +15,7 @@ FleetLM is built to run in your own infrastructure. This page covers recommended
 - **Memory:** 4 GB RAM per node for typical workloads. Increase if you retain very large tails.
 - **Disk:** Fast SSD/NVMe for the Raft log (append-heavy). Mount `/data` on dedicated storage.
 - Set `FLEETLM_RAFT_DATA_DIR` to the mounted volume path so Raft logs survive restarts.
-- **Network:** Low-latency links between nodes. For production, keep Raft replicas within the same AZ or region (<5 ms RTT).
+- **Network:** Low-latency links between nodes. For production, keep Raft replicas within the same AZ or region (&lt;5 ms RTT).
 
 ---
 

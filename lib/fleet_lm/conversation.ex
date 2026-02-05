@@ -4,7 +4,7 @@ defmodule FleetLM.Conversation do
 
   This is a message backend substrate. It stores and streams messages but does
   NOT manage prompt windows, token budgets, or compaction. Prompt assembly is
-  the responsibility of the client (e.g., Cria).
+  the responsibility of the client.
   """
 
   alias __MODULE__, as: Conversation

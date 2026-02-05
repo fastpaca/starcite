@@ -1,8 +1,8 @@
-# FleetLM Message Store
+# FleetLM TypeScript SDK
 
 **Message backend for AI agents.** FleetLM is an append-only, replayable message log with streaming updates and optional archival.
 
-This is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Cria (or other prompt systems) handles prompt assembly.
+This is a **message substrate** — it stores and streams messages, but does NOT manage prompt windows, token budgets, or compaction. Your app (or any prompt system) handles prompt assembly.
 
 ## Installation
 
@@ -45,16 +45,16 @@ const { messages: replay } = await conv.replay({ from: 100, limit: 50 });
 await fleetlm.tombstoneConversation('chat-123');
 ```
 
-## Cria Integration
+## Prompt assembly
 
-FleetLM stores messages; Cria builds the prompt. Example flow:
+FleetLM stores messages; you build the prompt. Example flow:
 
 ```typescript
 // 1. Fetch messages from FleetLM
 const { messages } = await conv.tail({ limit: 100 });
 
-// 2. Convert to Cria prompt input and render
-// (Cria handles token budgets, compaction, provider formatting)
+// 2. Convert to your model input and render
+// (You handle token budgets, summarization, provider formatting)
 ```
 
 ## API

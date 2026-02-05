@@ -2,8 +2,6 @@
 
 Minimal chat app demonstrating FleetLM conversation logs with ai-sdk and Next.js.
 
-![](https://fleetlm.com/images/context-store-demo.gif)
-
 ## Features
 
 - **Pure ai-sdk frontend** - Uses `useChat`, no FleetLM client code in the UI

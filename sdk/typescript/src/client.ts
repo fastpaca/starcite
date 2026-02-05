@@ -6,7 +6,7 @@ import type { FleetLMClientConfig, ConversationInfo } from './types';
  *
  * This is a message substrate. It stores and streams messages
  * but does NOT manage prompt windows, token budgets, or compaction.
- * Prompt assembly is handled by Cria or other prompt systems.
+ * Prompt assembly is handled by your app (or any prompt system).
  */
 export class FleetLMClient {
   private baseUrl: string;
