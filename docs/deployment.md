@@ -16,16 +16,26 @@ FleetLM is designed for self-hosted clustered deployment.
 
 Set `FLEETLM_RAFT_DATA_DIR` to persistent storage so Raft state survives restarts.
 
-## Single-node development
+## Local development (single node)
 
 ```bash
 docker run -d \
   -p 4000:4000 \
   -v fleetlm_data:/data \
-  ghcr.io/fastpaca/fleetlm:latest
+ghcr.io/fastpaca/fleetlm:latest
 ```
 
-## Three-node cluster
+## Local cluster testing (five nodes)
+
+Use the built-in scripts:
+
+```bash
+./scripts/start-cluster.sh
+./scripts/test-cluster.sh
+./scripts/stop-cluster.sh
+```
+
+## Three-node production shape
 
 ```bash
 docker run -d \
@@ -37,6 +47,8 @@ docker run -d \
 ```
 
 Repeat with `NODE_NAME=fleetlm-2` and `NODE_NAME=fleetlm-3`.
+
+Use a load balancer in front of nodes for API traffic.
 
 ## Archive (optional Postgres)
 
@@ -78,5 +90,15 @@ Core series:
 | `FLEETLM_POSTGRES_URL` | none | Alternate database URL if `DATABASE_URL` is not set |
 | `FLEETLM_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush tick interval |
 | `DB_POOL_SIZE` | `10` | Postgres connection pool size |
+| `DATABASE_URL` | none | Primary Postgres URL when archive is enabled |
+| `PORT` | `4000` | HTTP server port |
+| `PHX_SERVER` | unset | Required in release mode to start endpoint server |
+| `SECRET_KEY_BASE` | none (prod) | Required secret for Phoenix endpoint in production |
+| `PHX_HOST` | `example.com` (prod) | Public host used in generated endpoint URLs |
+
+Redis PubSub options (only when `:pubsub_adapter` is configured as `:redis`):
+
+| Variable | Default | Description |
+| --- | --- | --- |
 | `REDIS_HOST` | `localhost` | Redis host when PubSub adapter is `:redis` |
 | `REDIS_PORT` | `6379` | Redis port when PubSub adapter is `:redis` |

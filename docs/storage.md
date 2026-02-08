@@ -10,8 +10,8 @@ FleetLM separates hot runtime storage (Raft) from optional cold storage (Postgre
 ## Storage tiers
 
 - Hot (Raft)
-  - Session metadata (`last_seq`, `archived_seq`)
-  - In-memory event tail for low-latency tail replay
+  - Session metadata (`last_seq`, `archived_seq`, retention state)
+  - Ordered event log used for append and tail replay
 - Cold (Archive)
   - Full event history in table `events`
   - Composite key `(session_id, seq)`
@@ -19,9 +19,15 @@ FleetLM separates hot runtime storage (Raft) from optional cold storage (Postgre
 ## Guarantees
 
 - Append-only event history per session.
-- Total order per session via `seq`.
+- Monotonic total order per session via `seq`.
 - Idempotent archival writes with `ON CONFLICT DO NOTHING`.
 - At-least-once delivery from runtime to archive.
+
+## Replay behavior
+
+- `tail` replays committed events where `seq > cursor`.
+- If archive is enabled, runtime can trim older hot entries after archive acknowledgement.
+- If archive is disabled, replay is constrained to the retained hot tail window.
 
 ## Enabling Postgres archive
 
@@ -38,11 +44,6 @@ config :fleet_lm,
   archive_batch_size: 5_000,
   tail_keep: 1_000
 ```
-
-## Retention
-
-- Runtime never trims events newer than `archived_seq`.
-- If archive is disabled, the live Raft tail is the source for tail replay.
 
 ## Telemetry (archive subset)
 

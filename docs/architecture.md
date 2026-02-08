@@ -9,30 +9,47 @@ FleetLM runs a Raft-backed state machine that stores session event logs and serv
 
 ![FleetLM Architecture](./img/architecture.png)
 
-## Components
+## Public contract vs internals
+
+The public API surface is intentionally small:
+
+- `POST /v1/sessions`
+- `POST /v1/sessions/:id/append`
+- `GET /v1/sessions/:id/tail?cursor=N` (WebSocket upgrade)
+
+Everything else in this document explains how FleetLM preserves those semantics under failure and load.
+
+## Runtime components
 
 | Component | Responsibility |
 | --- | --- |
 | REST / WebSocket gateway | Validates API input and forwards to runtime |
-| Runtime | Applies session create/append commands and cursor queries |
+| Runtime | Applies create/append commands and tail replay queries |
 | Raft groups | 256 logical shards, each replicated across three nodes |
-| Snapshot manager | Raft snapshots for recovery/log compaction |
+| Snapshot manager | Raft snapshots for state recovery |
 | Archiver (optional) | Persists committed events to Postgres |
 
-## Data flow
+## Request flow
 
 1. **Create**: create session metadata in the shard owning that session id.
 2. **Append**: append one event; after quorum commit, ack with `seq`.
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
-4. **Archive**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
+4. **Archive (optional)**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
+
+## Ordering and durability model
+
+- Ordering is monotonic per session (`seq`).
+- Appends are acknowledged only after quorum commit.
+- `tail` replay is always ordered ascending by `seq`.
+- Client recovery is reconnect + `cursor` (last processed `seq`).
 
 ## Storage model
 
-- Hot (Raft): session metadata + bounded event tail
+- Hot (Raft): session metadata + event log
 - Cold (optional Postgres): full event history
 
-## Notes
+## Intentional boundaries
 
-- Ordering is monotonic per session (`seq`).
-- Writes are durable before ack.
-- Integrations pull via `tail`; FleetLM does not deliver outbound webhooks.
+- FleetLM does not define domain event vocabularies.
+- FleetLM does not run agent business logic.
+- FleetLM does not push outbound webhooks.

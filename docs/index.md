@@ -8,11 +8,26 @@ sidebar_position: 0
 
 FleetLM is the session semantics layer for AI experiences.
 
-- `create` a session
-- `append` ordered events
-- `tail` from a read cursor and follow live
+Core primitives:
 
-FleetLM does not own auth, prompt construction, token policy, agent scheduling, or outbound webhooks.
+- `create`: start a session
+- `append`: write one ordered event
+- `tail`: catch up from `cursor`, then stream live over WebSocket
+
+## Contract guarantees
+
+- Monotonic per-session ordering via `seq`.
+- Durable append acknowledgements.
+- Replay + live follow semantics for `tail`.
+- One append contract for humans and agents.
+- Opaque metadata and payloads (application-defined).
+
+## Out of scope
+
+- Authn/authz enforcement (upstream concern).
+- Prompt construction and token-window policy.
+- Agent scheduling/orchestration policy.
+- Outbound webhook delivery.
 
 ## Start here
 
