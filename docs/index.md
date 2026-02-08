@@ -37,3 +37,4 @@ Core primitives:
 - [Architecture](./architecture.md)
 - [Storage](./storage.md)
 - [Deployment](./deployment.md)
+- [Benchmarks](./benchmarks.md)

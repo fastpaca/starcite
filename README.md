@@ -58,12 +58,13 @@ Server behavior:
 
 ## Docs
 
-- [Quick start](https://fleetlm.com/docs/usage/quickstart)
-- [REST API](https://fleetlm.com/docs/api/rest)
-- [WebSocket API](https://fleetlm.com/docs/api/websocket)
-- [Architecture](https://fleetlm.com/docs/architecture)
-- [Storage](https://fleetlm.com/docs/storage)
-- [Deployment](https://fleetlm.com/docs/deployment)
+- [Quick start](docs/usage/quickstart.md)
+- [REST API](docs/api/rest.md)
+- [WebSocket API](docs/api/websocket.md)
+- [Architecture](docs/architecture.md)
+- [Storage](docs/storage.md)
+- [Deployment](docs/deployment.md)
+- [Benchmarks](docs/benchmarks.md)
 
 ## Development
 
@@ -71,7 +72,8 @@ Server behavior:
 # Clone and set up
 git clone https://github.com/fastpaca/fleetlm
 cd fleetlm
-mix setup            # install deps, create DB, run migrations (requires Postgres)
+mix deps.get
+mix compile
 
 # Start server on http://localhost:4000
 mix phx.server
@@ -79,6 +81,14 @@ mix phx.server
 # Run tests / precommit checks
 mix test
 mix precommit        # format, compile (warnings-as-errors), test
+```
+
+Optional local 5-node Raft cluster:
+
+```bash
+./scripts/start-cluster.sh
+./scripts/test-cluster.sh
+./scripts/stop-cluster.sh
 ```
 
 ## Contributing
