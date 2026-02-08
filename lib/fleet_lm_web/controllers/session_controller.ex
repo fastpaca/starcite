@@ -44,7 +44,7 @@ defmodule FleetLMWeb.SessionController do
 
   defp validate_create(params) when is_map(params) do
     with {:ok, id} <- optional_non_empty_string(Map.get(params, "id")),
-         {:ok, title} <- optional_non_empty_string(Map.get(params, "title")),
+         {:ok, title} <- optional_string(Map.get(params, "title")),
          {:ok, metadata} <- optional_object(Map.get(params, "metadata")) do
       {:ok, [id: id, title: title, metadata: metadata]}
     end

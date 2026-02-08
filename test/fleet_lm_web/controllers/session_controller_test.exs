@@ -64,6 +64,21 @@ defmodule FleetLMWeb.SessionControllerTest do
       assert body["id"] == id
     end
 
+    test "accepts empty title string" do
+      id = unique_id("ses")
+
+      conn =
+        json_conn(:post, "/v1/sessions", %{
+          "id" => id,
+          "title" => ""
+        })
+
+      assert conn.status == 201
+      body = Jason.decode!(conn.resp_body)
+      assert body["id"] == id
+      assert body["title"] == ""
+    end
+
     test "duplicate id returns 409" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
