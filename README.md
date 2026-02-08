@@ -5,95 +5,103 @@
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
-Starcite is a session semantics layer for AI products.
-Main site: https://starcite.ai
+**AI sessions that don't break.** Open source. Apache 2.0.
 
-- Start a session
-- Append ordered events
-- Tail from your cursor, then follow live over WebSocket
+https://starcite.ai
 
-That is the product surface.
+---
 
-## API Primitives (`/v1`)
+Starcite sits between your AI and your users so the session stays correct — through refreshes, reconnects, and device switches. No sync logic on your side.
 
-Create a session:
+Three primitives:
+
+1. **Create** a session
+2. **Append** ordered events to it
+3. **Tail** — catch up from a cursor, then follow live over WebSocket
+
+## Quick Start
+
+```bash
+docker run -d -p 4000:4000 -v starcite_data:/data ghcr.io/fastpaca/starcite:latest
+```
+
+### Create a session
 
 ```bash
 curl -X POST http://localhost:4000/v1/sessions \
   -H "Content-Type: application/json" \
-  -d '{"title":"Draft contract","metadata":{"tenant_id":"acme"}}'
+  -d '{"id": "ses_demo", "title": "Draft contract", "metadata": {"tenant_id": "acme"}}'
 ```
 
-Append an event:
+### Append an event
 
 ```bash
-curl -X POST http://localhost:4000/v1/sessions/ses_123/append \
+curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
   -H "Content-Type: application/json" \
   -d '{
-    "type":"content",
-    "payload":{"text":"Working..."},
-    "actor":"agent:planner"
+    "type": "content",
+    "payload": {"text": "Reviewing clause 4.2..."},
+    "actor": "agent:drafter"
   }'
 ```
 
-Tail from cursor over WebSocket:
+Response:
 
-```bash
-ws://localhost:4000/v1/sessions/ses_123/tail?cursor=41
+```json
+{"seq": 1, "last_seq": 1, "deduped": false}
 ```
 
-Server behavior:
+### Tail from cursor
 
-1. Replay committed events where `seq > cursor` in ascending order.
-2. Keep streaming new committed events on the same socket.
+```
+ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
+```
 
-## Contract Notes
+1. Replays committed events where `seq > cursor`.
+2. Streams new events live on the same socket.
+3. On reconnect, pass your last processed `seq` as the next cursor.
 
-- Ordering is monotonic per session via `seq`.
-- Appends are durable before ack.
-- `append` is shared by humans and agents.
-- `metadata` is application-defined and opaque to Starcite.
-- `idempotency_key` is optional.
-- `expected_seq` is optional optimistic concurrency.
-- Auth is upstream.
+## What you get
 
-## Docs
+- **Ordered** — monotonic `seq` per session, no gaps
+- **Durable** — ack only after quorum commit
+- **Replayable** — catch up from any cursor, then follow live
+- **Shared** — one append API for humans and agents
+- **Idempotent** — optional `idempotency_key` for safe retries
+- **Concurrent** — optional `expected_seq` for optimistic locking
+- **Archivable** — optional Postgres cold storage
 
-- [Quick start](docs/usage/quickstart.md)
+## What Starcite doesn't do
+
+- Auth (your layer, upstream)
+- Prompt construction or token management
+- Agent orchestration
+- Webhooks
+
+## Documentation
+
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
 - [Architecture](docs/architecture.md)
-- [Storage](docs/storage.md)
 - [Deployment](docs/deployment.md)
 - [Benchmarks](docs/benchmarks.md)
 
 ## Development
 
 ```bash
-# Clone and set up
-git clone https://github.com/fastpaca/starcite
-cd starcite
-mix deps.get
-mix compile
-
-# Start server on http://localhost:4000
-mix phx.server
-
-# Run tests / precommit checks
+git clone https://github.com/fastpaca/starcite && cd starcite
+mix deps.get && mix compile
+mix phx.server       # http://localhost:4000
 mix test
-mix precommit        # format, compile (warnings-as-errors), test
-```
-
-Optional local 5-node Raft cluster:
-
-```bash
-./scripts/start-cluster.sh
-./scripts/test-cluster.sh
-./scripts/stop-cluster.sh
+mix precommit        # format + compile (warnings-as-errors) + test
 ```
 
 ## Contributing
 
-1. Run `mix precommit` before opening a PR.
-2. Add tests for behavior changes.
-3. Update docs when runtime behavior or contracts change.
+1. Fork and branch.
+2. `mix precommit` before opening a PR.
+3. Add tests for behavior changes.
+
+## License
+
+[Apache 2.0](LICENSE)
