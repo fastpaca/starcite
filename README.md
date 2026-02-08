@@ -1,5 +1,8 @@
 # Starcite
 
+> [!NOTE]
+> Starcite is a work in progress. Expect rapid iterations and future breaking changes. Always lock your dependencies to a release version.
+
 [![Tests](https://github.com/fastpaca/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/test.yml)
 [![Docker Build](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
