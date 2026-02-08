@@ -33,6 +33,54 @@ wait_for_ready() {
   return 1
 }
 
+wait_for_live() {
+  local url=$1
+  local attempts=${2:-30}
+  local interval=${3:-1}
+
+  for ((i = 1; i <= attempts; i++)); do
+    local health
+    health=$(curl -sf "$url" || true)
+
+    if echo "$health" | grep -q '"status":"ok"'; then
+      echo -e "  ✓ live after $((i * interval))s"
+      return 0
+    fi
+
+    sleep "$interval"
+  done
+
+  echo -e "  ${YELLOW}⚠ not live after $((attempts * interval))s${NC}"
+  return 1
+}
+
+wait_for_node_down() {
+  local node_pattern=$1
+  local attempts=${2:-20}
+  local interval=${3:-1}
+
+  for ((i = 1; i <= attempts; i++)); do
+    if ! pgrep -f "$node_pattern" > /dev/null; then
+      echo -e "  ✓ ${node_pattern} stopped after $((i * interval))s"
+      return 0
+    fi
+
+    sleep "$interval"
+  done
+
+  echo -e "  ${YELLOW}⚠ ${node_pattern} still running after $((attempts * interval))s; forcing kill${NC}"
+  pkill -9 -f "$node_pattern" || true
+  sleep 1
+
+  if pgrep -f "$node_pattern" > /dev/null; then
+    echo -e "  ${RED}✗ failed to stop ${node_pattern}${NC}"
+    return 1
+  fi
+
+  echo -e "  ✓ ${node_pattern} force-stopped"
+  return 0
+}
+
 append_expect() {
   local port=$1
   local session_id=$2
@@ -94,6 +142,7 @@ if [ -z "$NODE3_PIDS" ]; then
   exit 1
 fi
 kill $NODE3_PIDS
+wait_for_node_down "node3@127.0.0.1" 20 1
 wait_for_ready "http://localhost:4001/health/ready" 20 1
 
 NEXT_SEQ=$(append_expect 4001 "$SESSION_ID" "$SEQ" "after node3 down") || {
@@ -111,6 +160,7 @@ if [ -z "$NODE4_PIDS" ]; then
   exit 1
 fi
 kill $NODE4_PIDS
+wait_for_node_down "node4@127.0.0.1" 20 1
 wait_for_ready "http://localhost:4000/health/ready" 20 1
 
 NEXT_SEQ=$(append_expect 4000 "$SESSION_ID" "$SEQ" "after node4 down") || {
@@ -122,8 +172,9 @@ echo -e "  ${GREEN}✓ seq=$SEQ${NC}"
 echo ""
 
 echo "4. Restart node3 and append via restarted node..."
+wait_for_node_down "node3@127.0.0.1" 20 1
 CLUSTER_NODES="node1@127.0.0.1,node2@127.0.0.1,node3@127.0.0.1,node4@127.0.0.1,node5@127.0.0.1" PORT=4002 elixir --name node3@127.0.0.1 -S mix phx.server > logs/node3-restart.log 2>&1 &
-wait_for_ready "http://localhost:4002/health/ready" 45 1
+wait_for_live "http://localhost:4002/health/live" 45 1
 
 NEXT_SEQ=$(append_expect 4002 "$SESSION_ID" "$SEQ" "after node3 restart") || {
   echo -e "${RED}  ✗ append failed on restarted node3${NC}"
