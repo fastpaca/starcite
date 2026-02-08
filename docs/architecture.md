@@ -17,7 +17,7 @@ The public API surface is intentionally small:
 - `POST /v1/sessions/:id/append`
 - `GET /v1/sessions/:id/tail?cursor=N` (WebSocket upgrade)
 
-Everything else in this document explains how FleetLM preserves those semantics under failure and load.
+Everything else in this document exists to preserve one behavior chain: `create -> append -> tail`.
 
 ## Runtime components
 

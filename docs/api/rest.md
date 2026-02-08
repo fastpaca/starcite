@@ -117,6 +117,8 @@ See [WebSocket API](./websocket.md).
 
 ## Health endpoints
 
+These are operational probes, not part of the product primitive surface.
+
 - `GET /health/live` returns `{"status":"ok"}`.
 - `GET /health/ready` returns `{"status":"ok"}`.
 

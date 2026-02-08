@@ -4,7 +4,8 @@ Guidance for Claude Code when collaborating on FleetLM.
 
 ## Quick Start
 
-- `mix setup` - bootstrap deps, DB, and assets
+- `mix deps.get` - install dependencies
+- `mix compile` - compile the application
 - `mix phx.server` - run the dev server
 - `mix test` / `mix test path/to/file.exs` - execute test suites
 - `mix precommit` - final gate before handing work back (compile + format + tests)
@@ -51,8 +52,6 @@ Contract reminders:
 - `metadata` and `refs` are opaque application data; FleetLM stores and replays them.
 - **Background flush**: Flusher batch-inserts committed events to Postgres when archiver is enabled. Idempotent on `[session_id, seq]`.
 - **Snapshots**: Raft snapshots are used for recovery and log compaction.
-- LiveView templates begin with `<Layouts.app ...>`; forms use `<.form>`/`<.input>` combos, icons use `<.icon>`.
-- Tailwind v4 is the styling backbone. Maintain the stock import stanza and craft micro-interactions via utility classes.
 
 ## Tooling Shortcuts
 

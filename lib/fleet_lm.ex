@@ -1,7 +1,11 @@
 defmodule FleetLM do
   @moduledoc """
-  FleetLM - event stream backend for AI sessions.
+  FleetLM - session primitives for AI products.
 
-  An append-only, replayable event log with streaming updates.
+  Product surface:
+
+  - create a session
+  - append ordered events
+  - tail from cursor and follow live over WebSocket
   """
 end
