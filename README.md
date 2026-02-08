@@ -1,7 +1,7 @@
 # Starcite
 
-[![Tests](https://github.com/starcite-ai/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/starcite-ai/starcite/actions/workflows/test.yml)
-[![Docker Build](https://github.com/starcite-ai/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/starcite-ai/starcite/actions/workflows/docker-build.yml)
+[![Tests](https://github.com/fastpaca/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/test.yml)
+[![Docker Build](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
@@ -71,7 +71,7 @@ Server behavior:
 
 ```bash
 # Clone and set up
-git clone https://github.com/starcite-ai/starcite
+git clone https://github.com/fastpaca/starcite
 cd starcite
 mix deps.get
 mix compile

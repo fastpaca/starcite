@@ -13,7 +13,7 @@ This quick start uses the three session primitives.
 docker run -d \
   -p 4000:4000 \
   -v starcite_data:/data \
-  ghcr.io/starcite-ai/starcite:latest
+  ghcr.io/fastpaca/starcite:latest
 ```
 
 ## 2. Create a session

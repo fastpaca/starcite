@@ -22,7 +22,7 @@ Set `STARCITE_RAFT_DATA_DIR` to persistent storage so Raft state survives restar
 docker run -d \
   -p 4000:4000 \
   -v starcite_data:/data \
-ghcr.io/starcite-ai/starcite:latest
+ghcr.io/fastpaca/starcite:latest
 ```
 
 ## Local cluster testing (five nodes)
@@ -43,7 +43,7 @@ docker run -d \
   -v /var/lib/starcite:/data \
   -e CLUSTER_NODES=starcite-1@starcite.internal,starcite-2@starcite.internal,starcite-3@starcite.internal \
   -e NODE_NAME=starcite-1 \
-  ghcr.io/starcite-ai/starcite:latest
+  ghcr.io/fastpaca/starcite:latest
 ```
 
 Repeat with `NODE_NAME=starcite-2` and `NODE_NAME=starcite-3`.

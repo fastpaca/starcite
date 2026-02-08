@@ -77,7 +77,7 @@ for IP in $INSTANCE_IPS; do
   ssh $SSH_OPTS ec2-user@$IP "docker rm starcite 2>/dev/null || true"
 
   echo "Pulling Starcite image..."
-  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/starcite-ai/starcite:latest"
+  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/fastpaca/starcite:latest"
 
   PRIVATE_IP=$(ssh $SSH_OPTS ec2-user@$IP "hostname -i" | tr -d '\n')
   HAS_NVME=$(ssh $SSH_OPTS ec2-user@$IP "test -d /mnt/nvme && echo 'yes' || echo 'no'")
@@ -108,7 +108,7 @@ for IP in $INSTANCE_IPS; do
     -e MIX_ENV=prod \
     -e RELEASE_DISTRIBUTION=name \
     -e RELEASE_NODE='starcite@$PRIVATE_IP' \
-    ghcr.io/starcite-ai/starcite:latest"
+    ghcr.io/fastpaca/starcite:latest"
 
   sleep 5
 
