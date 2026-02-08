@@ -8,7 +8,7 @@ const canonicalSiteUrl = siteUrl.replace(/\/docs\/?$/, "");
 
 const config = {
   title: "FleetLM Docs",
-  tagline: "Self-host FleetLM with confidence",
+  tagline: "AI sessions that don't break",
   url: canonicalSiteUrl,
   baseUrl,
   onBrokenLinks: "throw",
