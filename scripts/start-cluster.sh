@@ -28,9 +28,18 @@ rm -rf priv/raft/* node*@127.0.0.1 2>/dev/null || true
 echo -e "${GREEN}Raft data cleaned${NC}"
 echo ""
 
+echo -e "${GREEN}Compiling once before booting nodes (avoids multi-node compile races)...${NC}"
+if ! mix compile > logs/compile.log 2>&1; then
+  echo -e "${RED}Compile failed. See logs/compile.log${NC}"
+  exit 1
+fi
+echo -e "${GREEN}Compile complete${NC}"
+echo ""
+
 # Start all nodes with CLUSTER_NODES env for libcluster discovery
 CLUSTER_NODES="node1@127.0.0.1,node2@127.0.0.1,node3@127.0.0.1,node4@127.0.0.1,node5@127.0.0.1"
 ARCHIVER_ENABLED="${FLEETLM_ARCHIVER_ENABLED:-false}"
+MIX_NO_COMPILE=1
 
 if [ "$ARCHIVER_ENABLED" != "false" ] && [ -z "${DATABASE_URL:-}" ] && [ -z "${FLEETLM_POSTGRES_URL:-}" ]; then
   echo -e "${YELLOW}Warning: FLEETLM_ARCHIVER_ENABLED=$ARCHIVER_ENABLED but no DATABASE_URL/FLEETLM_POSTGRES_URL set${NC}"
@@ -39,27 +48,31 @@ if [ "$ARCHIVER_ENABLED" != "false" ] && [ -z "${DATABASE_URL:-}" ] && [ -z "${F
 fi
 
 echo -e "${GREEN}Starting node1@127.0.0.1 on port 4000...${NC}"
-FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4000 elixir --name node1@127.0.0.1 -S mix phx.server > logs/node1.log 2>&1 &
+nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4000 elixir --name node1@127.0.0.1 -S mix phx.server > logs/node1.log 2>&1 &
 NODE1_PID=$!
 echo "  PID: $NODE1_PID"
+sleep 0.2
 
 echo -e "${GREEN}Starting node2@127.0.0.1 on port 4001...${NC}"
-FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4001 elixir --name node2@127.0.0.1 -S mix phx.server > logs/node2.log 2>&1 &
+nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4001 elixir --name node2@127.0.0.1 -S mix phx.server > logs/node2.log 2>&1 &
 NODE2_PID=$!
 echo "  PID: $NODE2_PID"
+sleep 0.2
 
 echo -e "${GREEN}Starting node3@127.0.0.1 on port 4002...${NC}"
-FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4002 elixir --name node3@127.0.0.1 -S mix phx.server > logs/node3.log 2>&1 &
+nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4002 elixir --name node3@127.0.0.1 -S mix phx.server > logs/node3.log 2>&1 &
 NODE3_PID=$!
 echo "  PID: $NODE3_PID"
+sleep 0.2
 
 echo -e "${GREEN}Starting node4@127.0.0.1 on port 4003...${NC}"
-FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4003 elixir --name node4@127.0.0.1 -S mix phx.server > logs/node4.log 2>&1 &
+nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4003 elixir --name node4@127.0.0.1 -S mix phx.server > logs/node4.log 2>&1 &
 NODE4_PID=$!
 echo "  PID: $NODE4_PID"
+sleep 0.2
 
 echo -e "${GREEN}Starting node5@127.0.0.1 on port 4004...${NC}"
-FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4004 elixir --name node5@127.0.0.1 -S mix phx.server > logs/node5.log 2>&1 &
+nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4004 elixir --name node5@127.0.0.1 -S mix phx.server > logs/node5.log 2>&1 &
 NODE5_PID=$!
 echo "  PID: $NODE5_PID"
 

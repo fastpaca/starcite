@@ -125,12 +125,13 @@ defmodule FleetLMWeb.TailSocket do
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)
     should_flush_buffer? = state.replay_done and map_size(state.live_buffer) > 0
+    should_fetch_more_replay? = not state.replay_done and :queue.is_empty(state.replay_queue)
 
     cond do
       state.drain_scheduled ->
         state
 
-      queue_non_empty? or should_flush_buffer? ->
+      queue_non_empty? or should_flush_buffer? or should_fetch_more_replay? ->
         schedule_drain(state)
 
       true ->

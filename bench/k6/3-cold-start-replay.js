@@ -15,6 +15,7 @@ const appendLatency = new Trend('append_latency', true);
 
 const sessionCount = Number(__ENV.BACKLOG_SESSIONS || 5);
 const duration = __ENV.REPLAY_DURATION || '1m';
+const enableConflictCheck = __ENV.ENABLE_CONFLICT_CHECK === 'true';
 
 export const options = {
   setupTimeout: '120s',
@@ -62,7 +63,7 @@ export default function (data) {
   const session = data.sessions[vuId];
   if (!session) return;
 
-  const key = `k-${vuId}-${Math.floor(__ITER / 2)}`;
+  const key = `k-${vuId}-${__ITER}`;
   const payload = { text: `idempotency run=${data.runId} vu=${vuId} iter=${__ITER}` };
 
   const first = lib.appendEvent(session.sessionId, {
@@ -99,14 +100,24 @@ export default function (data) {
     dedupedTotal.add(1);
   }
 
-  // Every 10th iteration, intentionally conflict on same key with different payload.
-  if (__ITER % 10 === 0) {
+  // Optional conflict exercise: same key + different payload => 409 idempotency_conflict.
+  if (enableConflictCheck && __ITER % 10 === 0) {
+    const conflictKey = `conflict-${vuId}-${__ITER}`;
+
+    lib.appendEvent(session.sessionId, {
+      type: 'state',
+      payload: { text: 'baseline payload' },
+      actor: `agent:vu:${vuId}`,
+      source: 'benchmark',
+      idempotency_key: conflictKey,
+    });
+
     const conflict = lib.appendEvent(session.sessionId, {
       type: 'state',
       payload: { text: 'different payload' },
       actor: `agent:vu:${vuId}`,
       source: 'benchmark',
-      idempotency_key: key,
+      idempotency_key: conflictKey,
     });
 
     if (conflict.res.status === 409 && conflict.res.body.includes('idempotency_conflict')) {
