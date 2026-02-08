@@ -304,6 +304,7 @@ defmodule FleetLM.Runtime do
   end
 
   defp retriable_error?({:expected_seq_conflict, _current}), do: false
+  defp retriable_error?({:expected_seq_conflict, _expected, _current}), do: false
   defp retriable_error?(_reason), do: true
 
   defp safe_rpc_call(node, fun, args) do

@@ -85,7 +85,7 @@ defmodule FleetLM.RuntimeTest do
           actor: "agent:1"
         })
 
-      assert {:error, {:expected_seq_conflict, 1}} =
+      assert {:error, {:expected_seq_conflict, 0, 1}} =
                Runtime.append_event(
                  id,
                  %{type: "content", payload: %{text: "two"}, actor: "agent:1"},

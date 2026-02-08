@@ -168,8 +168,9 @@ defmodule FleetLM.Runtime.RaftFSM do
        when is_integer(expected_seq) and expected_seq >= 0 and last_seq == expected_seq,
        do: :ok
 
-  defp guard_expected_seq(%Session{last_seq: last_seq}, _expected_seq),
-    do: {:error, {:expected_seq_conflict, last_seq}}
+  defp guard_expected_seq(%Session{last_seq: last_seq}, expected_seq)
+       when is_integer(expected_seq) and expected_seq >= 0,
+       do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
   defp build_effects(session_id, event) do
     stream_event =

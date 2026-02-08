@@ -7,7 +7,7 @@ sidebar_position: 90
 
 FleetLM ships with a reproducible benchmark harness so you can validate performance and failure modes on your own hardware/network.
 
-The benchmark suite focuses on the *conversation layer* primitives: append latency, tail/replay reads, and durability under load. Your end-to-end latency will still be dominated by the model provider.
+The benchmark suite focuses on the *session layer* primitives: append latency, tail reads, and durability under load. Your end-to-end latency will still be dominated by the model provider.
 
 ## What’s included
 
@@ -50,7 +50,7 @@ terraform destroy
 ## Interpreting results
 
 - Append latency is heavily influenced by network RTT between replicas; keep cluster nodes close for production.
-- Throughput scales with the number of independent conversations and the cluster size.
+- Throughput scales with the number of independent sessions and the cluster size.
 - If you see `503` responses, you likely don’t have a Raft quorum (or the cluster isn’t formed yet); retry with backoff.
 
 If you run these benchmarks in a representative environment and want to publish numbers, capture:

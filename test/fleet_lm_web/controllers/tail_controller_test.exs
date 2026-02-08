@@ -31,7 +31,9 @@ defmodule FleetLMWeb.TailControllerTest do
       conn = conn_get("/v1/sessions/#{id}/tail?cursor=0")
 
       assert conn.status == 400
-      assert Jason.decode!(conn.resp_body)["error"] == "invalid_websocket_upgrade"
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_websocket_upgrade"
+      assert is_binary(body["message"])
     end
 
     test "returns 404 for missing session" do
@@ -44,7 +46,9 @@ defmodule FleetLMWeb.TailControllerTest do
         ])
 
       assert conn.status == 404
-      assert Jason.decode!(conn.resp_body)["error"] == "session_not_found"
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "session_not_found"
+      assert is_binary(body["message"])
     end
 
     test "returns 400 for invalid cursor" do
@@ -60,7 +64,9 @@ defmodule FleetLMWeb.TailControllerTest do
         ])
 
       assert conn.status == 400
-      assert Jason.decode!(conn.resp_body)["error"] == "invalid_cursor"
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_cursor"
+      assert is_binary(body["message"])
     end
   end
 end

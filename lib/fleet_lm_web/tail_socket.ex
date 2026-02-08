@@ -51,7 +51,7 @@ defmodule FleetLMWeb.TailSocket do
 
       if state.replay_done and queue_empty? and buffer_empty? do
         next_state = %{state | cursor: event.seq}
-        {:push, {:text, Jason.encode!(event)}, next_state}
+        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
       else
         buffered = Map.put(state.live_buffer, event.seq, event)
         next_state = %{state | live_buffer: buffered}
@@ -71,7 +71,7 @@ defmodule FleetLMWeb.TailSocket do
           |> Map.put(:cursor, max(state.cursor, event.seq))
           |> maybe_schedule_drain()
 
-        {:push, {:text, Jason.encode!(event)}, next_state}
+        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
 
       {:empty, _queue} ->
         if state.replay_done do
@@ -142,4 +142,17 @@ defmodule FleetLMWeb.TailSocket do
     send(self(), :drain_replay)
     %{state | drain_scheduled: true}
   end
+
+  defp render_event(event) when is_map(event) do
+    Map.update(event, :inserted_at, nil, &iso8601_utc/1)
+  end
+
+  defp iso8601_utc(%NaiveDateTime{} = datetime) do
+    datetime
+    |> DateTime.from_naive!("Etc/UTC")
+    |> DateTime.to_iso8601()
+  end
+
+  defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+  defp iso8601_utc(other), do: other
 end

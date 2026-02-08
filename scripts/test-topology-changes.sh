@@ -1,298 +1,138 @@
 #!/bin/bash
-# Test dynamic topology changes: kill 2 nodes (node3, node4), verify cluster rebalances
+# Test topology changes using session create/append primitives only.
 
-set -e
+set -euo pipefail
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-wait_for_node_down() {
-  local node=$1
-  local attempts=${2:-20}
-  local interval=${3:-0.5}
-
-  for ((i = 1; i <= attempts; i++)); do
-    if ! pgrep -f "$node" > /dev/null; then
-      return 0
-    fi
-
-    sleep "$interval"
-  done
-
-  # Still running, force kill
-  local pids
-  pids=$(pgrep -f "$node" || true)
-  if [ -n "$pids" ]; then
-    echo -e "  ${YELLOW}⚠ $node still running, force killing (PIDs: $pids)${NC}"
-    kill -9 $pids 2>/dev/null || true
-  fi
-}
-
-write_with_retry() {
-  local port=$1
-  local conversation_id=$2
-  local text=$3
-  local attempts=${4:-30}
-  local interval=${5:-1}
-
-  local resp=""
-
-  for ((i = 1; i <= attempts; i++)); do
-    resp=$(curl -s --max-time 2 -X POST "http://localhost:${port}/v1/conversations/${conversation_id}/messages" \
-      -H "Content-Type: application/json" \
-      -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"${text}\"}]}}")
-
-    if echo "$resp" | grep -q '"seq"'; then
-      return 0
-    fi
-
-    sleep "$interval"
-  done
-
-  echo "$resp"
-  return 1
+extract_seq() {
+  echo "$1" | grep -o '"seq":[0-9]*' | head -n1 | cut -d':' -f2
 }
 
 wait_for_ready() {
-  local attempts=$1
-  local interval=$2
-  local url=$3
+  local url=$1
+  local attempts=${2:-30}
+  local interval=${3:-1}
 
   for ((i = 1; i <= attempts; i++)); do
+    local health
     health=$(curl -sf "$url" || true)
 
     if echo "$health" | grep -q '"status":"ok"'; then
-      echo -e "  ✓ Cluster ready after $((i * interval))s"
-      return 0
-    elif echo "$health" | grep -q '"status":"starting"'; then
-      echo -e "  ✓ Cluster functional (status=starting) after $((i * interval))s"
+      echo -e "  ✓ ready after $((i * interval))s"
       return 0
     fi
 
     sleep "$interval"
   done
 
-  echo -e "  ${YELLOW}⚠ Cluster not ready after $((attempts * interval))s${NC}"
+  echo -e "  ${YELLOW}⚠ not ready after $((attempts * interval))s${NC}"
   return 1
 }
 
-select_conversation_id() {
-  local attempt=0
-  local id=""
-  local replicas=""
+append_expect() {
+  local port=$1
+  local session_id=$2
+  local expected_seq=$3
+  local text=$4
 
-  while [ $attempt -lt 50 ]; do
-    attempt=$((attempt + 1))
-    id="topology-test-$(date +%s)-${attempt}"
+  local resp
+  resp=$(curl -s -X POST "http://localhost:${port}/v1/sessions/${session_id}/append" \
+    -H "Content-Type: application/json" \
+    -d "{\"type\":\"content\",\"payload\":{\"text\":\"${text}\"},\"actor\":\"agent:topology-test\",\"expected_seq\":${expected_seq}}")
 
-    replicas=$(elixir -e '
-      id = System.argv() |> hd()
-      nodes = ["node1@127.0.0.1", "node2@127.0.0.1", "node3@127.0.0.1", "node4@127.0.0.1", "node5@127.0.0.1"]
-      |> Enum.map(&String.to_atom/1)
-      group_id = :erlang.phash2(id, 256)
-      replicas =
-        nodes
-        |> Enum.map(fn node -> {:erlang.phash2({group_id, node}), node} end)
-        |> Enum.sort()
-        |> Enum.take(3)
-        |> Enum.map(fn {_score, node} -> Atom.to_string(node) end)
-      IO.puts(Enum.join(replicas, ","))
-    ' "$id")
+  local seq
+  seq=$(extract_seq "$resp")
 
-    if ! echo "$replicas" | grep -q "node3@127.0.0.1" || ! echo "$replicas" | grep -q "node4@127.0.0.1"; then
-      echo "$id"
-      return 0
-    fi
-  done
+  if [ -z "$seq" ]; then
+    echo "$resp"
+    return 1
+  fi
 
-  echo ""
-  return 1
+  echo "$seq"
+  return 0
 }
 
 echo -e "${GREEN}=== TOPOLOGY CHANGE TEST (5-node cluster) ===${NC}"
 echo ""
 
-# Check cluster is running
-running_nodes=0
-for node in node1@127.0.0.1 node2@127.0.0.1 node3@127.0.0.1 node4@127.0.0.1 node5@127.0.0.1; do
-  if pgrep -f "$node" > /dev/null; then
-    running_nodes=$((running_nodes + 1))
-  fi
-done
+echo "0. Waiting for baseline readiness..."
+wait_for_ready "http://localhost:4000/health/ready" 30 1
+wait_for_ready "http://localhost:4001/health/ready" 30 1
+wait_for_ready "http://localhost:4002/health/ready" 30 1
+wait_for_ready "http://localhost:4003/health/ready" 30 1
+wait_for_ready "http://localhost:4004/health/ready" 30 1
+echo ""
 
-if [ $running_nodes -lt 5 ]; then
-  echo -e "${RED}Full cluster not running (only $running_nodes nodes). Start all 5 nodes first:${NC}"
-  echo "  ./scripts/start-cluster.sh"
+echo "1. Create test session and append initial event..."
+SESSION_ID="topology-session-$(date +%s)"
+CREATE_RESP=$(curl -s -X POST http://localhost:4000/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d "{\"id\":\"$SESSION_ID\",\"metadata\":{}}")
+
+if ! echo "$CREATE_RESP" | grep -q '"id"'; then
+  echo -e "${RED}  ✗ failed to create session${NC}"
+  echo "Response: $CREATE_RESP"
   exit 1
 fi
 
-echo -e "${GREEN}Found all 5 nodes running${NC}"
-echo ""
-
-# Wait for node1 readiness
-echo "0. Waiting for node1 readiness..."
-wait_for_ready 30 1 "http://localhost:4000/health/ready"
-echo ""
-
-# Step 1: Create a test conversation and write messages
-echo "Step 1: Creating test conversation and writing messages..."
-CONVERSATION_ID=$(select_conversation_id)
-if [ -z "$CONVERSATION_ID" ]; then
-  echo -e "${RED}  Failed to select a stable conversation id${NC}"
+SEQ=$(append_expect 4000 "$SESSION_ID" 0 "initial") || {
+  echo -e "${RED}  ✗ initial append failed${NC}"
   exit 1
-fi
+}
 
-CONVERSATION=$(curl -s --max-time 2 -X PUT http://localhost:4000/v1/conversations/$CONVERSATION_ID \
-  -H "Content-Type: application/json" \
-  -d "{\"metadata\":{}}")
-
-echo "  Conversation: $CONVERSATION_ID"
-
-# Write initial message
-curl -s --max-time 2 -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
-  -H "Content-Type: application/json" \
-  -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"initial message\"}]}}" > /dev/null
-echo "  ✓ Initial message written"
+echo -e "  ${GREEN}✓ session created, seq=$SEQ${NC}"
 echo ""
 
-# Step 2: Kill node3
-echo "Step 2: Killing node3..."
-NODE3_PIDS=$(pgrep -f "node3@127.0.0.1")
+echo "2. Kill node3 and append via node2..."
+NODE3_PIDS=$(pgrep -f "node3@127.0.0.1" || true)
 if [ -z "$NODE3_PIDS" ]; then
-  echo -e "${RED}  Node3 not running!${NC}"
+  echo -e "${RED}  ✗ node3 not running${NC}"
   exit 1
 fi
-
 kill $NODE3_PIDS
-echo "  ✓ Node3 killed (PIDs: $NODE3_PIDS)"
-wait_for_node_down "node3@127.0.0.1"
+wait_for_ready "http://localhost:4001/health/ready" 20 1
 
-echo "  Waiting for cluster to detect failure (polling readiness)..."
-wait_for_ready 15 1 "http://localhost:4001/health/ready"
-echo ""
-
-# Step 3: Verify cluster still works (should have 4 healthy nodes)
-echo "Step 3: Writing message after node3 failure..."
-if MSG_RESP=$(write_with_retry 4001 "$CONVERSATION_ID" "after node3 killed" 20 1); then
-  echo -e "  ${GREEN}✓ Write succeeded with 4 nodes${NC}"
-else
-  echo -e "  ${RED}✗ Write failed${NC}"
-  echo "Response: $MSG_RESP"
+NEXT_SEQ=$(append_expect 4001 "$SESSION_ID" "$SEQ" "after node3 down") || {
+  echo -e "${RED}  ✗ append failed after node3 kill${NC}"
   exit 1
-fi
+}
+SEQ=$NEXT_SEQ
+echo -e "  ${GREEN}✓ seq=$SEQ${NC}"
 echo ""
 
-# Step 4: Kill node4 as well
-echo "Step 4: Killing node4..."
-NODE4_PIDS=$(pgrep -f "node4@127.0.0.1")
+echo "3. Kill node4 and append via node1 (3-node quorum path)..."
+NODE4_PIDS=$(pgrep -f "node4@127.0.0.1" || true)
 if [ -z "$NODE4_PIDS" ]; then
-  echo -e "${RED}  Node4 not running!${NC}"
+  echo -e "${RED}  ✗ node4 not running${NC}"
   exit 1
 fi
-
 kill $NODE4_PIDS
-echo "  ✓ Node4 killed (PIDs: $NODE4_PIDS)"
-wait_for_node_down "node4@127.0.0.1"
-echo "  Waiting for cluster to detect second failure..."
-wait_for_ready 15 1 "http://localhost:4001/health/ready"
-echo ""
+wait_for_ready "http://localhost:4000/health/ready" 20 1
 
-# Step 5: Verify cluster still works with 3 nodes (minimum for quorum with 3-replica groups)
-echo "Step 5: Writing message with only 3 nodes remaining..."
-if MSG_RESP=$(write_with_retry 4000 "$CONVERSATION_ID" "with 3 nodes" 30 1); then
-  echo -e "  ${GREEN}✓ Write succeeded with 3 nodes${NC}"
-else
-  echo -e "  ${RED}✗ Write failed${NC}"
-  echo "Response: $MSG_RESP"
+NEXT_SEQ=$(append_expect 4000 "$SESSION_ID" "$SEQ" "after node4 down") || {
+  echo -e "${RED}  ✗ append failed with two nodes down${NC}"
   exit 1
-fi
+}
+SEQ=$NEXT_SEQ
+echo -e "  ${GREEN}✓ seq=$SEQ${NC}"
 echo ""
 
-# Step 6: Read messages from all remaining nodes
-echo "Step 6: Verifying message replication across remaining nodes..."
-
-for port in 4000 4001 4004; do
-  echo "  Checking node on port $port..."
-  for i in {1..60}; do
-    MSGS=$(curl -s "http://localhost:$port/v1/conversations/$CONVERSATION_ID/tail?limit=10")
-    COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
-
-    if [ "$COUNT" -ge 3 ]; then
-      echo -e "    ${GREEN}✓ All messages replicated ($COUNT total)${NC}"
-      break
-    fi
-
-    if [ $i -eq 60 ]; then
-      echo -e "    ${YELLOW}⚠ Only $COUNT messages found (expected 3+)${NC}"
-    fi
-
-    sleep 0.2
-  done
-done
-echo ""
-
-# Step 7: Restart node3
-echo "Step 7: Restarting node3 (simulating node recovery)..."
-wait_for_node_down "node3@127.0.0.1"
+echo "4. Restart node3 and append via restarted node..."
 CLUSTER_NODES="node1@127.0.0.1,node2@127.0.0.1,node3@127.0.0.1,node4@127.0.0.1,node5@127.0.0.1" PORT=4002 elixir --name node3@127.0.0.1 -S mix phx.server > logs/node3-restart.log 2>&1 &
-NODE3_NEW_PID=$!
-echo "  ✓ Node3 restarted (PID: $NODE3_NEW_PID)"
-echo "  Waiting for node3 to rejoin cluster..."
-wait_for_ready 30 1 "http://localhost:4002/health/ready"
-echo ""
+wait_for_ready "http://localhost:4002/health/ready" 45 1
 
-# Step 8: Verify node3 rejoined and can serve requests
-echo "Step 8: Verifying node3 rejoined cluster..."
-if curl -s http://localhost:4002/health/ready > /dev/null; then
-  echo -e "  ${GREEN}✓ Node3 is responding to API requests${NC}"
-
-  # Check if it has the messages
-  for i in {1..30}; do
-    MSGS=$(curl -s "http://localhost:4002/v1/conversations/$CONVERSATION_ID/tail?limit=10")
-    COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l)
-
-    if [ "$COUNT" -ge 3 ]; then
-      echo -e "  ${GREEN}✓ Node3 has all messages replicated ($COUNT total)${NC}"
-      break
-    fi
-
-    if [ $i -eq 30 ]; then
-      echo -e "  ${YELLOW}⚠ Node3 only has $COUNT messages (may need more time to sync)${NC}"
-    fi
-
-    sleep 0.1
-  done
-else
-  echo -e "  ${RED}✗ Node3 not responding${NC}"
-fi
-echo ""
-
-# Cleanup
-echo "Step 9: Cleaning up test conversation..."
-curl -s -X DELETE http://localhost:4000/v1/conversations/$CONVERSATION_ID > /dev/null
-echo -e "  ✓ Conversation deleted"
+NEXT_SEQ=$(append_expect 4002 "$SESSION_ID" "$SEQ" "after node3 restart") || {
+  echo -e "${RED}  ✗ append failed on restarted node3${NC}"
+  exit 1
+}
+SEQ=$NEXT_SEQ
+echo -e "  ${GREEN}✓ node3 rejoined, seq=$SEQ${NC}"
 echo ""
 
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}✓ Topology change test complete!${NC}"
+echo -e "${GREEN}✓ Topology primitive test complete${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo ""
-echo "Cluster handled topology changes:"
-echo "  - Started with 5 nodes"
-echo "  - Killed node3, cluster continued with 4 nodes"
-echo "  - Killed node4, cluster continued with 3 nodes (minimum for quorum)"
-echo "  - Restarted node3, it rejoined and synced data"
-echo ""
-echo "Current state:"
-echo "  - Node1: running"
-echo "  - Node2: running"
-echo "  - Node3: running (restarted)"
-echo "  - Node4: killed"
-echo "  - Node5: running"
-echo ""
-echo "Cluster now has 4-of-5 nodes operational"
-echo ""
-echo "To stop cluster:"
-echo "  ./scripts/stop-cluster.sh"

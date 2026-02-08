@@ -111,7 +111,9 @@ defmodule FleetLMWeb.TailSocketTest do
       assert {:push, {:text, payload}, next_state} =
                TailSocket.handle_info({:event, event}, drained_state)
 
-      assert Jason.decode!(payload)["seq"] == 1
+      frame = Jason.decode!(payload)
+      assert frame["seq"] == 1
+      assert String.ends_with?(frame["inserted_at"], "Z")
       assert next_state.cursor == 1
     end
   end

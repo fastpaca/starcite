@@ -46,6 +46,8 @@ defmodule FleetLMWeb.SessionControllerTest do
       assert body["title"] == "Draft"
       assert body["metadata"]["workflow"] == "legal"
       assert body["last_seq"] == 0
+      assert String.ends_with?(body["created_at"], "Z")
+      assert String.ends_with?(body["updated_at"], "Z")
     end
 
     test "creates session with caller-provided id" do
@@ -69,7 +71,9 @@ defmodule FleetLMWeb.SessionControllerTest do
       conn = json_conn(:post, "/v1/sessions", %{"id" => id})
 
       assert conn.status == 409
-      assert Jason.decode!(conn.resp_body)["error"] == "session_exists"
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "session_exists"
+      assert is_binary(body["message"])
     end
   end
 
@@ -114,6 +118,7 @@ defmodule FleetLMWeb.SessionControllerTest do
       assert conn.status == 409
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "expected_seq_conflict"
+      assert is_binary(body["message"])
     end
 
     test "idempotency conflict returns 409" do
@@ -139,7 +144,9 @@ defmodule FleetLMWeb.SessionControllerTest do
         })
 
       assert conn2.status == 409
-      assert Jason.decode!(conn2.resp_body)["error"] == "idempotency_conflict"
+      body = Jason.decode!(conn2.resp_body)
+      assert body["error"] == "idempotency_conflict"
+      assert is_binary(body["message"])
     end
 
     test "same idempotency key and payload dedupes" do
@@ -173,7 +180,25 @@ defmodule FleetLMWeb.SessionControllerTest do
       conn = json_conn(:post, "/v1/sessions/#{id}/append", %{"payload" => %{"text" => "hi"}})
 
       assert conn.status == 400
-      assert Jason.decode!(conn.resp_body)["error"] == "invalid_event"
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_event"
+      assert is_binary(body["message"])
+    end
+
+    test "returns 404 with error message when session is missing" do
+      id = unique_id("missing")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "agent:test"
+        })
+
+      assert conn.status == 404
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "session_not_found"
+      assert is_binary(body["message"])
     end
   end
 end

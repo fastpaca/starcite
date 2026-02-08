@@ -5,7 +5,7 @@ sidebar_position: 4
 
 # Architecture
 
-FleetLM runs a Raft-backed state machine that stores conversation logs and streams updates. Every node exposes the same API; requests can land anywhere and are routed to the appropriate shard.
+FleetLM runs a Raft-backed state machine that stores session event logs and serves tail streams.
 
 ![FleetLM Architecture](./img/architecture.png)
 
@@ -13,31 +13,26 @@ FleetLM runs a Raft-backed state machine that stores conversation logs and strea
 
 | Component | Responsibility |
 | --- | --- |
-| **REST / Websocket gateway** | Validates requests and forwards them to the runtime. |
-| **Runtime** | Applies appends, manages conversation metadata, enforces version guards, emits events. |
-| **Raft groups** | 256 logical shards, each replicated across three nodes. Provide ordered, durable writes. |
-| **Snapshot manager** | Raft snapshots for log compaction and fast recovery (not LLM windows). |
-| **Archiver (optional)** | Writes committed messages to Postgres. Leader-only, fed by Raft effects. |
+| REST / WebSocket gateway | Validates API input and forwards to runtime |
+| Runtime | Applies session create/append commands and cursor queries |
+| Raft groups | 256 logical shards, each replicated across three nodes |
+| Snapshot manager | Raft snapshots for recovery/log compaction |
+| Archiver (optional) | Persists committed events to Postgres |
 
 ## Data flow
 
-1. **Append** - the node forwards the message to the shard leader; once a quorum commits, the conversation updates and the client receives `{seq, version}`.
-2. **Tail/Replay** - reads are served from the in-memory message log, ordered by `seq`.
-3. **Archive (optional)** - the leader persists messages to Postgres and acknowledges a high-water mark (`ack_archived(seq)`), allowing the runtime to trim older tail segments while retaining a small bounded tail.
-4. **Stream** - PubSub fans out `message`, `tombstone`, and `gap` events to the websocket channel.
+1. **Create**: create session metadata in the shard owning that session id.
+2. **Append**: append one event; after quorum commit, ack with `seq`.
+3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
+4. **Archive**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
 
-## Storage tiers
+## Storage model
 
-- **Hot (Raft):**
-  - Conversation metadata (version, tombstone state, watermarks)
-  - Message tail (newest entries, newest-first internally)
-  - Watermarks: `last_seq` (writer), `archived_seq` (trim cursor)
-- **Cold (Archive):**
-  - Full message history in Postgres (optional component)
+- Hot (Raft): session metadata + bounded event tail
+- Cold (optional Postgres): full event history
 
-## Operational notes
+## Notes
 
-- Leader election is automatic. Losing one node leaves the cluster writable (2/3 quorum).
-- Append latency is dominated by network RTT between replicas; keep nodes close.
-- Snapshots are small: they include conversation metadata and the message tail. ETS archive buffers are not part of snapshots.
-- **Topology coordinator**: The lowest node ID (by sort order) manages Raft group membership. Coordinator bootstraps new groups and rebalances replicas when nodes join/leave. Non-coordinators join existing groups and keep local replicas running. If coordinator fails, the next-lowest node automatically takes over.
+- Ordering is monotonic per session (`seq`).
+- Writes are durable before ack.
+- Integrations pull via `tail`; FleetLM does not deliver outbound webhooks.

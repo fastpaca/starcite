@@ -86,14 +86,18 @@ defmodule FleetLMWeb.SessionController do
 
   defp optional_refs(refs) when is_map(refs) and not is_list(refs) do
     with {:ok, _} <- optional_non_neg_integer(Map.get(refs, "to_seq")),
-         {:ok, _} <- optional_non_empty_string(Map.get(refs, "request_id")),
-         {:ok, _} <- optional_non_empty_string(Map.get(refs, "sequence_id")),
+         {:ok, _} <- optional_string(Map.get(refs, "request_id")),
+         {:ok, _} <- optional_string(Map.get(refs, "sequence_id")),
          {:ok, _} <- optional_non_neg_integer(Map.get(refs, "step")) do
       {:ok, refs}
     end
   end
 
   defp optional_refs(_value), do: {:error, :invalid_refs}
+
+  defp optional_string(nil), do: {:ok, nil}
+  defp optional_string(value) when is_binary(value), do: {:ok, value}
+  defp optional_string(_value), do: {:error, :invalid_event}
 
   defp optional_non_neg_integer(nil), do: {:ok, nil}
   defp optional_non_neg_integer(value) when is_integer(value) and value >= 0, do: {:ok, value}

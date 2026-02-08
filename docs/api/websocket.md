@@ -1,95 +1,47 @@
 ---
-title: Websocket
+title: WebSocket API
 sidebar_position: 2
 ---
 
-# Websocket API
+# WebSocket API
 
-FleetLM exposes a backend-only websocket for streaming conversation updates in near real time. It is implemented as a Phoenix Channel.
+FleetLM exposes `tail` as a WebSocket endpoint.
 
-Endpoint:
-
-```
-ws://HOST/socket/websocket
-```
-
-Topic:
+## Endpoint
 
 ```
-conversation:CONVERSATION_ID
+ws://HOST/v1/sessions/:id/tail?cursor=41
 ```
 
-## Example (Phoenix JS client)
+## Semantics
 
-```typescript
-import { Socket } from "phoenix";
+On connect:
 
-const socket = new Socket("ws://localhost:4000/socket", {
-  params: {}
-});
+1. Replay committed events where `seq > cursor`, in ascending order.
+2. Continue streaming newly committed events on the same socket.
+3. On reconnect, use the last processed `seq` as the next `cursor`.
 
-socket.connect();
+## Server frames
 
-const channel = socket.channel("conversation:support-123");
-channel.join();
-
-channel.on("message", payload => {
-  // payload.type === "message"
-  console.log(payload);
-});
-
-channel.on("tombstone", payload => {
-  // payload.type === "tombstone"
-  console.log(payload);
-});
-
-channel.on("gap", payload => {
-  // payload.type === "gap"
-  console.log(payload);
-});
-```
-
-## Event payloads
-
-### Message event
+FleetLM emits one JSON event object per WebSocket text frame:
 
 ```json
 {
-  "type": "message",
-  "seq": 101,
-  "version": 101,
-  "message": {
-    "role": "assistant",
-    "parts": [{ "type": "text", "text": "Got it - checking now." }],
-    "metadata": { "source": "agent" },
-    "token_count": 27
-  }
+  "seq": 42,
+  "type": "state",
+  "payload": { "state": "running" },
+  "actor": "agent:researcher",
+  "source": "agent",
+  "metadata": { "role": "worker", "identity": { "provider": "codex" } },
+  "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
+  "idempotency_key": "run_123-step_8",
+  "inserted_at": "2026-02-08T15:00:01Z"
 }
 ```
 
-Sent whenever a new message is appended to the conversation.
+Notes:
 
-### Tombstone event
-
-```json
-{ "type": "tombstone" }
-```
-
-Sent when the conversation is tombstoned. New appends will be rejected after this event.
-
-### Gap event
-
-```json
-{ "type": "gap", "expected": 120, "actual": 124 }
-```
-
-Indicates the client missed messages. Fetch the missing range via replay:
-
-```
-GET /v1/conversations/:id/messages?from=120&limit=100
-```
-
-## Notes
-
-- This websocket is intended for backend-to-backend use. If you need browser updates, fan out through your own gateway (SSE, WebSocket, Pub/Sub).
-- There are no compaction or prompt-window events. This service only streams message-log updates.
+- No `gap` event in the primary contract.
+- No `tombstone` event in the primary contract.
+- No `tail_synced` event.
+- Tail is server-to-client only; inbound client frames are ignored.

@@ -144,8 +144,8 @@ defmodule FleetLM.Session do
       title: session.title,
       metadata: session.metadata,
       last_seq: session.last_seq,
-      created_at: NaiveDateTime.to_iso8601(session.inserted_at),
-      updated_at: NaiveDateTime.to_iso8601(session.updated_at)
+      created_at: iso8601_utc(session.inserted_at),
+      updated_at: iso8601_utc(session.updated_at)
     }
   end
 
@@ -176,4 +176,12 @@ defmodule FleetLM.Session do
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
   end
+
+  defp iso8601_utc(%NaiveDateTime{} = datetime) do
+    datetime
+    |> DateTime.from_naive!("Etc/UTC")
+    |> DateTime.to_iso8601()
+  end
+
+  defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
 end
