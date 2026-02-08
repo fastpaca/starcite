@@ -53,10 +53,6 @@ fleetlm-*.tar
 npm-debug.log
 /assets/node_modules/
 
-docs-site/node_modules
-docs-site/.docusaurus
-docs-site/build
-
 examples/*/node_modules
 examples/*/.next
 examples/*/.env*
