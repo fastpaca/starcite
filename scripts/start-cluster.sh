@@ -9,6 +9,29 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+wait_for_ready() {
+  local port=$1
+  local attempts=${2:-60}
+  local interval=${3:-1}
+  local url="http://localhost:${port}/health/ready"
+  local health=""
+
+  for ((i = 1; i <= attempts; i++)); do
+    health=$(curl -s "$url" || true)
+    if echo "$health" | grep -q '"status":"ok"'; then
+      echo -e "  ✓ Node on port $port ready"
+      return 0
+    fi
+    sleep "$interval"
+  done
+
+  echo -e "${RED}  ✗ Node on port $port not ready after ${attempts}s${NC}"
+  if [ -n "$health" ]; then
+    echo "    Last response: $health"
+  fi
+  return 1
+}
+
 echo -e "${GREEN}Starting 5-node FleetLM Raft cluster...${NC}"
 echo ""
 
@@ -77,7 +100,20 @@ NODE5_PID=$!
 echo "  PID: $NODE5_PID"
 
 echo ""
-echo -e "${GREEN}Cluster started!${NC}"
+echo "Waiting for all nodes to become ready..."
+for port in 4000 4001 4002 4003 4004; do
+  if ! wait_for_ready "$port" 60 1; then
+    echo ""
+    echo -e "${RED}Cluster failed readiness checks. Recent logs:${NC}"
+    for log_file in logs/node1.log logs/node2.log logs/node3.log logs/node4.log logs/node5.log; do
+      echo "----- $log_file -----"
+      tail -n 40 "$log_file" || true
+    done
+    exit 1
+  fi
+done
+
+echo -e "${GREEN}Cluster started and ready!${NC}"
 echo ""
 echo "Nodes (libcluster CLUSTER_NODES=$CLUSTER_NODES):"
 echo "  node1@127.0.0.1 - http://localhost:4000 (PID: $NODE1_PID)"
