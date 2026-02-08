@@ -32,6 +32,24 @@ wait_for_ready() {
   return 1
 }
 
+wait_for_pid() {
+  local pid=$1
+  local name=$2
+  local attempts=${3:-20}
+  local interval=${4:-1}
+
+  for ((i = 1; i <= attempts; i++)); do
+    if kill -0 "$pid" 2>/dev/null; then
+      echo -e "  ✓ ${name} process up (PID: $pid)"
+      return 0
+    fi
+    sleep "$interval"
+  done
+
+  echo -e "${RED}  ✗ ${name} failed to stay up (PID: $pid)${NC}"
+  return 1
+}
+
 echo -e "${GREEN}Starting 5-node FleetLM Raft cluster...${NC}"
 echo ""
 
@@ -98,6 +116,14 @@ echo -e "${GREEN}Starting node5@127.0.0.1 on port 4004...${NC}"
 nohup env MIX_NO_COMPILE="$MIX_NO_COMPILE" FLEETLM_ARCHIVER_ENABLED="$ARCHIVER_ENABLED" CLUSTER_NODES="$CLUSTER_NODES" PORT=4004 elixir --name node5@127.0.0.1 -S mix phx.server > logs/node5.log 2>&1 &
 NODE5_PID=$!
 echo "  PID: $NODE5_PID"
+
+echo ""
+echo "Verifying all node processes are running..."
+wait_for_pid "$NODE1_PID" "node1@127.0.0.1"
+wait_for_pid "$NODE2_PID" "node2@127.0.0.1"
+wait_for_pid "$NODE3_PID" "node3@127.0.0.1"
+wait_for_pid "$NODE4_PID" "node4@127.0.0.1"
+wait_for_pid "$NODE5_PID" "node5@127.0.0.1"
 
 echo ""
 echo "Waiting for all nodes to become ready..."
