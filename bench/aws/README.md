@@ -28,7 +28,7 @@ terraform apply -var="ssh_public_key=$(cat ~/.ssh/id_rsa.pub)"
 ```bash
 cd ../scripts
 ./deploy.sh
-./smoke-test.sh   # Optional sanity check (creates a conversation, appends, reads)
+./smoke-test.sh   # Optional sanity check (creates a session, appends, checks idempotency)
 ```
 
 **3. Run a benchmark (locally or from the AWS client):**

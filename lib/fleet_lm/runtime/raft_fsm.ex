@@ -1,19 +1,19 @@
 defmodule FleetLM.Runtime.RaftFSM do
   @moduledoc """
-  Minimal Raft state machine for FleetLM message substrate.
+  Raft state machine for FleetLM sessions.
 
-  Stores conversations as append-only message logs. No compaction, no token budgets.
+  Stores append-only session event logs and supports cursor-based replay.
   """
 
   @behaviour :ra_machine
 
-  alias FleetLM.Conversation
+  alias FleetLM.Session
 
   @num_lanes 16
 
   defmodule Lane do
     @moduledoc false
-    defstruct conversations: %{}
+    defstruct sessions: %{}
   end
 
   defstruct [:group_id, :lanes]
@@ -25,59 +25,51 @@ defmodule FleetLM.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(
-        _meta,
-        {:upsert_conversation, lane_id, conversation_id, status, metadata},
-        state
-      ) do
+  def apply(_meta, {:create_session, lane_id, session_id, title, metadata}, state) do
     lane = Map.fetch!(state.lanes, lane_id)
 
-    conversation =
-      case Map.get(lane.conversations, conversation_id) do
-        nil ->
-          Conversation.new(conversation_id, status: status, metadata: metadata)
+    case Map.get(lane.sessions, session_id) do
+      nil ->
+        session = Session.new(session_id, title: title, metadata: metadata)
+        new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, session)}
+        new_state = put_in(state.lanes[lane_id], new_lane)
+        {new_state, {:reply, {:ok, Session.to_map(session)}}}
 
-        %Conversation{} = existing ->
-          Conversation.update(existing, status: status, metadata: metadata)
-      end
-
-    new_lane = %{lane | conversations: Map.put(lane.conversations, conversation_id, conversation)}
-    new_state = put_in(state.lanes[lane_id], new_lane)
-
-    reply = Conversation.to_map(conversation)
-
-    {new_state, {:reply, {:ok, reply}}}
+      %Session{} ->
+        {state, {:reply, {:error, :session_exists}}}
+    end
   end
 
   @impl true
-  def apply(_meta, {:append_batch, lane_id, conversation_id, inbound_messages, opts}, state) do
+  def apply(_meta, {:append_event, lane_id, session_id, input, opts}, state) do
     lane = Map.fetch!(state.lanes, lane_id)
 
-    with {:ok, conversation} <- fetch_conversation(lane, conversation_id),
-         :ok <- ensure_active(conversation),
-         :ok <- guard_version(conversation, opts[:if_version]) do
-      {updated_conversation, appended} = Conversation.append(conversation, inbound_messages)
+    with {:ok, session} <- fetch_session(lane, session_id),
+         :ok <- guard_expected_seq(session, opts[:expected_seq]) do
+      case Session.append_event(session, input) do
+        {:appended, updated_session, event} ->
+          new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
+          new_state = put_in(state.lanes[lane_id], new_lane)
 
-      new_lane = %{
-        lane
-        | conversations: Map.put(lane.conversations, conversation_id, updated_conversation)
-      }
+          FleetLM.Observability.Telemetry.event_appended(
+            session_id,
+            event.type,
+            event.actor,
+            event.source,
+            byte_size(Jason.encode!(event.payload))
+          )
 
-      new_state = put_in(state.lanes[lane_id], new_lane)
+          reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+          effects = build_effects(session_id, event)
+          {new_state, {:reply, {:ok, reply}}, effects}
 
-      reply =
-        Enum.map(appended, fn %{seq: seq, token_count: tokens} ->
-          %{
-            conversation_id: conversation_id,
-            seq: seq,
-            version: updated_conversation.version,
-            token_count: tokens
-          }
-        end)
+        {:deduped, _session, seq} ->
+          reply = %{seq: seq, last_seq: session.last_seq, deduped: true}
+          {state, {:reply, {:ok, reply}}}
 
-      effects = build_effects(conversation_id, appended, updated_conversation)
-
-      {new_state, {:reply, {:ok, reply}}, effects}
+        {:error, :idempotency_conflict} ->
+          {state, {:reply, {:error, :idempotency_conflict}}}
+      end
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
     end
@@ -89,34 +81,27 @@ defmodule FleetLM.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, {:ack_archived, lane_id, conversation_id, upto_seq}, state) do
+  def apply(_meta, {:ack_archived, lane_id, session_id, upto_seq}, state) do
     lane = Map.fetch!(state.lanes, lane_id)
 
-    with {:ok, conversation} <- fetch_conversation(lane, conversation_id) do
-      {updated_conversation, trimmed} = Conversation.persist_ack(conversation, upto_seq)
-
-      new_lane = %{
-        lane
-        | conversations: Map.put(lane.conversations, conversation_id, updated_conversation)
-      }
-
+    with {:ok, session} <- fetch_session(lane, session_id) do
+      {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
+      new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
 
-      # Emit telemetry about archival lag and trim
-      tail_size = length(updated_conversation.message_log.entries)
+      tail_size = length(updated_session.event_log.entries)
 
       FleetLM.Observability.Telemetry.archive_ack_applied(
-        conversation_id,
-        updated_conversation.last_seq,
-        updated_conversation.archived_seq,
+        session_id,
+        updated_session.last_seq,
+        updated_session.archived_seq,
         trimmed,
-        updated_conversation.retention.tail_keep,
-        tail_size,
-        0
+        updated_session.retention.tail_keep,
+        tail_size
       )
 
       {new_state,
-       {:reply, {:ok, %{archived_seq: updated_conversation.archived_seq, trimmed: trimmed}}}}
+       {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: trimmed}}}}
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
     end
@@ -127,41 +112,38 @@ defmodule FleetLM.Runtime.RaftFSM do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Query messages from the tail (newest) with offset-based pagination.
+  Query events with `seq > cursor`, ordered ascending.
   """
-  def query_messages_tail(state, lane_id, conversation_id, offset, limit) do
+  def query_events_from_cursor(state, lane_id, session_id, cursor, limit) do
     with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, conversation} <- fetch_conversation(lane, conversation_id) do
-      Conversation.messages_tail(conversation, offset, limit)
+         {:ok, session} <- fetch_session(lane, session_id) do
+      {:ok, Session.events_from_cursor(session, cursor, limit)}
     else
-      _ -> []
+      _ -> {:error, :session_not_found}
     end
   end
 
   @doc """
-  Query messages by sequence range for replay.
-
-  Returns messages where `seq >= from_seq`, ordered oldest to newest.
+  Query one session by ID.
   """
-  def query_messages_replay(state, lane_id, conversation_id, from_seq, limit) do
+  def query_session(state, lane_id, session_id) do
     with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, conversation} <- fetch_conversation(lane, conversation_id) do
-      Conversation.messages_replay(conversation, from_seq, limit)
+         {:ok, session} <- fetch_session(lane, session_id) do
+      {:ok, session}
     else
-      _ -> []
+      _ -> {:error, :session_not_found}
     end
   end
 
   @doc """
-  Query unarchived messages (seq > archived_seq) up to `limit`.
+  Query unarchived events (seq > archived_seq) up to `limit`.
   """
-  def query_unarchived(state, lane_id, conversation_id, limit) do
+  def query_unarchived(state, lane_id, session_id, limit) do
     with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, %Conversation{} = conversation} <- fetch_conversation(lane, conversation_id) do
-      conversation.message_log
+         {:ok, %Session{} = session} <- fetch_session(lane, session_id) do
+      session.event_log
       |> Map.get(:entries, [])
-      # entries are newest-first; take while strictly newer than archive boundary
-      |> Enum.take_while(fn %{seq: seq} -> seq > conversation.archived_seq end)
+      |> Enum.take_while(fn %{seq: seq} -> seq > session.archived_seq end)
       |> Enum.reverse()
       |> Enum.take(limit)
     else
@@ -169,73 +151,48 @@ defmodule FleetLM.Runtime.RaftFSM do
     end
   end
 
-  @doc """
-  Query a conversation by ID.
-  """
-  def query_conversation(state, lane_id, conversation_id) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, conversation} <- fetch_conversation(lane, conversation_id) do
-      {:ok, conversation}
-    else
-      _ -> {:error, :conversation_not_found}
-    end
-  end
-
-  def query_conversations(state, lane_id) do
-    case Map.fetch(state.lanes, lane_id) do
-      {:ok, %Lane{conversations: conversations}} -> conversations
-      _ -> %{}
-    end
-  end
-
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp fetch_conversation(%Lane{conversations: conversations}, conversation_id) do
-    case Map.get(conversations, conversation_id) do
-      nil -> {:error, :conversation_not_found}
-      conversation -> {:ok, conversation}
+  defp fetch_session(%Lane{sessions: sessions}, session_id) do
+    case Map.get(sessions, session_id) do
+      nil -> {:error, :session_not_found}
+      session -> {:ok, session}
     end
   end
 
-  defp ensure_active(%Conversation{status: :active}), do: :ok
-  defp ensure_active(_), do: {:error, :conversation_tombstoned}
+  defp guard_expected_seq(_session, nil), do: :ok
 
-  defp guard_version(_conversation, nil), do: :ok
+  defp guard_expected_seq(%Session{last_seq: last_seq}, expected_seq)
+       when is_integer(expected_seq) and expected_seq >= 0 and last_seq == expected_seq,
+       do: :ok
 
-  defp guard_version(%Conversation{version: version}, expected) when version == expected, do: :ok
+  defp guard_expected_seq(%Session{last_seq: last_seq}, expected_seq)
+       when is_integer(expected_seq) and expected_seq >= 0,
+       do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
-  defp guard_version(%Conversation{version: version}, _expected),
-    do: {:error, {:version_conflict, version}}
-
-  defp build_effects(conversation_id, messages, conversation) do
-    message_events =
-      Enum.map(messages, fn message ->
-        {
-          :mod_call,
-          Phoenix.PubSub,
-          :broadcast,
-          [
-            FleetLM.PubSub,
-            "conversation:#{conversation_id}",
-            {:message, message_payload(message, conversation)}
-          ]
-        }
-      end)
+  defp build_effects(session_id, event) do
+    stream_event =
+      {
+        :mod_call,
+        Phoenix.PubSub,
+        :broadcast,
+        [
+          FleetLM.PubSub,
+          "session:#{session_id}",
+          {:event, event}
+        ]
+      }
 
     archive_event =
       {
         :mod_call,
         FleetLM.Archive,
-        :append_messages,
-        [conversation_id, messages]
+        :append_events,
+        [session_id, [event]]
       }
 
-    message_events ++ [archive_event]
-  end
-
-  defp message_payload(message, %Conversation{} = conversation) do
-    Map.put(message, :version, conversation.version)
+    [stream_event, archive_event]
   end
 end

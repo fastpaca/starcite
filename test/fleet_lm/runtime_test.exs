@@ -7,296 +7,169 @@ defmodule FleetLM.RuntimeTest do
   alias FleetLM.Runtime.RaftManager
 
   setup do
-    # Clean up any existing Raft groups
-    for group_id <- 0..(RaftManager.num_groups() - 1) do
-      server_id = RaftManager.server_id(group_id)
-      full_server_id = {server_id, Node.self()}
-
-      case Process.whereis(server_id) do
-        nil ->
-          try do
-            :ra.force_delete_server(:default, full_server_id)
-          catch
-            _, _ -> :ok
-          end
-
-        pid ->
-          ref = Process.monitor(pid)
-          Process.exit(pid, :kill)
-
-          receive do
-            {:DOWN, ^ref, :process, ^pid, _} -> :ok
-          after
-            1000 -> :ok
-          end
-
-          try do
-            :ra.force_delete_server(:default, full_server_id)
-          catch
-            _, _ -> :ok
-          end
-      end
-    end
-
-    # Remove residual Raft data on disk
     FleetLM.Runtime.TestHelper.reset()
-
-    # Give Ra time to fully clean up
-    Process.sleep(100)
-
     :ok
   end
 
-  # Helper to generate unique conversation IDs
   defp unique_id(prefix) do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{:rand.uniform(999_999_999)}"
   end
 
-  describe "Runtime.upsert_conversation/2" do
-    test "creates a new conversation via Raft" do
-      {:ok, result} = Runtime.upsert_conversation("conv-1")
+  describe "create/get session" do
+    test "creates a new session with generated id" do
+      {:ok, session} = Runtime.create_session(title: "Draft", metadata: %{workflow: "legal"})
 
-      assert result.id == "conv-1"
-      assert result.version == 0
-      assert result.last_seq == 0
-      assert result.tombstoned == false
+      assert is_binary(session.id)
+      assert String.starts_with?(session.id, "ses_")
+      assert session.title == "Draft"
+      assert session.metadata == %{workflow: "legal"}
+      assert session.last_seq == 0
     end
 
-    test "creates with metadata" do
-      {:ok, result} = Runtime.upsert_conversation("conv-2", metadata: %{user_id: "u_123"})
+    test "creates with caller-provided id and rejects duplicates" do
+      id = unique_id("ses")
 
-      assert result.id == "conv-2"
-      assert result.metadata == %{user_id: "u_123"}
+      {:ok, session} = Runtime.create_session(id: id, title: "Draft")
+      assert session.id == id
+
+      assert {:error, :session_exists} = Runtime.create_session(id: id)
     end
 
-    test "updates an existing conversation" do
-      {:ok, _} = Runtime.upsert_conversation("conv-3", metadata: %{foo: "bar"})
-      {:ok, updated} = Runtime.upsert_conversation("conv-3", metadata: %{foo: "baz"})
+    test "gets existing session" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
 
-      assert updated.metadata == %{foo: "baz"}
-    end
-  end
-
-  describe "Runtime.get_conversation/1" do
-    test "retrieves conversation from Raft" do
-      {:ok, _} = Runtime.upsert_conversation("conv-4")
-
-      messages = [
-        %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-      ]
-
-      {:ok, _} = Runtime.append_messages("conv-4", messages)
-      {:ok, conv} = Runtime.get_conversation("conv-4")
-
-      assert conv.id == "conv-4"
-      assert conv.last_seq == 1
-      assert conv.version > 0
+      {:ok, session} = Runtime.get_session(id)
+      assert session.id == id
+      assert session.last_seq == 0
     end
 
-    test "returns error for non-existent conversation" do
-      assert {:error, _} = Runtime.get_conversation("nonexistent")
+    test "returns not found for missing session" do
+      assert {:error, :session_not_found} = Runtime.get_session("missing")
     end
   end
 
-  describe "Runtime.tombstone_conversation/1" do
-    test "tombstones a conversation" do
-      {:ok, _} = Runtime.upsert_conversation("conv-tomb")
-      {:ok, result} = Runtime.tombstone_conversation("conv-tomb")
-
-      assert result.tombstoned == true
-    end
-
-    test "tombstoned conversation rejects writes" do
-      {:ok, _} = Runtime.upsert_conversation("conv-tomb-write")
-      {:ok, _} = Runtime.tombstone_conversation("conv-tomb-write")
-
-      messages = [%{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}]
-      result = Runtime.append_messages("conv-tomb-write", messages)
-
-      assert {:error, :conversation_tombstoned} = result
-    end
-  end
-
-  describe "Runtime.append_messages/3" do
-    test "appends messages to a conversation" do
-      {:ok, _} = Runtime.upsert_conversation("conv-append")
-
-      messages = [
-        %{role: "user", parts: [%{type: "text", text: "Hello"}], metadata: %{}, token_count: 10},
-        %{role: "assistant", parts: [%{type: "text", text: "Hi"}], metadata: %{}, token_count: 10}
-      ]
-
-      {:ok, results} = Runtime.append_messages("conv-append", messages)
-
-      assert length(results) == 2
-      assert hd(results).seq == 1
-      assert hd(results).conversation_id == "conv-append"
-    end
-
-    test "sequences are monotonically increasing" do
-      {:ok, _} = Runtime.upsert_conversation("conv-seq")
+  describe "append_event/3" do
+    test "appends events with monotonic seq" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
 
       {:ok, r1} =
-        Runtime.append_messages("conv-seq", [
-          %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-        ])
+        Runtime.append_event(id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:1"
+        })
 
       {:ok, r2} =
-        Runtime.append_messages("conv-seq", [
-          %{role: "assistant", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-        ])
+        Runtime.append_event(id, %{
+          type: "content",
+          payload: %{text: "two"},
+          actor: "agent:1"
+        })
 
-      assert hd(r1).seq == 1
-      assert hd(r2).seq == 2
+      assert r1.seq == 1
+      assert r2.seq == 2
+      assert r2.last_seq == 2
+      refute r2.deduped
     end
 
-    test "version guard rejects stale writes (409 Conflict)" do
-      {:ok, _} = Runtime.upsert_conversation("conv-version")
+    test "guards on expected_seq" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
 
       {:ok, _} =
-        Runtime.append_messages("conv-version", [
-          %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-        ])
+        Runtime.append_event(id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:1"
+        })
 
-      # Try to append with wrong version
-      result =
-        Runtime.append_messages(
-          "conv-version",
-          [%{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}],
-          if_version: 0
-        )
+      assert {:error, {:expected_seq_conflict, 0, 1}} =
+               Runtime.append_event(
+                 id,
+                 %{type: "content", payload: %{text: "two"}, actor: "agent:1"},
+                 expected_seq: 0
+               )
+    end
 
-      assert {:error, {:version_conflict, _current}} = result
+    test "dedupes when idempotency key repeats with same payload" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      event = %{
+        type: "state",
+        payload: %{state: "running"},
+        actor: "agent:1",
+        idempotency_key: "k1"
+      }
+
+      {:ok, first} = Runtime.append_event(id, event)
+      {:ok, second} = Runtime.append_event(id, event)
+
+      assert first.seq == second.seq
+      assert second.deduped
+      assert second.last_seq == 1
+    end
+
+    test "errors on idempotency conflict" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      {:ok, _} =
+        Runtime.append_event(id, %{
+          type: "state",
+          payload: %{state: "running"},
+          actor: "agent:1",
+          idempotency_key: "k1"
+        })
+
+      assert {:error, :idempotency_conflict} =
+               Runtime.append_event(id, %{
+                 type: "state",
+                 payload: %{state: "completed"},
+                 actor: "agent:1",
+                 idempotency_key: "k1"
+               })
     end
   end
 
-  describe "Runtime.get_messages_tail/3" do
-    test "retrieves last N messages with default offset" do
-      id = unique_id("tail-last-n")
-      {:ok, _} = Runtime.upsert_conversation(id)
+  describe "get_events_from_cursor/3" do
+    test "returns events strictly after cursor" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
 
-      messages =
-        for _ <- 1..10,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
+      for n <- 1..5 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
 
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      {:ok, result} = Runtime.get_messages_tail(id, 0, 3)
-
-      assert length(result) == 3
-      assert Enum.map(result, & &1.seq) == [8, 9, 10]
-    end
-
-    test "retrieves messages with offset from tail" do
-      id = unique_id("tail-offset")
-      {:ok, _} = Runtime.upsert_conversation(id)
-
-      messages =
-        for _ <- 1..10,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      # Skip last 3, get next 4 (should be seq 4, 5, 6, 7)
-      {:ok, result} = Runtime.get_messages_tail(id, 3, 4)
-
-      assert length(result) == 4
-      assert Enum.map(result, & &1.seq) == [4, 5, 6, 7]
-    end
-
-    test "pagination through entire message history" do
-      id = unique_id("tail-pages")
-      {:ok, _} = Runtime.upsert_conversation(id)
-
-      messages =
-        for _ <- 1..10,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      {:ok, page1} = Runtime.get_messages_tail(id, 0, 3)
-      assert Enum.map(page1, & &1.seq) == [8, 9, 10]
-
-      {:ok, page2} = Runtime.get_messages_tail(id, 3, 3)
-      assert Enum.map(page2, & &1.seq) == [5, 6, 7]
-
-      {:ok, page3} = Runtime.get_messages_tail(id, 6, 3)
-      assert Enum.map(page3, & &1.seq) == [2, 3, 4]
-
-      {:ok, page4} = Runtime.get_messages_tail(id, 9, 3)
-      assert Enum.map(page4, & &1.seq) == [1]
-    end
-
-    test "returns empty list when offset exceeds count" do
-      id = unique_id("tail-empty")
-      {:ok, _} = Runtime.upsert_conversation(id)
-
-      messages =
-        for _ <- 1..5,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      {:ok, result} = Runtime.get_messages_tail(id, 100, 10)
-
-      assert result == []
-    end
-  end
-
-  describe "Runtime.get_messages_replay/3" do
-    test "replays messages from sequence number" do
-      id = unique_id("replay")
-      {:ok, _} = Runtime.upsert_conversation(id)
-
-      messages =
-        for _ <- 1..10,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      # Replay from seq 5
-      {:ok, result} = Runtime.get_messages_replay(id, 5, 100)
-
-      assert length(result) == 6
-      assert Enum.map(result, & &1.seq) == [5, 6, 7, 8, 9, 10]
-    end
-
-    test "respects limit" do
-      id = unique_id("replay-limit")
-      {:ok, _} = Runtime.upsert_conversation(id)
-
-      messages =
-        for _ <- 1..10,
-            do: %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-
-      {:ok, _} = Runtime.append_messages(id, messages)
-
-      {:ok, result} = Runtime.get_messages_replay(id, 1, 3)
-
-      assert length(result) == 3
-      assert Enum.map(result, & &1.seq) == [1, 2, 3]
+      {:ok, events} = Runtime.get_events_from_cursor(id, 2, 100)
+      assert Enum.map(events, & &1.seq) == [3, 4, 5]
     end
   end
 
   describe "Raft failover and recovery" do
     test "recovers state after server crash and restart" do
+      id = unique_id("ses-failover")
+
       capture_log(fn ->
-        {:ok, _} = Runtime.upsert_conversation("conv-failover")
+        {:ok, _} = Runtime.create_session(id: id)
 
-        {:ok, r1} =
-          Runtime.append_messages("conv-failover", [
-            %{
-              role: "user",
-              parts: [%{type: "text", text: "before crash"}],
-              metadata: %{},
-              token_count: 10
-            }
-          ])
+        {:ok, first} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "before crash"},
+            actor: "agent:1"
+          })
 
-        assert hd(r1).seq == 1
+        assert first.seq == 1
 
-        # Kill the Raft group
-        group_id = RaftManager.group_for_conversation("conv-failover")
+        group_id = RaftManager.group_for_session(id)
         server_id = RaftManager.server_id(group_id)
         pid = Process.whereis(server_id)
 
@@ -306,12 +179,10 @@ defmodule FleetLM.RuntimeTest do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
-          2000 -> flunk("Raft process did not die")
+          2_000 -> flunk("Raft process did not die")
         end
 
-        # Restart the group
-        start_result = RaftManager.start_group(group_id)
-        assert start_result in [:ok, {:error, :cluster_not_formed}]
+        assert RaftManager.start_group(group_id) in [:ok, {:error, :cluster_not_formed}]
 
         eventually(
           fn ->
@@ -320,22 +191,17 @@ defmodule FleetLM.RuntimeTest do
           timeout: 3_000
         )
 
-        # Append after crash
-        {:ok, r2} =
-          Runtime.append_messages("conv-failover", [
-            %{
-              role: "user",
-              parts: [%{type: "text", text: "after crash"}],
-              metadata: %{},
-              token_count: 10
-            }
-          ])
+        {:ok, second} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "after crash"},
+            actor: "agent:1"
+          })
 
-        assert hd(r2).seq >= 2
+        assert second.seq >= 2
 
-        # Verify both messages exist
-        {:ok, messages} = Runtime.get_messages_tail("conv-failover", 0, 10)
-        texts = Enum.map(messages, &(&1.parts |> hd() |> Map.get(:text)))
+        {:ok, events} = Runtime.get_events_from_cursor(id, 0, 100)
+        texts = Enum.map(events, &Map.get(&1.payload, :text))
 
         assert "before crash" in texts
         assert "after crash" in texts
@@ -344,25 +210,27 @@ defmodule FleetLM.RuntimeTest do
   end
 
   describe "Concurrent access" do
-    test "multiple conversations can be appended concurrently" do
-      # Create 10 conversations
-      for i <- 1..10 do
-        {:ok, _} = Runtime.upsert_conversation("conv-concurrent-#{i}")
-      end
-
-      # Append to all concurrently
-      tasks =
+    test "multiple sessions can append concurrently" do
+      ids =
         for i <- 1..10 do
-          Task.async(fn ->
-            Runtime.append_messages("conv-concurrent-#{i}", [
-              %{role: "user", parts: [%{type: "text"}], metadata: %{}, token_count: 10}
-            ])
-          end)
+          id = "ses-concurrent-#{i}"
+          {:ok, _} = Runtime.create_session(id: id)
+          id
         end
 
-      results = Task.await_many(tasks, 5000)
+      tasks =
+        Enum.map(ids, fn id ->
+          Task.async(fn ->
+            Runtime.append_event(id, %{
+              type: "content",
+              payload: %{text: "hello"},
+              actor: "agent:1"
+            })
+          end)
+        end)
 
-      # All should succeed
+      results = Task.await_many(tasks, 5_000)
+
       assert Enum.all?(results, fn
                {:ok, _} -> true
                _ -> false
@@ -370,12 +238,10 @@ defmodule FleetLM.RuntimeTest do
     end
   end
 
-  # Helper to wait for eventually condition
   defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
-    timeout = Keyword.get(opts, :timeout, 1000)
+    timeout = Keyword.get(opts, :timeout, 1_000)
     interval = Keyword.get(opts, :interval, 50)
     deadline = System.monotonic_time(:millisecond) + timeout
-
     do_eventually(fun, deadline, interval)
   end
 

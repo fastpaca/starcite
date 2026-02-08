@@ -2,7 +2,7 @@ defmodule FleetLM.Archive.Adapter.Postgres do
   @moduledoc """
   Postgres archive adapter using Ecto.
 
-  Inserts messages in batches with ON CONFLICT DO NOTHING for idempotency.
+  Inserts events in batches with ON CONFLICT DO NOTHING for idempotency.
   """
 
   @behaviour FleetLM.Archive.Adapter
@@ -17,12 +17,12 @@ defmodule FleetLM.Archive.Adapter.Postgres do
   @impl true
   def init(state), do: {:ok, state}
 
-  # Postgres parameter limit is 65535. With 7 fields per message,
-  # we can safely insert ~9000 messages per batch. Use 5000 to be safe.
+  # Postgres parameter limit is 65535. With 10 fields per event,
+  # we can safely insert ~6000 rows per batch. Use 5000 to be safe.
   @chunk_size 5_000
 
   @impl true
-  def write_messages(rows) when is_list(rows) do
+  def write_events(rows) when is_list(rows) do
     if rows == [] do
       {:ok, 0}
     else
@@ -42,24 +42,25 @@ defmodule FleetLM.Archive.Adapter.Postgres do
     entries =
       Enum.map(rows, fn row ->
         %{
-          conversation_id: row.conversation_id,
+          session_id: row.session_id,
           seq: row.seq,
-          role: row.role,
-          # Encode to JSON string for jsonb columns
-          parts: Jason.encode!(row.parts),
+          type: row.type,
+          actor: row.actor,
+          source: row.source,
+          payload: Jason.encode!(row.payload),
           metadata: Jason.encode!(row.metadata),
-          token_count: row.token_count,
-          # Convert NaiveDateTime to DateTime for timestamptz
+          refs: Jason.encode!(row.refs),
+          idempotency_key: row.idempotency_key,
           inserted_at: DateTime.from_naive!(row.inserted_at, "Etc/UTC")
         }
       end)
 
     Repo.insert_all(
-      "messages",
+      "events",
       entries,
-      placeholders: %{parts: :string, metadata: :string},
+      placeholders: %{payload: :string, metadata: :string, refs: :string},
       on_conflict: :nothing,
-      conflict_target: [:conversation_id, :seq]
+      conflict_target: [:session_id, :seq]
     )
   end
 end

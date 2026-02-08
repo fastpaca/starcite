@@ -11,5 +11,5 @@ defmodule FleetLM.Archive.TestAdapter do
   def init(state), do: {:ok, state}
 
   @impl true
-  def write_messages(rows) when is_list(rows), do: {:ok, length(rows)}
+  def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
 end

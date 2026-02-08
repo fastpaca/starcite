@@ -1,66 +1,79 @@
 defmodule FleetLMWeb.FallbackController do
   @moduledoc """
-  Fallback controller for error handling.
-
-  Error codes per spec:
-  - 400 Bad Request: invalid payload shape
-  - 404 Not Found: conversation does not exist
-  - 409 Conflict: version mismatch
-  - 410 Gone: conversation is tombstoned
+  Fallback controller for API error handling.
   """
   use FleetLMWeb, :controller
 
-  def call(conn, {:error, :not_found}) do
-    conn
-    |> put_status(:not_found)
-    |> json(%{error: "not_found"})
+  def call(conn, {:error, :session_not_found}) do
+    error(conn, :not_found, "session_not_found", "Session was not found")
   end
 
-  def call(conn, {:error, :conversation_not_found}) do
-    conn
-    |> put_status(:not_found)
-    |> json(%{error: "conversation_not_found"})
+  def call(conn, {:error, :session_exists}) do
+    error(conn, :conflict, "session_exists", "Session already exists")
   end
 
-  def call(conn, {:error, {:version_conflict, current}}) do
-    conn
-    |> put_status(:conflict)
-    |> json(%{error: "conflict", message: "Version mismatch (current: #{current})"})
+  def call(conn, {:error, {:expected_seq_conflict, expected, current}}) do
+    error(
+      conn,
+      :conflict,
+      "expected_seq_conflict",
+      "Expected seq #{expected}, current seq is #{current}"
+    )
   end
 
-  # Tombstoned conversations return 410 Gone per spec
-  def call(conn, {:error, :conversation_tombstoned}) do
-    conn
-    |> put_status(:gone)
-    |> json(%{error: "conversation_tombstoned", message: "Conversation is tombstoned"})
+  def call(conn, {:error, {:expected_seq_conflict, current}}) do
+    error(conn, :conflict, "expected_seq_conflict", "Current seq is #{current}")
+  end
+
+  def call(conn, {:error, :idempotency_conflict}) do
+    error(
+      conn,
+      :conflict,
+      "idempotency_conflict",
+      "Idempotency key was already used with different event content"
+    )
   end
 
   def call(conn, {:timeout, _leader}) do
-    conn
-    |> put_status(:service_unavailable)
-    |> json(%{error: "raft_timeout"})
+    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
+  end
+
+  def call(conn, {:error, {:timeout, _leader}}) do
+    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
   end
 
   def call(conn, {:error, {:no_available_replicas, _failures}}) do
-    conn
-    |> put_status(:service_unavailable)
-    |> json(%{error: "raft_unavailable"})
+    error(conn, :service_unavailable, "raft_unavailable", "No available replicas")
   end
 
   def call(conn, {:error, reason})
       when reason in [
-             :invalid_message,
+             :invalid_event,
              :invalid_metadata,
-             :invalid_conversation_config
+             :invalid_refs,
+             :invalid_cursor,
+             :invalid_websocket_upgrade,
+             :invalid_session,
+             :invalid_session_id
            ] do
-    conn
-    |> put_status(:bad_request)
-    |> json(%{error: to_string(reason)})
+    error(conn, :bad_request, to_string(reason), reason_message(reason))
   end
 
-  def call(conn, {:error, reason}) do
+  def call(conn, {:error, _reason}) do
+    error(conn, :internal_server_error, "internal_error", "Internal server error")
+  end
+
+  defp reason_message(:invalid_event), do: "Invalid event payload"
+  defp reason_message(:invalid_metadata), do: "Invalid metadata payload"
+  defp reason_message(:invalid_refs), do: "Invalid refs payload"
+  defp reason_message(:invalid_cursor), do: "Invalid cursor value"
+  defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
+  defp reason_message(:invalid_session), do: "Invalid session payload"
+  defp reason_message(:invalid_session_id), do: "Invalid session id"
+
+  defp error(conn, status, error, message) do
     conn
-    |> put_status(:internal_server_error)
-    |> json(%{error: inspect(reason)})
+    |> put_status(status)
+    |> json(%{error: error, message: message})
   end
 end

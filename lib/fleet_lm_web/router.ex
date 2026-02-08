@@ -8,15 +8,9 @@ defmodule FleetLMWeb.Router do
   scope "/v1", FleetLMWeb do
     pipe_through :api
 
-    # Conversation lifecycle
-    put "/conversations/:id", ConversationController, :upsert
-    get "/conversations/:id", ConversationController, :show
-    delete "/conversations/:id", ConversationController, :delete
-
-    # Messages
-    post "/conversations/:id/messages", ConversationController, :append
-    get "/conversations/:id/tail", ConversationController, :tail
-    get "/conversations/:id/messages", ConversationController, :replay
+    post "/sessions", SessionController, :create
+    post "/sessions/:id/append", SessionController, :append
+    get "/sessions/:id/tail", TailController, :tail
   end
 
   scope "/", FleetLMWeb do

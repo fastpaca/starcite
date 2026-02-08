@@ -2,8 +2,8 @@ defmodule FleetLM.Archive do
   @moduledoc """
   Leader-local archive queue and flush loop.
 
-  - append_messages/2 is invoked by the Raft FSM effects after commits
-  - holds pending messages in ETS until flushed to cold storage
+  - append_events/2 is invoked by the Raft FSM effects after commits
+  - holds pending events in ETS until flushed to cold storage
   - after flush, advances archive watermark via Runtime.ack_archived/2
 
   Designed so adapters for Postgres or S3 can be plugged in without touching
@@ -14,18 +14,22 @@ defmodule FleetLM.Archive do
 
   alias FleetLM.Runtime
 
-  @messages_tab :fleet_lm_archive_messages
-  @conversations_tab :fleet_lm_archive_conversations
+  @events_tab :fleet_lm_archive_events
+  @sessions_tab :fleet_lm_archive_sessions
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
-  @doc "Append committed messages to the pending archive queue (ETS)."
-  @spec append_messages(String.t(), [map()]) :: :ok
-  def append_messages(conversation_id, messages)
-      when is_binary(conversation_id) and is_list(messages) do
+  @doc """
+  Append committed events to the pending archive queue (ETS).
+
+  Events are normalized into the archive row shape used by adapters.
+  """
+  @spec append_events(String.t(), [map()]) :: :ok
+  def append_events(session_id, events)
+      when is_binary(session_id) and is_list(events) do
     case Process.whereis(__MODULE__) do
       nil -> :ok
-      _pid -> GenServer.cast(__MODULE__, {:append, conversation_id, messages})
+      _pid -> GenServer.cast(__MODULE__, {:append, session_id, events})
     end
 
     :ok
@@ -34,8 +38,8 @@ defmodule FleetLM.Archive do
   @impl true
   def init(opts) do
     # ETS tables (uncapped by design)
-    :ets.new(@messages_tab, [:ordered_set, :public, :named_table, {:read_concurrency, true}])
-    :ets.new(@conversations_tab, [:set, :public, :named_table, {:read_concurrency, true}])
+    :ets.new(@events_tab, [:ordered_set, :public, :named_table, {:read_concurrency, true}])
+    :ets.new(@sessions_tab, [:set, :public, :named_table, {:read_concurrency, true}])
 
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.fetch!(opts, :adapter)
@@ -54,13 +58,13 @@ defmodule FleetLM.Archive do
   end
 
   @impl true
-  def handle_cast({:append, conversation_id, messages}, state) do
-    Enum.each(messages, fn msg ->
-      key = {conversation_id, msg.seq}
-      :ets.insert(@messages_tab, {key, msg})
+  def handle_cast({:append, session_id, events}, state) do
+    Enum.each(events, fn event ->
+      key = {session_id, event.seq}
+      :ets.insert(@events_tab, {key, normalize_event(event)})
     end)
 
-    :ets.insert(@conversations_tab, {conversation_id, :pending})
+    :ets.insert(@sessions_tab, {session_id, :pending})
     {:noreply, state}
   end
 
@@ -77,36 +81,36 @@ defmodule FleetLM.Archive do
 
   defp flush_all(%{adapter: adapter} = state) do
     start = System.monotonic_time(:millisecond)
-    conversations = conversations_list()
+    session_ids = sessions_list()
 
     {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total} =
-      Enum.reduce(conversations, {0, 0, 0, 0}, fn conversation_id,
-                                                  {attempted_acc, inserted_acc, bytes_att_acc,
-                                                   bytes_ins_acc} ->
-        rows = take_pending_rows(conversation_id, state)
-        attempted = length(rows)
-        bytes_attempted = Enum.reduce(rows, 0, fn r, acc -> acc + approx_bytes(r) end)
+      Enum.reduce(session_ids, {0, 0, 0, 0}, fn session_id,
+                                                {attempted_acc, inserted_acc, bytes_att_acc,
+                                                 bytes_ins_acc} ->
+        events = take_pending_events(session_id, state)
+        attempted = length(events)
+        bytes_attempted = Enum.reduce(events, 0, fn event, acc -> acc + approx_bytes(event) end)
 
-        if rows != [] do
-          case adapter.write_messages(rows) do
+        if events != [] do
+          case adapter.write_events(events) do
             {:ok, _count} ->
-              upto_seq = contiguous_upto(rows)
+              upto_seq = contiguous_upto(events)
 
-              case Runtime.ack_archived(conversation_id, upto_seq) do
+              case Runtime.ack_archived(session_id, upto_seq) do
                 {:ok, %{archived_seq: _archived, trimmed: _}} ->
-                  trim_local(conversation_id, upto_seq)
-                  pending_after = pending_count(conversation_id)
-                  avg_msg_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
+                  trim_local(session_id, upto_seq)
+                  pending_after = pending_count(session_id)
+                  avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
                   FleetLM.Observability.Telemetry.archive_batch(
-                    conversation_id,
+                    session_id,
                     attempted,
                     bytes_attempted,
-                    avg_msg_bytes,
+                    avg_event_bytes,
                     pending_after
                   )
 
-                  maybe_clear_conversation(conversation_id)
+                  maybe_clear_session(session_id)
 
                   {attempted_acc + attempted, inserted_acc + attempted,
                    bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
@@ -126,8 +130,8 @@ defmodule FleetLM.Archive do
       end)
 
     elapsed = System.monotonic_time(:millisecond) - start
-    pending_rows = :ets.info(@messages_tab, :size) || 0
-    pending_conversations = :ets.info(@conversations_tab, :size) || 0
+    pending_events = :ets.info(@events_tab, :size) || 0
+    pending_sessions = :ets.info(@sessions_tab, :size) || 0
 
     # Emit queue age gauge
     age_seconds = oldest_age_seconds()
@@ -137,8 +141,8 @@ defmodule FleetLM.Archive do
       elapsed,
       attempted_total,
       inserted_total,
-      pending_rows,
-      pending_conversations,
+      pending_events,
+      pending_sessions,
       bytes_attempted_total,
       bytes_inserted_total
     )
@@ -146,30 +150,32 @@ defmodule FleetLM.Archive do
     :ok
   end
 
-  defp approx_bytes(%{parts: parts, metadata: metadata}) do
-    # Approximate payload size by JSON-encoding parts & metadata
-    byte_size(Jason.encode!(parts)) + byte_size(Jason.encode!(metadata))
+  defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do
+    # Approximate payload size by JSON-encoding primary dynamic fields.
+    byte_size(Jason.encode!(payload)) +
+      byte_size(Jason.encode!(metadata)) +
+      byte_size(Jason.encode!(refs))
   end
 
-  defp conversations_list do
-    :ets.tab2list(@conversations_tab) |> Enum.map(fn {id, _} -> id end)
+  defp sessions_list do
+    :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _} -> id end)
   end
 
-  defp take_pending_rows(conversation_id, _state) do
-    # Select a chunk of rows in seq-ascending order for this conversation
+  defp take_pending_events(session_id, _state) do
+    # Select a chunk of rows in seq-ascending order for this session
     limit = Application.get_env(:fleet_lm, :archive_batch_size, 5_000)
 
     ms = [
       {
-        {{conversation_id, :"$1"}, :"$2"},
+        {{session_id, :"$1"}, :"$2"},
         [],
         [{{:"$1", :"$2"}}]
       }
     ]
 
-    select_take(@messages_tab, ms, limit)
-    |> Enum.map(fn {seq, msg} ->
-      Map.put(msg, :conversation_id, conversation_id) |> Map.put(:seq, seq)
+    select_take(@events_tab, ms, limit)
+    |> Enum.map(fn {seq, event} ->
+      Map.put(event, :session_id, session_id) |> Map.put(:seq, seq)
     end)
     |> Enum.sort_by(& &1.seq)
   end
@@ -222,53 +228,53 @@ defmodule FleetLM.Archive do
     |> elem(1)
   end
 
-  defp trim_local(conversation_id, upto_seq) do
-    # Delete all rows for this conversation with seq <= upto_seq
+  defp trim_local(session_id, upto_seq) do
+    # Delete all rows for this session with seq <= upto_seq
     ms = [
       {
-        {{conversation_id, :"$1"}, :"$2"},
+        {{session_id, :"$1"}, :"$2"},
         [{:"=<", :"$1", upto_seq}],
         [true]
       }
     ]
 
-    :ets.select_delete(@messages_tab, ms)
+    :ets.select_delete(@events_tab, ms)
     :ok
   end
 
-  defp maybe_clear_conversation(conversation_id) do
-    # If no rows remain for this conversation, clear it from conversations_tab
+  defp maybe_clear_session(session_id) do
+    # If no rows remain for this session, clear it from sessions_tab
     ms = [
       {
-        {{conversation_id, :"$1"}, :"$2"},
+        {{session_id, :"$1"}, :"$2"},
         [],
         [true]
       }
     ]
 
-    case :ets.select(@messages_tab, ms, 1) do
-      {[], _} -> :ets.delete(@conversations_tab, conversation_id)
+    case :ets.select(@events_tab, ms, 1) do
+      {[], _} -> :ets.delete(@sessions_tab, session_id)
       _ -> :ok
     end
   end
 
-  defp pending_count(conversation_id) do
+  defp pending_count(session_id) do
     ms = [
       {
-        {{conversation_id, :"$1"}, :"$2"},
+        {{session_id, :"$1"}, :"$2"},
         [],
         [true]
       }
     ]
 
-    :ets.select_count(@messages_tab, ms)
+    :ets.select_count(@events_tab, ms)
   end
 
   defp oldest_age_seconds do
     now = NaiveDateTime.utc_now()
-    conversations = conversations_list()
+    session_ids = sessions_list()
 
-    conversations
+    session_ids
     |> Enum.map(&first_row_ts/1)
     |> Enum.reject(&is_nil/1)
     |> Enum.map(fn ts -> max(NaiveDateTime.diff(now, ts, :second), 0) end)
@@ -278,18 +284,31 @@ defmodule FleetLM.Archive do
     end
   end
 
-  defp first_row_ts(conversation_id) do
+  defp first_row_ts(session_id) do
     ms = [
       {
-        {{conversation_id, :"$1"}, :"$2"},
+        {{session_id, :"$1"}, :"$2"},
         [],
         [:"$2"]
       }
     ]
 
-    case :ets.select(@messages_tab, ms, 1) do
-      {[msg], _cont} -> Map.get(msg, :inserted_at)
+    case :ets.select(@events_tab, ms, 1) do
+      {[event], _cont} -> Map.get(event, :inserted_at)
       _ -> nil
     end
+  end
+
+  defp normalize_event(event) do
+    %{
+      type: Map.get(event, :type),
+      payload: Map.get(event, :payload, %{}),
+      actor: Map.get(event, :actor),
+      source: Map.get(event, :source),
+      metadata: Map.get(event, :metadata, %{}),
+      refs: Map.get(event, :refs, %{}),
+      idempotency_key: Map.get(event, :idempotency_key),
+      inserted_at: Map.get(event, :inserted_at, NaiveDateTime.utc_now())
+    }
   end
 end

@@ -1,46 +1,19 @@
 /**
- * FleetLM Scenario 4: Durability Cadence
+ * FleetLM Scenario 4: Sustained Ordered Appends
  *
- * Sustained append workload that periodically reads the tail to ensure
- * data is durable and sequence numbers are monotonic.
- *
- * Profile:
- * - sessionCount conversations (default 10)
- * - Constant VUs for configurable duration (default 3m)
- * - Every 10th iteration fetches the tail to verify durability
- *
- * Thresholds (Pass/Fail):
- * - append_latency p99 < 200ms
- * - http_req_failed < 1%
- * - durability_check == 1 (tail replay matches appended count)
- *
- * Usage:
- *   k6 run bench/k6/4-durability-cadence.js
- *
- *   # Longer soak
- *   k6 run -e DURATION=15m bench/k6/4-durability-cadence.js
+ * Sustained append workload with strict expected_seq guards.
  */
 
 import { check } from 'k6';
 import { Counter, Trend, Rate } from 'k6/metrics';
 import * as lib from './lib.js';
 
-// ============================================================================
-// Metrics
-// ============================================================================
-
-const messagesSent = new Counter('messages_sent');
+const eventsSent = new Counter('events_sent');
 const appendLatency = new Trend('append_latency', true);
-const tailLatency = new Trend('tail_latency', true);
-const durabilityCheck = new Rate('durability_check');
-
-// ============================================================================
-// Test Configuration
-// ============================================================================
+const orderingCheck = new Rate('ordering_check');
 
 const sessionCount = Number(__ENV.SESSION_COUNT || 10);
 const duration = __ENV.DURATION || '3m';
-const verifyTailLimit = Number(__ENV.VERIFY_TAIL_LIMIT || 2000);
 
 export const options = {
   setupTimeout: '120s',
@@ -58,25 +31,19 @@ export const options = {
       { threshold: 'p(95)<120', abortOnFail: false },
       { threshold: 'p(99)<200', abortOnFail: false },
     ],
-    durability_check: [{ threshold: 'rate==1', abortOnFail: true }],
+    ordering_check: [{ threshold: 'rate==1', abortOnFail: true }],
   },
 };
 
-// ============================================================================
-// Setup
-// ============================================================================
-
 export function setup() {
-  console.log('Setting up durability cadence benchmark...');
+  console.log('Setting up sustained ordered append benchmark...');
   console.log(`Run ID: ${lib.config.runId}`);
-  console.log(`Conversations: ${sessionCount}`);
-  console.log(`Duration: ${duration}`);
 
-  const conversations = {};
+  const sessions = {};
 
   for (let vuId = 1; vuId <= sessionCount; vuId++) {
-    const convId = lib.conversationId('durability', vuId);
-    lib.ensureConversation(convId, {
+    const id = lib.sessionId('durability', vuId);
+    lib.ensureSession(id, {
       metadata: {
         bench: true,
         scenario: 'durability_cadence',
@@ -84,118 +51,55 @@ export function setup() {
         run_id: lib.config.runId,
       },
     });
-    conversations[vuId] = { conversationId: convId, appended: 0, lastSeq: 0, version: 0 };
+    sessions[vuId] = { sessionId: id, lastSeq: 0 };
   }
 
   return {
     runId: lib.config.runId,
-    conversations,
-    verifyTailLimit,
+    sessions,
   };
 }
 
-// ============================================================================
-// Main Test
-// ============================================================================
-
 export default function (data) {
   const vuId = __VU;
-  const conv = data.conversations[vuId];
-  if (!conv) {
-    return;
-  }
+  const session = data.sessions[vuId];
+  if (!session) return;
 
-  const messageSeq = conv.appended + 1;
-  const messageText = `durability message run=${data.runId} vu=${vuId} seq=${messageSeq}`;
-
-  const { res, json } = lib.appendMessage(
-    conv.conversationId,
+  const expected = session.lastSeq;
+  const { res, json } = lib.appendEvent(
+    session.sessionId,
     {
-      role: 'assistant',
-      parts: [{ type: 'text', text: messageText }],
+      type: 'content',
+      payload: { text: `durability run=${data.runId} vu=${vuId} iter=${__ITER}` },
+      actor: `agent:vu:${vuId}`,
+      source: 'benchmark',
       metadata: {
         bench: true,
         scenario: 'durability_cadence',
         vu: vuId,
-        seq: messageSeq,
         iter: __ITER,
       },
-    }
+    },
+    { expectedSeq: expected }
   );
 
   appendLatency.add(res.timings.duration);
-  messagesSent.add(1);
+  eventsSent.add(1);
 
   const ok = check(res, {
-    'append ok': (r) => r.status >= 200 && r.status < 300,
+    'append success': (r) => r.status >= 200 && r.status < 300,
   });
 
   if (!ok) {
-    console.error(`VU${vuId}: append failed status=${res.status} body=${res.body}`);
+    orderingCheck.add(false);
     return;
   }
 
-  conv.appended = messageSeq;
-
-  if (json) {
-    if (typeof json.seq === 'number') {
-      conv.lastSeq = json.seq;
-    }
-    if (typeof json.version === 'number') {
-      conv.version = json.version;
-    }
+  if (json && typeof json.seq === 'number') {
+    const ordered = json.seq === expected + 1;
+    orderingCheck.add(ordered);
+    session.lastSeq = json.seq;
+  } else {
+    orderingCheck.add(false);
   }
-
-  // Every 10th iteration, fetch the tail to verify durability
-  if (conv.appended % 10 === 0) {
-    const { res: tailRes } = lib.getTail(conv.conversationId, { limit: 10 });
-    tailLatency.add(tailRes.timings.duration);
-
-    check(tailRes, {
-      'tail fetch ok': (r) => r.status === 200,
-    });
-  }
-}
-
-// ============================================================================
-// Teardown
-// ============================================================================
-
-export function teardown(data) {
-  console.log('Verifying durability tail across conversations...');
-
-  Object.values(data.conversations).forEach((conv) => {
-    if (!conv || conv.appended === 0) {
-      durabilityCheck.add(true);
-      return;
-    }
-
-    const limit = Math.min(conv.appended, data.verifyTailLimit);
-    // Replay from beginning to get all messages
-    const { res, json } = lib.getMessages(conv.conversationId, {
-      from_seq: 1,
-      limit,
-    });
-
-    const ok = res.status === 200 && json && Array.isArray(json.messages);
-    if (!ok) {
-      console.error(
-        `Durability check failed conversation=${conv.conversationId} status=${res.status} body=${res.body}`
-      );
-      durabilityCheck.add(false);
-      return;
-    }
-
-    const tailLength = json.messages.length;
-    const lastMessage = tailLength > 0 ? json.messages[tailLength - 1] : null;
-    const seqMatches = lastMessage ? lastMessage.seq === conv.lastSeq : conv.lastSeq === 0;
-
-    durabilityCheck.add(seqMatches);
-
-    if (!seqMatches) {
-      console.error(
-        `Seq mismatch conversation=${conv.conversationId} expected=${conv.lastSeq} got=${lastMessage ? lastMessage.seq : 'none'}`
-      );
-    }
-  });
 }

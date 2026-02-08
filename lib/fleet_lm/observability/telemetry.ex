@@ -4,30 +4,31 @@ defmodule FleetLM.Observability.Telemetry do
 
   Exposes small, purpose-built emitters that wrap `:telemetry.execute/3`.
 
-  Note: This is a message substrate - no LLM token budgets or compaction metrics.
+  Note: This is an event substrate - no LLM token budgets or compaction metrics.
   """
-
-  @type token_source :: :client | :server
 
   @doc """
-  Emit an event when a message is appended, including token counting source.
+  Emit an event when an event is appended to a session.
 
   Measurements:
-    - `:token_count` – integer token count for the message (client metadata)
+    - `:payload_bytes` – approximate JSON payload bytes for the event
 
   Metadata:
-    - `:conversation_id` – conversation identifier
-    - `:source` – `:client` or `:server` depending on who supplied the count
-    - `:role` – message role (user/assistant/system)
+    - `:session_id` – session identifier
+    - `:type` – event type
+    - `:actor` – producer identifier
+    - `:source` – optional producer class (for example `agent`, `user`, `system`)
   """
-  @spec message_appended(token_source(), non_neg_integer(), String.t(), String.t()) :: :ok
-  def message_appended(source, token_count, conversation_id, role)
-      when source in [:client, :server] and is_integer(token_count) and token_count >= 0 and
-             is_binary(conversation_id) and is_binary(role) do
+  @spec event_appended(String.t(), String.t(), String.t(), String.t() | nil, non_neg_integer()) ::
+          :ok
+  def event_appended(session_id, type, actor, source, payload_bytes)
+      when is_binary(session_id) and is_binary(type) and type != "" and is_binary(actor) and
+             actor != "" and (is_binary(source) or is_nil(source)) and is_integer(payload_bytes) and
+             payload_bytes >= 0 do
     :telemetry.execute(
-      [:fleet_lm, :messages, :append],
-      %{token_count: token_count},
-      %{conversation_id: conversation_id, source: source, role: role}
+      [:fleet_lm, :events, :append],
+      %{payload_bytes: payload_bytes},
+      %{session_id: session_id, type: type, actor: actor, source: source}
     )
 
     :ok
@@ -40,8 +41,8 @@ defmodule FleetLM.Observability.Telemetry do
     - `:elapsed_ms` – time spent in flush loop
     - `:attempted` – rows attempted to write
     - `:inserted` – rows successfully inserted (idempotent)
-    - `:pending_rows` – total pending rows in ETS after flush
-    - `:pending_conversations` – total conversations with pending rows after flush
+    - `:pending_events` – total pending rows in ETS after flush
+    - `:pending_sessions` – total sessions with pending rows after flush
   """
   @spec archive_flush(
           non_neg_integer(),
@@ -56,23 +57,23 @@ defmodule FleetLM.Observability.Telemetry do
         elapsed_ms,
         attempted,
         inserted,
-        pending_rows,
-        pending_conversations,
+        pending_events,
+        pending_sessions,
         bytes_attempted,
         bytes_inserted
       )
       when is_integer(elapsed_ms) and elapsed_ms >= 0 and is_integer(attempted) and attempted >= 0 and
-             is_integer(inserted) and inserted >= 0 and is_integer(pending_rows) and
-             pending_rows >= 0 and
-             is_integer(pending_conversations) and pending_conversations >= 0 do
+             is_integer(inserted) and inserted >= 0 and is_integer(pending_events) and
+             pending_events >= 0 and
+             is_integer(pending_sessions) and pending_sessions >= 0 do
     :telemetry.execute(
       [:fleet_lm, :archive, :flush],
       %{
         elapsed_ms: elapsed_ms,
         attempted: attempted,
         inserted: inserted,
-        pending_rows: pending_rows,
-        pending_conversations: pending_conversations,
+        pending_events: pending_events,
+        pending_sessions: pending_sessions,
         bytes_attempted: bytes_attempted,
         bytes_inserted: bytes_inserted
       },
@@ -86,12 +87,12 @@ defmodule FleetLM.Observability.Telemetry do
   Emit an event when an archive acknowledgement is applied by Raft.
 
   Measurements:
-    - `:lag` – last_seq - archived_seq (messages)
+    - `:lag` – last_seq - archived_seq (events)
     - `:trimmed` – number of entries removed from the tail
     - `:tail_size` – entries currently in the tail after trim
 
   Metadata:
-    - `:conversation_id`
+    - `:session_id`
     - `:archived_seq`
     - `:last_seq`
     - `:tail_keep`
@@ -102,19 +103,17 @@ defmodule FleetLM.Observability.Telemetry do
           non_neg_integer(),
           non_neg_integer(),
           pos_integer(),
-          non_neg_integer(),
           non_neg_integer()
         ) :: :ok
   def archive_ack_applied(
-        conversation_id,
+        session_id,
         last_seq,
         archived_seq,
         trimmed,
         tail_keep,
-        tail_size,
-        _token_count \\ 0
+        tail_size
       )
-      when is_binary(conversation_id) and is_integer(last_seq) and last_seq >= 0 and
+      when is_binary(session_id) and is_integer(last_seq) and last_seq >= 0 and
              is_integer(archived_seq) and
              archived_seq >= 0 and is_integer(trimmed) and trimmed >= 0 and is_integer(tail_keep) and
              tail_keep > 0 do
@@ -124,7 +123,7 @@ defmodule FleetLM.Observability.Telemetry do
       [:fleet_lm, :archive, :ack],
       %{lag: lag, trimmed: trimmed, tail_size: tail_size},
       %{
-        conversation_id: conversation_id,
+        session_id: session_id,
         archived_seq: archived_seq,
         last_seq: last_seq,
         tail_keep: tail_keep
@@ -135,16 +134,16 @@ defmodule FleetLM.Observability.Telemetry do
   end
 
   @doc """
-  Emit an event per archived batch (per conversation).
+  Emit an event per archived batch (per session).
 
   Measurements:
     - `:batch_rows` – number of rows in batch
     - `:batch_bytes` – total payload bytes in batch (approx)
-    - `:avg_message_bytes` – average payload bytes per message in batch
-    - `:pending_after` – pending rows left for this conversation after trim
+    - `:avg_event_bytes` – average payload bytes per event in batch
+    - `:pending_after` – pending rows left for this session after trim
 
   Metadata:
-    - `:conversation_id`
+    - `:session_id`
   """
   @spec archive_batch(
           String.t(),
@@ -153,26 +152,26 @@ defmodule FleetLM.Observability.Telemetry do
           non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def archive_batch(conversation_id, batch_rows, batch_bytes, avg_message_bytes, pending_after)
-      when is_binary(conversation_id) and is_integer(batch_rows) and batch_rows >= 0 and
-             is_integer(batch_bytes) and batch_bytes >= 0 and is_integer(avg_message_bytes) and
-             avg_message_bytes >= 0 and is_integer(pending_after) and pending_after >= 0 do
+  def archive_batch(session_id, batch_rows, batch_bytes, avg_event_bytes, pending_after)
+      when is_binary(session_id) and is_integer(batch_rows) and batch_rows >= 0 and
+             is_integer(batch_bytes) and batch_bytes >= 0 and is_integer(avg_event_bytes) and
+             avg_event_bytes >= 0 and is_integer(pending_after) and pending_after >= 0 do
     :telemetry.execute(
       [:fleet_lm, :archive, :batch],
       %{
         batch_rows: batch_rows,
         batch_bytes: batch_bytes,
-        avg_message_bytes: avg_message_bytes,
+        avg_event_bytes: avg_event_bytes,
         pending_after: pending_after
       },
-      %{conversation_id: conversation_id}
+      %{session_id: session_id}
     )
 
     :ok
   end
 
   @doc """
-  Emit queue age gauge (seconds) across all conversations.
+  Emit queue age gauge (seconds) across all sessions.
   """
   @spec archive_queue_age(non_neg_integer()) :: :ok
   def archive_queue_age(seconds) when is_integer(seconds) and seconds >= 0 do

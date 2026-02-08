@@ -7,7 +7,7 @@ defmodule FleetLM.Runtime.RaftTopology do
   - **Erlang distribution** for cluster membership (not Presence/CRDT)
   - **Coordinator pattern**: lowest node ID manages all group topology
   - **Continuous reconciliation**: coordinator ensures groups match desired state
-  - **No global "ready" state**: nodes join and serve traffic ASAP
+  - **Explicit startup readiness**: ready only after bootstrap/join phase completes
 
   ## Bootstrap
 
@@ -29,6 +29,7 @@ defmodule FleetLM.Runtime.RaftTopology do
 
   @reconcile_interval_ms 10_000
   @rebalance_debounce_ms 2_000
+  @ready_call_timeout_ms 1_000
 
   # Client API
 
@@ -40,7 +41,7 @@ defmodule FleetLM.Runtime.RaftTopology do
   def ready? do
     case Process.whereis(__MODULE__) do
       nil -> false
-      pid -> GenServer.call(pid, :ready?)
+      pid -> safe_ready_call(pid)
     end
   end
 
@@ -73,17 +74,20 @@ defmodule FleetLM.Runtime.RaftTopology do
     send(self(), :bootstrap)
     schedule_reconcile()
 
-    {:ok, %{rebalance_timer: nil}}
+    {:ok,
+     %{
+       rebalance_timer: nil,
+       startup_complete?: false,
+       sync_ref: nil
+     }}
   end
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    # Simple health: do my local groups exist?
+    # Readiness = startup phase complete + local raft presence.
     my_groups = compute_my_groups()
-
-    ready =
-      my_groups == [] or
-        Enum.any?(my_groups, &group_running?/1)
+    local_ready = my_groups == [] or Enum.any?(my_groups, &group_running?/1)
+    ready = state.startup_complete? and local_ready
 
     {:reply, ready, state}
   end
@@ -100,26 +104,76 @@ defmodule FleetLM.Runtime.RaftTopology do
       Process.send_after(self(), :bootstrap, 500)
       {:noreply, state}
     else
-      if coordinator?(cluster) do
-        Logger.info("RaftTopology: coordinator bootstrapping #{RaftManager.num_groups()} groups")
-        bootstrap_all_groups_async(cluster)
+      if coordinator?(cluster) and expected > 1 and not raft_system_ready?(cluster) do
+        Logger.debug("RaftTopology: waiting for Ra systems to start on all nodes")
+        Process.send_after(self(), :bootstrap, 500)
+        {:noreply, state}
       else
-        Logger.info("RaftTopology: non-coordinator joining existing groups")
-        join_my_groups_async(cluster)
-      end
+        if coordinator?(cluster) do
+          Logger.info(
+            "RaftTopology: coordinator bootstrapping #{RaftManager.num_groups()} groups"
+          )
 
-      {:noreply, state}
+          bootstrap_all_groups_async(cluster, self())
+
+          {:noreply, state}
+        else
+          Logger.info("RaftTopology: non-coordinator joining existing groups")
+          join_my_groups_async(cluster, self())
+
+          {:noreply, state}
+        end
+      end
     end
+  end
+
+  @impl true
+  def handle_info({:startup_complete, mode}, state)
+      when mode in [:coordinator, :follower] do
+    case mode do
+      :coordinator ->
+        Logger.info("RaftTopology: bootstrap complete")
+        send(self(), :rebalance)
+
+      :follower ->
+        Logger.info("RaftTopology: join complete")
+    end
+
+    {:noreply, %{state | startup_complete?: true}}
+  end
+
+  @impl true
+  def handle_info({ref, _result}, %{sync_ref: ref} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, %{state | sync_ref: nil}}
+  end
+
+  @impl true
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{sync_ref: ref} = state) do
+    Logger.warning("RaftTopology: topology sync task failed: #{inspect(reason)}")
+    {:noreply, %{state | sync_ref: nil}}
+  end
+
+  @impl true
+  def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info({ref, _result}, state) when is_reference(ref) do
+    {:noreply, state}
   end
 
   @impl true
   def handle_info(:reconcile, state) do
     cluster = all_nodes()
 
-    if coordinator?(cluster) do
-      # Coordinator continuously reconciles all groups
-      Enum.each(0..(RaftManager.num_groups() - 1), &reconcile_group(&1, cluster))
-    end
+    state =
+      if coordinator?(cluster) and state.startup_complete? do
+        maybe_start_sync(state, cluster, :reconcile)
+      else
+        state
+      end
 
     schedule_reconcile()
     {:noreply, state}
@@ -141,11 +195,13 @@ defmodule FleetLM.Runtime.RaftTopology do
   def handle_info(:rebalance, state) do
     cluster = all_nodes()
 
-    if coordinator?(cluster) do
-      Logger.info("RaftTopology: rebalancing #{length(cluster)} nodes")
-      # Use reconcile (not just rebalance) to ensure missing groups are created
-      Enum.each(0..(RaftManager.num_groups() - 1), &reconcile_group(&1, cluster))
-    end
+    state =
+      if coordinator?(cluster) and state.startup_complete? do
+        Logger.info("RaftTopology: rebalancing #{length(cluster)} nodes")
+        maybe_start_sync(state, cluster, :rebalance)
+      else
+        state
+      end
 
     {:noreply, %{state | rebalance_timer: nil}}
   end
@@ -169,21 +225,48 @@ defmodule FleetLM.Runtime.RaftTopology do
     Node.self() == List.first(cluster)
   end
 
-  defp bootstrap_all_groups_async(cluster) do
+  defp maybe_start_sync(%{sync_ref: nil} = state, cluster, trigger) do
+    task =
+      Task.Supervisor.async_nolink(FleetLM.RaftTaskSupervisor, fn ->
+        Enum.each(0..(RaftManager.num_groups() - 1), &reconcile_group(&1, cluster))
+      end)
+
+    Logger.debug("RaftTopology: started #{trigger} sync task")
+    %{state | sync_ref: task.ref}
+  end
+
+  defp maybe_start_sync(state, _cluster, _trigger), do: state
+
+  defp safe_ready_call(pid) do
+    GenServer.call(pid, :ready?, @ready_call_timeout_ms)
+  catch
+    :exit, _reason -> false
+  end
+
+  defp raft_system_ready?(cluster) do
+    Enum.all?(cluster, fn node ->
+      case :rpc.call(node, Process, :whereis, [:ra_server_sup_sup]) do
+        pid when is_pid(pid) -> true
+        _ -> false
+      end
+    end)
+  end
+
+  defp bootstrap_all_groups_async(cluster, owner) do
     # Bootstrap async to avoid blocking GenServer
-    Task.start(fn ->
+    Task.Supervisor.start_child(FleetLM.RaftTaskSupervisor, fn ->
       Enum.each(0..(RaftManager.num_groups() - 1), fn group_id ->
         ensure_group_exists(group_id, cluster)
       end)
 
-      Logger.info("RaftTopology: bootstrap complete")
+      send(owner, {:startup_complete, :coordinator})
     end)
   end
 
-  defp join_my_groups_async(_cluster) do
+  defp join_my_groups_async(_cluster, owner) do
     # Join async to avoid blocking GenServer
     # Non-coordinators wait for groups to be bootstrapped by coordinator
-    Task.start(fn ->
+    Task.Supervisor.start_child(FleetLM.RaftTaskSupervisor, fn ->
       await_cluster_min_size()
       my_groups = compute_my_groups()
 
@@ -192,6 +275,7 @@ defmodule FleetLM.Runtime.RaftTopology do
       end)
 
       Logger.info("RaftTopology: joined #{length(my_groups)} groups")
+      send(owner, {:startup_complete, :follower})
     end)
   end
 

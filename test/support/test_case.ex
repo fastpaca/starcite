@@ -15,11 +15,8 @@ defmodule FleetLM.TestCase do
   end
 
   setup _tags do
-    previous_config = configure_test_env()
-
     on_exit(fn ->
       FleetLM.Runtime.TestHelper.reset()
-      restore_config(previous_config)
     end)
 
     {:ok, %{}}
@@ -35,27 +32,6 @@ defmodule FleetLM.TestCase do
     deadline = System.monotonic_time(:millisecond) + timeout
 
     try_eventually(fun, interval, deadline)
-  end
-
-  defp configure_test_env do
-    previous = %{
-      disable_agent_webhooks: Application.get_env(:fleet_lm, :disable_agent_webhooks),
-      agent_dispatch_tick_ms: Application.get_env(:fleet_lm, :agent_dispatch_tick_ms),
-      agent_debounce_window_ms: Application.get_env(:fleet_lm, :agent_debounce_window_ms)
-    }
-
-    Application.put_env(:fleet_lm, :disable_agent_webhooks, true)
-    Application.put_env(:fleet_lm, :agent_dispatch_tick_ms, 10)
-    Application.put_env(:fleet_lm, :agent_debounce_window_ms, 0)
-
-    previous
-  end
-
-  defp restore_config(previous) do
-    Enum.each(previous, fn
-      {key, nil} -> Application.delete_env(:fleet_lm, key)
-      {key, value} -> Application.put_env(:fleet_lm, key, value)
-    end)
   end
 
   defp try_eventually(fun, interval, deadline) do

@@ -20,7 +20,7 @@ erl_crash.dump
 
 # Where 3rd-party dependencies like ExDoc output generated docs.
 /doc/
-/docs/specs/
+/.docs/
 
 # Ignore .fetch files in case you like to edit your project deps locally.
 /.fetch
@@ -52,17 +52,9 @@ fleetlm-*.tar
 npm-debug.log
 /assets/node_modules/
 
-docs-site/node_modules
-docs-site/.docusaurus
-docs-site/build
-
 examples/*/node_modules
 examples/*/.next
 examples/*/.env*
-
-# SDK artifacts
-sdk/**/node_modules
-sdk/**/dist
 
 # osx ..
 .DS_Store

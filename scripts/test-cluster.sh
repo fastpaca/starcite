@@ -1,12 +1,10 @@
 #!/bin/bash
-# Test that the 5-node cluster is working correctly
-# IMPORTANT: Any node should be able to serve any conversation (via routing/proxying)
+# Smoke test for 5-node cluster routing using session primitives only.
 
-set -e
+set -euo pipefail
 
 GREEN='\033[0;32m'
 RED='\033[0;31m'
-YELLOW='\033[1;33m'
 NC='\033[0m'
 
 wait_for_ready() {
@@ -14,212 +12,101 @@ wait_for_ready() {
   local attempts=${2:-30}
   local interval=${3:-1}
   local url="http://localhost:${port}/health/ready"
-  local health=""
 
   for ((i = 1; i <= attempts; i++)); do
+    local health
     health=$(curl -s "$url" || true)
-
     if echo "$health" | grep -q '"status":"ok"'; then
-      echo -e "  ✓ Node on port $port ready after $((i * interval))s"
+      echo -e "  ✓ Node on port $port ready"
       return 0
     fi
-
     sleep "$interval"
   done
 
-  echo -e "${RED}  ✗ Node on port $port not ready after $((attempts * interval))s${NC}"
-  if [ -n "$health" ]; then
-    echo "    Last response: $health"
-  fi
+  echo -e "${RED}  ✗ Node on port $port not ready${NC}"
   return 1
 }
 
-echo -e "${GREEN}Testing 5-node Raft cluster...${NC}"
+extract_seq() {
+  echo "$1" | grep -o '"seq":[0-9]*' | head -n1 | cut -d':' -f2
+}
+
+echo -e "${GREEN}Testing 5-node cluster with session primitives...${NC}"
 echo ""
 
-# Check all nodes are running
-echo "1. Checking nodes are running..."
-for port in 4000 4001 4002 4003 4004; do
-  if curl -s http://localhost:$port/health/ready > /dev/null; then
-    echo -e "  ✓ Node on port $port is up"
-  else
-    echo -e "${RED}  ✗ Node on port $port is down${NC}"
-    exit 1
-  fi
-done
-echo ""
-
-# Wait for readiness on all nodes
-echo "2. Waiting for all nodes to become ready..."
+echo "1. Waiting for all nodes to become ready..."
 for port in 4000 4001 4002 4003 4004; do
   wait_for_ready "$port" 30 1
 done
 echo ""
 
-# Create a conversation via node1
-echo "3. Creating test conversation via node1..."
-CONVERSATION_ID="test-conversation-$(date +%s)"
-
-CONVERSATION=$(curl -s -X PUT http://localhost:4000/v1/conversations/$CONVERSATION_ID \
+echo "2. Creating test session via node1..."
+SESSION_ID="test-session-$(date +%s)"
+CREATE_RESP=$(curl -s -X POST http://localhost:4000/v1/sessions \
   -H "Content-Type: application/json" \
-  -d "{\"metadata\":{\"test\":true}}")
+  -d "{\"id\":\"$SESSION_ID\",\"metadata\":{\"test\":true}}")
 
-if echo "$CONVERSATION" | grep -q '"id"'; then
-  echo -e "  ✓ Conversation created: $CONVERSATION_ID"
+if echo "$CREATE_RESP" | grep -q '"id"'; then
+  echo -e "  ✓ Session created: $SESSION_ID"
 else
-  echo -e "${RED}  ✗ Failed to create conversation${NC}"
-  echo "Response: $CONVERSATION"
+  echo -e "${RED}  ✗ Failed to create session${NC}"
+  echo "Response: $CREATE_RESP"
   exit 1
 fi
 echo ""
 
-# Write a message via node1
-echo "4. Writing message via node1..."
-MSG_RESP=$(curl -s -X POST http://localhost:4000/v1/conversations/$CONVERSATION_ID/messages \
-  -H "Content-Type: application/json" \
-  -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"cluster test message\"}]}}")
+echo "3. Appending from each node with expected_seq guards..."
+EXPECTED_SEQ=0
 
-MSG_SEQ=$(echo $MSG_RESP | grep -o '"seq":[0-9]*' | cut -d':' -f2)
+for i in 1 2 3 4 5; do
+  port=$((3999 + i))
+  echo -n "  Node on port $port append: "
 
-if [ -z "$MSG_SEQ" ]; then
-  echo -e "${RED}  ✗ Failed to write message${NC}"
-  echo "Response: $MSG_RESP"
-  exit 1
-fi
-
-echo -e "  ✓ Message written with seq: $MSG_SEQ"
-echo ""
-
-# Critical test: ALL nodes should be able to READ the conversation
-# Even if only 3 nodes host the Raft replicas, the API layer should handle routing
-echo "5. Testing that ALL nodes can read the conversation..."
-echo "   (API should route to Raft replicas transparently)"
-echo ""
-
-failed_nodes=0
-successful_reads=0
-
-for port in 4000 4001 4002 4003 4004; do
-  echo -n "  Node on port $port: "
-
-  # Try reading with retries (allow for eventual consistency)
-  found=false
-  error_msg=""
-
-  for i in {1..20}; do
-    MSGS=$(curl -s "http://localhost:$port/v1/conversations/$CONVERSATION_ID/tail?limit=10" 2>&1)
-
-    # Check if we got an error page (HTML response)
-    if echo "$MSGS" | grep -q "DOCTYPE html"; then
-      error_msg="Received error page"
-      sleep 0.05
-      continue
-    fi
-
-    READ_COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l | tr -d ' ')
-
-    if [ "$READ_COUNT" -ge 1 ]; then
-      found=true
-      break
-    fi
-
-    sleep 0.05
-  done
-
-  if [ "$found" = true ]; then
-    echo -e "${GREEN}✓ can read message${NC}"
-    successful_reads=$((successful_reads + 1))
-  else
-    echo -e "${RED}✗ FAILED to read${NC}"
-    if [ -n "$error_msg" ]; then
-      echo "    Error: $error_msg"
-    fi
-    failed_nodes=$((failed_nodes + 1))
-  fi
-done
-echo ""
-
-# Verify ALL nodes can read
-echo "6. Verifying request routing..."
-if [ $failed_nodes -eq 0 ]; then
-  echo -e "  ${GREEN}✓ All 5 nodes can serve the conversation (routing works)${NC}"
-else
-  echo -e "  ${RED}✗ $failed_nodes node(s) failed to serve the conversation${NC}"
-  echo -e "  ${RED}✗ API layer is NOT routing requests to Raft replicas!${NC}"
-  echo ""
-  echo "Expected behavior: Any node should be able to serve any conversation"
-  echo "Current behavior: Only replica nodes can serve conversations"
-  echo ""
-  echo "This is a critical issue for a production distributed system."
-  exit 1
-fi
-echo ""
-
-# Write from different nodes to verify routing works for writes too
-echo "7. Testing writes from ALL nodes..."
-write_failures=0
-
-for i in {1..5}; do
-  port=$((4000 + i - 1))
-  echo -n "  Writing via node on port $port: "
-
-  WRITE_RESP=$(curl -s -X POST http://localhost:$port/v1/conversations/$CONVERSATION_ID/messages \
+  RESP=$(curl -s -X POST "http://localhost:${port}/v1/sessions/${SESSION_ID}/append" \
     -H "Content-Type: application/json" \
-    -d "{\"message\":{\"role\":\"user\",\"parts\":[{\"type\":\"text\",\"text\":\"message from node $i\"}]}}" 2>&1)
+    -d "{\"type\":\"content\",\"payload\":{\"text\":\"message from node ${i}\"},\"actor\":\"agent:cluster-test\",\"expected_seq\":${EXPECTED_SEQ}}")
 
-  # Check if we got an error
-  if echo "$WRITE_RESP" | grep -q "DOCTYPE html"; then
-    echo -e "${RED}✗ FAILED${NC}"
-    write_failures=$((write_failures + 1))
-  elif echo "$WRITE_RESP" | grep -q '"seq"'; then
-    echo -e "${GREEN}✓ success${NC}"
+  SEQ=$(extract_seq "$RESP")
+  NEXT=$((EXPECTED_SEQ + 1))
+
+  if [ -n "$SEQ" ] && [ "$SEQ" -eq "$NEXT" ]; then
+    echo -e "${GREEN}✓ seq=$SEQ${NC}"
+    EXPECTED_SEQ=$SEQ
   else
-    echo -e "${RED}✗ unexpected response${NC}"
-    write_failures=$((write_failures + 1))
+    echo -e "${RED}✗ failed${NC}"
+    echo "Response: $RESP"
+    exit 1
   fi
 done
 echo ""
 
-if [ $write_failures -gt 0 ]; then
-  echo -e "  ${RED}✗ $write_failures write(s) failed${NC}"
-  echo -e "  ${RED}✗ Write routing is broken${NC}"
-  exit 1
+echo "4. Idempotency sanity check..."
+KEY="idem-${SESSION_ID}"
+RESP1=$(curl -s -X POST "http://localhost:4002/v1/sessions/${SESSION_ID}/append" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"state\",\"payload\":{\"state\":\"running\"},\"actor\":\"agent:cluster-test\",\"idempotency_key\":\"${KEY}\"}")
+RESP2=$(curl -s -X POST "http://localhost:4003/v1/sessions/${SESSION_ID}/append" \
+  -H "Content-Type: application/json" \
+  -d "{\"type\":\"state\",\"payload\":{\"state\":\"running\"},\"actor\":\"agent:cluster-test\",\"idempotency_key\":\"${KEY}\"}")
+
+SEQ1=$(extract_seq "$RESP1")
+SEQ2=$(extract_seq "$RESP2")
+if [ -n "$SEQ1" ] && [ "$SEQ1" = "$SEQ2" ] && echo "$RESP2" | grep -q '"deduped":true'; then
+  echo -e "  ${GREEN}✓ idempotency dedupe works across nodes${NC}"
 else
-  echo -e "  ${GREEN}✓ All nodes can route writes correctly${NC}"
+  echo -e "  ${RED}✗ idempotency check failed${NC}"
+  echo "resp1: $RESP1"
+  echo "resp2: $RESP2"
+  exit 1
 fi
 echo ""
 
-# Verify message count on all nodes
-echo "8. Verifying all messages are accessible from all nodes..."
-expected_msgs=6  # 1 initial + 5 from different nodes
-
-for port in 4000 4001 4002 4003 4004; do
-  MSGS=$(curl -s "http://localhost:$port/v1/conversations/$CONVERSATION_ID/tail?limit=20" 2>/dev/null)
-  COUNT=$(echo $MSGS | grep -o '"seq":' | wc -l | tr -d ' ')
-
-  if [ "$COUNT" -ge "$expected_msgs" ]; then
-    echo -e "  Port $port: ${GREEN}✓ has all $COUNT messages${NC}"
-  else
-    echo -e "  Port $port: ${RED}✗ only has $COUNT messages (expected $expected_msgs)${NC}"
-  fi
-done
-echo ""
-
-# Cleanup
-echo "9. Cleaning up test conversation..."
-curl -s -X DELETE http://localhost:4000/v1/conversations/$CONVERSATION_ID > /dev/null
-echo -e "  ✓ Conversation deleted"
-echo ""
-
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
-echo -e "${GREEN}✓ All cluster tests passed!${NC}"
+echo -e "${GREEN}✓ Cluster primitive test passed${NC}"
 echo -e "${GREEN}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${NC}"
 echo ""
-echo "Cluster is healthy:"
-echo "  - All 5 nodes responding to health checks"
-echo "  - ALL nodes can serve ANY conversation (routing works)"
-echo "  - Writes can be sent to ANY node"
-echo "  - Raft handles replication transparently (3 replicas per group)"
-echo ""
-echo "Ready for benchmarks:"
-echo "  k6 run bench/k6/1-hot-path-throughput.js"
+echo "Validated:"
+echo "  - create session"
+echo "  - append routed from any node"
+echo "  - expected_seq concurrency guard"
+echo "  - idempotency dedupe"

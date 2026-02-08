@@ -1,7 +1,11 @@
 defmodule FleetLM do
   @moduledoc """
-  FleetLM - message backend for AI agents.
+  FleetLM - session primitives for AI products.
 
-  An append-only, replayable message log with streaming updates.
+  Product surface:
+
+  - create a session
+  - append ordered events
+  - tail from cursor and follow live over WebSocket
   """
 end

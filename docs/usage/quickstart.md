@@ -5,7 +5,9 @@ sidebar_position: 1
 
 # Quick Start
 
-## 1. Run FleetLM
+This quick start uses the three session primitives.
+
+## 1. Start FleetLM
 
 ```bash
 docker run -d \
@@ -14,107 +16,52 @@ docker run -d \
   ghcr.io/fastpaca/fleetlm:latest
 ```
 
-FleetLM listens on `http://localhost:4000/v1`. The container persists data under `fleetlm_data/`.
-
----
-
-## 2. Create a conversation
-
-Create a conversation with the id `demo-chat`.
+## 2. Create a session
 
 ```bash
-curl -X PUT http://localhost:4000/v1/conversations/demo-chat \
+curl -X POST http://localhost:4000/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{"id":"ses_demo","title":"Draft contract","metadata":{"tenant_id":"acme"}}'
+```
+
+## 3. Append an event
+
+```bash
+curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
   -H "Content-Type: application/json" \
   -d '{
-    "metadata": { "channel": "web" }
+    "type":"content",
+    "payload":{"text":"Working..."},
+    "actor":"agent:planner",
+    "source":"agent"
   }'
 ```
 
----
+## 4. Tail from a cursor over WebSocket
 
-## 3. Append a message
+Connect to:
 
-Add a user message with `How do I deploy this?` as text.
-
-```bash
-curl -X POST http://localhost:4000/v1/conversations/demo-chat/messages \
-  -H "Content-Type: application/json" \
-  -d '{
-    "message": {
-      "role": "user",
-      "parts": [{ "type": "text", "text": "How do I deploy this?" }]
-    }
-  }'
+```text
+ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 ```
 
-FleetLM replies with the assigned sequence number and version:
+Behavior:
 
-```json
-{ "seq": 1, "version": 1, "token_count": 24 }
-```
+1. FleetLM replays events with `seq > cursor`.
+2. FleetLM keeps streaming new events as they commit.
+3. Reconnect with your last processed `seq` as the next cursor.
 
-Use `if_version` to prevent race conditions when multiple clients append simultaneously. See the [REST API docs](../api/rest.md#messages) for retry patterns.
+## 5. Optional write controls
 
----
+- `idempotency_key`: optional dedupe key for retries.
+- `expected_seq`: optional optimistic concurrency guard.
 
-## 4. Read recent messages
-
-Fetch the most recent messages with tail pagination:
-
-```bash
-curl "http://localhost:4000/v1/conversations/demo-chat/tail?limit=50"
-```
-
-Response (trimmed):
+Append response shape:
 
 ```json
 {
-  "messages": [
-    {
-      "seq": 1,
-      "role": "user",
-      "parts": [{ "type": "text", "text": "How do I deploy this?" }]
-    }
-  ]
+  "seq": 1,
+  "last_seq": 1,
+  "deduped": false
 }
 ```
-
----
-
-## 5. Build a prompt (SDK example)
-
-```typescript title="app/api/chat/route.ts"
-import { createClient } from '@fleetlm/client';
-import { streamText } from 'ai';
-import { openai } from '@ai-sdk/openai';
-
-export async function POST(req: Request) {
-  const { conversationId, message } = await req.json();
-
-  const fleetlm = createClient({ baseUrl: process.env.FLEETLM_URL || 'http://localhost:4000/v1' });
-  const convo = await fleetlm.conversation(conversationId, { metadata: { channel: 'web' } });
-
-  // Append user message
-  await convo.append({
-    role: 'user',
-    parts: [{ type: 'text', text: message }]
-  });
-
-  // Build your prompt from the log (here: last 50 messages)
-  const { messages } = await convo.tail({ limit: 50 });
-
-  // Stream response and append assistant output
-  return streamText({
-    model: openai('gpt-4o-mini'),
-    messages,
-  }).toUIMessageStreamResponse({
-    onFinish: async ({ responseMessage }) => {
-      await convo.append(responseMessage);
-    },
-  });
-}
-```
-
----
-
-Ready to go deeper? Continue with [Getting Started](./getting-started.md) or jump straight to the [API reference](../api/rest.md).

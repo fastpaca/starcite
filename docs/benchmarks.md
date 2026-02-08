@@ -7,16 +7,46 @@ sidebar_position: 90
 
 FleetLM ships with a reproducible benchmark harness so you can validate performance and failure modes on your own hardware/network.
 
-The benchmark suite focuses on the *conversation layer* primitives: append latency, tail/replay reads, and durability under load. Your end-to-end latency will still be dominated by the model provider.
+The benchmark suite focuses on the session primitives: append latency, optimistic concurrency behavior, idempotency behavior, and ordering durability under load.
 
 ## What’s included
 
-- `bench/k6/*`: k6 scenarios for REST write/read mixes, throughput, and durability cadence
+- `bench/k6/1-hot-path-throughput.js`: high-throughput append latency and failure-rate guardrails
+- `bench/k6/2-rest-read-write-mix.js`: append mix with `expected_seq` guard behavior
+- `bench/k6/3-cold-start-replay.js`: idempotency retry/dedupe behavior
+- `bench/k6/4-durability-cadence.js`: sustained ordered append workload with ordering checks
 - `bench/aws/*`: Terraform + scripts to provision an AWS environment and run the k6 suite close to the cluster (removes WAN latency from the measurement)
 
 ## Local quick run
 
-1. Start FleetLM locally (single node).
+1. Start the local cluster:
+   ```bash
+   ./scripts/start-cluster.sh
+   ```
+2. Verify primitive health:
+   ```bash
+   ./scripts/test-cluster.sh
+   ```
+3. Run scenarios sequentially (one process at a time):
+   ```bash
+   k6 run bench/k6/1-hot-path-throughput.js
+   k6 run bench/k6/2-rest-read-write-mix.js
+   k6 run bench/k6/3-cold-start-replay.js
+   k6 run bench/k6/4-durability-cadence.js
+   ```
+4. Stop the cluster when done:
+   ```bash
+   ./scripts/stop-cluster.sh
+   ```
+
+Notes:
+
+- Run k6 scenarios sequentially, not in parallel.
+- Each scenario includes threshold gates and may abort on failure.
+
+## Single scenario quick run
+
+1. Start FleetLM.
 2. Install k6.
 3. Run a scenario:
 
@@ -50,11 +80,11 @@ terraform destroy
 ## Interpreting results
 
 - Append latency is heavily influenced by network RTT between replicas; keep cluster nodes close for production.
-- Throughput scales with the number of independent conversations and the cluster size.
-- If you see `503` responses, you likely don’t have a Raft quorum (or the cluster isn’t formed yet); retry with backoff.
+- Throughput scales with the number of independent sessions and the cluster size.
+- If you see `503` responses, your cluster may not be fully formed or you may have lost quorum; verify health and retry with backoff.
 
 If you run these benchmarks in a representative environment and want to publish numbers, capture:
 - instance types + region/AZ layout
 - cluster size
-- k6 scenario config (`MAX_VUS`, `PIPELINE_DEPTH`, durations)
+- k6 scenario config (`VUS`, `SESSION_COUNT`, `PIPELINE_DEPTH`, durations)
 - commit SHA / version

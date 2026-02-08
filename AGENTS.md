@@ -1,6 +1,6 @@
 # FleetLM - Agent Guide
 
-FleetLM is a clustered Phoenix application that provides durable, low-latency message storage for LLM applications. It maintains conversation history with sub-150ms p99 appends via Raft consensus, leaving prompt construction and token management to the client.
+FleetLM is a clustered Phoenix application that provides durable, low-latency session event storage for LLM applications. It maintains ordered session histories with sub-150ms p99 appends via Raft consensus, leaving prompt construction and token management to the client.
 
 ## Ground Rules
 
@@ -20,7 +20,7 @@ FleetLM is a clustered Phoenix application that provides durable, low-latency me
 ## Domain Assumptions
 
 - Messages are append-only and replayable with deterministic sequence numbers.
-- Conversations are stored durably in 256 Raft groups (3 replicas each, quorum writes).
+- Sessions are stored durably in 256 Raft groups (3 replicas each, quorum writes).
 - No compaction, token budgets, or prompt-window logic—clients own that responsibility.
 - Background flusher streams Raft state to Postgres (non-blocking, idempotent).
 

@@ -20,7 +20,7 @@ defmodule FleetLM.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def write_messages(rows) when is_list(rows) do
+  def write_events(rows) when is_list(rows) do
     GenServer.call(__MODULE__, {:write, rows})
     {:ok, length(rows)}
   end

@@ -59,10 +59,5 @@ config :phoenix, :plug_init_mode, :runtime
 # Use local PubSub for development (change to :redis for testing horizontal scaling)
 config :fleet_lm, :pubsub_adapter, :local
 
-# Slower flush interval in dev to keep messages in disk log longer for testing hot path
+# Slower flush interval in dev to keep events in disk log longer for testing hot path
 config :fleet_lm, :storage_flush_interval_ms, 500
-
-# Tune agent dispatch engine for development benchmarks
-config :fleet_lm,
-  agent_dispatch_tick_ms: 25,
-  agent_debounce_window_ms: 250

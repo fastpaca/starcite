@@ -12,7 +12,7 @@ defmodule FleetLM.MixProject do
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
       description:
-        "FleetLM - Message infra for AI agents & LLMs. Append-only, replayable, ordered message log with streaming updates."
+        "FleetLM - Session primitives for AI products: create sessions, append ordered events, and tail from cursor over WebSocket."
     ]
   end
 
