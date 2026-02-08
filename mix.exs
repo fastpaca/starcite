@@ -1,9 +1,9 @@
-defmodule FleetLM.MixProject do
+defmodule Starcite.MixProject do
   use Mix.Project
 
   def project do
     [
-      app: :fleet_lm,
+      app: :starcite,
       version: "0.1.0",
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
@@ -12,7 +12,7 @@ defmodule FleetLM.MixProject do
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
       description:
-        "FleetLM - Session primitives for AI products: create sessions, append ordered events, and tail from cursor over WebSocket."
+        "Starcite - Session primitives for AI products: create sessions, append ordered events, and tail from cursor over WebSocket."
     ]
   end
 
@@ -21,7 +21,7 @@ defmodule FleetLM.MixProject do
   # Type `mix help compile.app` for more information.
   def application do
     [
-      mod: {FleetLM.Application, []},
+      mod: {Starcite.Application, []},
       extra_applications: [:logger, :runtime_tools]
     ]
   end

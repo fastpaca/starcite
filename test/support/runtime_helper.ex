@@ -1,10 +1,10 @@
-defmodule FleetLM.Runtime.TestHelper do
+defmodule Starcite.Runtime.TestHelper do
   @moduledoc false
 
   require ExUnit.CaptureLog
   require Logger
 
-  alias FleetLM.Runtime.RaftManager
+  alias Starcite.Runtime.RaftManager
 
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->
@@ -46,7 +46,7 @@ defmodule FleetLM.Runtime.TestHelper do
   end
 
   defp cleanup_raft_test_data do
-    test_data_dir = Application.get_env(:fleet_lm, :raft_data_dir, "tmp/test_raft")
+    test_data_dir = Application.get_env(:starcite, :raft_data_dir, "tmp/test_raft")
 
     if String.contains?(test_data_dir, "test") do
       File.rm_rf(test_data_dir)

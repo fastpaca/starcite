@@ -1,5 +1,5 @@
 /**
- * FleetLM Scenario 2: Append Mix
+ * Starcite Scenario 2: Append Mix
  *
  * Exercises append traffic with mixed payload sizes and optimistic concurrency.
  */

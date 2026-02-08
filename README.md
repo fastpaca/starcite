@@ -1,11 +1,12 @@
-# FleetLM
+# Starcite
 
-[![Tests](https://github.com/fastpaca/fleetlm/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/fleetlm/actions/workflows/test.yml)
-[![Docker Build](https://github.com/fastpaca/fleetlm/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/fleetlm/actions/workflows/docker-build.yml)
+[![Tests](https://github.com/starcite-ai/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/starcite-ai/starcite/actions/workflows/test.yml)
+[![Docker Build](https://github.com/starcite-ai/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/starcite-ai/starcite/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
 [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
 
-FleetLM is a session semantics layer for AI products.
+Starcite is a session semantics layer for AI products.
+Main site: https://starcite.ai
 
 - Start a session
 - Append ordered events
@@ -51,7 +52,7 @@ Server behavior:
 - Ordering is monotonic per session via `seq`.
 - Appends are durable before ack.
 - `append` is shared by humans and agents.
-- `metadata` is application-defined and opaque to FleetLM.
+- `metadata` is application-defined and opaque to Starcite.
 - `idempotency_key` is optional.
 - `expected_seq` is optional optimistic concurrency.
 - Auth is upstream.
@@ -70,8 +71,8 @@ Server behavior:
 
 ```bash
 # Clone and set up
-git clone https://github.com/fastpaca/fleetlm
-cd fleetlm
+git clone https://github.com/starcite-ai/starcite
+cd starcite
 mix deps.get
 mix compile
 

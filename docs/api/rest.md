@@ -42,7 +42,7 @@ Response `201`:
 
 Validation:
 
-- `id`: optional string (if omitted, FleetLM generates one)
+- `id`: optional string (if omitted, Starcite generates one)
 - `title`: optional string
 - `metadata`: optional object
 

@@ -1,21 +1,21 @@
 output "instance_ips" {
   description = "Public IP addresses of EC2 instances"
-  value       = aws_instance.fleetlm[*].public_ip
+  value       = aws_instance.starcite[*].public_ip
 }
 
 output "instance_private_ips" {
   description = "Private IP addresses of EC2 instances"
-  value       = aws_instance.fleetlm[*].private_ip
+  value       = aws_instance.starcite[*].private_ip
 }
 
 output "cluster_nodes" {
   description = "Cluster nodes string for CLUSTER_NODES env var"
-  value       = join(",", [for ip in aws_instance.fleetlm[*].private_ip : "fleetlm@${ip}"])
+  value       = join(",", [for ip in aws_instance.starcite[*].private_ip : "starcite@${ip}"])
 }
 
 output "ssh_commands" {
   description = "SSH commands to connect to instances"
-  value       = [for idx, ip in aws_instance.fleetlm[*].public_ip : "ssh ec2-user@${ip}"]
+  value       = [for idx, ip in aws_instance.starcite[*].public_ip : "ssh ec2-user@${ip}"]
 }
 
 output "benchmark_client_ip" {

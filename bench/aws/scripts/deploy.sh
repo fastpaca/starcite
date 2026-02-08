@@ -10,7 +10,7 @@ NC='\033[0m' # No Color
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 
-echo -e "${GREEN}=== FleetLM Cluster Deployment ===${NC}"
+echo -e "${GREEN}=== Starcite Cluster Deployment ===${NC}"
 
 if [ ! -d "$TERRAFORM_DIR" ]; then
   echo -e "${RED}Error: Terraform directory not found at $TERRAFORM_DIR${NC}"
@@ -41,7 +41,7 @@ SSH_OPTS="-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o Connect
 INDEX=0
 for IP in $INSTANCE_IPS; do
   INDEX=$((INDEX + 1))
-  NODE_NAME="fleet_lm-bench-$INDEX"
+  NODE_NAME="starcite-bench-$INDEX"
 
   echo ""
   echo -e "${GREEN}=== Deploying to $NODE_NAME ($IP) ===${NC}"
@@ -72,12 +72,12 @@ for IP in $INSTANCE_IPS; do
     sleep 5
   done
 
-  echo "Stopping any existing FleetLM containers..."
-  ssh $SSH_OPTS ec2-user@$IP "docker stop fleetlm 2>/dev/null || true"
-  ssh $SSH_OPTS ec2-user@$IP "docker rm fleetlm 2>/dev/null || true"
+  echo "Stopping any existing Starcite containers..."
+  ssh $SSH_OPTS ec2-user@$IP "docker stop starcite 2>/dev/null || true"
+  ssh $SSH_OPTS ec2-user@$IP "docker rm starcite 2>/dev/null || true"
 
-  echo "Pulling FleetLM image..."
-  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/fastpaca/fleetlm:latest"
+  echo "Pulling Starcite image..."
+  ssh $SSH_OPTS ec2-user@$IP "docker pull ghcr.io/starcite-ai/starcite:latest"
 
   PRIVATE_IP=$(ssh $SSH_OPTS ec2-user@$IP "hostname -i" | tr -d '\n')
   HAS_NVME=$(ssh $SSH_OPTS ec2-user@$IP "test -d /mnt/nvme && echo 'yes' || echo 'no'")
@@ -91,9 +91,9 @@ for IP in $INSTANCE_IPS; do
     SLOT_LOG_DIR=""
   fi
 
-  echo "Starting FleetLM container..."
+  echo "Starting Starcite container..."
   ssh $SSH_OPTS ec2-user@$IP "docker run -d \
-    --name fleetlm \
+    --name starcite \
     --restart unless-stopped \
     -p 4000:4000 \
     -p 4369:4369 \
@@ -107,18 +107,18 @@ for IP in $INSTANCE_IPS; do
     -e SLOT_LOG_DIR='$SLOT_LOG_DIR' \
     -e MIX_ENV=prod \
     -e RELEASE_DISTRIBUTION=name \
-    -e RELEASE_NODE='fleet_lm@$PRIVATE_IP' \
-    ghcr.io/fastpaca/fleetlm:latest"
+    -e RELEASE_NODE='starcite@$PRIVATE_IP' \
+    ghcr.io/starcite-ai/starcite:latest"
 
   sleep 5
 
   echo "Checking container status..."
-  if ssh $SSH_OPTS ec2-user@$IP "docker ps | grep fleetlm" > /dev/null; then
+  if ssh $SSH_OPTS ec2-user@$IP "docker ps | grep starcite" > /dev/null; then
     echo -e "${GREEN}✓ Container is running${NC}"
   else
     echo -e "${RED}✗ Container failed to start${NC}"
     echo "Container logs:"
-    ssh $SSH_OPTS ec2-user@$IP "docker logs fleetlm"
+    ssh $SSH_OPTS ec2-user@$IP "docker logs starcite"
     exit 1
   fi
 done
@@ -143,7 +143,7 @@ for IP in $INSTANCE_IPS; do
 done
 echo ""
 echo -e "${YELLOW}Useful commands:${NC}"
-echo "  View logs: ssh ec2-user@<IP> 'docker logs -f fleetlm'"
-echo "  Verify cluster: ssh ec2-user@<IP> 'docker exec fleetlm bin/fleet_lm rpc \"Node.list()\"'"
-echo "  Restart node: ssh ec2-user@<IP> 'docker restart fleetlm'"
+echo "  View logs: ssh ec2-user@<IP> 'docker logs -f starcite'"
+echo "  Verify cluster: ssh ec2-user@<IP> 'docker exec starcite bin/starcite rpc \"Node.list()\"'"
+echo "  Restart node: ssh ec2-user@<IP> 'docker restart starcite'"
 echo ""

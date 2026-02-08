@@ -1,7 +1,7 @@
 /**
- * FleetLM k6 Benchmark Library
+ * Starcite k6 Benchmark Library
  *
- * Helpers for exercising FleetLM session primitives during load tests.
+ * Helpers for exercising Starcite session primitives during load tests.
  */
 
 import http from 'k6/http';

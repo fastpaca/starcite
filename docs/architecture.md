@@ -5,9 +5,9 @@ sidebar_position: 4
 
 # Architecture
 
-FleetLM runs a Raft-backed state machine that stores session event logs and serves tail streams.
+Starcite runs a Raft-backed state machine that stores session event logs and serves tail streams.
 
-![FleetLM Architecture](./img/architecture.png)
+![Starcite Architecture](./img/architecture.png)
 
 ## Public contract vs internals
 
@@ -50,6 +50,6 @@ Everything else in this document exists to preserve one behavior chain: `create 
 
 ## Intentional boundaries
 
-- FleetLM does not define domain event vocabularies.
-- FleetLM does not run agent business logic.
-- FleetLM does not push outbound webhooks.
+- Starcite does not define domain event vocabularies.
+- Starcite does not run agent business logic.
+- Starcite does not push outbound webhooks.

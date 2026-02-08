@@ -8,7 +8,7 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m'
 
-echo -e "${YELLOW}Stopping FleetLM Raft cluster...${NC}"
+echo -e "${YELLOW}Stopping Starcite Raft cluster...${NC}"
 
 # Find and kill all nodes
 for node in node1@127.0.0.1 node2@127.0.0.1 node3@127.0.0.1 node4@127.0.0.1 node5@127.0.0.1; do

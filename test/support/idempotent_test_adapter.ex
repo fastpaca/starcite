@@ -1,11 +1,11 @@
-defmodule FleetLM.Archive.IdempotentTestAdapter do
+defmodule Starcite.Archive.IdempotentTestAdapter do
   @moduledoc """
   Test adapter for archive idempotency tests.
 
   Tracks all write attempts and stores them for inspection,
   allowing tests to verify idempotency behavior.
   """
-  @behaviour FleetLM.Archive.Adapter
+  @behaviour Starcite.Archive.Adapter
 
   use GenServer
 

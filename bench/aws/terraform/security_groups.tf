@@ -1,6 +1,6 @@
-resource "aws_security_group" "fleetlm_ec2" {
-  name        = "fleetlm-ec2-bench"
-  description = "Security group for FleetLM EC2 instances - WIDE OPEN FOR BENCHMARKING ONLY"
+resource "aws_security_group" "starcite_ec2" {
+  name        = "starcite-ec2-bench"
+  description = "Security group for Starcite EC2 instances - WIDE OPEN FOR BENCHMARKING ONLY"
 
   # SSH
   ingress {
@@ -48,6 +48,6 @@ resource "aws_security_group" "fleetlm_ec2" {
   }
 
   tags = {
-    Name = "fleetlm-ec2-bench"
+    Name = "starcite-ec2-bench"
   }
 }

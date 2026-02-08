@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # Storage & Audit
 
-FleetLM separates hot runtime storage (Raft) from optional cold storage (Postgres archive).
+Starcite separates hot runtime storage (Raft) from optional cold storage (Postgres archive).
 
 ## Storage tiers
 
@@ -32,31 +32,31 @@ FleetLM separates hot runtime storage (Raft) from optional cold storage (Postgre
 ## Enabling Postgres archive
 
 ```bash
--e FLEETLM_ARCHIVER_ENABLED=true \
+-e STARCITE_ARCHIVER_ENABLED=true \
 -e DATABASE_URL=postgres://user:password@host:5432/db \
--e FLEETLM_ARCHIVE_FLUSH_INTERVAL_MS=5000
+-e STARCITE_ARCHIVE_FLUSH_INTERVAL_MS=5000
 ```
 
 Tail retention and batch size are configurable:
 
 ```elixir
-config :fleet_lm,
+config :starcite,
   archive_batch_size: 5_000,
   tail_keep: 1_000
 ```
 
 ## Telemetry (archive subset)
 
-- `fleet_lm_archive_pending_rows`
-- `fleet_lm_archive_pending_sessions`
-- `fleet_lm_archive_attempted_total`
-- `fleet_lm_archive_inserted_total`
-- `fleet_lm_archive_bytes_attempted_total`
-- `fleet_lm_archive_bytes_inserted_total`
-- `fleet_lm_archive_flush_duration_ms`
-- `fleet_lm_archive_lag`
-- `fleet_lm_archive_tail_size`
-- `fleet_lm_archive_trimmed_total`
+- `starcite_archive_pending_rows`
+- `starcite_archive_pending_sessions`
+- `starcite_archive_attempted_total`
+- `starcite_archive_inserted_total`
+- `starcite_archive_bytes_attempted_total`
+- `starcite_archive_bytes_inserted_total`
+- `starcite_archive_flush_duration_ms`
+- `starcite_archive_lag`
+- `starcite_archive_tail_size`
+- `starcite_archive_trimmed_total`
 
 ## Exporting history
 

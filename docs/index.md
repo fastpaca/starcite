@@ -1,12 +1,12 @@
 ---
-title: FleetLM
+title: Starcite
 slug: /
 sidebar_position: 0
 ---
 
-# FleetLM
+# Starcite
 
-FleetLM is the session semantics layer for AI experiences.
+Starcite is the session semantics layer for AI experiences.
 
 Core primitives:
 

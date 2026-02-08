@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Guidance for Claude Code when collaborating on FleetLM.
+Guidance for Claude Code when collaborating on Starcite.
 
 ## Quick Start
 
@@ -12,7 +12,7 @@ Guidance for Claude Code when collaborating on FleetLM.
 
 ## Product Surface
 
-FleetLM exposes three primitives under `/v1`:
+Starcite exposes three primitives under `/v1`:
 
 - `POST /v1/sessions` (`create`)
 - `POST /v1/sessions/:id/append` (`append`)
@@ -25,8 +25,8 @@ Contract reminders:
 - `actor` is required on append and is an opaque string.
 - `type` + `payload` are protocol-agnostic in this iteration.
 - `idempotency_key` and `expected_seq` are optional controls.
-- Auth is upstream; FleetLM does not own authn/authz.
-- FleetLM does not push outbound webhooks.
+- Auth is upstream; Starcite does not own authn/authz.
+- Starcite does not push outbound webhooks.
 
 ## Architecture Cheat Sheet
 
@@ -49,7 +49,7 @@ Contract reminders:
 - Sessions are the primary resource.
 - Events are append-only per session and ordered by monotonic `seq`.
 - Clients recover from disconnects by reconnecting `tail` with their last processed cursor.
-- `metadata` and `refs` are opaque application data; FleetLM stores and replays them.
+- `metadata` and `refs` are opaque application data; Starcite stores and replays them.
 - **Background flush**: Flusher batch-inserts committed events to Postgres when archiver is enabled. Idempotent on `[session_id, seq]`.
 - **Snapshots**: Raft snapshots are used for recovery and log compaction.
 

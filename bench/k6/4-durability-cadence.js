@@ -1,5 +1,5 @@
 /**
- * FleetLM Scenario 4: Sustained Ordered Appends
+ * Starcite Scenario 4: Sustained Ordered Appends
  *
  * Sustained append workload with strict expected_seq guards.
  */

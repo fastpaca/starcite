@@ -5,7 +5,7 @@ sidebar_position: 3
 
 # Deployment
 
-FleetLM is designed for self-hosted clustered deployment.
+Starcite is designed for self-hosted clustered deployment.
 
 ## Hardware guidance
 
@@ -14,15 +14,15 @@ FleetLM is designed for self-hosted clustered deployment.
 - Disk: fast SSD/NVMe for Raft logs
 - Network: low RTT between cluster nodes
 
-Set `FLEETLM_RAFT_DATA_DIR` to persistent storage so Raft state survives restarts.
+Set `STARCITE_RAFT_DATA_DIR` to persistent storage so Raft state survives restarts.
 
 ## Local development (single node)
 
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v fleetlm_data:/data \
-ghcr.io/fastpaca/fleetlm:latest
+  -v starcite_data:/data \
+ghcr.io/starcite-ai/starcite:latest
 ```
 
 ## Local cluster testing (five nodes)
@@ -40,22 +40,22 @@ Use the built-in scripts:
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v /var/lib/fleetlm:/data \
-  -e CLUSTER_NODES=fleetlm-1@fleetlm.internal,fleetlm-2@fleetlm.internal,fleetlm-3@fleetlm.internal \
-  -e NODE_NAME=fleetlm-1 \
-  ghcr.io/fastpaca/fleetlm:latest
+  -v /var/lib/starcite:/data \
+  -e CLUSTER_NODES=starcite-1@starcite.internal,starcite-2@starcite.internal,starcite-3@starcite.internal \
+  -e NODE_NAME=starcite-1 \
+  ghcr.io/starcite-ai/starcite:latest
 ```
 
-Repeat with `NODE_NAME=fleetlm-2` and `NODE_NAME=fleetlm-3`.
+Repeat with `NODE_NAME=starcite-2` and `NODE_NAME=starcite-3`.
 
 Use a load balancer in front of nodes for API traffic.
 
 ## Archive (optional Postgres)
 
 ```bash
--e FLEETLM_ARCHIVER_ENABLED=true \
+-e STARCITE_ARCHIVER_ENABLED=true \
 -e DATABASE_URL=postgres://user:password@host/db \
--e FLEETLM_ARCHIVE_FLUSH_INTERVAL_MS=5000 \
+-e STARCITE_ARCHIVE_FLUSH_INTERVAL_MS=5000 \
 -e DB_POOL_SIZE=10
 ```
 
@@ -65,16 +65,16 @@ Prometheus metrics are exposed on `/metrics`.
 
 Core series:
 
-- `fleet_lm_events_append_total`
-- `fleet_lm_events_payload_bytes`
-- `fleet_lm_archive_pending_rows`
-- `fleet_lm_archive_pending_sessions`
-- `fleet_lm_archive_flush_duration_ms`
-- `fleet_lm_archive_attempted_total`
-- `fleet_lm_archive_inserted_total`
-- `fleet_lm_archive_lag`
-- `fleet_lm_archive_tail_size`
-- `fleet_lm_archive_trimmed_total`
+- `starcite_events_append_total`
+- `starcite_events_payload_bytes`
+- `starcite_archive_pending_rows`
+- `starcite_archive_pending_sessions`
+- `starcite_archive_flush_duration_ms`
+- `starcite_archive_attempted_total`
+- `starcite_archive_inserted_total`
+- `starcite_archive_lag`
+- `starcite_archive_tail_size`
+- `starcite_archive_trimmed_total`
 
 ## Configuration summary
 
@@ -83,12 +83,12 @@ Core series:
 | `NODE_NAME` | random | Node identifier used by clustering |
 | `CLUSTER_NODES` | none | Comma-separated peer Erlang node names |
 | `DNS_CLUSTER_QUERY` | none | DNS name for libcluster DNS poll strategy |
-| `DNS_CLUSTER_NODE_BASENAME` | `fleet_lm` | Base name for DNS cluster nodes |
+| `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS cluster nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval for cluster discovery |
-| `FLEETLM_RAFT_DATA_DIR` | `priv/raft` | Filesystem path for Raft logs and snapshots |
-| `FLEETLM_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
-| `FLEETLM_POSTGRES_URL` | none | Alternate database URL if `DATABASE_URL` is not set |
-| `FLEETLM_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush tick interval |
+| `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Filesystem path for Raft logs and snapshots |
+| `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
+| `STARCITE_POSTGRES_URL` | none | Alternate database URL if `DATABASE_URL` is not set |
+| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush tick interval |
 | `DB_POOL_SIZE` | `10` | Postgres connection pool size |
 | `DATABASE_URL` | none | Primary Postgres URL when archive is enabled |
 | `PORT` | `4000` | HTTP server port |

@@ -1,4 +1,4 @@
-defmodule FleetLM.Repo.Migrations.CreateArchiveEvents do
+defmodule Starcite.Repo.Migrations.CreateArchiveEvents do
   use Ecto.Migration
 
   def change do

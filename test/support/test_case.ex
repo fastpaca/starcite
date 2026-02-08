@@ -1,6 +1,6 @@
-defmodule FleetLM.TestCase do
+defmodule Starcite.TestCase do
   @moduledoc """
-  Lean ExUnit case template for FleetLM.
+  Lean ExUnit case template for Starcite.
 
   Provides a clean runtime after each test and a small set of helpers tailored
   for the Raft-only runtime.
@@ -10,13 +10,13 @@ defmodule FleetLM.TestCase do
 
   using _opts do
     quote do
-      import FleetLM.TestCase
+      import Starcite.TestCase
     end
   end
 
   setup _tags do
     on_exit(fn ->
-      FleetLM.Runtime.TestHelper.reset()
+      Starcite.Runtime.TestHelper.reset()
     end)
 
     {:ok, %{}}

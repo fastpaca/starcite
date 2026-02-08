@@ -8,7 +8,7 @@ import Config
 # No static assets are built/served by this API-only app,
 # so disable static manifest warmup in prod.
 # If a web UI is added later, re-enable with:
-# config :fleet_lm, FleetLMWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
+# config :starcite, StarciteWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
 # Configures Swoosh API Client
 config :swoosh, api_client: Swoosh.ApiClient.Req
@@ -20,7 +20,7 @@ config :swoosh, local: false
 config :logger, level: :info
 
 # Use local PubSub (pg2) in production; clustering handled via libcluster DNS
-config :fleet_lm, :pubsub_adapter, :local
+config :starcite, :pubsub_adapter, :local
 
 # Runtime production configuration, including reading
 # of environment variables, is done on config/runtime.exs.

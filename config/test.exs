@@ -1,14 +1,14 @@
 import Config
 
 # Configure database for tests
-config :fleet_lm, FleetLM.Repo,
-  url: "ecto://postgres:postgres@localhost:5432/fleet_lm_test",
+config :starcite, Starcite.Repo,
+  url: "ecto://postgres:postgres@localhost:5432/starcite_test",
   pool: Ecto.Adapters.SQL.Sandbox,
   pool_size: 10
 
 # We don't run a server during test. If one is required,
 # you can enable the server option below.
-config :fleet_lm, FleetLMWeb.Endpoint,
+config :starcite, StarciteWeb.Endpoint,
   http: [ip: {127, 0, 0, 1}, port: 4002],
   secret_key_base: "j00A2bogYM9pz50icwpf23zy58245sY8GUZ67/P1CqXOIxD0kbwNBPR4vjbfl82k",
   server: false
@@ -20,10 +20,10 @@ config :logger, level: :warning
 config :phoenix, :plug_init_mode, :runtime
 
 # Use local PubSub for tests to avoid Redis dependency
-config :fleet_lm, :pubsub_adapter, :local
+config :starcite, :pubsub_adapter, :local
 
 # Raft test configuration
-config :fleet_lm,
+config :starcite,
   raft_data_dir: "tmp/test_raft",
   raft_flush_interval_ms: 100,
   runtime_flusher_enabled: false,

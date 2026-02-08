@@ -5,7 +5,7 @@ sidebar_position: 90
 
 # Benchmarks
 
-FleetLM ships with a reproducible benchmark harness so you can validate performance and failure modes on your own hardware/network.
+Starcite ships with a reproducible benchmark harness so you can validate performance and failure modes on your own hardware/network.
 
 The benchmark suite focuses on the session primitives: append latency, optimistic concurrency behavior, idempotency behavior, and ordering durability under load.
 
@@ -46,7 +46,7 @@ Notes:
 
 ## Single scenario quick run
 
-1. Start FleetLM.
+1. Start Starcite.
 2. Install k6.
 3. Run a scenario:
 
@@ -58,7 +58,7 @@ Each scenario defines **thresholds** as guardrails (for example, `append_latency
 
 ## AWS reproducible setup
 
-The AWS harness provisions a cluster and a benchmark client in the same VPC so you can measure FleetLM without public-internet jitter.
+The AWS harness provisions a cluster and a benchmark client in the same VPC so you can measure Starcite without public-internet jitter.
 
 ```bash
 cd bench/aws/terraform

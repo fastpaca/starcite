@@ -7,20 +7,20 @@
 # General application configuration
 import Config
 
-config :fleet_lm,
-  ecto_repos: [FleetLM.Repo],
+config :starcite,
+  ecto_repos: [Starcite.Repo],
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000
 
 # Configures the endpoint
-config :fleet_lm, FleetLMWeb.Endpoint,
+config :starcite, StarciteWeb.Endpoint,
   url: [host: "localhost"],
   adapter: Bandit.PhoenixAdapter,
   render_errors: [
-    formats: [json: FleetLMWeb.ErrorJSON],
+    formats: [json: StarciteWeb.ErrorJSON],
     layout: false
   ],
-  pubsub_server: FleetLM.PubSub
+  pubsub_server: Starcite.PubSub
 
 # Configures Elixir's Logger
 config :logger, :default_formatter,
@@ -32,7 +32,7 @@ config :phoenix, :json_library, Jason
 
 config :libcluster, topologies: []
 
-config :fleet_lm, FleetLM.Observability.PromEx,
+config :starcite, Starcite.Observability.PromEx,
   metrics_server: :disabled,
   grafana_agent: :disabled
 

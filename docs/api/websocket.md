@@ -5,7 +5,7 @@ sidebar_position: 2
 
 # WebSocket API
 
-FleetLM exposes `tail` as a WebSocket endpoint.
+Starcite exposes `tail` as a WebSocket endpoint.
 
 ## Endpoint
 
@@ -23,7 +23,7 @@ On connect:
 
 ## Server frames
 
-FleetLM emits one JSON event object per WebSocket text frame:
+Starcite emits one JSON event object per WebSocket text frame:
 
 ```json
 {

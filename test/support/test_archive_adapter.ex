@@ -1,6 +1,6 @@
-defmodule FleetLM.Archive.TestAdapter do
+defmodule Starcite.Archive.TestAdapter do
   @moduledoc false
-  @behaviour FleetLM.Archive.Adapter
+  @behaviour Starcite.Archive.Adapter
 
   use GenServer
 

@@ -9,7 +9,7 @@ NC='\033[0m'
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TERRAFORM_DIR="$SCRIPT_DIR/../terraform"
 
-echo -e "${GREEN}=== FleetLM Smoke Test ===${NC}"
+echo -e "${GREEN}=== Starcite Smoke Test ===${NC}"
 
 cd "$TERRAFORM_DIR"
 INSTANCE_IPS=$(terraform output -json instance_ips | jq -r '.[]')
@@ -48,7 +48,7 @@ APPEND_STATUS=$(curl -s -o /tmp/session_append.json -w "%{http_code}" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "content",
-    "payload": {"text": "Hello from FleetLM smoke test"},
+    "payload": {"text": "Hello from Starcite smoke test"},
     "actor": "agent:smoke",
     "source": "smoke-test"
   }')

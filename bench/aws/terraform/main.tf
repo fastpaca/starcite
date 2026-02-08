@@ -43,19 +43,19 @@ data "aws_ami" "amazon_linux_2023" {
 }
 
 # Create SSH key pair if ssh_public_key is provided
-resource "aws_key_pair" "fleetlm" {
+resource "aws_key_pair" "starcite" {
   count      = var.ssh_public_key != "" ? 1 : 0
-  key_name   = "fleetlm-bench-key"
+  key_name   = "starcite-bench-key"
   public_key = var.ssh_public_key
 
   tags = {
-    Name = "fleetlm-bench-key"
+    Name = "starcite-bench-key"
   }
 }
 
 # Determine which key to use
 locals {
-  key_name = var.key_name != "" ? var.key_name : (var.ssh_public_key != "" ? aws_key_pair.fleetlm[0].key_name : null)
+  key_name = var.key_name != "" ? var.key_name : (var.ssh_public_key != "" ? aws_key_pair.starcite[0].key_name : null)
 }
 
 # User data script to install Docker and mount instance store
@@ -95,14 +95,14 @@ locals {
 }
 
 # EC2 instances
-resource "aws_instance" "fleetlm" {
+resource "aws_instance" "starcite" {
   count = var.instance_count
 
   ami           = data.aws_ami.amazon_linux_2023.id
   instance_type = var.instance_type
   key_name      = local.key_name
 
-  vpc_security_group_ids = [aws_security_group.fleetlm_ec2.id]
+  vpc_security_group_ids = [aws_security_group.starcite_ec2.id]
 
   user_data                   = local.user_data
   user_data_replace_on_change = true
@@ -113,7 +113,7 @@ resource "aws_instance" "fleetlm" {
   }
 
   tags = {
-    Name  = "fleetlm-bench-${count.index + 1}"
+    Name  = "starcite-bench-${count.index + 1}"
     Index = count.index
   }
 }

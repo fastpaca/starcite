@@ -7,13 +7,13 @@ sidebar_position: 1
 
 This quick start uses the three session primitives.
 
-## 1. Start FleetLM
+## 1. Start Starcite
 
 ```bash
 docker run -d \
   -p 4000:4000 \
-  -v fleetlm_data:/data \
-  ghcr.io/fastpaca/fleetlm:latest
+  -v starcite_data:/data \
+  ghcr.io/starcite-ai/starcite:latest
 ```
 
 ## 2. Create a session
@@ -47,8 +47,8 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 
 Behavior:
 
-1. FleetLM replays events with `seq > cursor`.
-2. FleetLM keeps streaming new events as they commit.
+1. Starcite replays events with `seq > cursor`.
+2. Starcite keeps streaming new events as they commit.
 3. Reconnect with your last processed `seq` as the next cursor.
 
 ## 5. Optional write controls

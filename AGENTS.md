@@ -1,6 +1,6 @@
-# FleetLM - Agent Guide
+# Starcite - Agent Guide
 
-FleetLM is a clustered Phoenix application that provides durable, low-latency session event storage for LLM applications. It maintains ordered session histories with sub-150ms p99 appends via Raft consensus, leaving prompt construction and token management to the client.
+Starcite is a clustered Phoenix application that provides durable, low-latency session event storage for LLM applications. It maintains ordered session histories with sub-150ms p99 appends via Raft consensus, leaving prompt construction and token management to the client.
 
 ## Ground Rules
 
@@ -38,14 +38,14 @@ FleetLM is a clustered Phoenix application that provides durable, low-latency se
   @import "tailwindcss" source(none);
   @source "../css";
   @source "../js";
-  @source "../../lib/fleetlm_web";
+  @source "../../lib/starcite_web";
   ```
 - No inline `<script>` tags. Extend behaviour via `assets/js/app.js` and Phoenix hooks with `phx-update="ignore"` when hooks own the DOM.
 - Build micro-interactions via Tailwind utility classes and CSS transitions; avoid component libraries like daisyUI.
 
 ## Observability & Testing
 
-- Emit telemetry via helpers in `FleetLM.Observability.Telemetry`; add new events there so tags stay normalised.
+- Emit telemetry via the centralized telemetry helper module; add new events there so tags stay normalised.
 - When you touch collections rendered in LiveView, prefer streams (`stream/3`) and track counts/empty states separately.
 - Use `mix test`, `mix test --failed`, or file-scoped runs to iterate quickly. End every work session with `mix precommit`.
 

@@ -1,5 +1,5 @@
 /**
- * FleetLM Scenario 3: Idempotency Under Load
+ * Starcite Scenario 3: Idempotency Under Load
  *
  * Simulates retries by reusing idempotency keys while appending concurrent traffic.
  */
