@@ -1,7 +1,7 @@
 defmodule FleetLM do
   @moduledoc """
-  FleetLM - message backend for AI agents.
+  FleetLM - event stream backend for AI sessions.
 
-  An append-only, replayable message log with streaming updates.
+  An append-only, replayable event log with streaming updates.
   """
 end

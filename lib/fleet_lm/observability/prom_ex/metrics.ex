@@ -8,27 +8,27 @@ defmodule FleetLM.Observability.PromEx.Metrics do
   @impl true
   def event_metrics(_opts) do
     [
-      messages_metrics(),
+      events_metrics(),
       archive_metrics()
     ]
   end
 
-  defp messages_metrics do
+  defp events_metrics do
     Event.build(
-      :fleet_lm_messages_event_metrics,
+      :fleet_lm_events_metrics,
       [
-        counter("fleet_lm_messages_append_total",
-          event_name: [:fleet_lm, :messages, :append],
-          description: "Total messages appended",
-          tags: [:source, :role]
+        counter("fleet_lm_events_append_total",
+          event_name: [:fleet_lm, :events, :append],
+          description: "Total events appended",
+          tags: [:type, :source]
         ),
-        distribution("fleet_lm_messages_token_count",
-          event_name: [:fleet_lm, :messages, :append],
-          measurement: :token_count,
-          description: "Token count per appended message",
-          unit: :token,
-          tags: [:source, :role],
-          reporter_options: [buckets: [10, 50, 100, 500, 1000, 5000, 10000]]
+        distribution("fleet_lm_events_payload_bytes",
+          event_name: [:fleet_lm, :events, :append],
+          measurement: :payload_bytes,
+          description: "Payload bytes per appended event",
+          unit: :byte,
+          tags: [:type, :source],
+          reporter_options: [buckets: [128, 512, 1024, 4096, 16384, 65536, 262_144, 1_048_576]]
         )
       ]
     )
@@ -40,13 +40,13 @@ defmodule FleetLM.Observability.PromEx.Metrics do
       [
         last_value("fleet_lm_archive_pending_rows",
           event_name: [:fleet_lm, :archive, :flush],
-          measurement: :pending_rows,
+          measurement: :pending_events,
           description: "Pending rows in archive ETS queue"
         ),
-        last_value("fleet_lm_archive_pending_conversations",
+        last_value("fleet_lm_archive_pending_sessions",
           event_name: [:fleet_lm, :archive, :flush],
-          measurement: :pending_conversations,
-          description: "Conversations with pending rows in archive ETS queue"
+          measurement: :pending_sessions,
+          description: "Sessions with pending rows in archive ETS queue"
         ),
         distribution("fleet_lm_archive_flush_duration_ms",
           event_name: [:fleet_lm, :archive, :flush],
@@ -80,46 +80,46 @@ defmodule FleetLM.Observability.PromEx.Metrics do
         distribution("fleet_lm_archive_batch_rows",
           event_name: [:fleet_lm, :archive, :batch],
           measurement: :batch_rows,
-          description: "Rows per archive batch (per conversation)",
+          description: "Rows per archive batch (per session)",
           reporter_options: [buckets: [1, 10, 50, 100, 500, 1_000, 2_000, 5_000, 10_000]],
-          tags: [:conversation_id]
+          tags: [:session_id]
         ),
         distribution("fleet_lm_archive_batch_bytes",
           event_name: [:fleet_lm, :archive, :batch],
           measurement: :batch_bytes,
-          description: "Payload bytes per archive batch (per conversation)",
+          description: "Payload bytes per archive batch (per session)",
           reporter_options: [buckets: [1_024, 10_240, 102_400, 1_048_576, 10_485_760, 52_428_800]],
-          tags: [:conversation_id]
+          tags: [:session_id]
         ),
-        distribution("fleet_lm_archive_message_bytes",
+        distribution("fleet_lm_archive_event_bytes",
           event_name: [:fleet_lm, :archive, :batch],
-          measurement: :avg_message_bytes,
-          description: "Average message bytes per batch (per conversation)",
+          measurement: :avg_event_bytes,
+          description: "Average event bytes per batch (per session)",
           reporter_options: [buckets: [100, 1_000, 5_000, 10_000, 50_000, 100_000, 1_000_000]],
-          tags: [:conversation_id]
+          tags: [:session_id]
         ),
         last_value("fleet_lm_archive_oldest_age_seconds",
           event_name: [:fleet_lm, :archive, :queue_age],
           measurement: :seconds,
-          description: "Oldest pending message age across the archive queue (seconds)"
+          description: "Oldest pending event age across the archive queue (seconds)"
         ),
         last_value("fleet_lm_archive_lag",
           event_name: [:fleet_lm, :archive, :ack],
           measurement: :lag,
-          description: "Archive lag (messages) per conversation",
-          tags: [:conversation_id]
+          description: "Archive lag (events) per session",
+          tags: [:session_id]
         ),
         last_value("fleet_lm_archive_tail_size",
           event_name: [:fleet_lm, :archive, :ack],
           measurement: :tail_size,
           description: "In-Raft tail size after trim",
-          tags: [:conversation_id]
+          tags: [:session_id]
         ),
         counter("fleet_lm_archive_trimmed_total",
           event_name: [:fleet_lm, :archive, :ack],
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
-          tags: [:conversation_id]
+          tags: [:session_id]
         )
       ]
     )

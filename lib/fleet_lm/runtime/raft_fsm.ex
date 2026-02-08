@@ -51,6 +51,14 @@ defmodule FleetLM.Runtime.RaftFSM do
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
           new_state = put_in(state.lanes[lane_id], new_lane)
 
+          FleetLM.Observability.Telemetry.event_appended(
+            session_id,
+            event.type,
+            event.actor,
+            event.source,
+            byte_size(Jason.encode!(event.payload))
+          )
+
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
           effects = build_effects(session_id, event)
           {new_state, {:reply, {:ok, reply}}, effects}
@@ -89,8 +97,7 @@ defmodule FleetLM.Runtime.RaftFSM do
         updated_session.archived_seq,
         trimmed,
         updated_session.retention.tail_keep,
-        tail_size,
-        0
+        tail_size
       )
 
       {new_state,
