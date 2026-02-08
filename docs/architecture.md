@@ -1,8 +1,3 @@
----
-title: Architecture
-sidebar_position: 4
----
-
 # Architecture
 
 Starcite runs a Raft-backed state machine that stores session event logs and serves tail streams.
@@ -36,17 +31,28 @@ Everything else in this document exists to preserve one behavior chain: `create 
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
 4. **Archive (optional)**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
 
-## Ordering and durability model
+## Ordering and durability
 
 - Ordering is monotonic per session (`seq`).
 - Appends are acknowledged only after quorum commit.
 - `tail` replay is always ordered ascending by `seq`.
 - Client recovery is reconnect + `cursor` (last processed `seq`).
+- Append-only event history — no deletes, no updates.
+- Idempotent archival writes (`ON CONFLICT DO NOTHING`).
+- At-least-once delivery from runtime to archive.
 
 ## Storage model
 
-- Hot (Raft): session metadata + event log
-- Cold (optional Postgres): full event history
+| Tier | Contents |
+| --- | --- |
+| Hot (Raft) | Session metadata (`last_seq`, `archived_seq`, retention state) + ordered event log |
+| Cold (optional Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
+
+## Replay behavior
+
+- `tail` replays committed events where `seq > cursor`.
+- When archive is enabled, runtime trims older hot entries after archive acknowledgement.
+- When archive is disabled, replay is constrained to the retained hot tail window.
 
 ## Intentional boundaries
 

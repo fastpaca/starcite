@@ -1,8 +1,3 @@
----
-title: REST API
-sidebar_position: 1
----
-
 # REST API
 
 All endpoints are under `/v1`.
@@ -116,8 +111,6 @@ Optimistic concurrency behavior:
 See [WebSocket API](./websocket.md).
 
 ## Health endpoints
-
-These are operational probes, not part of the product primitive surface.
 
 - `GET /health/live` returns `{"status":"ok"}`.
 - `GET /health/ready` returns `{"status":"ok"}`.
