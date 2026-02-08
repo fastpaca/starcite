@@ -1,89 +1,91 @@
 defmodule FleetLM.Runtime do
   @moduledoc """
-  Public interface for the Raft-backed runtime.
+  Public interface for the Raft-backed FleetLM runtime.
 
-  This is a message backend substrate - it stores and streams messages
-  but does NOT manage prompt windows, token budgets, or compaction.
+  The runtime exposes three session primitives:
+
+  - create a session
+  - append an event
+  - tail events from a cursor
   """
 
   require Logger
 
-  alias FleetLM.Conversation
   alias FleetLM.Runtime.{RaftFSM, RaftManager, RaftTopology}
+  alias FleetLM.Session
 
   @timeout Application.compile_env(:fleet_lm, :raft_command_timeout_ms, 2_000)
   @rpc_timeout Application.compile_env(:fleet_lm, :rpc_timeout_ms, 5_000)
 
+  @default_tail_batch_size 1_000
+
   # ---------------------------------------------------------------------------
-  # Conversation lifecycle
+  # Session lifecycle
   # ---------------------------------------------------------------------------
 
-  @doc """
-  Create or update a conversation.
+  @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
+  def create_session(opts \\ []) when is_list(opts) do
+    id =
+      case Keyword.get(opts, :id) do
+        nil -> generate_session_id()
+        value -> value
+      end
 
-  Options:
-    - `metadata`: Optional map of conversation metadata
-    - `status`: Optional status (:active or :tombstoned)
+    title = Keyword.get(opts, :title)
+    metadata = Keyword.get(opts, :metadata, %{})
+    group = RaftManager.group_for_session(id)
 
-  Returns `{:ok, conversation}` on success.
-  """
-  @spec upsert_conversation(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
-  def upsert_conversation(id, opts \\ []) when is_binary(id) do
-    group = RaftManager.group_for_conversation(id)
-
-    call_on_replica(group, :upsert_conversation_local, [id, opts], fn ->
-      upsert_conversation_local(id, opts)
+    call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
+      create_session_local(id, title, metadata)
     end)
   end
 
   @doc false
-  def upsert_conversation_local(id, opts \\ []) when is_binary(id) do
-    status = Keyword.get(opts, :status, :active)
-    metadata = Keyword.get(opts, :metadata, %{})
-
+  def create_session_local(id, title, metadata)
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and is_map(metadata) do
     with {:ok, server_id, lane, group} <- locate(id),
-         :ok <- ensure_group_started(group),
-         {:ok, {:reply, {:ok, data}}, _leader} <-
-           :ra.process_command(
+         :ok <- ensure_group_started(group) do
+      case :ra.process_command(
              {server_id, Node.self()},
-             {:upsert_conversation, lane, id, status, metadata},
+             {:create_session, lane, id, title, metadata},
              @timeout
            ) do
-      {:ok, data}
-    else
-      {:timeout, leader} -> {:timeout, leader}
-      {:error, reason} -> {:error, reason}
+        {:ok, {:reply, {:ok, data}}, _leader} -> {:ok, data}
+        {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
+        {:timeout, leader} -> {:timeout, leader}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
-  @doc """
-  Get a conversation by ID.
+  def create_session_local(_id, _title, _metadata), do: {:error, :invalid_session}
 
-  Returns `{:ok, conversation}` on success, `{:error, :conversation_not_found}` if not found.
-  """
-  @spec get_conversation(String.t()) :: {:ok, Conversation.t()} | {:error, term()}
-  def get_conversation(id) when is_binary(id) do
-    group = RaftManager.group_for_conversation(id)
+  @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
+  def get_session(id) when is_binary(id) and id != "" do
+    group = RaftManager.group_for_session(id)
 
-    call_on_replica(group, :get_conversation_local, [id], fn ->
-      get_conversation_local(id)
+    call_on_replica(group, :get_session_local, [id], fn ->
+      get_session_local(id)
     end)
   end
 
+  def get_session(_id), do: {:error, :invalid_session_id}
+
   @doc false
-  def get_conversation_local(id) when is_binary(id) do
-    with {:ok, server_id, lane, _group} <- locate(id) do
+  def get_session_local(id) when is_binary(id) and id != "" do
+    with {:ok, server_id, lane, group} <- locate(id),
+         :ok <- ensure_group_started(group) do
       case :ra.consistent_query(server_id, fn state ->
-             RaftFSM.query_conversation(state, lane, id)
+             RaftFSM.query_session(state, lane, id)
            end) do
-        {:ok, {:ok, conversation}, _leader} ->
-          {:ok, conversation}
+        {:ok, {:ok, session}, _leader} ->
+          {:ok, session}
 
         {:ok, {:error, reason}, _leader} ->
           {:error, reason}
 
-        {:ok, {{_term, _index}, {:ok, conversation}}, _leader} ->
-          {:ok, conversation}
+        {:ok, {{_term, _index}, {:ok, session}}, _leader} ->
+          {:ok, session}
 
         {:ok, {{_term, _index}, {:error, reason}}, _leader} ->
           {:error, reason}
@@ -97,58 +99,34 @@ defmodule FleetLM.Runtime do
     end
   end
 
-  @doc """
-  Tombstone a conversation (soft delete).
-
-  Tombstoned conversations reject new writes but remain readable.
-  Returns `{:ok, conversation}` on success.
-  """
-  @spec tombstone_conversation(String.t()) :: {:ok, map()} | {:error, term()}
-  def tombstone_conversation(id) when is_binary(id) do
-    with {:ok, conversation} <- get_conversation(id) do
-      upsert_conversation(id, status: :tombstoned, metadata: conversation.metadata)
-    end
-  end
-
   # ---------------------------------------------------------------------------
-  # Messaging
+  # Append and tail
   # ---------------------------------------------------------------------------
 
-  @doc """
-  Append messages to a conversation.
+  @spec append_event(String.t(), map(), keyword()) ::
+          {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
+          | {:error, term()}
+          | {:timeout, term()}
+  def append_event(id, event, opts \\ [])
 
-  Each message is a map with:
-    - `role`: required string
-    - `parts`: required list of parts (each with `type`)
-    - `metadata`: optional map
-    - `token_count`: optional integer (client-provided)
-    - `token_source`: :client or :server
+  def append_event(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
+    group = RaftManager.group_for_session(id)
 
-  Options:
-    - `if_version`: optimistic concurrency check
-
-  Returns `{:ok, [reply]}` where each reply contains `seq`, `version`, `token_count`.
-  Returns `{:error, :conversation_tombstoned}` (410) if tombstoned.
-  Returns `{:error, {:version_conflict, current}}` (409) if version mismatch.
-  """
-  @spec append_messages(String.t(), [map()], keyword()) ::
-          {:ok, [map()]} | {:error, term()} | {:timeout, term()}
-  def append_messages(id, message_inputs, opts \\ []) when is_binary(id) do
-    group = RaftManager.group_for_conversation(id)
-
-    call_on_replica(group, :append_messages_local, [id, message_inputs, opts], fn ->
-      append_messages_local(id, message_inputs, opts)
+    call_on_replica(group, :append_event_local, [id, event, opts], fn ->
+      append_event_local(id, event, opts)
     end)
   end
 
+  def append_event(_id, _event, _opts), do: {:error, :invalid_event}
+
   @doc false
-  def append_messages_local(id, message_inputs, opts \\ [])
-      when is_binary(id) do
+  def append_event_local(id, event, opts \\ [])
+      when is_binary(id) and id != "" and is_map(event) do
     with {:ok, server_id, lane, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.process_command(
              {server_id, Node.self()},
-             {:append_batch, lane, id, message_inputs, opts},
+             {:append_event, lane, id, event, opts},
              @timeout
            ) do
         {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
@@ -159,99 +137,42 @@ defmodule FleetLM.Runtime do
     end
   end
 
-  @doc """
-  Retrieves messages from the tail (newest) with offset-based pagination.
-
-  Designed for backward iteration starting from the most recent messages.
-  Future-proof for scenarios where older messages may be paged from disk/remote storage.
-
-  ## Parameters
-    - `id`: Conversation ID
-    - `offset`: Number of messages to skip from tail (0 = most recent, default: 0)
-    - `limit`: Maximum messages to return (must be > 0, default: 100)
-
-  ## Examples
-      # Get last 50 messages
-      get_messages_tail("conv-123", 0, 50)
-
-      # Get next page (messages 51-100 from tail)
-      get_messages_tail("conv-123", 50, 50)
-
-  Returns `{:ok, messages}` where messages are in chronological order (oldest to newest).
-  """
-  @spec get_messages_tail(String.t(), non_neg_integer(), pos_integer()) ::
+  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
-  def get_messages_tail(id, offset \\ 0, limit \\ 100)
-      when is_binary(id) and is_integer(offset) and offset >= 0 and is_integer(limit) and
-             limit > 0 do
-    group = RaftManager.group_for_conversation(id)
+  def get_events_from_cursor(id, cursor, limit \\ @default_tail_batch_size)
 
-    call_on_replica(group, :get_messages_tail_local, [id, offset, limit], fn ->
-      get_messages_tail_local(id, offset, limit)
+  def get_events_from_cursor(id, cursor, limit)
+      when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
+             limit > 0 do
+    group = RaftManager.group_for_session(id)
+
+    call_on_replica(group, :get_events_from_cursor_local, [id, cursor, limit], fn ->
+      get_events_from_cursor_local(id, cursor, limit)
     end)
   end
 
+  def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
+
   @doc false
-  def get_messages_tail_local(id, offset, limit)
-      when is_binary(id) and is_integer(offset) and offset >= 0 and is_integer(limit) and
+  def get_events_from_cursor_local(id, cursor, limit)
+      when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    with {:ok, server_id, lane, _group} <- locate(id) do
+    with {:ok, server_id, lane, group} <- locate(id),
+         :ok <- ensure_group_started(group) do
       case :ra.consistent_query(server_id, fn state ->
-             RaftFSM.query_messages_tail(state, lane, id, offset, limit)
+             RaftFSM.query_events_from_cursor(state, lane, id, cursor, limit)
            end) do
-        {:ok, messages, _leader} when is_list(messages) ->
-          {:ok, messages}
+        {:ok, {:ok, events}, _leader} when is_list(events) ->
+          {:ok, events}
 
-        {:ok, {{_term, _index}, messages}, _leader} when is_list(messages) ->
-          {:ok, messages}
+        {:ok, {{_term, _index}, {:ok, events}}, _leader} when is_list(events) ->
+          {:ok, events}
 
-        {:timeout, leader} ->
-          {:error, {:timeout, leader}}
-
-        {:error, reason} ->
+        {:ok, {:error, reason}, _leader} ->
           {:error, reason}
-      end
-    end
-  end
 
-  @doc """
-  Replay messages by sequence number range.
-
-  Returns messages starting from `from_seq`, ordered by seq (oldest to newest).
-  Use this for replaying from a known position (e.g., after a gap event in websocket).
-
-  ## Parameters
-    - `id`: Conversation ID
-    - `from_seq`: Starting sequence number (inclusive)
-    - `limit`: Maximum messages to return (must be > 0, default: 100)
-
-  Returns `{:ok, messages}` in chronological order.
-  """
-  @spec get_messages_replay(String.t(), non_neg_integer(), pos_integer()) ::
-          {:ok, [map()]} | {:error, term()}
-  def get_messages_replay(id, from_seq \\ 0, limit \\ 100)
-      when is_binary(id) and is_integer(from_seq) and from_seq >= 0 and is_integer(limit) and
-             limit > 0 do
-    group = RaftManager.group_for_conversation(id)
-
-    call_on_replica(group, :get_messages_replay_local, [id, from_seq, limit], fn ->
-      get_messages_replay_local(id, from_seq, limit)
-    end)
-  end
-
-  @doc false
-  def get_messages_replay_local(id, from_seq, limit)
-      when is_binary(id) and is_integer(from_seq) and from_seq >= 0 and is_integer(limit) and
-             limit > 0 do
-    with {:ok, server_id, lane, _group} <- locate(id) do
-      case :ra.consistent_query(server_id, fn state ->
-             RaftFSM.query_messages_replay(state, lane, id, from_seq, limit)
-           end) do
-        {:ok, messages, _leader} when is_list(messages) ->
-          {:ok, messages}
-
-        {:ok, {{_term, _index}, messages}, _leader} when is_list(messages) ->
-          {:ok, messages}
+        {:ok, {{_term, _index}, {:error, reason}}, _leader} ->
+          {:error, reason}
 
         {:timeout, leader} ->
           {:error, {:timeout, leader}}
@@ -269,7 +190,7 @@ defmodule FleetLM.Runtime do
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    group = RaftManager.group_for_conversation(id)
+    group = RaftManager.group_for_session(id)
 
     call_on_replica(group, :ack_archived_local, [id, upto_seq], fn ->
       ack_archived_local(id, upto_seq)
@@ -299,8 +220,8 @@ defmodule FleetLM.Runtime do
   # ---------------------------------------------------------------------------
 
   defp locate(id) do
-    group = RaftManager.group_for_conversation(id)
-    lane = :erlang.phash2(id, 16)
+    group = RaftManager.group_for_session(id)
+    lane = RaftManager.lane_for_session(id)
     server_id = RaftManager.server_id(group)
     {:ok, server_id, lane, group}
   end
@@ -348,12 +269,10 @@ defmodule FleetLM.Runtime do
           try_remote(rest, fun, args, visited, [{node, :not_leader} | failures])
 
         {:error, {:timeout, leader}} ->
-          # If a timeout returns a leader hint, try the leader next
           rest = maybe_enqueue_leader(leader, rest, visited)
           try_remote(rest, fun, args, visited, [{node, {:timeout, leader}} | failures])
 
         {:timeout, leader} ->
-          # Some paths may return bare {:timeout, leader}
           rest = maybe_enqueue_leader(leader, rest, visited)
           try_remote(rest, fun, args, visited, [{node, {:timeout, leader}} | failures])
 
@@ -373,16 +292,18 @@ defmodule FleetLM.Runtime do
 
   defp retriable_error?(reason)
        when reason in [
-              :invalid_message,
-              :invalid_metadata,
-              :invalid_conversation_config,
-              :conversation_tombstoned,
-              :conversation_not_found
+              :invalid_session,
+              :invalid_session_id,
+              :invalid_event,
+              :invalid_cursor,
+              :session_not_found,
+              :session_exists,
+              :idempotency_conflict
             ] do
     false
   end
 
-  defp retriable_error?({:version_conflict, _current}), do: false
+  defp retriable_error?({:expected_seq_conflict, _current}), do: false
   defp retriable_error?(_reason), do: true
 
   defp safe_rpc_call(node, fun, args) do
@@ -432,5 +353,9 @@ defmodule FleetLM.Runtime do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
+  end
+
+  defp generate_session_id do
+    "ses_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
   end
 end

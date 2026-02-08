@@ -22,9 +22,6 @@ config :phoenix, :plug_init_mode, :runtime
 # Use local PubSub for tests to avoid Redis dependency
 config :fleet_lm, :pubsub_adapter, :local
 
-# Disable agent webhooks by default in tests
-config :fleet_lm, :disable_agent_webhooks, true
-
 # Raft test configuration
 config :fleet_lm,
   raft_data_dir: "tmp/test_raft",

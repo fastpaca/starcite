@@ -27,27 +27,25 @@ defmodule FleetLM.ArchiveTest do
          flush_interval_ms: 100, adapter: FleetLM.Archive.TestAdapter, adapter_opts: []}
       )
 
-    conv_id = "conv-arch-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.upsert_conversation(conv_id)
+    session_id = "ses-arch-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
 
-    messages =
-      for i <- 1..5,
-          do: %{
-            role: "user",
-            parts: [%{type: "text", text: "m#{i}"}],
-            metadata: %{},
-            token_count: 1
-          }
-
-    {:ok, _} = Runtime.append_messages(conv_id, messages)
+    for i <- 1..5 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
 
     # Wait until archived_seq catches up
     eventually(
       fn ->
-        {:ok, conv} = Runtime.get_conversation(conv_id)
-        assert conv.archived_seq == conv.last_seq
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == session.last_seq
         # Tail should retain only 2 messages
-        tail = FleetLM.Conversation.MessageLog.entries(conv.message_log)
+        tail = FleetLM.Session.EventLog.entries(session.event_log)
         assert length(tail) == 2
       end,
       timeout: 2_000
@@ -63,19 +61,17 @@ defmodule FleetLM.ArchiveTest do
            flush_interval_ms: 50, adapter: FleetLM.Archive.IdempotentTestAdapter, adapter_opts: []}
         )
 
-      conv_id = "conv-idem-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.upsert_conversation(conv_id)
+      session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
 
-      messages =
-        for i <- 1..3,
-            do: %{
-              role: "user",
-              parts: [%{type: "text", text: "msg#{i}"}],
-              metadata: %{},
-              token_count: 1
-            }
-
-      {:ok, _} = Runtime.append_messages(conv_id, messages)
+      for i <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "msg#{i}"},
+            actor: "agent:test"
+          })
+      end
 
       # Wait for first flush
       eventually(
@@ -115,19 +111,16 @@ defmodule FleetLM.ArchiveTest do
            flush_interval_ms: 50, adapter: FleetLM.Archive.IdempotentTestAdapter, adapter_opts: []}
         )
 
-      conv_id = "conv-retry-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.upsert_conversation(conv_id)
+      session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
 
       # Append same logical message multiple times (simulating retry scenario)
       {:ok, _} =
-        Runtime.append_messages(conv_id, [
-          %{
-            role: "user",
-            parts: [%{type: "text", text: "retry-msg"}],
-            metadata: %{},
-            token_count: 1
-          }
-        ])
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "retry-msg"},
+          actor: "agent:test"
+        })
 
       eventually(
         fn ->
@@ -135,7 +128,7 @@ defmodule FleetLM.ArchiveTest do
 
           matching =
             Enum.filter(writes, fn row ->
-              row.conversation_id == conv_id and row.seq == 1
+              row.conversation_id == session_id and row.seq == 1
             end)
 
           # Should have exactly one message with seq=1 for this conversation
@@ -153,20 +146,17 @@ defmodule FleetLM.ArchiveTest do
            flush_interval_ms: 50, adapter: FleetLM.Archive.IdempotentTestAdapter, adapter_opts: []}
         )
 
-      conv_id = "conv-order-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.upsert_conversation(conv_id)
+      session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
 
       # Append messages in order
       for i <- 1..5 do
         {:ok, _} =
-          Runtime.append_messages(conv_id, [
-            %{
-              role: "user",
-              parts: [%{type: "text", text: "msg#{i}"}],
-              metadata: %{},
-              token_count: 1
-            }
-          ])
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "msg#{i}"},
+            actor: "agent:test"
+          })
       end
 
       eventually(
@@ -175,7 +165,7 @@ defmodule FleetLM.ArchiveTest do
 
           conv_writes =
             writes
-            |> Enum.filter(fn row -> row.conversation_id == conv_id end)
+            |> Enum.filter(fn row -> row.conversation_id == session_id end)
             |> Enum.sort_by(fn row -> row.seq end)
 
           seqs = Enum.map(conv_writes, & &1.seq)

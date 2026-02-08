@@ -1,38 +1,34 @@
 defmodule FleetLMWeb.FallbackController do
   @moduledoc """
-  Fallback controller for error handling.
-
-  Error codes per spec:
-  - 400 Bad Request: invalid payload shape
-  - 404 Not Found: conversation does not exist
-  - 409 Conflict: version mismatch
-  - 410 Gone: conversation is tombstoned
+  Fallback controller for API error handling.
   """
   use FleetLMWeb, :controller
 
-  def call(conn, {:error, :not_found}) do
+  def call(conn, {:error, :session_not_found}) do
     conn
     |> put_status(:not_found)
-    |> json(%{error: "not_found"})
+    |> json(%{error: "session_not_found"})
   end
 
-  def call(conn, {:error, :conversation_not_found}) do
-    conn
-    |> put_status(:not_found)
-    |> json(%{error: "conversation_not_found"})
-  end
-
-  def call(conn, {:error, {:version_conflict, current}}) do
+  def call(conn, {:error, :session_exists}) do
     conn
     |> put_status(:conflict)
-    |> json(%{error: "conflict", message: "Version mismatch (current: #{current})"})
+    |> json(%{error: "session_exists"})
   end
 
-  # Tombstoned conversations return 410 Gone per spec
-  def call(conn, {:error, :conversation_tombstoned}) do
+  def call(conn, {:error, {:expected_seq_conflict, current}}) do
     conn
-    |> put_status(:gone)
-    |> json(%{error: "conversation_tombstoned", message: "Conversation is tombstoned"})
+    |> put_status(:conflict)
+    |> json(%{
+      error: "expected_seq_conflict",
+      message: "Expected seq mismatch (current: #{current})"
+    })
+  end
+
+  def call(conn, {:error, :idempotency_conflict}) do
+    conn
+    |> put_status(:conflict)
+    |> json(%{error: "idempotency_conflict"})
   end
 
   def call(conn, {:timeout, _leader}) do
@@ -49,9 +45,13 @@ defmodule FleetLMWeb.FallbackController do
 
   def call(conn, {:error, reason})
       when reason in [
-             :invalid_message,
+             :invalid_event,
              :invalid_metadata,
-             :invalid_conversation_config
+             :invalid_refs,
+             :invalid_cursor,
+             :invalid_websocket_upgrade,
+             :invalid_session,
+             :invalid_session_id
            ] do
     conn
     |> put_status(:bad_request)

@@ -27,14 +27,14 @@ defmodule FleetLM.Runtime.RaftManager do
   @doc false
   def num_groups, do: @num_groups
 
-  @doc "Map conversation_id → group_id (0..#{@num_groups - 1})"
-  def group_for_conversation(conversation_id) do
-    :erlang.phash2(conversation_id, @num_groups)
+  @doc "Map session_id → group_id (0..#{@num_groups - 1})"
+  def group_for_session(session_id) do
+    :erlang.phash2(session_id, @num_groups)
   end
 
-  @doc "Map conversation_id → lane_id (0..#{@num_lanes - 1}) within its group"
-  def lane_for_conversation(conversation_id) do
-    :erlang.phash2(conversation_id, @num_lanes)
+  @doc "Map session_id → lane_id (0..#{@num_lanes - 1}) within its group"
+  def lane_for_session(session_id) do
+    :erlang.phash2(session_id, @num_lanes)
   end
 
   @doc "Get Ra server ID (process name) for a group"
