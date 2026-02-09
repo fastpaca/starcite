@@ -52,42 +52,6 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
-  test "rebuilds archive queue from raft state after archive process starts late" do
-    session_id = "ses-recover-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
-
-    for i <- 1..3 do
-      {:ok, _} =
-        Runtime.append_event(session_id, %{
-          type: "content",
-          payload: %{text: "late#{i}"},
-          actor: "agent:test"
-        })
-    end
-
-    {:ok, _pid} =
-      start_supervised(
-        {Starcite.Archive,
-         flush_interval_ms: 50, adapter: Starcite.Archive.IdempotentTestAdapter, adapter_opts: []}
-      )
-
-    eventually(
-      fn ->
-        {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == session.last_seq
-
-        writes =
-          Starcite.Archive.IdempotentTestAdapter.get_writes()
-          |> Enum.filter(&(&1.session_id == session_id))
-          |> Enum.uniq_by(fn row -> {row.session_id, row.seq} end)
-          |> Enum.sort_by(& &1.seq)
-
-        assert Enum.map(writes, & &1.seq) == [1, 2, 3]
-      end,
-      timeout: 2_500
-    )
-  end
-
   describe "archive idempotency" do
     test "duplicate writes are idempotent" do
       # Start Archive with test adapter that tracks writes

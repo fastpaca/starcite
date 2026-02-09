@@ -13,12 +13,9 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Runtime
-  alias Starcite.Runtime.RaftManager
 
   @events_tab :starcite_archive_events
   @sessions_tab :starcite_archive_sessions
-  @default_recovery_groups_per_tick 8
-  @default_recovery_sessions_per_group 128
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -48,31 +45,12 @@ defmodule Starcite.Archive do
     adapter_mod = Keyword.fetch!(opts, :adapter)
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
-    recovery_groups_per_tick =
-      opts
-      |> Keyword.get(:recovery_groups_per_tick, @default_recovery_groups_per_tick)
-      |> max(1)
-
-    recovery_sessions_per_group =
-      opts
-      |> Keyword.get(:recovery_sessions_per_group, @default_recovery_sessions_per_group)
-      |> max(1)
-
-    recovery_events_per_session =
-      opts
-      |> Keyword.get(:recovery_events_per_session, archive_batch_size())
-      |> max(1)
-
     {:ok, _} = adapter_mod.start_link(adapter_opts)
 
     state = %{
       interval: interval,
       adapter: adapter_mod,
-      adapter_opts: adapter_opts,
-      recovery_group_cursor: 0,
-      recovery_groups_per_tick: recovery_groups_per_tick,
-      recovery_sessions_per_group: recovery_sessions_per_group,
-      recovery_events_per_session: recovery_events_per_session
+      adapter_opts: adapter_opts
     }
 
     schedule_flush(interval)
@@ -83,7 +61,7 @@ defmodule Starcite.Archive do
   def handle_cast({:append, session_id, events}, state) do
     Enum.each(events, fn event ->
       key = {session_id, event.seq}
-      :ets.insert_new(@events_tab, {key, normalize_event(event)})
+      :ets.insert(@events_tab, {key, normalize_event(event)})
     end)
 
     :ets.insert(@sessions_tab, {session_id, :pending})
@@ -92,7 +70,6 @@ defmodule Starcite.Archive do
 
   @impl true
   def handle_info(:flush_tick, state) do
-    state = recover_unarchived_from_runtime(state)
     flush_all(state)
     schedule_flush(state.interval)
     {:noreply, state}
@@ -180,82 +157,13 @@ defmodule Starcite.Archive do
       byte_size(Jason.encode!(refs))
   end
 
-  defp recover_unarchived_from_runtime(
-         %{
-           recovery_group_cursor: cursor,
-           recovery_groups_per_tick: groups_per_tick,
-           recovery_sessions_per_group: sessions_per_group,
-           recovery_events_per_session: events_per_session
-         } = state
-       ) do
-    num_groups = RaftManager.num_groups()
-    scan_count = min(groups_per_tick, num_groups)
-    group_ids = group_scan_window(cursor, scan_count, num_groups)
-
-    Enum.each(group_ids, fn group_id ->
-      recover_group(group_id, sessions_per_group, events_per_session)
-    end)
-
-    next_cursor = rem(cursor + scan_count, num_groups)
-    %{state | recovery_group_cursor: next_cursor}
-  end
-
-  defp group_scan_window(_cursor, count, _num_groups) when count <= 0, do: []
-
-  defp group_scan_window(cursor, count, num_groups) do
-    for offset <- 0..(count - 1), do: rem(cursor + offset, num_groups)
-  end
-
-  defp recover_group(group_id, sessions_per_group, events_per_session) do
-    case Runtime.list_unarchived_sessions_by_group(group_id, sessions_per_group) do
-      {:ok, session_ids} when is_list(session_ids) ->
-        Enum.each(session_ids, fn session_id ->
-          recover_session(session_id, events_per_session)
-        end)
-
-      _ ->
-        :ok
-    end
-  end
-
-  defp recover_session(session_id, events_per_session) when is_binary(session_id) do
-    if :ets.member(@sessions_tab, session_id) do
-      :ok
-    else
-      case Runtime.get_unarchived_events_for_archive_local(session_id, events_per_session) do
-        {:ok, events} when is_list(events) and events != [] ->
-          inserted =
-            Enum.reduce(events, 0, fn %{seq: seq} = event, acc ->
-              key = {session_id, seq}
-
-              if :ets.insert_new(@events_tab, {key, normalize_event(event)}) do
-                acc + 1
-              else
-                acc
-              end
-            end)
-
-          if inserted > 0 do
-            :ets.insert(@sessions_tab, {session_id, :pending})
-          end
-
-          :ok
-
-        _ ->
-          :ok
-      end
-    end
-  end
-
-  defp recover_session(_session_id, _events_per_session), do: :ok
-
   defp sessions_list do
     :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _} -> id end)
   end
 
   defp take_pending_events(session_id, _state) do
     # Select a chunk of rows in seq-ascending order for this session
-    limit = archive_batch_size()
+    limit = Application.get_env(:starcite, :archive_batch_size, 5_000)
 
     ms = [
       {
@@ -402,9 +310,5 @@ defmodule Starcite.Archive do
       idempotency_key: Map.get(event, :idempotency_key),
       inserted_at: Map.get(event, :inserted_at, NaiveDateTime.utc_now())
     }
-  end
-
-  defp archive_batch_size do
-    Application.get_env(:starcite, :archive_batch_size, 5_000)
   end
 end

@@ -151,29 +151,6 @@ defmodule Starcite.Runtime.RaftFSM do
     end
   end
 
-  @doc """
-  Query session IDs in this group that still have unarchived events.
-  """
-  def query_unarchived_sessions(%__MODULE__{} = state, limit)
-      when is_integer(limit) and limit > 0 do
-    state.lanes
-    |> Enum.reduce([], fn {_lane_id, %Lane{sessions: sessions}}, acc ->
-      Enum.reduce(sessions, acc, fn
-        {session_id, %Session{last_seq: last_seq, archived_seq: archived_seq}}, inner
-        when last_seq > archived_seq ->
-          [session_id | inner]
-
-        {_session_id, %Session{}}, inner ->
-          inner
-      end)
-    end)
-    |> Enum.uniq()
-    |> Enum.sort()
-    |> Enum.take(limit)
-  end
-
-  def query_unarchived_sessions(_state, _limit), do: []
-
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
