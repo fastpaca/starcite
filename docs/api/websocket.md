@@ -1,8 +1,3 @@
----
-title: WebSocket API
-sidebar_position: 2
----
-
 # WebSocket API
 
 Starcite exposes `tail` as a WebSocket endpoint.
