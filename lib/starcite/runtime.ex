@@ -75,7 +75,7 @@ defmodule Starcite.Runtime do
   def get_session_local(id) when is_binary(id) and id != "" do
     with {:ok, server_id, lane, group} <- locate(id),
          :ok <- ensure_group_started(group) do
-      case :ra.consistent_query(server_id, fn state ->
+      case :ra.consistent_query({server_id, Node.self()}, fn state ->
              RaftFSM.query_session(state, lane, id)
            end) do
         {:ok, {:ok, session}, _leader} ->
@@ -159,7 +159,7 @@ defmodule Starcite.Runtime do
              limit > 0 do
     with {:ok, server_id, lane, group} <- locate(id),
          :ok <- ensure_group_started(group) do
-      case :ra.consistent_query(server_id, fn state ->
+      case :ra.consistent_query({server_id, Node.self()}, fn state ->
              RaftFSM.query_events_from_cursor(state, lane, id, cursor, limit)
            end) do
         {:ok, {:ok, events}, _leader} when is_list(events) ->
@@ -242,7 +242,7 @@ defmodule Starcite.Runtime do
         {:error, {:no_available_replicas, []}}
 
       {:remote, nodes} ->
-        try_remote(nodes, fun, args, MapSet.new(), [])
+        try_remote(nodes, fun, args, %{}, [])
     end
   end
 
@@ -251,10 +251,10 @@ defmodule Starcite.Runtime do
   end
 
   defp try_remote([node | rest], fun, args, visited, failures) do
-    if MapSet.member?(visited, node) do
+    if Map.has_key?(visited, node) do
       try_remote(rest, fun, args, visited, failures)
     else
-      visited = MapSet.put(visited, node)
+      visited = Map.put(visited, node, true)
 
       case safe_rpc_call(node, fun, args) do
         {:badrpc, reason} ->
@@ -317,7 +317,7 @@ defmodule Starcite.Runtime do
   defp maybe_enqueue_leader({server_id, leader_node}, rest, visited)
        when is_atom(server_id) and is_atom(leader_node) do
     cond do
-      MapSet.member?(visited, leader_node) -> rest
+      Map.has_key?(visited, leader_node) -> rest
       Enum.member?(rest, leader_node) -> rest
       true -> [leader_node | rest]
     end

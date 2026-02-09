@@ -45,6 +45,7 @@ starcite-*.tar
 /priv/runtime/
 /priv/storage
 /priv/raft
+/priv/plts
 /tmp/test_raft
 /nonode@nohost
 
