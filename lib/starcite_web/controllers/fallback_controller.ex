@@ -34,6 +34,16 @@ defmodule StarciteWeb.FallbackController do
     )
   end
 
+  def call(conn, {:error, {:archive_backpressure, lag, max}})
+      when is_integer(lag) and is_integer(max) do
+    error(
+      conn,
+      :too_many_requests,
+      "archive_backpressure",
+      "Archive lag #{lag} events exceeded configured cap #{max}"
+    )
+  end
+
   def call(conn, {:timeout, _leader}) do
     error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
   end

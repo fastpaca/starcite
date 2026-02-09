@@ -215,5 +215,45 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["error"] == "session_not_found"
       assert is_binary(body["message"])
     end
+
+    test "returns 429 when archive backpressure threshold is hit" do
+      previous_limit = Application.get_env(:starcite, :max_unarchived_events)
+
+      on_exit(fn ->
+        if is_nil(previous_limit) do
+          Application.delete_env(:starcite, :max_unarchived_events)
+        else
+          Application.put_env(:starcite, :max_unarchived_events, previous_limit)
+        end
+      end)
+
+      Application.put_env(:starcite, :max_unarchived_events, 2)
+
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for _ <- 1..2 do
+        conn =
+          json_conn(:post, "/v1/sessions/#{id}/append", %{
+            "type" => "content",
+            "payload" => %{"text" => "ok"},
+            "actor" => "agent:test"
+          })
+
+        assert conn.status == 201
+      end
+
+      blocked_conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "blocked"},
+          "actor" => "agent:test"
+        })
+
+      assert blocked_conn.status == 429
+      body = Jason.decode!(blocked_conn.resp_body)
+      assert body["error"] == "archive_backpressure"
+      assert is_binary(body["message"])
+    end
   end
 end

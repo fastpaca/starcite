@@ -27,9 +27,8 @@ defmodule Starcite.Archive do
   @spec append_events(String.t(), [map()]) :: :ok
   def append_events(session_id, events)
       when is_binary(session_id) and is_list(events) do
-    case Process.whereis(__MODULE__) do
-      nil -> :ok
-      _pid -> GenServer.cast(__MODULE__, {:append, session_id, events})
+    if events != [] do
+      append_to_queue(session_id, events)
     end
 
     :ok
@@ -59,12 +58,7 @@ defmodule Starcite.Archive do
 
   @impl true
   def handle_cast({:append, session_id, events}, state) do
-    Enum.each(events, fn event ->
-      key = {session_id, event.seq}
-      :ets.insert(@events_tab, {key, normalize_event(event)})
-    end)
-
-    :ets.insert(@sessions_tab, {session_id, :pending})
+    append_to_queue(session_id, events)
     {:noreply, state}
   end
 
@@ -310,5 +304,27 @@ defmodule Starcite.Archive do
       idempotency_key: Map.get(event, :idempotency_key),
       inserted_at: Map.get(event, :inserted_at, NaiveDateTime.utc_now())
     }
+  end
+
+  defp append_to_queue(session_id, events) do
+    if queue_tables_ready?() do
+      rows =
+        Enum.map(events, fn event ->
+          {{session_id, event.seq}, normalize_event(event)}
+        end)
+
+      :ets.insert(@events_tab, rows)
+      :ets.insert(@sessions_tab, {session_id, :pending})
+    end
+
+    :ok
+  catch
+    :error, :badarg ->
+      # Tables may be recreated during process restarts; skip enqueue for this call.
+      :ok
+  end
+
+  defp queue_tables_ready? do
+    :ets.whereis(@events_tab) != :undefined and :ets.whereis(@sessions_tab) != :undefined
   end
 end

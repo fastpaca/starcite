@@ -132,6 +132,39 @@ defmodule Starcite.RuntimeTest do
                  idempotency_key: "k1"
                })
     end
+
+    test "returns archive_backpressure once unarchived lag reaches cap" do
+      previous_limit = Application.get_env(:starcite, :max_unarchived_events)
+
+      on_exit(fn ->
+        if is_nil(previous_limit) do
+          Application.delete_env(:starcite, :max_unarchived_events)
+        else
+          Application.put_env(:starcite, :max_unarchived_events, previous_limit)
+        end
+      end)
+
+      Application.put_env(:starcite, :max_unarchived_events, 3)
+
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..3 do
+        assert {:ok, %{seq: ^n}} =
+                 Runtime.append_event(id, %{
+                   type: "content",
+                   payload: %{text: "event-#{n}"},
+                   actor: "agent:1"
+                 })
+      end
+
+      assert {:error, {:archive_backpressure, 3, 3}} =
+               Runtime.append_event(id, %{
+                 type: "content",
+                 payload: %{text: "blocked"},
+                 actor: "agent:1"
+               })
+    end
   end
 
   describe "get_events_from_cursor/3" do

@@ -39,6 +39,9 @@ cd ../scripts
 
 # From the benchmark client in AWS (eliminates WAN latency)
 ./run-k6-remote.sh 1-hot-path-throughput
+
+# Backpressure safety gate
+./run-k6-remote.sh 5-archive-backpressure-guard
 ```
 
 **4. Teardown (important - stops billing):**

@@ -32,6 +32,10 @@ export const jsonHeaders = {
   },
 };
 
+function rootUrl(url) {
+  return url.replace(/\/v1$/, '');
+}
+
 function buildUrl(path, params = {}, useLoadBalancer = true) {
   const query = Object.entries(params)
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
@@ -40,6 +44,115 @@ function buildUrl(path, params = {}, useLoadBalancer = true) {
 
   const baseUrl = useLoadBalancer && clusterNodes.length > 1 ? getNextNode() : config.apiUrl;
   return query ? `${baseUrl}${path}?${query}` : `${baseUrl}${path}`;
+}
+
+function parsePrometheusLabels(raw) {
+  if (!raw) return {};
+
+  const labels = {};
+  const labelPattern = /([a-zA-Z_][a-zA-Z0-9_]*)="((?:[^"\\]|\\.)*)"/g;
+  let match;
+
+  while ((match = labelPattern.exec(raw)) !== null) {
+    labels[match[1]] = match[2].replace(/\\"/g, '"');
+  }
+
+  return labels;
+}
+
+function parseMetricSamples(body, metricName) {
+  const samples = [];
+  const lines = body.split('\n');
+
+  for (const line of lines) {
+    if (!line || line.startsWith('#') || !line.startsWith(metricName)) continue;
+
+    const withoutName = line.slice(metricName.length);
+    let labels = {};
+    let valuePart = withoutName;
+
+    if (withoutName.startsWith('{')) {
+      const closingIdx = withoutName.indexOf('}');
+      if (closingIdx < 0) continue;
+      labels = parsePrometheusLabels(withoutName.slice(1, closingIdx));
+      valuePart = withoutName.slice(closingIdx + 1);
+    }
+
+    const value = Number.parseFloat(valuePart.trim().split(/\s+/)[0]);
+    if (Number.isNaN(value)) continue;
+
+    samples.push({ labels, value });
+  }
+
+  return samples;
+}
+
+/**
+ * Poll archive lag and queue pressure from /metrics.
+ *
+ * Returns per-session lag summary for the provided session IDs and selected
+ * queue gauges exposed by PromEx.
+ */
+export function getArchiveLagSnapshot(sessionIds, opts = {}) {
+  if (!sessionIds || sessionIds.length === 0) {
+    return null;
+  }
+
+  const useLoadBalancer = opts.useLoadBalancer || false;
+  const node =
+    useLoadBalancer && clusterNodes.length > 1 ? getNextNode() : (opts.node || clusterNodes[0]);
+  const metricsUrl = `${rootUrl(node)}/metrics`;
+  const res = http.get(metricsUrl, { timeout: opts.timeout || '5s' });
+
+  if (res.status !== 200) {
+    return {
+      ok: false,
+      status: res.status,
+      metricsUrl,
+      error: `metrics_status_${res.status}`,
+    };
+  }
+
+  const lagSamples = parseMetricSamples(res.body, 'starcite_archive_lag');
+  const pendingSamples = parseMetricSamples(res.body, 'starcite_archive_pending_rows');
+  const queueAgeSamples = parseMetricSamples(res.body, 'starcite_archive_oldest_age_seconds');
+
+  const lagBySession = {};
+  for (const sample of lagSamples) {
+    if (sample.labels && sample.labels.session_id) {
+      lagBySession[sample.labels.session_id] = sample.value;
+    }
+  }
+
+  const lagValues = [];
+  let missing = 0;
+
+  for (const sessionId of sessionIds) {
+    if (Object.prototype.hasOwnProperty.call(lagBySession, sessionId)) {
+      lagValues.push(lagBySession[sessionId]);
+    } else {
+      missing++;
+    }
+  }
+
+  const lagSum = lagValues.reduce((acc, value) => acc + value, 0);
+  const lagMax = lagValues.length > 0 ? Math.max(...lagValues) : 0;
+  const lagAvg = lagValues.length > 0 ? lagSum / lagValues.length : 0;
+  const pendingRows = pendingSamples.length > 0 ? pendingSamples[0].value : 0;
+  const queueAgeSeconds = queueAgeSamples.length > 0 ? queueAgeSamples[0].value : 0;
+
+  return {
+    ok: true,
+    status: 200,
+    metricsUrl,
+    sampledSessions: lagValues.length,
+    missingSessions: missing,
+    lagAvg,
+    lagMax,
+    lagSum,
+    pendingRows,
+    queueAgeSeconds,
+  };
 }
 
 export function waitForClusterReady(timeoutSeconds = 60) {

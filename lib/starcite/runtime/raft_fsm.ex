@@ -17,12 +17,17 @@ defmodule Starcite.Runtime.RaftFSM do
     defstruct sessions: %{}
   end
 
-  defstruct [:group_id, :lanes]
+  defstruct [:group_id, :lanes, :max_unarchived_events]
 
   @impl true
   def init(%{group_id: group_id}) do
     lanes = for lane <- 0..(@num_lanes - 1), into: %{}, do: {lane, %Lane{}}
-    %__MODULE__{group_id: group_id, lanes: lanes}
+
+    %__MODULE__{
+      group_id: group_id,
+      lanes: lanes,
+      max_unarchived_events: archive_backpressure_limit()
+    }
   end
 
   @impl true
@@ -46,7 +51,8 @@ defmodule Starcite.Runtime.RaftFSM do
     lane = Map.fetch!(state.lanes, lane_id)
 
     with {:ok, session} <- fetch_session(lane, session_id),
-         :ok <- guard_expected_seq(session, opts[:expected_seq]) do
+         :ok <- guard_expected_seq(session, opts[:expected_seq]),
+         :ok <- guard_archive_backpressure(session, state.max_unarchived_events) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
@@ -171,6 +177,25 @@ defmodule Starcite.Runtime.RaftFSM do
   defp guard_expected_seq(%Session{last_seq: last_seq}, expected_seq)
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
+
+  defp guard_archive_backpressure(_session, nil), do: :ok
+
+  defp guard_archive_backpressure(%Session{last_seq: last_seq, archived_seq: archived_seq}, max)
+       when is_integer(max) and max > 0 do
+    lag = max(last_seq - archived_seq, 0)
+
+    if lag >= max do
+      {:error, {:archive_backpressure, lag, max}}
+    else
+      :ok
+    end
+  end
+
+  defp guard_archive_backpressure(_session, _), do: :ok
+
+  defp archive_backpressure_limit do
+    Application.get_env(:starcite, :max_unarchived_events, 250_000)
+  end
 
   defp build_effects(session_id, event) do
     stream_event =

@@ -11,11 +11,19 @@ import * as lib from './lib.js';
 const eventsSent = new Counter('events_sent');
 const appendLatency = new Trend('append_latency', true);
 const monotonicSeqViolations = new Counter('monotonic_seq_violations');
+const archiveLagMax = new Trend('archive_lag_max', false);
+const archiveLagAvg = new Trend('archive_lag_avg', false);
+const archivePendingRows = new Trend('archive_pending_rows', false);
+const archiveQueueAgeSeconds = new Trend('archive_queue_age_seconds', false);
+const archiveLagSamples = new Counter('archive_lag_samples');
+const archiveLagProbeFailures = new Counter('archive_lag_probe_failures');
+const archiveLagMissingSessions = new Counter('archive_lag_missing_sessions');
 
 const maxVUs = Number(__ENV.MAX_VUS || 20);
 const rampDuration = __ENV.RAMP_DURATION || '30s';
 const steadyDuration = __ENV.STEADY_DURATION || '1m40s';
 const rampDownDuration = __ENV.RAMP_DOWN_DURATION || '10s';
+const lagPollEveryIters = Number(__ENV.LAG_POLL_EVERY_ITERS || 10);
 
 export const options = {
   setupTimeout: '60s',
@@ -52,19 +60,22 @@ export function setup() {
   lib.waitForClusterReady(90);
 
   const sessions = {};
+  const sessionIds = [];
 
   for (let vuId = 1; vuId <= maxVUs; vuId++) {
-    const id = lib.sessionId('hot-path', vuId);
+    const id = lib.sessionId('hot-path', vuId, lib.config.runId);
     lib.ensureSession(id, {
       metadata: { bench: true, scenario: 'hot_path', vu: vuId, run_id: lib.config.runId },
     });
     sessions[vuId] = { sessionId: id, lastSeq: 0 };
+    sessionIds.push(id);
   }
 
   return {
     runId: lib.config.runId,
     pipelineDepth,
     sessions,
+    sessionIds,
   };
 }
 
@@ -111,6 +122,24 @@ export default function (data) {
         monotonicSeqViolations.add(1);
       }
       lastSeq = json.seq;
+    }
+  }
+
+  if (__VU === 1 && lagPollEveryIters > 0 && __ITER % lagPollEveryIters === 0) {
+    const snapshot = lib.getArchiveLagSnapshot(data.sessionIds || []);
+
+    if (snapshot && snapshot.ok) {
+      archiveLagSamples.add(1);
+      archiveLagMax.add(snapshot.lagMax);
+      archiveLagAvg.add(snapshot.lagAvg);
+      archivePendingRows.add(snapshot.pendingRows);
+      archiveQueueAgeSeconds.add(snapshot.queueAgeSeconds);
+
+      if (snapshot.missingSessions > 0) {
+        archiveLagMissingSessions.add(snapshot.missingSessions);
+      }
+    } else {
+      archiveLagProbeFailures.add(1);
     }
   }
 

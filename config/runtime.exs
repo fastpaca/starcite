@@ -53,6 +53,11 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
+if max_unarchived_events = System.get_env("STARCITE_MAX_UNARCHIVED_EVENTS") do
+  parsed_max_unarchived_events = String.to_integer(max_unarchived_events)
+  config :starcite, :max_unarchived_events, parsed_max_unarchived_events
+end
+
 # Configure Postgres Repo at runtime when archiver is enabled
 if enabled_env?.(System.get_env("STARCITE_ARCHIVER_ENABLED")) do
   db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")

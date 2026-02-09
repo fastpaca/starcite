@@ -303,6 +303,8 @@ defmodule Starcite.Runtime do
     false
   end
 
+  defp retriable_error?({:archive_backpressure, _lag, _max}), do: false
+
   defp retriable_error?({:expected_seq_conflict, _current}), do: false
   defp retriable_error?({:expected_seq_conflict, _expected, _current}), do: false
   defp retriable_error?(_reason), do: true
