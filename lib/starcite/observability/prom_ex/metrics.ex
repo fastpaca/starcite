@@ -41,12 +41,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
         last_value("starcite_archive_pending_rows",
           event_name: [:starcite, :archive, :flush],
           measurement: :pending_events,
-          description: "Pending rows in archive ETS queue"
+          description: "Pending references in archive queue"
         ),
         last_value("starcite_archive_pending_sessions",
           event_name: [:starcite, :archive, :flush],
           measurement: :pending_sessions,
-          description: "Sessions with pending rows in archive ETS queue"
+          description: "Sessions with pending archive references"
         ),
         distribution("starcite_archive_flush_duration_ms",
           event_name: [:starcite, :archive, :flush],
@@ -120,6 +120,32 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
           tags: [:session_id]
+        ),
+        counter("starcite_archive_reconcile_runs_total",
+          event_name: [:starcite, :archive, :reconcile],
+          measurement: :count,
+          description: "Total archive reconciliation scan runs",
+          tags: [:outcome]
+        ),
+        counter("starcite_archive_reconcile_discovered_total",
+          event_name: [:starcite, :archive, :reconcile],
+          measurement: :discovered,
+          description: "Total lagging sessions discovered by reconciliation"
+        ),
+        counter("starcite_archive_reconcile_marked_total",
+          event_name: [:starcite, :archive, :reconcile],
+          measurement: :marked,
+          description: "Total sessions marked dirty by reconciliation"
+        ),
+        distribution("starcite_archive_reconcile_duration_ms",
+          event_name: [:starcite, :archive, :reconcile],
+          measurement: :elapsed_ms,
+          description: "Archive reconciliation scan duration",
+          unit: {:native, :millisecond},
+          reporter_options: [
+            buckets: [1, 5, 10, 25, 50, 100, 250, 500, 1_000, 2_500, 5_000, 10_000]
+          ],
+          tags: [:outcome]
         )
       ]
     )

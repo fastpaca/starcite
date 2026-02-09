@@ -7,6 +7,8 @@ defmodule Starcite.Observability.Telemetry do
   Note: This is an event substrate - no LLM token budgets or compaction metrics.
   """
 
+  @archive_reconcile_outcomes [:ok, :error]
+
   @doc """
   Emit an event when an event is appended to a session.
 
@@ -41,8 +43,8 @@ defmodule Starcite.Observability.Telemetry do
     - `:elapsed_ms` – time spent in flush loop
     - `:attempted` – rows attempted to write
     - `:inserted` – rows successfully inserted (idempotent)
-    - `:pending_events` – total pending rows in ETS after flush
-    - `:pending_sessions` – total sessions with pending rows after flush
+    - `:pending_events` – total pending refs in archive queue after flush
+    - `:pending_sessions` – total sessions with pending refs after flush
   """
   @spec archive_flush(
           non_neg_integer(),
@@ -179,6 +181,41 @@ defmodule Starcite.Observability.Telemetry do
       [:starcite, :archive, :queue_age],
       %{seconds: seconds},
       %{}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit reconciliation scan telemetry.
+
+  Measurements:
+    - `:count` – number of scan runs emitted by this call
+    - `:elapsed_ms` – scan duration
+    - `:discovered` – lagging sessions returned by this scan page
+    - `:marked` – sessions marked dirty from this scan page
+
+  Metadata:
+    - `:group_id` – scanned Raft group id
+    - `:has_more` – whether this group has more pages
+    - `:outcome` – scan result classification
+  """
+  @spec archive_reconcile(
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          boolean(),
+          :ok | :error
+        ) :: :ok
+  def archive_reconcile(group_id, elapsed_ms, discovered, marked, has_more, outcome)
+      when is_integer(group_id) and group_id >= 0 and is_integer(elapsed_ms) and elapsed_ms >= 0 and
+             is_integer(discovered) and discovered >= 0 and is_integer(marked) and marked >= 0 and
+             is_boolean(has_more) and outcome in @archive_reconcile_outcomes do
+    :telemetry.execute(
+      [:starcite, :archive, :reconcile],
+      %{count: 1, elapsed_ms: elapsed_ms, discovered: discovered, marked: marked},
+      %{group_id: group_id, has_more: has_more, outcome: outcome}
     )
 
     :ok

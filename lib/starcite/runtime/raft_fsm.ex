@@ -154,6 +154,42 @@ defmodule Starcite.Runtime.RaftFSM do
     end
   end
 
+  @doc """
+  Query lagging session IDs (`last_seq > archived_seq`) for a group.
+
+  Returns up to `limit` IDs in deterministic order, with pagination metadata.
+  """
+  def query_lagging_sessions(state, limit, after_session_id \\ nil)
+      when is_integer(limit) and limit > 0 and
+             (is_nil(after_session_id) or
+                (is_binary(after_session_id) and after_session_id != "")) do
+    lagging_ids =
+      state.lanes
+      |> Enum.flat_map(fn {_lane_id, %Lane{sessions: sessions}} ->
+        Enum.reduce(sessions, [], fn
+          {session_id, %Session{last_seq: last_seq, archived_seq: archived_seq}}, acc
+          when is_integer(last_seq) and is_integer(archived_seq) and last_seq > archived_seq ->
+            [session_id | acc]
+
+          _, acc ->
+            acc
+        end)
+      end)
+      |> Enum.sort()
+
+    remaining =
+      case after_session_id do
+        nil -> lagging_ids
+        after_id -> Enum.drop_while(lagging_ids, &(&1 <= after_id))
+      end
+
+    page = Enum.take(remaining, limit)
+    has_more = length(remaining) > length(page)
+    next_after = if has_more and page != [], do: List.last(page), else: nil
+
+    {:ok, %{session_ids: page, has_more: has_more, next_after: next_after}}
+  end
+
   # ---------------------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------------------
@@ -245,8 +281,8 @@ defmodule Starcite.Runtime.RaftFSM do
       {
         :mod_call,
         Starcite.Archive,
-        :append_events,
-        [session_id, [event]]
+        :mark_dirty,
+        [session_id, event.seq]
       }
 
     [stream_event, archive_event]

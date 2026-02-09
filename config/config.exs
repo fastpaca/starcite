@@ -12,6 +12,8 @@ config :starcite,
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000,
   archive_flush_interval_ms: 500,
+  archive_reconcile_enabled: true,
+  archive_reconcile_batch_size: 64,
   max_unarchived_events: 250_000
 
 # Configures the endpoint

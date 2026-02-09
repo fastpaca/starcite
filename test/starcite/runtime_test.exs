@@ -186,6 +186,45 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
+  describe "list_lagging_sessions/3" do
+    test "returns lagging sessions for a group with pagination metadata" do
+      seed_id = unique_id("ses-lag-seed")
+      group_id = RaftManager.group_for_session(seed_id)
+      [id1, id2] = collect_ids_for_group(group_id, 2)
+
+      {:ok, _} = Runtime.create_session(id: id1)
+      {:ok, _} = Runtime.create_session(id: id2)
+
+      for id <- [id1, id2] do
+        assert {:ok, %{seq: 1}} =
+                 Runtime.append_event(id, %{
+                   type: "content",
+                   payload: %{text: "event-1"},
+                   actor: "agent:1"
+                 })
+      end
+
+      assert {:ok, %{session_ids: page, has_more: has_more, next_after: next_after}} =
+               Runtime.list_lagging_sessions(group_id, nil, 1)
+
+      assert length(page) == 1
+      assert has_more == true
+      assert is_binary(next_after)
+
+      assert {:ok, %{session_ids: page2, has_more: false, next_after: nil}} =
+               Runtime.list_lagging_sessions(group_id, next_after, 10)
+
+      assert length(page2) == 1
+      assert Enum.sort(page ++ page2) == Enum.sort([id1, id2])
+    end
+
+    test "returns validation errors for invalid lagging query input" do
+      assert {:error, :invalid_group_id} = Runtime.list_lagging_sessions(999_999, nil, 10)
+      assert {:error, :invalid_lagging_query} = Runtime.list_lagging_sessions(1, "", 10)
+      assert {:error, :invalid_lagging_query} = Runtime.list_lagging_sessions(1, nil, 0)
+    end
+  end
+
   describe "ack_archived_if_current/3" do
     test "only applies ack when expected archived seq matches current archived seq" do
       id = unique_id("ses")
@@ -313,6 +352,21 @@ defmodule Starcite.RuntimeTest do
         else
           fun.()
         end
+    end
+  end
+
+  defp collect_ids_for_group(group_id, count, acc \\ [])
+       when is_integer(group_id) and group_id >= 0 and is_integer(count) and count >= 0 do
+    if length(acc) >= count do
+      Enum.reverse(acc)
+    else
+      id = unique_id("ses-lag")
+
+      if RaftManager.group_for_session(id) == group_id do
+        collect_ids_for_group(group_id, count, [id | acc])
+      else
+        collect_ids_for_group(group_id, count, acc)
+      end
     end
   end
 end

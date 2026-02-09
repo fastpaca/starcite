@@ -52,14 +52,14 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
-  test "advances archived watermark when sequence numbers are strictly increasing but sparse" do
+  test "archives directly from raft without payload queue duplication" do
     {:ok, archive_pid} =
       start_supervised(
         {Starcite.Archive,
          flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
       )
 
-    session_id = "ses-gap-#{System.unique_integer([:positive, :monotonic])}"
+    session_id = "ses-refs-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = Runtime.create_session(id: session_id)
 
     for i <- 1..3 do
@@ -71,32 +71,20 @@ defmodule Starcite.ArchiveTest do
         })
     end
 
-    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
+    assert :undefined == :ets.whereis(:starcite_archive_events)
 
     send(archive_pid, :flush_tick)
 
     eventually(
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == 3
-      end,
-      timeout: 2_000
-    )
-
-    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 3})
-
-    send(archive_pid, :flush_tick)
-
-    eventually(
-      fn ->
-        {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == 3
+        assert session.archived_seq == session.last_seq
       end,
       timeout: 2_000
     )
   end
 
-  test "advances archived watermark over multiple sparse batches" do
+  test "advances archived watermark over multiple cursor batches" do
     previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
     Application.put_env(:starcite, :archive_batch_size, 2)
 
@@ -114,7 +102,7 @@ defmodule Starcite.ArchiveTest do
          flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
       )
 
-    session_id = "ses-sparse-batches-#{System.unique_integer([:positive, :monotonic])}"
+    session_id = "ses-cursor-batches-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = Runtime.create_session(id: session_id)
 
     for i <- 1..5 do
@@ -126,20 +114,25 @@ defmodule Starcite.ArchiveTest do
         })
     end
 
-    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
-    assert true = :ets.delete(:starcite_archive_events, {session_id, 4})
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 2
+      end,
+      timeout: 2_000
+    )
 
     send(archive_pid, :flush_tick)
 
     eventually(
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == 3
+        assert session.archived_seq == 4
       end,
       timeout: 2_000
     )
-
-    assert [{_, _}] = :ets.lookup(:starcite_archive_events, {session_id, 5})
 
     send(archive_pid, :flush_tick)
 
@@ -150,8 +143,55 @@ defmodule Starcite.ArchiveTest do
       end,
       timeout: 2_000
     )
+  end
 
-    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 5})
+  test "reconciliation discovers lagging sessions after archiver start" do
+    session_id = "ses-reconcile-#{System.unique_integer([:positive, :monotonic])}"
+    group_id = Starcite.Runtime.RaftManager.group_for_session(session_id)
+
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    for i <- 1..3 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
+
+    {:ok, archive_pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 60_000,
+         adapter: Starcite.Archive.TestAdapter,
+         adapter_opts: [],
+         reconcile_enabled: true,
+         reconcile_batch_size: 16,
+         reconcile_start_group: group_id}
+      )
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        assert [{^session_id, _marked_at, max_dirty_seq}] =
+                 :ets.lookup(:starcite_archive_sessions, session_id)
+
+        assert max_dirty_seq >= 0
+      end,
+      timeout: 2_000
+    )
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == session.last_seq
+      end,
+      timeout: 2_000
+    )
   end
 
   describe "archive cursor protocol" do

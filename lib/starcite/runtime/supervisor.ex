@@ -14,7 +14,9 @@ defmodule Starcite.Runtime.Supervisor do
            [
              flush_interval_ms: archive_interval(),
              adapter: Starcite.Archive.Adapter.Postgres,
-             adapter_opts: []
+             adapter_opts: [],
+             reconcile_enabled: archive_reconcile_enabled?(),
+             reconcile_batch_size: archive_reconcile_batch_size()
            ]}
         ]
       else
@@ -49,5 +51,38 @@ defmodule Starcite.Runtime.Supervisor do
       end
 
     Application.get_env(:starcite, :archive_enabled, false) || from_env
+  end
+
+  defp archive_reconcile_enabled? do
+    case Application.get_env(:starcite, :archive_reconcile_enabled) do
+      value when is_boolean(value) ->
+        value
+
+      _ ->
+        case System.get_env("STARCITE_ARCHIVE_RECONCILE_ENABLED") do
+          nil -> true
+          val -> val not in ["", "false", "0", "no", "off"]
+        end
+    end
+  end
+
+  defp archive_reconcile_batch_size do
+    case Application.get_env(:starcite, :archive_reconcile_batch_size) ||
+           System.get_env("STARCITE_ARCHIVE_RECONCILE_BATCH_SIZE") do
+      nil ->
+        64
+
+      val when is_integer(val) and val > 0 ->
+        val
+
+      val when is_binary(val) ->
+        case Integer.parse(val) do
+          {parsed, ""} when parsed > 0 -> parsed
+          _ -> 64
+        end
+
+      _ ->
+        64
+    end
   end
 end

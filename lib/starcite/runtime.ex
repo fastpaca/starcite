@@ -183,6 +183,75 @@ defmodule Starcite.Runtime do
     end
   end
 
+  @spec list_lagging_sessions(non_neg_integer(), String.t() | nil, pos_integer()) ::
+          {:ok,
+           %{
+             session_ids: [String.t()],
+             has_more: boolean(),
+             next_after: String.t() | nil
+           }}
+          | {:error, term()}
+  def list_lagging_sessions(group_id, after_session_id \\ nil, limit \\ @default_tail_batch_size)
+
+  def list_lagging_sessions(group_id, after_session_id, limit)
+      when is_integer(group_id) and group_id >= 0 and
+             (is_nil(after_session_id) or
+                (is_binary(after_session_id) and after_session_id != "")) and
+             is_integer(limit) and limit > 0 do
+    if group_id < RaftManager.num_groups() do
+      call_on_replica(
+        group_id,
+        :list_lagging_sessions_local,
+        [group_id, after_session_id, limit],
+        fn ->
+          list_lagging_sessions_local(group_id, after_session_id, limit)
+        end
+      )
+    else
+      {:error, :invalid_group_id}
+    end
+  end
+
+  def list_lagging_sessions(_group_id, _after_session_id, _limit),
+    do: {:error, :invalid_lagging_query}
+
+  @doc false
+  def list_lagging_sessions_local(group_id, after_session_id, limit)
+      when is_integer(group_id) and group_id >= 0 and
+             (is_nil(after_session_id) or
+                (is_binary(after_session_id) and after_session_id != "")) and
+             is_integer(limit) and limit > 0 do
+    if group_id < RaftManager.num_groups() do
+      server_id = RaftManager.server_id(group_id)
+
+      with :ok <- ensure_group_started(group_id) do
+        case :ra.consistent_query({server_id, Node.self()}, fn state ->
+               RaftFSM.query_lagging_sessions(state, limit, after_session_id)
+             end) do
+          {:ok, {:ok, result}, _leader} when is_map(result) ->
+            {:ok, result}
+
+          {:ok, {{_term, _index}, {:ok, result}}, _leader} when is_map(result) ->
+            {:ok, result}
+
+          {:ok, {:error, reason}, _leader} ->
+            {:error, reason}
+
+          {:ok, {{_term, _index}, {:error, reason}}, _leader} ->
+            {:error, reason}
+
+          {:timeout, leader} ->
+            {:error, {:timeout, leader}}
+
+          {:error, reason} ->
+            {:error, reason}
+        end
+      end
+    else
+      {:error, :invalid_group_id}
+    end
+  end
+
   # ---------------------------------------------------------------------------
   # Archival acknowledgements (tiered storage integration point)
   # ---------------------------------------------------------------------------
@@ -332,6 +401,8 @@ defmodule Starcite.Runtime do
               :invalid_session_id,
               :invalid_event,
               :invalid_cursor,
+              :invalid_group_id,
+              :invalid_lagging_query,
               :session_not_found,
               :session_exists,
               :idempotency_conflict
