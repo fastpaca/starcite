@@ -28,6 +28,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Raft groups | 256 logical shards, each replicated across three nodes |
 | Snapshot manager | Raft snapshots for state recovery |
 | Archiver (optional) | Persists committed events to Postgres |
+| Archive recovery sweep | Rebuilds pending archive work from unarchived Raft state |
 
 ## Request flow
 

@@ -8,6 +8,7 @@ defmodule Starcite.Runtime.RaftFSM do
   @behaviour :ra_machine
 
   alias Starcite.Session
+  alias Starcite.Session.EventLog
 
   @num_lanes 16
 
@@ -89,7 +90,10 @@ defmodule Starcite.Runtime.RaftFSM do
       new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
 
-      tail_size = length(updated_session.event_log.entries)
+      tail_size =
+        updated_session.event_log
+        |> EventLog.entries()
+        |> length()
 
       Starcite.Observability.Telemetry.archive_ack_applied(
         session_id,
@@ -141,15 +145,34 @@ defmodule Starcite.Runtime.RaftFSM do
   def query_unarchived(state, lane_id, session_id, limit) do
     with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
          {:ok, %Session{} = session} <- fetch_session(lane, session_id) do
-      session.event_log
-      |> Map.get(:entries, [])
-      |> Enum.take_while(fn %{seq: seq} -> seq > session.archived_seq end)
-      |> Enum.reverse()
-      |> Enum.take(limit)
+      Session.events_from_cursor(session, session.archived_seq, limit)
     else
       _ -> []
     end
   end
+
+  @doc """
+  Query session IDs in this group that still have unarchived events.
+  """
+  def query_unarchived_sessions(%__MODULE__{} = state, limit)
+      when is_integer(limit) and limit > 0 do
+    state.lanes
+    |> Enum.reduce([], fn {_lane_id, %Lane{sessions: sessions}}, acc ->
+      Enum.reduce(sessions, acc, fn
+        {session_id, %Session{last_seq: last_seq, archived_seq: archived_seq}}, inner
+        when last_seq > archived_seq ->
+          [session_id | inner]
+
+        {_session_id, %Session{}}, inner ->
+          inner
+      end)
+    end)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.take(limit)
+  end
+
+  def query_unarchived_sessions(_state, _limit), do: []
 
   # ---------------------------------------------------------------------------
   # Helpers
