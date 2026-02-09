@@ -58,10 +58,7 @@ defmodule Starcite.Runtime.RaftTopology do
   @impl true
   def init(_opts) do
     # Start Ra system
-    case :ra.start() do
-      :ok -> :ok
-      {:error, {:already_started, _}} -> :ok
-    end
+    :ok = :ra.start()
 
     :logger.set_application_level(:ra, :error)
 
@@ -382,9 +379,6 @@ defmodule Starcite.Runtime.RaftTopology do
       fn ->
         case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
           {:ok, _started, _not_started} ->
-            :ok
-
-          {:error, {:already_started, _}} ->
             :ok
 
           {:error, reason} ->

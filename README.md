@@ -81,7 +81,9 @@ mix phx.server
 
 # Run tests / precommit checks
 mix test
-mix precommit        # format, compile (warnings-as-errors), test
+mix typecheck        # forced compile with warnings-as-errors (includes type warnings)
+mix dialyzer         # static type analysis (Dialyxir)
+mix precommit        # typecheck, dialyzer, format, test
 ```
 
 Optional local 5-node Raft cluster:

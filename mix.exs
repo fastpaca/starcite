@@ -8,6 +8,7 @@ defmodule Starcite.MixProject do
       elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
+      dialyzer: dialyzer(),
       aliases: aliases(),
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
@@ -28,7 +29,7 @@ defmodule Starcite.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test]
+      preferred_envs: [precommit: :test, typecheck: :test, dialyzer: :dev]
     ]
   end
 
@@ -56,7 +57,16 @@ defmodule Starcite.MixProject do
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
       {:ra, "~> 2.13"},
-      {:bypass, "~> 2.1", only: :test}
+      {:bypass, "~> 2.1", only: :test},
+      {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
+    ]
+  end
+
+  defp dialyzer do
+    [
+      flags: [:no_unknown, :no_undefined_callbacks],
+      plt_add_apps: [:mix],
+      plt_file: {:no_warn, "priv/plts/starcite.plt"}
     ]
   end
 
@@ -72,7 +82,14 @@ defmodule Starcite.MixProject do
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
-      precommit: ["compile --warning-as-errors", "deps.unlock --unused", "format", "test"]
+      typecheck: ["compile --force --all-warnings --warnings-as-errors"],
+      precommit: [
+        "typecheck",
+        "cmd env MIX_ENV=dev mix dialyzer --format short",
+        "deps.unlock --unused",
+        "format",
+        "test"
+      ]
     ]
   end
 end

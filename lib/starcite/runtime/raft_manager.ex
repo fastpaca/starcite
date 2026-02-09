@@ -135,10 +135,7 @@ defmodule Starcite.Runtime.RaftManager do
         )
       else
         # Retry join until bootstrap node creates cluster
-        join_cluster_with_retry(group_id, server_id, cluster_name, machine,
-          retries: 10,
-          attempts: 0
-        )
+        join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
       end
     end
   end
@@ -159,40 +156,20 @@ defmodule Starcite.Runtime.RaftManager do
             :ok
         end
 
-      {:error, {:already_started, _}} ->
-        Logger.debug("RaftManager: Group #{group_id} exists, joining")
-
-        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine,
-          retries: 10,
-          attempts: 0
-        )
-
       {:error, :cluster_not_formed} ->
         Logger.debug("RaftManager: Cluster not formed for group #{group_id}, joining with retry")
 
-        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine,
-          retries: 10,
-          attempts: 0
-        )
-
-      {:error, reason} ->
-        Logger.error("RaftManager: Failed to bootstrap group #{group_id}: #{inspect(reason)}")
-        {:error, reason}
+        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine, 10)
     end
   end
 
-  defp join_cluster_with_retry(group_id, _server_id, _cluster_name, _machine,
-         retries: 0,
-         attempts: _attempts
-       ) do
+  defp join_cluster_with_retry(group_id, _server_id, _cluster_name, _machine, 0) do
     Logger.error("RaftManager: Failed to join group #{group_id} after retries")
     {:error, :join_timeout}
   end
 
-  defp join_cluster_with_retry(group_id, server_id, cluster_name, machine,
-         retries: retries,
-         attempts: _attempts
-       ) do
+  defp join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries)
+       when is_integer(retries) and retries > 0 do
     case join_cluster(group_id, server_id, cluster_name, machine) do
       :ok ->
         :ok
@@ -201,10 +178,7 @@ defmodule Starcite.Runtime.RaftManager do
         # Cluster doesn't exist yet, retry with small backoff
         Process.sleep(100)
 
-        join_cluster_with_retry(group_id, server_id, cluster_name, machine,
-          retries: retries - 1,
-          attempts: 0
-        )
+        join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
 
       {:error, reason} ->
         {:error, reason}
@@ -215,20 +189,25 @@ defmodule Starcite.Runtime.RaftManager do
     my_node = Node.self()
     node_name = my_node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
 
+    initial_members =
+      for node <- replicas_for_group(group_id), is_atom(node), do: {server_id, node}
+
     # Per-node Ra data directory, which avoid conflicts in case we have
     # multiple groups & nodes on the same host.
     data_dir_root = Application.get_env(:starcite, :raft_data_dir, "priv/raft")
     data_dir = Path.join([data_dir_root, "group_#{group_id}", node_name])
     File.mkdir_p!(data_dir)
+    system_config = :ra_system.default_config() |> Map.put(:data_dir, data_dir)
 
     # No cluster token enforcement
     server_conf = %{
       id: {server_id, my_node},
       uid: "raft_group_#{group_id}_#{node_name}",
       cluster_name: cluster_name,
+      initial_members: initial_members,
       log_init_args: %{
         uid: "raft_log_#{group_id}_#{node_name}",
-        data_dir: data_dir
+        system_config: system_config
       },
       machine: machine
     }
@@ -236,9 +215,6 @@ defmodule Starcite.Runtime.RaftManager do
     case :ra.start_server(:default, server_conf) do
       :ok ->
         Logger.debug("RaftManager: Joined group #{group_id}")
-        :ok
-
-      {:ok, _} ->
         :ok
 
       {:error, {:already_started, _}} ->
