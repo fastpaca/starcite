@@ -133,6 +133,66 @@ defmodule Starcite.SessionTest do
       assert Enum.sort(kept) == [2, 3, 4, 5]
       assert trimmed == 1
     end
+
+    test "prunes idempotency keys below retained tail floor" do
+      session = Session.new("ses-arch-idem", tail_keep: 2)
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 1},
+          actor: "a",
+          idempotency_key: "k1"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 2},
+          actor: "a",
+          idempotency_key: "k2"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 3},
+          actor: "a",
+          idempotency_key: "k3"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 4},
+          actor: "a",
+          idempotency_key: "k4"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 5},
+          actor: "a",
+          idempotency_key: "k5"
+        })
+
+      {session, _trimmed} = Session.persist_ack(session, 3)
+      retained_keys = session.idempotency_index |> Map.keys() |> Enum.sort()
+
+      assert retained_keys == ["k2", "k3", "k4", "k5"]
+
+      assert {:appended, session, replayed} =
+               Session.append_event(session, %{
+                 type: "content",
+                 payload: %{"n" => 10},
+                 actor: "a",
+                 idempotency_key: "k1"
+               })
+
+      assert replayed.seq == 6
+      assert session.idempotency_index["k1"].seq == 6
+    end
   end
 
   describe "Session.to_map/1" do
