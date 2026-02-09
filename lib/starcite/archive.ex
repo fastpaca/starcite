@@ -12,7 +12,9 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  alias Starcite.Observability.Telemetry
   alias Starcite.Runtime
+  alias Starcite.Session
 
   @events_tab :starcite_archive_events
   @sessions_tab :starcite_archive_sessions
@@ -88,28 +90,56 @@ defmodule Starcite.Archive do
         if events != [] do
           case adapter.write_events(events) do
             {:ok, _count} ->
-              upto_seq = contiguous_upto(events)
+              with {:ok, archived_seq} <- fetch_archived_seq(session_id) do
+                case anchored_contiguous_upto(events, archived_seq) do
+                  {:ok, upto_seq} ->
+                    case Runtime.ack_archived(session_id, upto_seq) do
+                      {:ok, %{archived_seq: _archived, trimmed: _}} ->
+                        trim_local(session_id, upto_seq)
+                        pending_after = pending_count(session_id)
 
-              case Runtime.ack_archived(session_id, upto_seq) do
-                {:ok, %{archived_seq: _archived, trimmed: _}} ->
-                  trim_local(session_id, upto_seq)
-                  pending_after = pending_count(session_id)
-                  avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
+                        avg_event_bytes =
+                          if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
-                  Starcite.Observability.Telemetry.archive_batch(
-                    session_id,
-                    attempted,
-                    bytes_attempted,
-                    avg_event_bytes,
-                    pending_after
-                  )
+                        Telemetry.archive_batch(
+                          session_id,
+                          attempted,
+                          bytes_attempted,
+                          avg_event_bytes,
+                          pending_after
+                        )
 
-                  maybe_clear_session(session_id)
+                        maybe_clear_session(session_id)
 
-                  {attempted_acc + attempted, inserted_acc + attempted,
-                   bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
+                        {attempted_acc + attempted, inserted_acc + attempted,
+                         bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
 
-                _ ->
+                      _ ->
+                        {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
+                         bytes_ins_acc}
+                    end
+
+                  {:gap, expected_seq, first_pending_seq} ->
+                    Telemetry.archive_ack_gap(
+                      session_id,
+                      archived_seq,
+                      expected_seq,
+                      first_pending_seq,
+                      attempted
+                    )
+
+                    {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
+                     bytes_ins_acc}
+
+                  :stale ->
+                    trim_local(session_id, archived_seq)
+                    maybe_clear_session(session_id)
+
+                    {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
+                     bytes_ins_acc}
+                end
+              else
+                {:error, _reason} ->
                   {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
                    bytes_ins_acc}
               end
@@ -129,9 +159,9 @@ defmodule Starcite.Archive do
 
     # Emit queue age gauge
     age_seconds = oldest_age_seconds()
-    Starcite.Observability.Telemetry.archive_queue_age(age_seconds)
+    Telemetry.archive_queue_age(age_seconds)
 
-    Starcite.Observability.Telemetry.archive_flush(
+    Telemetry.archive_flush(
       elapsed,
       attempted_total,
       inserted_total,
@@ -209,17 +239,68 @@ defmodule Starcite.Archive do
     end
   end
 
-  defp contiguous_upto(rows) do
+  defp fetch_archived_seq(session_id) when is_binary(session_id) and session_id != "" do
+    case Runtime.get_session(session_id) do
+      {:ok, %Session{archived_seq: archived_seq}}
+      when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      _other ->
+        {:error, :unexpected_session_lookup_result}
+    end
+  end
+
+  defp anchored_contiguous_upto(rows, archived_seq)
+       when is_list(rows) and is_integer(archived_seq) and archived_seq >= 0 do
+    expected_start = archived_seq + 1
+    first_pending_seq = first_pending_seq(rows, archived_seq)
+
+    cond do
+      is_nil(first_pending_seq) ->
+        :stale
+
+      first_pending_seq > expected_start ->
+        {:gap, expected_start, first_pending_seq}
+
+      true ->
+        upto_seq =
+          rows
+          |> Enum.sort_by(& &1.seq)
+          |> Enum.reduce_while({expected_start, archived_seq}, fn %{seq: seq},
+                                                                  {expected_seq, upto_seq} ->
+            cond do
+              seq < expected_seq ->
+                {:cont, {expected_seq, upto_seq}}
+
+              seq == expected_seq ->
+                {:cont, {expected_seq + 1, seq}}
+
+              seq > expected_seq ->
+                {:halt, {expected_seq, upto_seq}}
+            end
+          end)
+          |> elem(1)
+
+        if upto_seq > archived_seq do
+          {:ok, upto_seq}
+        else
+          {:gap, expected_start, first_pending_seq}
+        end
+    end
+  end
+
+  defp first_pending_seq(rows, archived_seq)
+       when is_list(rows) and is_integer(archived_seq) and archived_seq >= 0 do
     rows
-    |> Enum.sort_by(& &1.seq)
-    |> Enum.reduce({nil, 0}, fn %{seq: seq}, {prev, upto} ->
-      cond do
-        prev == nil -> {seq, seq}
-        seq == prev + 1 -> {seq, seq}
-        true -> {prev, upto}
-      end
-    end)
-    |> elem(1)
+    |> Enum.map(&Map.get(&1, :seq))
+    |> Enum.filter(&(is_integer(&1) and &1 > archived_seq))
+    |> case do
+      [] -> nil
+      seqs -> Enum.min(seqs)
+    end
   end
 
   defp trim_local(session_id, upto_seq) do

@@ -183,4 +183,50 @@ defmodule Starcite.Observability.Telemetry do
 
     :ok
   end
+
+  @doc """
+  Emit an event when archive ack cannot advance because the next expected seq
+  is missing in the flushed batch.
+
+  Measurements:
+    - `:count` - always 1 per detected gap
+    - `:attempted_rows` - number of rows attempted in the batch
+
+  Metadata:
+    - `:session_id`
+    - `:archived_seq`
+    - `:expected_seq`
+    - `:first_pending_seq`
+  """
+  @spec archive_ack_gap(
+          String.t(),
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def archive_ack_gap(
+        session_id,
+        archived_seq,
+        expected_seq,
+        first_pending_seq,
+        attempted_rows
+      )
+      when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
+             archived_seq >= 0 and is_integer(expected_seq) and expected_seq > 0 and
+             is_integer(first_pending_seq) and first_pending_seq > 0 and
+             is_integer(attempted_rows) and attempted_rows >= 0 do
+    :telemetry.execute(
+      [:starcite, :archive, :ack_gap],
+      %{count: 1, attempted_rows: attempted_rows},
+      %{
+        session_id: session_id,
+        archived_seq: archived_seq,
+        expected_seq: expected_seq,
+        first_pending_seq: first_pending_seq
+      }
+    )
+
+    :ok
+  end
 end

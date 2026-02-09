@@ -52,6 +52,50 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
+  test "does not advance archived watermark across a missing next sequence" do
+    {:ok, archive_pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
+      )
+
+    session_id = "ses-gap-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    for i <- 1..3 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
+
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 1
+      end,
+      timeout: 2_000
+    )
+
+    assert [{_, _}] = :ets.lookup(:starcite_archive_events, {session_id, 3})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 1
+      end,
+      timeout: 2_000
+    )
+  end
+
   describe "archive idempotency" do
     test "duplicate writes are idempotent" do
       # Start Archive with test adapter that tracks writes
