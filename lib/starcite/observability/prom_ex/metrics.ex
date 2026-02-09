@@ -48,6 +48,11 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :pending_sessions,
           description: "Sessions with pending rows in archive ETS queue"
         ),
+        last_value("starcite_archive_retry_markers",
+          event_name: [:starcite, :archive, :flush],
+          measurement: :pending_retry_markers,
+          description: "Sessions marked for archive enqueue recovery"
+        ),
         distribution("starcite_archive_flush_duration_ms",
           event_name: [:starcite, :archive, :flush],
           measurement: :elapsed_ms,
@@ -76,6 +81,18 @@ defmodule Starcite.Observability.PromEx.Metrics do
           event_name: [:starcite, :archive, :flush],
           measurement: :bytes_inserted,
           description: "Total payload bytes successfully archived"
+        ),
+        counter("starcite_archive_enqueue_failures_total",
+          event_name: [:starcite, :archive, :enqueue, :failure],
+          measurement: :count,
+          description: "Total archive enqueue failures",
+          tags: [:reason, :mode]
+        ),
+        counter("starcite_archive_enqueue_retries_total",
+          event_name: [:starcite, :archive, :enqueue, :retry],
+          measurement: :count,
+          description: "Total archive enqueue retry lifecycle events",
+          tags: [:outcome]
         ),
         distribution("starcite_archive_batch_rows",
           event_name: [:starcite, :archive, :batch],

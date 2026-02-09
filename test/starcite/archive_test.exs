@@ -290,6 +290,131 @@ defmodule Starcite.ArchiveTest do
   end
 
   describe "archive idempotency" do
+    test "enqueue failure is observed and recovered from runtime cursor replay" do
+      previous_strict_mode = Application.get_env(:starcite, :archive_enqueue_strict)
+      Application.put_env(:starcite, :archive_enqueue_strict, false)
+
+      on_exit(fn ->
+        if is_nil(previous_strict_mode) do
+          Application.delete_env(:starcite, :archive_enqueue_strict)
+        else
+          Application.put_env(:starcite, :archive_enqueue_strict, previous_strict_mode)
+        end
+      end)
+
+      {:ok, archive_pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 60_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = Starcite.Archive.IdempotentTestAdapter.clear_writes()
+
+      telemetry_handler_id = "archive-enqueue-#{System.unique_integer([:positive, :monotonic])}"
+
+      :ok =
+        :telemetry.attach_many(
+          telemetry_handler_id,
+          [
+            [:starcite, :archive, :enqueue, :failure],
+            [:starcite, :archive, :enqueue, :retry]
+          ],
+          fn event_name, measurements, metadata, test_pid ->
+            send(test_pid, {:telemetry_event, event_name, measurements, metadata})
+          end,
+          self()
+        )
+
+      on_exit(fn -> :telemetry.detach(telemetry_handler_id) end)
+
+      session_id = "ses-enqueue-recover-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      assert true = :ets.delete(:starcite_archive_events)
+      assert true = :ets.delete(:starcite_archive_sessions)
+
+      assert {:ok, %{seq: 1}} =
+               Runtime.append_event(session_id, %{
+                 type: "content",
+                 payload: %{text: "recovered"},
+                 actor: "agent:test"
+               })
+
+      assert_receive {:telemetry_event, [:starcite, :archive, :enqueue, :failure], %{count: 1},
+                      metadata},
+                     1_000
+
+      assert metadata.reason == :tables_unavailable
+      assert metadata.mode == :relaxed
+
+      assert_receive {:telemetry_event, [:starcite, :archive, :enqueue, :retry], %{count: 1},
+                      %{outcome: :marked}},
+                     1_000
+
+      assert [{^session_id, 1}] = :ets.lookup(:starcite_archive_retry_sessions, session_id)
+
+      send(archive_pid, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == session.last_seq
+        end,
+        timeout: 2_000
+      )
+
+      assert_receive {:telemetry_event, [:starcite, :archive, :enqueue, :retry], %{count: 1},
+                      %{outcome: :recovered}},
+                     2_000
+
+      assert_receive {:telemetry_event, [:starcite, :archive, :enqueue, :retry], %{count: 1},
+                      %{outcome: :cleared}},
+                     2_000
+
+      assert [] = :ets.lookup(:starcite_archive_retry_sessions, session_id)
+    end
+
+    test "strict enqueue mode returns error when queue tables are unavailable" do
+      previous_strict_mode = Application.get_env(:starcite, :archive_enqueue_strict)
+      Application.put_env(:starcite, :archive_enqueue_strict, true)
+
+      on_exit(fn ->
+        if is_nil(previous_strict_mode) do
+          Application.delete_env(:starcite, :archive_enqueue_strict)
+        else
+          Application.put_env(:starcite, :archive_enqueue_strict, previous_strict_mode)
+        end
+      end)
+
+      {:ok, _archive_pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
+        )
+
+      assert true = :ets.delete(:starcite_archive_events)
+      assert true = :ets.delete(:starcite_archive_sessions)
+
+      result =
+        Starcite.Archive.append_events("ses-strict-enqueue", [
+          %{
+            seq: 1,
+            type: "content",
+            payload: %{text: "strict-mode"},
+            actor: "agent:test",
+            metadata: %{},
+            refs: %{}
+          }
+        ])
+
+      assert {:error, {:archive_enqueue_failed, :tables_unavailable}} = result
+
+      assert [{"ses-strict-enqueue", 1}] =
+               :ets.lookup(:starcite_archive_retry_sessions, "ses-strict-enqueue")
+    end
+
     test "duplicate writes are idempotent" do
       # Start Archive with test adapter that tracks writes
       {:ok, _pid} =

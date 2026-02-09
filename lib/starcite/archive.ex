@@ -18,6 +18,7 @@ defmodule Starcite.Archive do
 
   @events_tab :starcite_archive_events
   @sessions_tab :starcite_archive_sessions
+  @retry_tab :starcite_archive_retry_sessions
 
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
 
@@ -26,21 +27,23 @@ defmodule Starcite.Archive do
 
   Events are normalized into the archive row shape used by adapters.
   """
-  @spec append_events(String.t(), [map()]) :: :ok
+  @spec append_events(String.t(), [map()]) :: :ok | {:error, term()}
   def append_events(session_id, events)
       when is_binary(session_id) and is_list(events) do
-    if events != [] do
-      append_to_queue(session_id, events)
+    if events == [] do
+      :ok
+    else
+      case append_to_queue(session_id, events) do
+        :ok -> :ok
+        {:error, reason} -> handle_enqueue_failure(session_id, events, reason)
+      end
     end
-
-    :ok
   end
 
   @impl true
   def init(opts) do
-    # ETS tables (uncapped by design)
-    :ets.new(@events_tab, [:ordered_set, :public, :named_table, {:read_concurrency, true}])
-    :ets.new(@sessions_tab, [:set, :public, :named_table, {:read_concurrency, true}])
+    :ok = ensure_queue_tables()
+    :ok = ensure_retry_table()
 
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.fetch!(opts, :adapter)
@@ -61,7 +64,7 @@ defmodule Starcite.Archive do
 
   @impl true
   def handle_cast({:append, session_id, events}, state) do
-    append_to_queue(session_id, events)
+    _ = append_to_queue(session_id, events)
     {:noreply, state}
   end
 
@@ -77,18 +80,19 @@ defmodule Starcite.Archive do
   end
 
   defp flush_all(%{adapter: adapter, cursors: cursors} = state) do
+    :ok = ensure_queue_tables()
+    :ok = ensure_retry_table()
+
     start = System.monotonic_time(:millisecond)
-    session_ids = sessions_list()
+    session_ids = Enum.uniq(sessions_list() ++ retry_sessions_list())
 
     {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total, cursors} =
       Enum.reduce(session_ids, {0, 0, 0, 0, cursors}, fn session_id,
                                                          {attempted_acc, inserted_acc,
                                                           bytes_att_acc, bytes_ins_acc,
                                                           cursors_acc} ->
-        events = take_pending_events(session_id, state)
-
         {{attempted, inserted, bytes_attempted, bytes_inserted}, cursors_acc} =
-          flush_session(session_id, events, adapter, cursors_acc)
+          flush_session(session_id, adapter, cursors_acc, state)
 
         {attempted_acc + attempted, inserted_acc + inserted, bytes_att_acc + bytes_attempted,
          bytes_ins_acc + bytes_inserted, cursors_acc}
@@ -97,6 +101,7 @@ defmodule Starcite.Archive do
     elapsed = System.monotonic_time(:millisecond) - start
     pending_events = :ets.info(@events_tab, :size) || 0
     pending_sessions = :ets.info(@sessions_tab, :size) || 0
+    pending_retry_markers = :ets.info(@retry_tab, :size) || 0
 
     # Emit queue age gauge
     age_seconds = oldest_age_seconds()
@@ -109,19 +114,21 @@ defmodule Starcite.Archive do
       pending_events,
       pending_sessions,
       bytes_attempted_total,
-      bytes_inserted_total
+      bytes_inserted_total,
+      pending_retry_markers
     )
 
     %{state | cursors: cursors}
   end
 
-  defp flush_session(_session_id, [], _adapter, cursors), do: {{0, 0, 0, 0}, cursors}
-
-  defp flush_session(session_id, events, adapter, cursors) do
+  defp flush_session(session_id, adapter, cursors, state) do
     case load_cursor(session_id, cursors) do
       {:ok, cursor, cursors} ->
+        events = events_for_flush(session_id, cursor, state)
+
         case build_flush_batch(events, cursor) do
           :stale ->
+            maybe_clear_retry_marker(session_id, cursor)
             {pending_after, cursors} = trim_and_retain_cursor(session_id, cursor, cursors)
 
             cursors =
@@ -183,6 +190,7 @@ defmodule Starcite.Archive do
       {:ok, %{archived_seq: archived_seq, trimmed: _trimmed}}
       when is_integer(archived_seq) and archived_seq >= cursor ->
         trim_local(session_id, archived_seq)
+        maybe_clear_retry_marker(session_id, archived_seq)
         pending_after = pending_count(session_id)
         avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
@@ -205,6 +213,8 @@ defmodule Starcite.Archive do
 
       {:error, {:archived_seq_mismatch, _expected_archived_seq, current_archived_seq}}
       when is_integer(current_archived_seq) and current_archived_seq >= 0 ->
+        maybe_clear_retry_marker(session_id, current_archived_seq)
+
         {pending_after, cursors} =
           trim_and_retain_cursor(session_id, current_archived_seq, cursors)
 
@@ -244,12 +254,28 @@ defmodule Starcite.Archive do
   end
 
   defp sessions_list do
-    :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _} -> id end)
+    if :ets.whereis(@sessions_tab) == :undefined do
+      []
+    else
+      :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _} -> id end)
+    end
+  catch
+    :error, :badarg -> []
+  end
+
+  defp retry_sessions_list do
+    if :ets.whereis(@retry_tab) == :undefined do
+      []
+    else
+      :ets.tab2list(@retry_tab) |> Enum.map(fn {id, _} -> id end)
+    end
+  catch
+    :error, :badarg -> []
   end
 
   defp take_pending_events(session_id, _state) do
     # Select a chunk of rows in seq-ascending order for this session
-    limit = Application.get_env(:starcite, :archive_batch_size, 5_000)
+    limit = archive_batch_limit()
 
     ms = [
       {
@@ -264,6 +290,62 @@ defmodule Starcite.Archive do
       Map.put(event, :session_id, session_id) |> Map.put(:seq, seq)
     end)
     |> Enum.sort_by(& &1.seq)
+  end
+
+  defp events_for_flush(session_id, cursor, state) do
+    queued = take_pending_events(session_id, state)
+    limit = archive_batch_limit()
+
+    case retry_upto(session_id) do
+      retry_upto when is_integer(retry_upto) and retry_upto > cursor ->
+        recovered = recover_events_from_runtime(session_id, cursor, limit)
+        merge_events(queued, recovered, limit)
+
+      _ ->
+        queued
+    end
+  end
+
+  defp recover_events_from_runtime(session_id, cursor, limit)
+       when is_binary(session_id) and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
+              limit > 0 do
+    case Runtime.get_events_from_cursor(session_id, cursor, limit) do
+      {:ok, events} when is_list(events) ->
+        if events == [] do
+          []
+        else
+          Telemetry.archive_enqueue_retry(:recovered)
+          Enum.map(events, &runtime_event_to_archive_row(session_id, &1))
+        end
+
+      {:error, _reason} ->
+        Telemetry.archive_enqueue_retry(:recover_failed)
+        []
+    end
+  end
+
+  defp runtime_event_to_archive_row(session_id, event) do
+    base =
+      event
+      |> normalize_event()
+      |> Map.put(:session_id, session_id)
+      |> Map.put(:seq, Map.get(event, :seq))
+
+    base
+  end
+
+  defp merge_events(queued, recovered, limit)
+       when is_list(queued) and is_list(recovered) and is_integer(limit) and limit > 0 do
+    (queued ++ recovered)
+    |> Enum.reduce(%{}, fn event, acc ->
+      case Map.get(event, :seq) do
+        seq when is_integer(seq) and seq >= 0 -> Map.put(acc, seq, event)
+        _ -> acc
+      end
+    end)
+    |> Map.values()
+    |> Enum.sort_by(& &1.seq)
+    |> Enum.take(limit)
   end
 
   defp select_take(tab, ms, limit) do
@@ -288,6 +370,8 @@ defmodule Starcite.Archive do
       :"$end_of_table" ->
         Enum.reverse(acc)
     end
+  catch
+    :error, :badarg -> Enum.reverse(acc)
   end
 
   defp do_select_take_cont(:"$end_of_table", _remaining, acc), do: Enum.reverse(acc)
@@ -299,6 +383,8 @@ defmodule Starcite.Archive do
       {[], cont2} -> do_select_take_cont(cont2, 0, acc)
       :"$end_of_table" -> Enum.reverse(acc)
     end
+  catch
+    :error, :badarg -> Enum.reverse(acc)
   end
 
   defp build_flush_batch(rows, cursor)
@@ -327,6 +413,8 @@ defmodule Starcite.Archive do
 
     :ets.select_delete(@events_tab, ms)
     :ok
+  catch
+    :error, :badarg -> :ok
   end
 
   defp maybe_clear_session(session_id) do
@@ -343,6 +431,8 @@ defmodule Starcite.Archive do
       {[], _} -> :ets.delete(@sessions_tab, session_id)
       _ -> :ok
     end
+  catch
+    :error, :badarg -> :ok
   end
 
   defp pending_count(session_id) do
@@ -355,6 +445,8 @@ defmodule Starcite.Archive do
     ]
 
     :ets.select_count(@events_tab, ms)
+  catch
+    :error, :badarg -> 0
   end
 
   defp oldest_age_seconds do
@@ -384,6 +476,8 @@ defmodule Starcite.Archive do
       {[event], _cont} -> Map.get(event, :inserted_at)
       _ -> nil
     end
+  catch
+    :error, :badarg -> nil
   end
 
   defp normalize_event(event) do
@@ -408,13 +502,145 @@ defmodule Starcite.Archive do
 
       :ets.insert(@events_tab, rows)
       :ets.insert(@sessions_tab, {session_id, :pending})
+      :ok
+    else
+      {:error, :tables_unavailable}
     end
-
-    :ok
   catch
     :error, :badarg ->
-      # Tables may be recreated during process restarts; skip enqueue for this call.
+      {:error, :badarg}
+  end
+
+  defp handle_enqueue_failure(session_id, events, reason) do
+    strict_mode = enqueue_strict_mode()
+    event_count = length(events)
+    Telemetry.archive_enqueue_failure(reason, event_count, strict_mode)
+
+    max_seq = max_event_seq(events)
+
+    case mark_retry(session_id, max_seq) do
+      :ok ->
+        Telemetry.archive_enqueue_retry(:marked)
+
+      {:error, _retry_reason} ->
+        Telemetry.archive_enqueue_retry(:mark_failed)
+    end
+
+    case strict_mode do
+      :strict -> {:error, {:archive_enqueue_failed, reason}}
+      :relaxed -> :ok
+    end
+  end
+
+  defp mark_retry(session_id, max_seq)
+       when is_binary(session_id) and is_integer(max_seq) and max_seq >= 0 do
+    :ok = ensure_retry_table()
+
+    case :ets.lookup(@retry_tab, session_id) do
+      [{^session_id, existing}] when is_integer(existing) and existing >= max_seq ->
+        :ok
+
+      _ ->
+        :ets.insert(@retry_tab, {session_id, max_seq})
+        :ok
+    end
+  catch
+    :error, :badarg -> {:error, :retry_table_unavailable}
+  end
+
+  defp retry_upto(session_id) when is_binary(session_id) do
+    case :ets.lookup(@retry_tab, session_id) do
+      [{^session_id, upto}] when is_integer(upto) and upto >= 0 -> upto
+      _ -> nil
+    end
+  catch
+    :error, :badarg -> nil
+  end
+
+  defp maybe_clear_retry_marker(session_id, archived_seq)
+       when is_binary(session_id) and is_integer(archived_seq) and archived_seq >= 0 do
+    case retry_upto(session_id) do
+      upto when is_integer(upto) and upto <= archived_seq ->
+        :ets.delete(@retry_tab, session_id)
+        Telemetry.archive_enqueue_retry(:cleared)
+        :ok
+
+      _ ->
+        :ok
+    end
+  catch
+    :error, :badarg -> :ok
+  end
+
+  defp max_event_seq(events) when is_list(events) do
+    Enum.reduce(events, 0, fn
+      %{seq: seq}, acc when is_integer(seq) and seq >= 0 -> max(seq, acc)
+      _, acc -> acc
+    end)
+  end
+
+  defp archive_batch_limit do
+    Application.get_env(:starcite, :archive_batch_size, 5_000)
+  end
+
+  defp enqueue_strict_mode do
+    case Application.get_env(:starcite, :archive_enqueue_strict, :unset) do
+      :unset -> parse_strict_mode(System.get_env("STARCITE_ARCHIVE_ENQUEUE_STRICT"))
+      value -> parse_strict_mode(value)
+    end
+  end
+
+  defp parse_strict_mode(value) do
+    case value do
+      nil -> :strict
+      true -> :strict
+      false -> :relaxed
+      :strict -> :strict
+      :relaxed -> :relaxed
+      "true" -> :strict
+      "1" -> :strict
+      "yes" -> :strict
+      "on" -> :strict
+      "false" -> :relaxed
+      "0" -> :relaxed
+      "no" -> :relaxed
+      "off" -> :relaxed
+      _ -> :strict
+    end
+  end
+
+  defp ensure_queue_tables do
+    with :ok <-
+           ensure_table(
+             @events_tab,
+             [:ordered_set, :public, :named_table, {:read_concurrency, true}]
+           ),
+         :ok <-
+           ensure_table(
+             @sessions_tab,
+             [:set, :public, :named_table, {:read_concurrency, true}]
+           ) do
       :ok
+    end
+  end
+
+  defp ensure_retry_table do
+    ensure_table(
+      @retry_tab,
+      [:set, :public, :named_table, {:read_concurrency, true}, {:write_concurrency, true}]
+    )
+  end
+
+  defp ensure_table(table, opts) do
+    if :ets.whereis(table) == :undefined do
+      :ets.new(table, opts)
+      :ok
+    else
+      :ok
+    end
+  catch
+    :error, :badarg ->
+      if :ets.whereis(table) == :undefined, do: {:error, :table_unavailable}, else: :ok
   end
 
   defp queue_tables_ready? do

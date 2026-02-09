@@ -7,6 +7,10 @@ defmodule Starcite.Observability.Telemetry do
   Note: This is an event substrate - no LLM token budgets or compaction metrics.
   """
 
+  @archive_enqueue_failure_reasons [:tables_unavailable, :badarg]
+  @archive_enqueue_retry_outcomes [:marked, :recovered, :recover_failed, :mark_failed, :cleared]
+  @archive_enqueue_modes [:strict, :relaxed]
+
   @doc """
   Emit an event when an event is appended to a session.
 
@@ -51,6 +55,7 @@ defmodule Starcite.Observability.Telemetry do
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer(),
+          non_neg_integer(),
           non_neg_integer()
         ) :: :ok
   def archive_flush(
@@ -60,12 +65,16 @@ defmodule Starcite.Observability.Telemetry do
         pending_events,
         pending_sessions,
         bytes_attempted,
-        bytes_inserted
+        bytes_inserted,
+        pending_retry_markers
       )
       when is_integer(elapsed_ms) and elapsed_ms >= 0 and is_integer(attempted) and attempted >= 0 and
              is_integer(inserted) and inserted >= 0 and is_integer(pending_events) and
              pending_events >= 0 and
-             is_integer(pending_sessions) and pending_sessions >= 0 do
+             is_integer(pending_sessions) and pending_sessions >= 0 and
+             is_integer(bytes_attempted) and bytes_attempted >= 0 and
+             is_integer(bytes_inserted) and bytes_inserted >= 0 and
+             is_integer(pending_retry_markers) and pending_retry_markers >= 0 do
     :telemetry.execute(
       [:starcite, :archive, :flush],
       %{
@@ -75,7 +84,8 @@ defmodule Starcite.Observability.Telemetry do
         pending_events: pending_events,
         pending_sessions: pending_sessions,
         bytes_attempted: bytes_attempted,
-        bytes_inserted: bytes_inserted
+        bytes_inserted: bytes_inserted,
+        pending_retry_markers: pending_retry_markers
       },
       %{}
     )
@@ -179,6 +189,50 @@ defmodule Starcite.Observability.Telemetry do
       [:starcite, :archive, :queue_age],
       %{seconds: seconds},
       %{}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit archive enqueue failure signals.
+
+  Measurements:
+    - `:count` – number of enqueue failures emitted by this call
+    - `:events` – number of events in the failed enqueue batch
+
+  Metadata:
+    - `:reason` – normalized failure reason
+    - `:mode` – strictness mode (`:strict` or `:relaxed`)
+  """
+  @spec archive_enqueue_failure(atom(), pos_integer(), :strict | :relaxed) :: :ok
+  def archive_enqueue_failure(reason, events, mode)
+      when reason in @archive_enqueue_failure_reasons and is_integer(events) and events > 0 and
+             mode in @archive_enqueue_modes do
+    :telemetry.execute(
+      [:starcite, :archive, :enqueue, :failure],
+      %{count: 1, events: events},
+      %{reason: reason, mode: mode}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit archive enqueue retry lifecycle signals.
+
+  Measurements:
+    - `:count` – number of retry lifecycle transitions emitted by this call
+
+  Metadata:
+    - `:outcome` – normalized retry lifecycle outcome
+  """
+  @spec archive_enqueue_retry(atom()) :: :ok
+  def archive_enqueue_retry(outcome) when outcome in @archive_enqueue_retry_outcomes do
+    :telemetry.execute(
+      [:starcite, :archive, :enqueue, :retry],
+      %{count: 1},
+      %{outcome: outcome}
     )
 
     :ok
