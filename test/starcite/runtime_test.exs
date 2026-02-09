@@ -186,6 +186,30 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
+  describe "ack_archived_if_current/3" do
+    test "only applies ack when expected archived seq matches current archived seq" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..3 do
+        assert {:ok, %{seq: ^n}} =
+                 Runtime.append_event(id, %{
+                   type: "content",
+                   payload: %{text: "event-#{n}"},
+                   actor: "agent:1"
+                 })
+      end
+
+      assert {:error, {:archived_seq_mismatch, 1, 0}} =
+               Runtime.ack_archived_if_current(id, 1, 2)
+
+      assert {:ok, %{archived_seq: 2}} = Runtime.ack_archived_if_current(id, 0, 2)
+
+      assert {:error, {:archived_seq_mismatch, 0, 2}} =
+               Runtime.ack_archived_if_current(id, 0, 3)
+    end
+  end
+
   describe "Raft failover and recovery" do
     test "recovers state after server crash and restart" do
       id = unique_id("ses-failover")

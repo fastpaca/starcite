@@ -52,6 +52,243 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
+  test "advances archived watermark when sequence numbers are strictly increasing but sparse" do
+    {:ok, archive_pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
+      )
+
+    session_id = "ses-gap-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    for i <- 1..3 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
+
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 3
+      end,
+      timeout: 2_000
+    )
+
+    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 3})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 3
+      end,
+      timeout: 2_000
+    )
+  end
+
+  test "advances archived watermark over multiple sparse batches" do
+    previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
+    Application.put_env(:starcite, :archive_batch_size, 2)
+
+    on_exit(fn ->
+      if is_nil(previous_batch_size) do
+        Application.delete_env(:starcite, :archive_batch_size)
+      else
+        Application.put_env(:starcite, :archive_batch_size, previous_batch_size)
+      end
+    end)
+
+    {:ok, archive_pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
+      )
+
+    session_id = "ses-sparse-batches-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    for i <- 1..5 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
+
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 4})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 3
+      end,
+      timeout: 2_000
+    )
+
+    assert [{_, _}] = :ets.lookup(:starcite_archive_events, {session_id, 5})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 5
+      end,
+      timeout: 2_000
+    )
+
+    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 5})
+  end
+
+  describe "archive cursor protocol" do
+    test "loads archived cursor on first flush and skips stale rows" do
+      previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
+      Application.put_env(:starcite, :archive_batch_size, 5_000)
+
+      on_exit(fn ->
+        if is_nil(previous_batch_size) do
+          Application.delete_env(:starcite, :archive_batch_size)
+        else
+          Application.put_env(:starcite, :archive_batch_size, previous_batch_size)
+        end
+      end)
+
+      {:ok, archive_pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 60_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = Starcite.Archive.IdempotentTestAdapter.clear_writes()
+
+      session_id = "ses-cursor-bootstrap-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      assert {:ok, %{archived_seq: 2}} =
+               Runtime.ack_archived_if_current(session_id, 0, 2)
+
+      send(archive_pid, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 3
+        end,
+        timeout: 2_000
+      )
+
+      writes =
+        Starcite.Archive.IdempotentTestAdapter.get_writes()
+        |> Enum.filter(&(&1.session_id == session_id))
+        |> Enum.map(& &1.seq)
+        |> Enum.sort()
+
+      assert writes == [3]
+    end
+
+    test "recovers from conditional ack mismatch and eventually converges" do
+      previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
+      Application.put_env(:starcite, :archive_batch_size, 2)
+
+      on_exit(fn ->
+        if is_nil(previous_batch_size) do
+          Application.delete_env(:starcite, :archive_batch_size)
+        else
+          Application.put_env(:starcite, :archive_batch_size, previous_batch_size)
+        end
+      end)
+
+      {:ok, archive_pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 60_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = Starcite.Archive.IdempotentTestAdapter.clear_writes()
+
+      session_id = "ses-cursor-mismatch-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for i <- 1..4 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(archive_pid, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 2
+        end,
+        timeout: 2_000
+      )
+
+      assert {:ok, %{archived_seq: 3}} =
+               Runtime.ack_archived_if_current(session_id, 2, 3)
+
+      send(archive_pid, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 3
+        end,
+        timeout: 2_000
+      )
+
+      send(archive_pid, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 4
+        end,
+        timeout: 2_000
+      )
+
+      unique_seqs =
+        Starcite.Archive.IdempotentTestAdapter.get_writes()
+        |> Enum.filter(&(&1.session_id == session_id))
+        |> Enum.map(& &1.seq)
+        |> Enum.uniq()
+        |> Enum.sort()
+
+      assert unique_seqs == [1, 2, 3, 4]
+    end
+  end
+
   describe "archive idempotency" do
     test "duplicate writes are idempotent" do
       # Start Archive with test adapter that tracks writes

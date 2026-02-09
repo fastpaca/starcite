@@ -4,7 +4,7 @@ defmodule Starcite.Archive do
 
   - append_events/2 is invoked by the Raft FSM effects after commits
   - holds pending events in ETS until flushed to cold storage
-  - after flush, advances archive watermark via Runtime.ack_archived/2
+  - after flush, advances archive watermark via Runtime.ack_archived_if_current/3
 
   Designed so adapters for Postgres or S3 can be plugged in without touching
   Raft state or HTTP paths.
@@ -12,7 +12,9 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  alias Starcite.Observability.Telemetry
   alias Starcite.Runtime
+  alias Starcite.Session
 
   @events_tab :starcite_archive_events
   @sessions_tab :starcite_archive_sessions
@@ -49,7 +51,8 @@ defmodule Starcite.Archive do
     state = %{
       interval: interval,
       adapter: adapter_mod,
-      adapter_opts: adapter_opts
+      adapter_opts: adapter_opts,
+      cursors: %{}
     }
 
     schedule_flush(interval)
@@ -64,7 +67,7 @@ defmodule Starcite.Archive do
 
   @impl true
   def handle_info(:flush_tick, state) do
-    flush_all(state)
+    state = flush_all(state)
     schedule_flush(state.interval)
     {:noreply, state}
   end
@@ -73,54 +76,22 @@ defmodule Starcite.Archive do
     Process.send_after(self(), :flush_tick, interval)
   end
 
-  defp flush_all(%{adapter: adapter} = state) do
+  defp flush_all(%{adapter: adapter, cursors: cursors} = state) do
     start = System.monotonic_time(:millisecond)
     session_ids = sessions_list()
 
-    {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total} =
-      Enum.reduce(session_ids, {0, 0, 0, 0}, fn session_id,
-                                                {attempted_acc, inserted_acc, bytes_att_acc,
-                                                 bytes_ins_acc} ->
+    {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total, cursors} =
+      Enum.reduce(session_ids, {0, 0, 0, 0, cursors}, fn session_id,
+                                                         {attempted_acc, inserted_acc,
+                                                          bytes_att_acc, bytes_ins_acc,
+                                                          cursors_acc} ->
         events = take_pending_events(session_id, state)
-        attempted = length(events)
-        bytes_attempted = Enum.reduce(events, 0, fn event, acc -> acc + approx_bytes(event) end)
 
-        if events != [] do
-          case adapter.write_events(events) do
-            {:ok, _count} ->
-              upto_seq = contiguous_upto(events)
+        {{attempted, inserted, bytes_attempted, bytes_inserted}, cursors_acc} =
+          flush_session(session_id, events, adapter, cursors_acc)
 
-              case Runtime.ack_archived(session_id, upto_seq) do
-                {:ok, %{archived_seq: _archived, trimmed: _}} ->
-                  trim_local(session_id, upto_seq)
-                  pending_after = pending_count(session_id)
-                  avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
-
-                  Starcite.Observability.Telemetry.archive_batch(
-                    session_id,
-                    attempted,
-                    bytes_attempted,
-                    avg_event_bytes,
-                    pending_after
-                  )
-
-                  maybe_clear_session(session_id)
-
-                  {attempted_acc + attempted, inserted_acc + attempted,
-                   bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
-
-                _ ->
-                  {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
-                   bytes_ins_acc}
-              end
-
-            {:error, _reason} ->
-              {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
-               bytes_ins_acc}
-          end
-        else
-          {attempted_acc, inserted_acc, bytes_att_acc, bytes_ins_acc}
-        end
+        {attempted_acc + attempted, inserted_acc + inserted, bytes_att_acc + bytes_attempted,
+         bytes_ins_acc + bytes_inserted, cursors_acc}
       end)
 
     elapsed = System.monotonic_time(:millisecond) - start
@@ -129,9 +100,9 @@ defmodule Starcite.Archive do
 
     # Emit queue age gauge
     age_seconds = oldest_age_seconds()
-    Starcite.Observability.Telemetry.archive_queue_age(age_seconds)
+    Telemetry.archive_queue_age(age_seconds)
 
-    Starcite.Observability.Telemetry.archive_flush(
+    Telemetry.archive_flush(
       elapsed,
       attempted_total,
       inserted_total,
@@ -141,8 +112,129 @@ defmodule Starcite.Archive do
       bytes_inserted_total
     )
 
-    :ok
+    %{state | cursors: cursors}
   end
+
+  defp flush_session(_session_id, [], _adapter, cursors), do: {{0, 0, 0, 0}, cursors}
+
+  defp flush_session(session_id, events, adapter, cursors) do
+    case load_cursor(session_id, cursors) do
+      {:ok, cursor, cursors} ->
+        case build_flush_batch(events, cursor) do
+          :stale ->
+            {pending_after, cursors} = trim_and_retain_cursor(session_id, cursor, cursors)
+
+            cursors =
+              maybe_drop_cursor(cursors, session_id, pending_after)
+
+            {{0, 0, 0, 0}, cursors}
+
+          {:ok, rows, upto_seq} ->
+            attempted = length(rows)
+            bytes_attempted = Enum.reduce(rows, 0, fn event, acc -> acc + approx_bytes(event) end)
+
+            case adapter.write_events(rows) do
+              {:ok, _count} ->
+                handle_post_write_ack(
+                  session_id,
+                  cursor,
+                  upto_seq,
+                  attempted,
+                  bytes_attempted,
+                  cursors
+                )
+
+              {:error, _reason} ->
+                {{attempted, 0, bytes_attempted, 0}, cursors}
+            end
+        end
+
+      {:error, cursors} ->
+        {{0, 0, 0, 0}, cursors}
+    end
+  end
+
+  defp load_cursor(session_id, cursors) when is_binary(session_id) and session_id != "" do
+    case Map.fetch(cursors, session_id) do
+      {:ok, cursor} ->
+        {:ok, cursor, cursors}
+
+      :error ->
+        case Runtime.get_session(session_id) do
+          {:ok, %Session{archived_seq: archived_seq}}
+          when is_integer(archived_seq) and archived_seq >= 0 ->
+            {:ok, archived_seq, Map.put(cursors, session_id, archived_seq)}
+
+          _ ->
+            {:error, cursors}
+        end
+    end
+  end
+
+  defp handle_post_write_ack(
+         session_id,
+         cursor,
+         upto_seq,
+         attempted,
+         bytes_attempted,
+         cursors
+       ) do
+    case Runtime.ack_archived_if_current(session_id, cursor, upto_seq) do
+      {:ok, %{archived_seq: archived_seq, trimmed: _trimmed}}
+      when is_integer(archived_seq) and archived_seq >= cursor ->
+        trim_local(session_id, archived_seq)
+        pending_after = pending_count(session_id)
+        avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
+
+        Telemetry.archive_batch(
+          session_id,
+          attempted,
+          bytes_attempted,
+          avg_event_bytes,
+          pending_after
+        )
+
+        maybe_clear_session(session_id)
+
+        cursors =
+          cursors
+          |> Map.put(session_id, archived_seq)
+          |> maybe_drop_cursor(session_id, pending_after)
+
+        {{attempted, attempted, bytes_attempted, bytes_attempted}, cursors}
+
+      {:error, {:archived_seq_mismatch, _expected_archived_seq, current_archived_seq}}
+      when is_integer(current_archived_seq) and current_archived_seq >= 0 ->
+        {pending_after, cursors} =
+          trim_and_retain_cursor(session_id, current_archived_seq, cursors)
+
+        cursors =
+          cursors
+          |> maybe_drop_cursor(session_id, pending_after)
+
+        {{attempted, 0, bytes_attempted, 0}, cursors}
+
+      {:error, _reason} ->
+        {{attempted, 0, bytes_attempted, 0}, cursors}
+
+      {:timeout, _leader} ->
+        {{attempted, 0, bytes_attempted, 0}, cursors}
+    end
+  end
+
+  defp trim_and_retain_cursor(session_id, cursor, cursors)
+       when is_integer(cursor) and cursor >= 0 do
+    trim_local(session_id, cursor)
+    pending_after = pending_count(session_id)
+    maybe_clear_session(session_id)
+    {pending_after, Map.put(cursors, session_id, cursor)}
+  end
+
+  defp maybe_drop_cursor(cursors, session_id, pending_after)
+       when is_integer(pending_after) and pending_after <= 0,
+       do: Map.delete(cursors, session_id)
+
+  defp maybe_drop_cursor(cursors, _session_id, _pending_after), do: cursors
 
   defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do
     # Approximate payload size by JSON-encoding primary dynamic fields.
@@ -209,17 +301,18 @@ defmodule Starcite.Archive do
     end
   end
 
-  defp contiguous_upto(rows) do
-    rows
-    |> Enum.sort_by(& &1.seq)
-    |> Enum.reduce({nil, 0}, fn %{seq: seq}, {prev, upto} ->
-      cond do
-        prev == nil -> {seq, seq}
-        seq == prev + 1 -> {seq, seq}
-        true -> {prev, upto}
-      end
-    end)
-    |> elem(1)
+  defp build_flush_batch(rows, cursor)
+       when is_list(rows) and is_integer(cursor) and cursor >= 0 do
+    fresh_rows = Enum.drop_while(rows, &(&1.seq <= cursor))
+
+    case fresh_rows do
+      [] ->
+        :stale
+
+      [%{seq: _first_pending_seq} | _] = fresh_rows ->
+        upto_seq = fresh_rows |> List.last() |> Map.fetch!(:seq)
+        {:ok, fresh_rows, upto_seq}
+    end
   end
 
   defp trim_local(session_id, upto_seq) do

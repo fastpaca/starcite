@@ -92,26 +92,23 @@ defmodule Starcite.Runtime.RaftFSM do
     lane = Map.fetch!(state.lanes, lane_id)
 
     with {:ok, session} <- fetch_session(lane, session_id) do
-      {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
-      new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
-      new_state = put_in(state.lanes[lane_id], new_lane)
+      apply_archive_ack(state, lane_id, lane, session_id, session, upto_seq)
+    else
+      {:error, reason} -> {state, {:reply, {:error, reason}}}
+    end
+  end
 
-      tail_size =
-        updated_session.event_log
-        |> EventLog.entries()
-        |> length()
+  @impl true
+  def apply(
+        _meta,
+        {:ack_archived_if_current, lane_id, session_id, expected_archived_seq, upto_seq},
+        state
+      ) do
+    lane = Map.fetch!(state.lanes, lane_id)
 
-      Starcite.Observability.Telemetry.archive_ack_applied(
-        session_id,
-        updated_session.last_seq,
-        updated_session.archived_seq,
-        trimmed,
-        updated_session.retention.tail_keep,
-        tail_size
-      )
-
-      {new_state,
-       {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: trimmed}}}}
+    with {:ok, session} <- fetch_session(lane, session_id),
+         :ok <- guard_archived_seq(session, expected_archived_seq) do
+      apply_archive_ack(state, lane_id, lane, session_id, session, upto_seq)
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
     end
@@ -192,6 +189,40 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   defp guard_archive_backpressure(_session, _), do: :ok
+
+  defp guard_archived_seq(%Session{archived_seq: archived_seq}, expected_archived_seq)
+       when is_integer(expected_archived_seq) and expected_archived_seq >= 0 and
+              archived_seq == expected_archived_seq,
+       do: :ok
+
+  defp guard_archived_seq(%Session{archived_seq: archived_seq}, expected_archived_seq)
+       when is_integer(expected_archived_seq) and expected_archived_seq >= 0,
+       do: {:error, {:archived_seq_mismatch, expected_archived_seq, archived_seq}}
+
+  defp guard_archived_seq(_session, _expected_archived_seq),
+    do: {:error, :invalid_expected_archived_seq}
+
+  defp apply_archive_ack(state, lane_id, lane, session_id, session, upto_seq) do
+    {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
+    new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
+    new_state = put_in(state.lanes[lane_id], new_lane)
+
+    tail_size =
+      updated_session.event_log
+      |> EventLog.entries()
+      |> length()
+
+    Starcite.Observability.Telemetry.archive_ack_applied(
+      session_id,
+      updated_session.last_seq,
+      updated_session.archived_seq,
+      trimmed,
+      updated_session.retention.tail_keep,
+      tail_size
+    )
+
+    {new_state, {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: trimmed}}}}
+  end
 
   defp archive_backpressure_limit do
     Application.get_env(:starcite, :max_unarchived_events, 250_000)
