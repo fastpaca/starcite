@@ -96,6 +96,64 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
+  test "advances archived watermark over multiple sparse batches" do
+    previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
+    Application.put_env(:starcite, :archive_batch_size, 2)
+
+    on_exit(fn ->
+      if is_nil(previous_batch_size) do
+        Application.delete_env(:starcite, :archive_batch_size)
+      else
+        Application.put_env(:starcite, :archive_batch_size, previous_batch_size)
+      end
+    end)
+
+    {:ok, archive_pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 60_000, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
+      )
+
+    session_id = "ses-sparse-batches-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    for i <- 1..5 do
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m#{i}"},
+          actor: "agent:test"
+        })
+    end
+
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 2})
+    assert true = :ets.delete(:starcite_archive_events, {session_id, 4})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 3
+      end,
+      timeout: 2_000
+    )
+
+    assert [{_, _}] = :ets.lookup(:starcite_archive_events, {session_id, 5})
+
+    send(archive_pid, :flush_tick)
+
+    eventually(
+      fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 5
+      end,
+      timeout: 2_000
+    )
+
+    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 5})
+  end
+
   describe "archive cursor protocol" do
     test "loads archived cursor on first flush and skips stale rows" do
       previous_batch_size = Application.get_env(:starcite, :archive_batch_size)
