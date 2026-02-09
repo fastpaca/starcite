@@ -183,24 +183,6 @@ defmodule Starcite.Runtime do
     end
   end
 
-  @doc """
-  Query unarchived events for one session.
-  """
-  @spec get_unarchived_events_for_archive(String.t(), pos_integer()) ::
-          {:ok, [map()]} | {:error, term()}
-  def get_unarchived_events_for_archive(id, limit \\ @default_tail_batch_size)
-
-  def get_unarchived_events_for_archive(id, limit)
-      when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
-    group = RaftManager.group_for_session(id)
-
-    call_on_replica(group, :get_unarchived_events_for_archive_local, [id, limit], fn ->
-      get_unarchived_events_for_archive_local(id, limit)
-    end)
-  end
-
-  def get_unarchived_events_for_archive(_id, _limit), do: {:error, :invalid_cursor}
-
   @doc false
   def get_unarchived_events_for_archive_local(id, limit)
       when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
