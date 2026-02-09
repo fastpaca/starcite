@@ -54,9 +54,6 @@ defmodule Starcite.Session.EventLog do
     |> Enum.reverse()
   end
 
-  @spec first_seq(t()) :: non_neg_integer()
-  def first_seq(%EventLog{base_seq: base_seq}), do: base_seq
-
   @spec append_event(t(), event_input(), non_neg_integer()) :: {t(), event(), non_neg_integer()}
   def append_event(%EventLog{} = log, input, last_seq) do
     next_seq = last_seq + 1

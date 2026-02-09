@@ -128,14 +128,11 @@ defmodule Starcite.Session do
     tail_keep = session.retention.tail_keep
     archived_seq = max(session.archived_seq, upto_seq)
     {event_log, trimmed} = EventLog.trim_ack(session.event_log, archived_seq, tail_keep)
-    min_seq_to_keep = EventLog.first_seq(event_log)
-    idempotency_index = prune_idempotency(session.idempotency_index, min_seq_to_keep)
 
     {%Session{
        session
        | archived_seq: archived_seq,
          event_log: event_log,
-         idempotency_index: idempotency_index,
          updated_at: NaiveDateTime.utc_now()
      }, trimmed}
   end
@@ -171,18 +168,6 @@ defmodule Starcite.Session do
 
   defp put_idempotency(index, idempotency_key, hash, seq) do
     Map.put(index, idempotency_key, %{hash: hash, seq: seq})
-  end
-
-  defp prune_idempotency(index, min_seq_to_keep)
-       when is_map(index) and is_integer(min_seq_to_keep) and min_seq_to_keep >= 0 do
-    Enum.reduce(index, %{}, fn
-      {key, %{seq: seq} = value}, acc
-      when is_binary(key) and is_integer(seq) and seq >= min_seq_to_keep ->
-        Map.put(acc, key, value)
-
-      _, acc ->
-        acc
-    end)
   end
 
   defp event_hash(input) do
