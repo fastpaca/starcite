@@ -52,22 +52,7 @@ defmodule Starcite.ArchiveTest do
     )
   end
 
-  test "does not advance archived watermark across a missing next sequence" do
-    handler_id = "archive-ack-gap-#{System.unique_integer([:positive, :monotonic])}"
-    parent = self()
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:starcite, :archive, :ack_gap],
-        fn _event_name, measurements, metadata, _config ->
-          send(parent, {:archive_ack_gap, measurements, metadata})
-        end,
-        nil
-      )
-
-    on_exit(fn -> :telemetry.detach(handler_id) end)
-
+  test "advances archived watermark when sequence numbers are strictly increasing but sparse" do
     {:ok, archive_pid} =
       start_supervised(
         {Starcite.Archive,
@@ -93,31 +78,22 @@ defmodule Starcite.ArchiveTest do
     eventually(
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == 1
+        assert session.archived_seq == 3
       end,
       timeout: 2_000
     )
 
-    assert [{_, _}] = :ets.lookup(:starcite_archive_events, {session_id, 3})
+    assert [] = :ets.lookup(:starcite_archive_events, {session_id, 3})
 
     send(archive_pid, :flush_tick)
 
     eventually(
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
-        assert session.archived_seq == 1
+        assert session.archived_seq == 3
       end,
       timeout: 2_000
     )
-
-    assert_receive {:archive_ack_gap, %{count: 1, attempted_rows: 1},
-                    %{
-                      session_id: ^session_id,
-                      archived_seq: 1,
-                      expected_seq: 2,
-                      first_pending_seq: 3
-                    }},
-                   1_000
   end
 
   describe "archive cursor protocol" do

@@ -120,16 +120,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
           tags: [:session_id]
-        ),
-        counter("starcite_archive_ack_gap_total",
-          event_name: [:starcite, :archive, :ack_gap],
-          measurement: :count,
-          description: "Total archive ack gap detections"
-        ),
-        counter("starcite_archive_ack_gap_attempted_rows_total",
-          event_name: [:starcite, :archive, :ack_gap],
-          measurement: :attempted_rows,
-          description: "Rows attempted in batches where archive ack could not safely advance"
         )
       ]
     )

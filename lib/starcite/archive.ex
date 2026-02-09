@@ -129,23 +129,7 @@ defmodule Starcite.Archive do
 
             {{0, 0, 0, 0}, cursors}
 
-          {:gap, first_pending_seq, pending_rows} ->
-            {pending_after, cursors} = trim_and_retain_cursor(session_id, cursor, cursors)
-
-            Telemetry.archive_ack_gap(
-              session_id,
-              cursor,
-              cursor + 1,
-              first_pending_seq,
-              pending_rows
-            )
-
-            cursors =
-              maybe_drop_cursor(cursors, session_id, pending_after)
-
-            {{0, 0, 0, 0}, cursors}
-
-          {:ok, rows, first_pending_seq, upto_seq} ->
+          {:ok, rows, upto_seq} ->
             attempted = length(rows)
             bytes_attempted = Enum.reduce(rows, 0, fn event, acc -> acc + approx_bytes(event) end)
 
@@ -154,7 +138,6 @@ defmodule Starcite.Archive do
                 handle_post_write_ack(
                   session_id,
                   cursor,
-                  first_pending_seq,
                   upto_seq,
                   attempted,
                   bytes_attempted,
@@ -191,7 +174,6 @@ defmodule Starcite.Archive do
   defp handle_post_write_ack(
          session_id,
          cursor,
-         first_pending_seq,
          upto_seq,
          attempted,
          bytes_attempted,
@@ -225,16 +207,6 @@ defmodule Starcite.Archive do
       when is_integer(current_archived_seq) and current_archived_seq >= 0 ->
         {pending_after, cursors} =
           trim_and_retain_cursor(session_id, current_archived_seq, cursors)
-
-        if current_archived_seq + 1 < first_pending_seq do
-          Telemetry.archive_ack_gap(
-            session_id,
-            current_archived_seq,
-            current_archived_seq + 1,
-            first_pending_seq,
-            attempted
-          )
-        end
 
         cursors =
           cursors
@@ -337,36 +309,9 @@ defmodule Starcite.Archive do
       [] ->
         :stale
 
-      [%{seq: first_pending_seq} | _]
-      when is_integer(first_pending_seq) and first_pending_seq > cursor + 1 ->
-        {:gap, first_pending_seq, length(fresh_rows)}
-
-      _ ->
-        {contiguous_rows, _next_expected} =
-          Enum.reduce_while(fresh_rows, {[], cursor + 1}, fn %{seq: seq} = row,
-                                                             {acc, expected_seq} ->
-            cond do
-              seq < expected_seq ->
-                {:cont, {acc, expected_seq}}
-
-              seq == expected_seq ->
-                {:cont, {[row | acc], expected_seq + 1}}
-
-              seq > expected_seq ->
-                {:halt, {acc, expected_seq}}
-            end
-          end)
-
-        contiguous_rows = Enum.reverse(contiguous_rows)
-
-        case contiguous_rows do
-          [] ->
-            :stale
-
-          [%{seq: first_pending_seq} | _] = contiguous_rows ->
-            upto_seq = contiguous_rows |> List.last() |> Map.fetch!(:seq)
-            {:ok, contiguous_rows, first_pending_seq, upto_seq}
-        end
+      [%{seq: _first_pending_seq} | _] = fresh_rows ->
+        upto_seq = fresh_rows |> List.last() |> Map.fetch!(:seq)
+        {:ok, fresh_rows, upto_seq}
     end
   end
 
