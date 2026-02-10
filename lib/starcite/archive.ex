@@ -37,22 +37,17 @@ defmodule Starcite.Archive do
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
 
-    {stats, oldest_pending_inserted_at} =
+    stats =
       EventStore.session_ids()
-      |> Enum.reduce({zero_stats(), nil}, fn session_id, {stats_acc, oldest_acc} ->
-        {session_stats, session_oldest} = flush_session(session_id, state.adapter)
-
-        {
-          merge_stats(stats_acc, session_stats),
-          older_timestamp(oldest_acc, session_oldest)
-        }
+      |> Enum.reduce(zero_stats(), fn session_id, stats_acc ->
+        session_stats = flush_session(session_id, state.adapter)
+        merge_stats(stats_acc, session_stats)
       end)
 
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
-    Starcite.Observability.Telemetry.archive_queue_age(
-      pending_age_seconds(oldest_pending_inserted_at)
-    )
+    # Queue age tracking is intentionally disabled for now; keep metric shape stable.
+    Starcite.Observability.Telemetry.archive_queue_age(0)
 
     Starcite.Observability.Telemetry.archive_flush(
       elapsed_ms,
@@ -77,11 +72,9 @@ defmodule Starcite.Archive do
 
       cond do
         pending_before == 0 ->
-          {zero_stats(), nil}
+          zero_stats()
 
         true ->
-          oldest_pending_inserted_at = first_pending_inserted_at(session_id, archived_seq)
-
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
@@ -90,14 +83,12 @@ defmodule Starcite.Archive do
             rows,
             session_id,
             max_seq,
-            archived_seq,
             pending_before,
-            oldest_pending_inserted_at,
             adapter
           )
       end
     else
-      _ -> {zero_stats(), nil}
+      _ -> zero_stats()
     end
   end
 
@@ -105,25 +96,18 @@ defmodule Starcite.Archive do
          [],
          _session_id,
          _max_seq,
-         _archived_seq,
          pending_before,
-         oldest_pending_inserted_at,
          _adapter
        )
        when is_integer(pending_before) and pending_before > 0 do
-    {
-      %{zero_stats() | pending_after: pending_before, pending_sessions: 1},
-      oldest_pending_inserted_at
-    }
+    %{zero_stats() | pending_after: pending_before, pending_sessions: 1}
   end
 
   defp persist_rows(
          rows,
          session_id,
          max_seq,
-         _archived_seq,
          pending_before,
-         oldest_pending_inserted_at,
          adapter
        ) do
     attempted = length(rows)
@@ -153,43 +137,34 @@ defmodule Starcite.Archive do
                 0
               end
 
-            {
-              %{
-                attempted: attempted,
-                inserted: inserted,
-                bytes_attempted: bytes_attempted,
-                bytes_inserted: bytes_inserted,
-                pending_after: pending_after,
-                pending_sessions: if(pending_after > 0, do: 1, else: 0)
-              },
-              oldest_pending_inserted_at
+            %{
+              attempted: attempted,
+              inserted: inserted,
+              bytes_attempted: bytes_attempted,
+              bytes_inserted: bytes_inserted,
+              pending_after: pending_after,
+              pending_sessions: if(pending_after > 0, do: 1, else: 0)
             }
 
           _ack_error ->
-            {
-              %{
-                attempted: attempted,
-                inserted: 0,
-                bytes_attempted: bytes_attempted,
-                bytes_inserted: 0,
-                pending_after: pending_before,
-                pending_sessions: 1
-              },
-              oldest_pending_inserted_at
+            %{
+              attempted: attempted,
+              inserted: 0,
+              bytes_attempted: bytes_attempted,
+              bytes_inserted: 0,
+              pending_after: pending_before,
+              pending_sessions: 1
             }
         end
 
       {:error, _reason} ->
-        {
-          %{
-            attempted: attempted,
-            inserted: 0,
-            bytes_attempted: bytes_attempted,
-            bytes_inserted: 0,
-            pending_after: pending_before,
-            pending_sessions: 1
-          },
-          oldest_pending_inserted_at
+        %{
+          attempted: attempted,
+          inserted: 0,
+          bytes_attempted: bytes_attempted,
+          bytes_inserted: 0,
+          pending_after: pending_before,
+          pending_sessions: 1
         }
     end
   end
@@ -229,48 +204,6 @@ defmodule Starcite.Archive do
         :error
     end
   end
-
-  defp first_pending_inserted_at(session_id, archived_seq)
-       when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
-              archived_seq >= 0 do
-    case EventStore.get_event(session_id, archived_seq + 1) do
-      {:ok, %{inserted_at: inserted_at}} -> inserted_at
-      _ -> nil
-    end
-  end
-
-  defp pending_age_seconds(nil), do: 0
-
-  defp pending_age_seconds(inserted_at) do
-    now = DateTime.utc_now()
-    inserted_at = to_datetime(inserted_at)
-    max(DateTime.diff(now, inserted_at, :second), 0)
-  end
-
-  defp to_datetime(%DateTime{} = datetime), do: datetime
-  defp to_datetime(%NaiveDateTime{} = datetime), do: DateTime.from_naive!(datetime, "Etc/UTC")
-  defp to_datetime(_other), do: DateTime.utc_now()
-
-  defp older_timestamp(nil, right), do: right
-  defp older_timestamp(left, nil), do: left
-
-  defp older_timestamp(%DateTime{} = left, %DateTime{} = right) do
-    if DateTime.compare(left, right) == :gt, do: right, else: left
-  end
-
-  defp older_timestamp(%NaiveDateTime{} = left, %NaiveDateTime{} = right) do
-    if NaiveDateTime.compare(left, right) == :gt, do: right, else: left
-  end
-
-  defp older_timestamp(%DateTime{} = left, %NaiveDateTime{} = right) do
-    older_timestamp(left, DateTime.from_naive!(right, "Etc/UTC"))
-  end
-
-  defp older_timestamp(%NaiveDateTime{} = left, %DateTime{} = right) do
-    older_timestamp(DateTime.from_naive!(left, "Etc/UTC"), right)
-  end
-
-  defp older_timestamp(_left, right), do: right
 
   defp zero_stats do
     %{
