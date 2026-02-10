@@ -47,7 +47,6 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
 
     :ok = PubSub.subscribe(Starcite.PubSub, "session:#{session_id}")
     :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
-    :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.global_topic())
 
     {:ok, %{seq: 1}} =
       Runtime.append_event(session_id, %{
@@ -69,9 +68,5 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
     assert update.actor == "agent:test"
     assert update.source == "agent"
     refute Map.has_key?(update, :payload)
-
-    assert_receive {:cursor_update, global_update}, 1_000
-    assert global_update.session_id == session_id
-    assert global_update.seq == 1
   end
 end

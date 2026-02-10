@@ -207,18 +207,6 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
-    cursor_update_global =
-      {
-        :mod_call,
-        Phoenix.PubSub,
-        :broadcast,
-        [
-          Starcite.PubSub,
-          CursorUpdate.global_topic(),
-          CursorUpdate.message(session_id, event, last_seq)
-        ]
-      }
-
-    [stream_event, cursor_update, cursor_update_global]
+    [stream_event, cursor_update]
   end
 end

@@ -1,22 +1,17 @@
 defmodule Starcite.Archive do
   @moduledoc """
-  Cursor-driven archiver.
+  Pull-based archiver.
 
-  - subscribes to global cursor updates
-  - reads committed events from local ETS event store
+  - periodically scans local `EventStore` session cursors
+  - archives only sessions for groups led on this node
   - persists batches through the configured adapter
-  - acknowledges archived progress via Raft (`Runtime.ack_archived/2`)
+  - acknowledges archived progress via local Raft command (`Runtime.ack_archived_local/2`)
   """
 
   use GenServer
 
   alias Starcite.Runtime
-  alias Starcite.Runtime.{CursorUpdate, EventStore}
-
-  @type pending_entry :: %{
-          required(:last_seq) => non_neg_integer(),
-          required(:oldest_inserted_at) => NaiveDateTime.t() | DateTime.t()
-        }
+  alias Starcite.Runtime.{EventStore, RaftManager}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -28,109 +23,109 @@ defmodule Starcite.Archive do
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
-    :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, CursorUpdate.global_topic())
 
     schedule_flush(interval)
 
     {:ok,
      %{
        interval: interval,
-       adapter: adapter_mod,
-       pending: %{}
+       adapter: adapter_mod
      }}
   end
-
-  @impl true
-  def handle_info({:cursor_update, %{session_id: session_id, seq: seq} = update}, state)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    inserted_at = Map.get(update, :inserted_at, NaiveDateTime.utc_now())
-
-    pending =
-      Map.update(state.pending, session_id, %{last_seq: seq, oldest_inserted_at: inserted_at}, fn
-        %{last_seq: pending_seq, oldest_inserted_at: oldest} = pending_entry ->
-          %{
-            pending_entry
-            | last_seq: max(pending_seq, seq),
-              oldest_inserted_at: older_timestamp(oldest, inserted_at)
-          }
-      end)
-
-    {:noreply, %{state | pending: pending}}
-  end
-
-  def handle_info({:cursor_update, _update}, state), do: {:noreply, state}
 
   @impl true
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
 
-    {pending, stats} =
-      Enum.reduce(state.pending, {%{}, zero_stats()}, fn {session_id, pending_entry},
-                                                         {pending_acc, stats_acc} ->
-        {next_entry, session_stats} = flush_session(session_id, pending_entry, state.adapter)
+    {stats, oldest_pending_inserted_at} =
+      EventStore.session_ids()
+      |> Enum.reduce({zero_stats(), nil}, fn session_id, {stats_acc, oldest_acc} ->
+        {session_stats, session_oldest} = flush_session(session_id, state.adapter)
 
-        pending_acc =
-          case next_entry do
-            nil -> pending_acc
-            entry -> Map.put(pending_acc, session_id, entry)
-          end
-
-        {pending_acc, merge_stats(stats_acc, session_stats)}
+        {
+          merge_stats(stats_acc, session_stats),
+          older_timestamp(oldest_acc, session_oldest)
+        }
       end)
 
     elapsed_ms = System.monotonic_time(:millisecond) - start
-    pending_sessions = map_size(pending)
-    pending_events = stats.pending_after
 
-    Starcite.Observability.Telemetry.archive_queue_age(oldest_age_seconds(pending))
+    Starcite.Observability.Telemetry.archive_queue_age(
+      pending_age_seconds(oldest_pending_inserted_at)
+    )
 
     Starcite.Observability.Telemetry.archive_flush(
       elapsed_ms,
       stats.attempted,
       stats.inserted,
-      pending_events,
-      pending_sessions,
+      stats.pending_after,
+      stats.pending_sessions,
       stats.bytes_attempted,
       stats.bytes_inserted
     )
 
     schedule_flush(state.interval)
-    {:noreply, %{state | pending: pending}}
+    {:noreply, state}
   end
 
-  defp flush_session(session_id, %{last_seq: target_seq} = pending_entry, adapter)
-       when is_binary(session_id) and session_id != "" and is_integer(target_seq) and
-              target_seq >= 0 do
-    with {:ok, session} <- Runtime.get_session(session_id) do
-      target_seq = max(target_seq, session.last_seq)
+  defp flush_session(session_id, adapter) when is_binary(session_id) and session_id != "" do
+    with :ok <- ensure_local_group_leader(session_id),
+         {:ok, max_seq} <- EventStore.max_seq(session_id),
+         {:ok, session} <- Runtime.get_session_local(session_id) do
       archived_seq = session.archived_seq
+      pending_before = max(max_seq - archived_seq, 0)
 
       cond do
-        archived_seq >= target_seq ->
-          {nil, zero_stats()}
+        pending_before == 0 ->
+          {zero_stats(), nil}
 
         true ->
+          oldest_pending_inserted_at = first_pending_inserted_at(session_id, archived_seq)
+
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
 
-          persist_rows(rows, session_id, target_seq, archived_seq, pending_entry, adapter)
+          persist_rows(
+            rows,
+            session_id,
+            max_seq,
+            archived_seq,
+            pending_before,
+            oldest_pending_inserted_at,
+            adapter
+          )
       end
     else
-      {:error, :session_not_found} ->
-        {nil, zero_stats()}
-
-      _other ->
-        {pending_entry, zero_stats()}
+      _ -> {zero_stats(), nil}
     end
   end
 
-  defp persist_rows([], _session_id, target_seq, archived_seq, pending_entry, _adapter) do
-    pending_after = max(target_seq - archived_seq, 0)
-    {%{pending_entry | last_seq: target_seq}, %{zero_stats() | pending_after: pending_after}}
+  defp persist_rows(
+         [],
+         _session_id,
+         _max_seq,
+         _archived_seq,
+         pending_before,
+         oldest_pending_inserted_at,
+         _adapter
+       )
+       when is_integer(pending_before) and pending_before > 0 do
+    {
+      %{zero_stats() | pending_after: pending_before, pending_sessions: 1},
+      oldest_pending_inserted_at
+    }
   end
 
-  defp persist_rows(rows, session_id, target_seq, archived_seq, pending_entry, adapter) do
+  defp persist_rows(
+         rows,
+         session_id,
+         max_seq,
+         _archived_seq,
+         pending_before,
+         oldest_pending_inserted_at,
+         adapter
+       ) do
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
@@ -138,9 +133,9 @@ defmodule Starcite.Archive do
       {:ok, inserted} ->
         upto_seq = contiguous_upto(rows)
 
-        case Runtime.ack_archived(session_id, upto_seq) do
+        case Runtime.ack_archived_local(session_id, upto_seq) do
           {:ok, %{archived_seq: acked_seq}} ->
-            pending_after = max(target_seq - acked_seq, 0)
+            pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
             Starcite.Observability.Telemetry.archive_batch(
@@ -158,46 +153,44 @@ defmodule Starcite.Archive do
                 0
               end
 
-            next_entry =
-              if pending_after == 0 do
-                nil
-              else
-                %{pending_entry | last_seq: target_seq}
-              end
-
-            {next_entry,
-             %{
-               attempted: attempted,
-               inserted: inserted,
-               bytes_attempted: bytes_attempted,
-               bytes_inserted: bytes_inserted,
-               pending_after: pending_after
-             }}
+            {
+              %{
+                attempted: attempted,
+                inserted: inserted,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: bytes_inserted,
+                pending_after: pending_after,
+                pending_sessions: if(pending_after > 0, do: 1, else: 0)
+              },
+              oldest_pending_inserted_at
+            }
 
           _ack_error ->
-            pending_after = max(target_seq - archived_seq, 0)
-
-            {%{pending_entry | last_seq: target_seq},
-             %{
-               attempted: attempted,
-               inserted: 0,
-               bytes_attempted: bytes_attempted,
-               bytes_inserted: 0,
-               pending_after: pending_after
-             }}
+            {
+              %{
+                attempted: attempted,
+                inserted: 0,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: 0,
+                pending_after: pending_before,
+                pending_sessions: 1
+              },
+              oldest_pending_inserted_at
+            }
         end
 
       {:error, _reason} ->
-        pending_after = max(target_seq - archived_seq, 0)
-
-        {%{pending_entry | last_seq: target_seq},
-         %{
-           attempted: attempted,
-           inserted: 0,
-           bytes_attempted: bytes_attempted,
-           bytes_inserted: 0,
-           pending_after: pending_after
-         }}
+        {
+          %{
+            attempted: attempted,
+            inserted: 0,
+            bytes_attempted: bytes_attempted,
+            bytes_inserted: 0,
+            pending_after: pending_before,
+            pending_sessions: 1
+          },
+          oldest_pending_inserted_at
+        }
     end
   end
 
@@ -224,6 +217,43 @@ defmodule Starcite.Archive do
     |> elem(1)
   end
 
+  defp ensure_local_group_leader(session_id) when is_binary(session_id) and session_id != "" do
+    group_id = RaftManager.group_for_session(session_id)
+    server_id = RaftManager.server_id(group_id)
+
+    case :ra.members({server_id, Node.self()}) do
+      {:ok, _members, {^server_id, leader_node}} ->
+        if leader_node == Node.self(), do: :ok, else: :error
+
+      _ ->
+        :error
+    end
+  end
+
+  defp first_pending_inserted_at(session_id, archived_seq)
+       when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
+              archived_seq >= 0 do
+    case EventStore.get_event(session_id, archived_seq + 1) do
+      {:ok, %{inserted_at: inserted_at}} -> inserted_at
+      _ -> nil
+    end
+  end
+
+  defp pending_age_seconds(nil), do: 0
+
+  defp pending_age_seconds(inserted_at) do
+    now = DateTime.utc_now()
+    inserted_at = to_datetime(inserted_at)
+    max(DateTime.diff(now, inserted_at, :second), 0)
+  end
+
+  defp to_datetime(%DateTime{} = datetime), do: datetime
+  defp to_datetime(%NaiveDateTime{} = datetime), do: DateTime.from_naive!(datetime, "Etc/UTC")
+  defp to_datetime(_other), do: DateTime.utc_now()
+
+  defp older_timestamp(nil, right), do: right
+  defp older_timestamp(left, nil), do: left
+
   defp older_timestamp(%DateTime{} = left, %DateTime{} = right) do
     if DateTime.compare(left, right) == :gt, do: right, else: left
   end
@@ -242,31 +272,15 @@ defmodule Starcite.Archive do
 
   defp older_timestamp(_left, right), do: right
 
-  defp oldest_age_seconds(pending) when is_map(pending) do
-    now = DateTime.utc_now()
-
-    pending
-    |> Map.values()
-    |> Enum.map(&Map.get(&1, :oldest_inserted_at))
-    |> Enum.reject(&is_nil/1)
-    |> Enum.map(&to_datetime/1)
-    |> case do
-      [] ->
-        0
-
-      timestamps ->
-        timestamps
-        |> Enum.map(fn ts -> max(DateTime.diff(now, ts, :second), 0) end)
-        |> Enum.max()
-    end
-  end
-
-  defp to_datetime(%DateTime{} = datetime), do: datetime
-  defp to_datetime(%NaiveDateTime{} = datetime), do: DateTime.from_naive!(datetime, "Etc/UTC")
-  defp to_datetime(_other), do: DateTime.utc_now()
-
   defp zero_stats do
-    %{attempted: 0, inserted: 0, bytes_attempted: 0, bytes_inserted: 0, pending_after: 0}
+    %{
+      attempted: 0,
+      inserted: 0,
+      bytes_attempted: 0,
+      bytes_inserted: 0,
+      pending_after: 0,
+      pending_sessions: 0
+    }
   end
 
   defp merge_stats(left, right) do
@@ -275,7 +289,8 @@ defmodule Starcite.Archive do
       inserted: left.inserted + right.inserted,
       bytes_attempted: left.bytes_attempted + right.bytes_attempted,
       bytes_inserted: left.bytes_inserted + right.bytes_inserted,
-      pending_after: left.pending_after + right.pending_after
+      pending_after: left.pending_after + right.pending_after,
+      pending_sessions: left.pending_sessions + right.pending_sessions
     }
   end
 

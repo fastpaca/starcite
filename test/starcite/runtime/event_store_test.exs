@@ -88,4 +88,71 @@ defmodule Starcite.Runtime.EventStoreTest do
     remaining = EventStore.from_cursor(session_id, 0, 10)
     assert Enum.map(remaining, & &1.seq) == [3, 4]
   end
+
+  test "tracks max sequence per session and returns indexed session ids" do
+    session_a = "ses-index-a-#{System.unique_integer([:positive, :monotonic])}"
+    session_b = "ses-index-b-#{System.unique_integer([:positive, :monotonic])}"
+
+    :ok =
+      EventStore.put_event(session_a, %{
+        seq: 1,
+        type: "content",
+        payload: %{n: 1},
+        actor: "agent:test",
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
+    :ok =
+      EventStore.put_event(session_a, %{
+        seq: 2,
+        type: "content",
+        payload: %{n: 2},
+        actor: "agent:test",
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
+    :ok =
+      EventStore.put_event(session_b, %{
+        seq: 1,
+        type: "content",
+        payload: %{n: 1},
+        actor: "agent:test",
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
+    assert {:ok, 2} = EventStore.max_seq(session_a)
+    assert {:ok, 1} = EventStore.max_seq(session_b)
+    assert :error = EventStore.max_seq("missing-session")
+
+    session_ids = EventStore.session_ids() |> Enum.sort()
+    assert session_ids == Enum.sort([session_a, session_b])
+  end
+
+  test "removes session index when all events are evicted" do
+    session_id = "ses-index-clean-#{System.unique_integer([:positive, :monotonic])}"
+
+    :ok =
+      EventStore.put_event(session_id, %{
+        seq: 1,
+        type: "content",
+        payload: %{n: 1},
+        actor: "agent:test",
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
+    :ok =
+      EventStore.put_event(session_id, %{
+        seq: 2,
+        type: "content",
+        payload: %{n: 2},
+        actor: "agent:test",
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
+    assert {:ok, 2} = EventStore.max_seq(session_id)
+    assert 2 = EventStore.delete_below(session_id, 3)
+    assert EventStore.session_size(session_id) == 0
+    assert :error = EventStore.max_seq(session_id)
+    refute session_id in EventStore.session_ids()
+  end
 end
