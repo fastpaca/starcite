@@ -90,6 +90,20 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert [{:release_cursor, 42, %RaftFSM{}}] = effects
   end
 
+  test "ack_archived does not emit release_cursor when archive cursor does not advance" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+
+    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
+      RaftFSM.apply(%{index: 42}, {:ack_archived, 0, session_id, 1}, state)
+
+    {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 0}}}} =
+      RaftFSM.apply(%{index: 43}, {:ack_archived, 0, session_id, 1}, state)
+  end
+
   defp seeded_state(session_id) do
     state = RaftFSM.init(%{group_id: 0})
 

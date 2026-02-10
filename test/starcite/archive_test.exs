@@ -287,6 +287,68 @@ defmodule Starcite.ArchiveTest do
         timeout: 2_000
       )
     end
+
+    test "continues archiving new writes after a full ETS compaction" do
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
+
+      session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 3
+          assert EventStore.session_size(session_id) == 0
+        end,
+        timeout: 2_000
+      )
+
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m4"},
+          actor: "agent:test"
+        })
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 4
+          assert EventStore.session_size(session_id) == 0
+
+          seqs =
+            IdempotentTestAdapter.get_writes()
+            |> Enum.filter(fn row -> row.session_id == session_id end)
+            |> Enum.map(& &1.seq)
+            |> Enum.uniq()
+            |> Enum.sort()
+
+          assert seqs == [1, 2, 3, 4]
+        end,
+        timeout: 2_000
+      )
+    end
   end
 
   # Helper to wait for condition
