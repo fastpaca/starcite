@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.EventPlaneTest do
+defmodule Starcite.Runtime.EventStoreMirrorTest do
   use ExUnit.Case, async: false
 
   alias Phoenix.PubSub
@@ -9,36 +9,14 @@ defmodule Starcite.Runtime.EventPlaneTest do
     Starcite.Runtime.TestHelper.reset()
     EventStore.clear()
 
-    old_mode = Application.get_env(:starcite, :event_plane, :legacy)
-
     on_exit(fn ->
-      Application.put_env(:starcite, :event_plane, old_mode)
       EventStore.clear()
     end)
 
     :ok
   end
 
-  test "legacy mode does not mirror payloads into ETS" do
-    Application.put_env(:starcite, :event_plane, :legacy)
-
-    session_id = "ses-legacy-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
-
-    {:ok, %{seq: 1}} =
-      Runtime.append_event(session_id, %{
-        type: "content",
-        payload: %{text: "legacy"},
-        actor: "agent:test"
-      })
-
-    assert EventStore.size() == 0
-    assert :error = EventStore.get_event(session_id, 1)
-  end
-
-  test "dual_write mode mirrors committed payloads into ETS" do
-    Application.put_env(:starcite, :event_plane, :dual_write)
-
+  test "mirrors committed payloads into ETS" do
     session_id = "ses-dual-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = Runtime.create_session(id: session_id)
 
@@ -64,8 +42,6 @@ defmodule Starcite.Runtime.EventPlaneTest do
   end
 
   test "publishes payload-free cursor updates on the cursor topic" do
-    Application.put_env(:starcite, :event_plane, :legacy)
-
     session_id = "ses-cursor-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = Runtime.create_session(id: session_id)
 

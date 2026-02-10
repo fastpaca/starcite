@@ -7,14 +7,6 @@ defmodule StarciteWeb.TailSocketTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
-
-    old_mode = Application.get_env(:starcite, :event_plane, :legacy)
-    Application.put_env(:starcite, :event_plane, :dual_write)
-
-    on_exit(fn ->
-      Application.put_env(:starcite, :event_plane, old_mode)
-    end)
-
     :ok
   end
 
