@@ -1,221 +1,217 @@
 defmodule Starcite.Archive do
   @moduledoc """
-  Leader-local archive queue and flush loop.
+  Cursor-driven archiver.
 
-  - append_events/2 is invoked by the Raft FSM effects after commits
-  - holds pending events in ETS until flushed to cold storage
-  - after flush, advances archive watermark via Runtime.ack_archived/2
-
-  Designed so adapters for Postgres or S3 can be plugged in without touching
-  Raft state or HTTP paths.
+  - subscribes to global cursor updates
+  - reads committed events from local ETS event store
+  - persists batches through the configured adapter
+  - acknowledges archived progress via Raft (`Runtime.ack_archived/2`)
   """
 
   use GenServer
 
   alias Starcite.Runtime
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
 
-  @events_tab :starcite_archive_events
-  @sessions_tab :starcite_archive_sessions
+  @type pending_entry :: %{
+          required(:last_seq) => non_neg_integer(),
+          required(:oldest_inserted_at) => NaiveDateTime.t() | DateTime.t()
+        }
 
+  @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
-  @doc """
-  Append committed events to the pending archive queue (ETS).
-
-  Events are normalized into the archive row shape used by adapters.
-  """
-  @spec append_events(String.t(), [map()]) :: :ok
-  def append_events(session_id, events)
-      when is_binary(session_id) and is_list(events) do
-    case Process.whereis(__MODULE__) do
-      nil -> :ok
-      _pid -> GenServer.cast(__MODULE__, {:append, session_id, events})
-    end
-
-    :ok
-  end
 
   @impl true
   def init(opts) do
-    # ETS tables (uncapped by design)
-    :ets.new(@events_tab, [:ordered_set, :public, :named_table, {:read_concurrency, true}])
-    :ets.new(@sessions_tab, [:set, :public, :named_table, {:read_concurrency, true}])
-
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.fetch!(opts, :adapter)
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
-
-    state = %{
-      interval: interval,
-      adapter: adapter_mod,
-      adapter_opts: adapter_opts
-    }
+    :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, CursorUpdate.global_topic())
 
     schedule_flush(interval)
-    {:ok, state}
+
+    {:ok,
+     %{
+       interval: interval,
+       adapter: adapter_mod,
+       pending: %{}
+     }}
   end
 
   @impl true
-  def handle_cast({:append, session_id, events}, state) do
-    Enum.each(events, fn event ->
-      key = {session_id, event.seq}
-      :ets.insert(@events_tab, {key, normalize_event(event)})
-    end)
+  def handle_info({:cursor_update, %{session_id: session_id, seq: seq} = update}, state)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    inserted_at = Map.get(update, :inserted_at, NaiveDateTime.utc_now())
 
-    :ets.insert(@sessions_tab, {session_id, :pending})
-    {:noreply, state}
+    pending =
+      Map.update(state.pending, session_id, %{last_seq: seq, oldest_inserted_at: inserted_at}, fn
+        %{last_seq: pending_seq, oldest_inserted_at: oldest} = pending_entry ->
+          %{
+            pending_entry
+            | last_seq: max(pending_seq, seq),
+              oldest_inserted_at: older_timestamp(oldest, inserted_at)
+          }
+      end)
+
+    {:noreply, %{state | pending: pending}}
   end
+
+  def handle_info({:cursor_update, _update}, state), do: {:noreply, state}
 
   @impl true
   def handle_info(:flush_tick, state) do
-    flush_all(state)
-    schedule_flush(state.interval)
-    {:noreply, state}
-  end
-
-  defp schedule_flush(interval) do
-    Process.send_after(self(), :flush_tick, interval)
-  end
-
-  defp flush_all(%{adapter: adapter} = state) do
     start = System.monotonic_time(:millisecond)
-    session_ids = sessions_list()
 
-    {attempted_total, inserted_total, bytes_attempted_total, bytes_inserted_total} =
-      Enum.reduce(session_ids, {0, 0, 0, 0}, fn session_id,
-                                                {attempted_acc, inserted_acc, bytes_att_acc,
-                                                 bytes_ins_acc} ->
-        events = take_pending_events(session_id, state)
-        attempted = length(events)
-        bytes_attempted = Enum.reduce(events, 0, fn event, acc -> acc + approx_bytes(event) end)
+    {pending, stats} =
+      Enum.reduce(state.pending, {%{}, zero_stats()}, fn {session_id, pending_entry},
+                                                         {pending_acc, stats_acc} ->
+        {next_entry, session_stats} = flush_session(session_id, pending_entry, state.adapter)
 
-        if events != [] do
-          case adapter.write_events(events) do
-            {:ok, _count} ->
-              upto_seq = contiguous_upto(events)
-
-              case Runtime.ack_archived(session_id, upto_seq) do
-                {:ok, %{archived_seq: _archived, trimmed: _}} ->
-                  trim_local(session_id, upto_seq)
-                  pending_after = pending_count(session_id)
-                  avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
-
-                  Starcite.Observability.Telemetry.archive_batch(
-                    session_id,
-                    attempted,
-                    bytes_attempted,
-                    avg_event_bytes,
-                    pending_after
-                  )
-
-                  maybe_clear_session(session_id)
-
-                  {attempted_acc + attempted, inserted_acc + attempted,
-                   bytes_att_acc + bytes_attempted, bytes_ins_acc + bytes_attempted}
-
-                _ ->
-                  {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
-                   bytes_ins_acc}
-              end
-
-            {:error, _reason} ->
-              {attempted_acc + attempted, inserted_acc, bytes_att_acc + bytes_attempted,
-               bytes_ins_acc}
+        pending_acc =
+          case next_entry do
+            nil -> pending_acc
+            entry -> Map.put(pending_acc, session_id, entry)
           end
-        else
-          {attempted_acc, inserted_acc, bytes_att_acc, bytes_ins_acc}
-        end
+
+        {pending_acc, merge_stats(stats_acc, session_stats)}
       end)
 
-    elapsed = System.monotonic_time(:millisecond) - start
-    pending_events = :ets.info(@events_tab, :size) || 0
-    pending_sessions = :ets.info(@sessions_tab, :size) || 0
+    elapsed_ms = System.monotonic_time(:millisecond) - start
+    pending_sessions = map_size(pending)
+    pending_events = stats.pending_after
 
-    # Emit queue age gauge
-    age_seconds = oldest_age_seconds()
-    Starcite.Observability.Telemetry.archive_queue_age(age_seconds)
+    Starcite.Observability.Telemetry.archive_queue_age(oldest_age_seconds(pending))
 
     Starcite.Observability.Telemetry.archive_flush(
-      elapsed,
-      attempted_total,
-      inserted_total,
+      elapsed_ms,
+      stats.attempted,
+      stats.inserted,
       pending_events,
       pending_sessions,
-      bytes_attempted_total,
-      bytes_inserted_total
+      stats.bytes_attempted,
+      stats.bytes_inserted
     )
 
-    :ok
+    schedule_flush(state.interval)
+    {:noreply, %{state | pending: pending}}
+  end
+
+  defp flush_session(session_id, %{last_seq: target_seq} = pending_entry, adapter)
+       when is_binary(session_id) and session_id != "" and is_integer(target_seq) and
+              target_seq >= 0 do
+    with {:ok, session} <- Runtime.get_session(session_id) do
+      target_seq = max(target_seq, session.last_seq)
+      archived_seq = session.archived_seq
+
+      cond do
+        archived_seq >= target_seq ->
+          {nil, zero_stats()}
+
+        true ->
+          rows =
+            EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
+            |> Enum.map(&Map.put(&1, :session_id, session_id))
+
+          persist_rows(rows, session_id, target_seq, archived_seq, pending_entry, adapter)
+      end
+    else
+      {:error, :session_not_found} ->
+        {nil, zero_stats()}
+
+      _other ->
+        {pending_entry, zero_stats()}
+    end
+  end
+
+  defp persist_rows([], _session_id, target_seq, archived_seq, pending_entry, _adapter) do
+    pending_after = max(target_seq - archived_seq, 0)
+    {%{pending_entry | last_seq: target_seq}, %{zero_stats() | pending_after: pending_after}}
+  end
+
+  defp persist_rows(rows, session_id, target_seq, archived_seq, pending_entry, adapter) do
+    attempted = length(rows)
+    bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
+
+    case adapter.write_events(rows) do
+      {:ok, inserted} ->
+        upto_seq = contiguous_upto(rows)
+
+        case Runtime.ack_archived(session_id, upto_seq) do
+          {:ok, %{archived_seq: acked_seq}} ->
+            pending_after = max(target_seq - acked_seq, 0)
+            avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
+
+            Starcite.Observability.Telemetry.archive_batch(
+              session_id,
+              attempted,
+              bytes_attempted,
+              avg_event_bytes,
+              pending_after
+            )
+
+            bytes_inserted =
+              if attempted > 0 do
+                div(bytes_attempted * inserted, attempted)
+              else
+                0
+              end
+
+            next_entry =
+              if pending_after == 0 do
+                nil
+              else
+                %{pending_entry | last_seq: target_seq}
+              end
+
+            {next_entry,
+             %{
+               attempted: attempted,
+               inserted: inserted,
+               bytes_attempted: bytes_attempted,
+               bytes_inserted: bytes_inserted,
+               pending_after: pending_after
+             }}
+
+          _ack_error ->
+            pending_after = max(target_seq - archived_seq, 0)
+
+            {%{pending_entry | last_seq: target_seq},
+             %{
+               attempted: attempted,
+               inserted: 0,
+               bytes_attempted: bytes_attempted,
+               bytes_inserted: 0,
+               pending_after: pending_after
+             }}
+        end
+
+      {:error, _reason} ->
+        pending_after = max(target_seq - archived_seq, 0)
+
+        {%{pending_entry | last_seq: target_seq},
+         %{
+           attempted: attempted,
+           inserted: 0,
+           bytes_attempted: bytes_attempted,
+           bytes_inserted: 0,
+           pending_after: pending_after
+         }}
+    end
   end
 
   defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do
-    # Approximate payload size by JSON-encoding primary dynamic fields.
     byte_size(Jason.encode!(payload)) +
       byte_size(Jason.encode!(metadata)) +
       byte_size(Jason.encode!(refs))
   end
 
-  defp sessions_list do
-    :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _} -> id end)
+  defp archive_batch_size do
+    Application.get_env(:starcite, :archive_batch_size, 5_000)
   end
 
-  defp take_pending_events(session_id, _state) do
-    # Select a chunk of rows in seq-ascending order for this session
-    limit = Application.get_env(:starcite, :archive_batch_size, 5_000)
-
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [],
-        [{{:"$1", :"$2"}}]
-      }
-    ]
-
-    select_take(@events_tab, ms, limit)
-    |> Enum.map(fn {seq, event} ->
-      Map.put(event, :session_id, session_id) |> Map.put(:seq, seq)
-    end)
-    |> Enum.sort_by(& &1.seq)
-  end
-
-  defp select_take(tab, ms, limit) do
-    do_select_take(tab, ms, limit, [])
-  end
-
-  defp do_select_take(_tab, _ms, 0, acc), do: Enum.reverse(acc)
-
-  defp do_select_take(tab, ms, remaining, acc) do
-    case :ets.select(tab, ms, 1) do
-      {[row], cont} ->
-        # delete as we go only after ack; for now just accumulate
-        # We'll delete after ack succeeds via trim_local/2
-        next_acc = [row | acc]
-        _ = cont
-        # Use continuation to fetch next; but continuation returns tuples of rows
-        do_select_take_cont(cont, remaining - 1, next_acc)
-
-      {[], _} ->
-        Enum.reverse(acc)
-
-      :"$end_of_table" ->
-        Enum.reverse(acc)
-    end
-  end
-
-  defp do_select_take_cont(:"$end_of_table", _remaining, acc), do: Enum.reverse(acc)
-  defp do_select_take_cont(_cont, remaining, acc) when remaining <= 0, do: Enum.reverse(acc)
-
-  defp do_select_take_cont(cont, remaining, acc) when remaining > 0 do
-    case :ets.select(cont) do
-      {[row], cont2} -> do_select_take_cont(cont2, remaining - 1, [row | acc])
-      {[], cont2} -> do_select_take_cont(cont2, 0, acc)
-      :"$end_of_table" -> Enum.reverse(acc)
-    end
-  end
-
-  defp contiguous_upto(rows) do
+  defp contiguous_upto(rows) when is_list(rows) do
     rows
     |> Enum.sort_by(& &1.seq)
     |> Enum.reduce({nil, 0}, fn %{seq: seq}, {prev, upto} ->
@@ -228,87 +224,62 @@ defmodule Starcite.Archive do
     |> elem(1)
   end
 
-  defp trim_local(session_id, upto_seq) do
-    # Delete all rows for this session with seq <= upto_seq
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [{:"=<", :"$1", upto_seq}],
-        [true]
-      }
-    ]
-
-    :ets.select_delete(@events_tab, ms)
-    :ok
+  defp older_timestamp(%DateTime{} = left, %DateTime{} = right) do
+    if DateTime.compare(left, right) == :gt, do: right, else: left
   end
 
-  defp maybe_clear_session(session_id) do
-    # If no rows remain for this session, clear it from sessions_tab
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [],
-        [true]
-      }
-    ]
-
-    case :ets.select(@events_tab, ms, 1) do
-      {[], _} -> :ets.delete(@sessions_tab, session_id)
-      _ -> :ok
-    end
+  defp older_timestamp(%NaiveDateTime{} = left, %NaiveDateTime{} = right) do
+    if NaiveDateTime.compare(left, right) == :gt, do: right, else: left
   end
 
-  defp pending_count(session_id) do
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [],
-        [true]
-      }
-    ]
-
-    :ets.select_count(@events_tab, ms)
+  defp older_timestamp(%DateTime{} = left, %NaiveDateTime{} = right) do
+    older_timestamp(left, DateTime.from_naive!(right, "Etc/UTC"))
   end
 
-  defp oldest_age_seconds do
-    now = NaiveDateTime.utc_now()
-    session_ids = sessions_list()
+  defp older_timestamp(%NaiveDateTime{} = left, %DateTime{} = right) do
+    older_timestamp(DateTime.from_naive!(left, "Etc/UTC"), right)
+  end
 
-    session_ids
-    |> Enum.map(&first_row_ts/1)
+  defp older_timestamp(_left, right), do: right
+
+  defp oldest_age_seconds(pending) when is_map(pending) do
+    now = DateTime.utc_now()
+
+    pending
+    |> Map.values()
+    |> Enum.map(&Map.get(&1, :oldest_inserted_at))
     |> Enum.reject(&is_nil/1)
-    |> Enum.map(fn ts -> max(NaiveDateTime.diff(now, ts, :second), 0) end)
+    |> Enum.map(&to_datetime/1)
     |> case do
-      [] -> 0
-      ages -> Enum.max(ages)
+      [] ->
+        0
+
+      timestamps ->
+        timestamps
+        |> Enum.map(fn ts -> max(DateTime.diff(now, ts, :second), 0) end)
+        |> Enum.max()
     end
   end
 
-  defp first_row_ts(session_id) do
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [],
-        [:"$2"]
-      }
-    ]
+  defp to_datetime(%DateTime{} = datetime), do: datetime
+  defp to_datetime(%NaiveDateTime{} = datetime), do: DateTime.from_naive!(datetime, "Etc/UTC")
+  defp to_datetime(_other), do: DateTime.utc_now()
 
-    case :ets.select(@events_tab, ms, 1) do
-      {[event], _cont} -> Map.get(event, :inserted_at)
-      _ -> nil
-    end
+  defp zero_stats do
+    %{attempted: 0, inserted: 0, bytes_attempted: 0, bytes_inserted: 0, pending_after: 0}
   end
 
-  defp normalize_event(event) do
+  defp merge_stats(left, right) do
     %{
-      type: Map.get(event, :type),
-      payload: Map.get(event, :payload, %{}),
-      actor: Map.get(event, :actor),
-      source: Map.get(event, :source),
-      metadata: Map.get(event, :metadata, %{}),
-      refs: Map.get(event, :refs, %{}),
-      idempotency_key: Map.get(event, :idempotency_key),
-      inserted_at: Map.get(event, :inserted_at, NaiveDateTime.utc_now())
+      attempted: left.attempted + right.attempted,
+      inserted: left.inserted + right.inserted,
+      bytes_attempted: left.bytes_attempted + right.bytes_attempted,
+      bytes_inserted: left.bytes_inserted + right.bytes_inserted,
+      pending_after: left.pending_after + right.pending_after
     }
+  end
+
+  defp schedule_flush(interval) do
+    Process.send_after(self(), :flush_tick, interval)
   end
 end

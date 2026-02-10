@@ -3,6 +3,7 @@ defmodule Starcite.Runtime.CursorUpdate do
   Payload-free cursor update contract for internal PubSub consumers.
 
   Topic:
+    - `"session_cursor"` (global stream for internal consumers)
     - `"session_cursor:<session_id>"`
 
   Message:
@@ -10,6 +11,7 @@ defmodule Starcite.Runtime.CursorUpdate do
   """
 
   @topic_prefix "session_cursor:"
+  @global_topic "session_cursor"
   alias Starcite.Session.EventLog
 
   @type t :: %{
@@ -29,6 +31,9 @@ defmodule Starcite.Runtime.CursorUpdate do
   def topic(session_id) when is_binary(session_id) and session_id != "" do
     @topic_prefix <> session_id
   end
+
+  @spec global_topic() :: String.t()
+  def global_topic, do: @global_topic
 
   @spec message(String.t(), EventLog.event(), pos_integer()) :: message()
   def message(

@@ -91,8 +91,8 @@ defmodule Starcite.Observability.Telemetry do
     - `:elapsed_ms` – time spent in flush loop
     - `:attempted` – rows attempted to write
     - `:inserted` – rows successfully inserted (idempotent)
-    - `:pending_events` – total pending rows in ETS after flush
-    - `:pending_sessions` – total sessions with pending rows after flush
+    - `:pending_events` – estimated unarchived events after flush
+    - `:pending_sessions` – sessions still pending archival after flush
   """
   @spec archive_flush(
           non_neg_integer(),
@@ -221,7 +221,7 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
-  Emit queue age gauge (seconds) across all sessions.
+  Emit archive backlog age gauge (seconds) across all pending sessions.
   """
   @spec archive_queue_age(non_neg_integer()) :: :ok
   def archive_queue_age(seconds) when is_integer(seconds) and seconds >= 0 do

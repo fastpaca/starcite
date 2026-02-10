@@ -96,6 +96,7 @@ defmodule Starcite.Runtime.RaftFSM do
 
     with {:ok, session} <- fetch_session(lane, session_id) do
       {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
+      _evicted = EventStore.delete_below(session_id, upto_seq + 1)
       new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
 
@@ -206,14 +207,18 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
-    archive_event =
+    cursor_update_global =
       {
         :mod_call,
-        Starcite.Archive,
-        :append_events,
-        [session_id, [event]]
+        Phoenix.PubSub,
+        :broadcast,
+        [
+          Starcite.PubSub,
+          CursorUpdate.global_topic(),
+          CursorUpdate.message(session_id, event, last_seq)
+        ]
       }
 
-    [stream_event, cursor_update, archive_event]
+    [stream_event, cursor_update, cursor_update_global]
   end
 end
