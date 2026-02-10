@@ -7,10 +7,12 @@ defmodule Starcite.Runtime.RaftFSM do
 
   @behaviour :ra_machine
 
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
   alias Starcite.Session.EventLog
 
   @num_lanes 16
+  @event_plane_modes [:legacy, :dual_write]
 
   defmodule Lane do
     @moduledoc false
@@ -49,6 +51,8 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
+          :ok = maybe_dual_write_payload(session_id, event)
+
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
           new_state = put_in(state.lanes[lane_id], new_lane)
 
@@ -60,8 +64,14 @@ defmodule Starcite.Runtime.RaftFSM do
             byte_size(Jason.encode!(event.payload))
           )
 
+          Starcite.Observability.Telemetry.cursor_update_emitted(
+            session_id,
+            event.seq,
+            updated_session.last_seq
+          )
+
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          effects = build_effects(session_id, event)
+          effects = build_effects(session_id, event, updated_session.last_seq)
           {new_state, {:reply, {:ok, reply}}, effects}
 
         {:deduped, _session, seq} ->
@@ -172,7 +182,7 @@ defmodule Starcite.Runtime.RaftFSM do
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
-  defp build_effects(session_id, event) do
+  defp build_effects(session_id, event, last_seq) do
     stream_event =
       {
         :mod_call,
@@ -185,6 +195,18 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
+    cursor_update =
+      {
+        :mod_call,
+        Phoenix.PubSub,
+        :broadcast,
+        [
+          Starcite.PubSub,
+          CursorUpdate.topic(session_id),
+          CursorUpdate.message(session_id, event, last_seq)
+        ]
+      }
+
     archive_event =
       {
         :mod_call,
@@ -193,6 +215,23 @@ defmodule Starcite.Runtime.RaftFSM do
         [session_id, [event]]
       }
 
-    [stream_event, archive_event]
+    [stream_event, cursor_update, archive_event]
+  end
+
+  defp maybe_dual_write_payload(session_id, event) do
+    case event_plane_mode() do
+      :legacy ->
+        :ok
+
+      :dual_write ->
+        EventStore.put_event(session_id, event)
+    end
+  end
+
+  defp event_plane_mode do
+    case Application.get_env(:starcite, :event_plane, :legacy) do
+      mode when mode in @event_plane_modes -> mode
+      other -> raise ArgumentError, "invalid :starcite, :event_plane value: #{inspect(other)}"
+    end
   end
 end

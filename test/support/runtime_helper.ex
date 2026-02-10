@@ -17,6 +17,9 @@ defmodule Starcite.Runtime.TestHelper do
       # Cleanup Raft data directory (test mode only)
       cleanup_raft_test_data()
 
+      # Cleanup ETS event mirror store (when present)
+      clear_event_store()
+
       # Brief wait to ensure all cleanup completes
       Process.sleep(50)
     end)
@@ -50,6 +53,12 @@ defmodule Starcite.Runtime.TestHelper do
 
     if String.contains?(test_data_dir, "test") do
       File.rm_rf(test_data_dir)
+    end
+  end
+
+  defp clear_event_store do
+    if Code.ensure_loaded?(Starcite.Runtime.EventStore) do
+      Starcite.Runtime.EventStore.clear()
     end
   end
 end

@@ -35,6 +35,56 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one event-store write.
+
+  Measurements:
+    - `:count` – fixed at 1 per write
+    - `:payload_bytes` – JSON payload size in bytes
+    - `:total_entries` – current ETS entry count after insert
+
+  Metadata:
+    - `:session_id`
+    - `:seq`
+  """
+  @spec event_store_write(String.t(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
+          :ok
+  def event_store_write(session_id, seq, payload_bytes, total_entries)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+             is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
+             total_entries >= 0 do
+    :telemetry.execute(
+      [:starcite, :event_store, :write],
+      %{count: 1, payload_bytes: payload_bytes, total_entries: total_entries},
+      %{session_id: session_id, seq: seq}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry when a cursor update is published on PubSub.
+
+  Measurements:
+    - `:count` – fixed at 1 per emitted update
+    - `:lag` – `last_seq - seq` at emission time
+
+  Metadata:
+    - `:session_id`
+  """
+  @spec cursor_update_emitted(String.t(), non_neg_integer(), non_neg_integer()) :: :ok
+  def cursor_update_emitted(session_id, seq, last_seq)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq >= 0 and
+             is_integer(last_seq) and last_seq >= seq do
+    :telemetry.execute(
+      [:starcite, :cursor, :update],
+      %{count: 1, lag: last_seq - seq},
+      %{session_id: session_id}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:

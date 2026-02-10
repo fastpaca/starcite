@@ -87,6 +87,7 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
+| `STARCITE_EVENT_PLANE` | `legacy` | Event mirroring mode (`legacy`, `dual_write`) |
 | `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
 | `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |

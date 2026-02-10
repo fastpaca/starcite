@@ -23,6 +23,8 @@ defmodule Starcite.Runtime.Supervisor do
 
     children =
       [
+        # Stable owner for ETS event mirror table
+        {Starcite.Runtime.EventStore, []},
         # Task.Supervisor for async Raft group startup
         {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
         # Topology coordinator (uses Erlang distribution, not Presence)
