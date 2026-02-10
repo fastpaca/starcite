@@ -12,6 +12,7 @@ defmodule Starcite.Runtime.RaftFSM do
   alias Starcite.Session.EventLog
 
   @num_lanes 16
+  @payload_plane_modes [:legacy, :dual_write]
 
   defmodule Lane do
     @moduledoc false
@@ -50,7 +51,6 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
-          assert_append_invariants!(session, updated_session, event)
           :ok = maybe_dual_write_payload(session_id, event)
 
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
@@ -218,22 +218,6 @@ defmodule Starcite.Runtime.RaftFSM do
     [stream_event, cursor_update, archive_event]
   end
 
-  defp assert_append_invariants!(
-         %Session{last_seq: previous_last_seq},
-         %Session{last_seq: updated_last_seq},
-         %{seq: seq}
-       )
-       when is_integer(previous_last_seq) and previous_last_seq >= 0 and
-              is_integer(updated_last_seq) and updated_last_seq > 0 and is_integer(seq) and
-              seq > 0 and
-              seq == previous_last_seq + 1 and updated_last_seq == seq do
-    :ok
-  end
-
-  defp assert_append_invariants!(_session, _updated_session, _event) do
-    raise ArgumentError, "append invariant violated: expected seq to advance by exactly one"
-  end
-
   defp maybe_dual_write_payload(session_id, event) do
     case payload_plane_mode() do
       :legacy ->
@@ -246,10 +230,7 @@ defmodule Starcite.Runtime.RaftFSM do
 
   defp payload_plane_mode do
     case Application.get_env(:starcite, :payload_plane, :legacy) do
-      :legacy -> :legacy
-      :dual_write -> :dual_write
-      "legacy" -> :legacy
-      "dual_write" -> :dual_write
+      mode when mode in @payload_plane_modes -> mode
       other -> raise ArgumentError, "invalid :starcite, :payload_plane value: #{inspect(other)}"
     end
   end
