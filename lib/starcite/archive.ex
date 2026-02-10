@@ -97,6 +97,7 @@ defmodule Starcite.Archive do
 
   defp flush_all(%{adapter: adapter, cursors: cursors} = state) do
     start = System.monotonic_time(:millisecond)
+    sessions_tab = sessions_table_ref!()
     batch_limit = archive_batch_limit()
     session_ids = sessions_list()
 
@@ -115,7 +116,7 @@ defmodule Starcite.Archive do
     state = maybe_reconcile(state)
 
     elapsed = System.monotonic_time(:millisecond) - start
-    pending_sessions = :ets.info(@sessions_tab, :size) || 0
+    pending_sessions = :ets.info(sessions_tab, :size) || 0
     pending_refs = pending_sessions
 
     age_seconds = oldest_age_seconds()
@@ -297,51 +298,50 @@ defmodule Starcite.Archive do
 
   defp mark_session_dirty(session_id, seq)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq >= 0 do
+    sessions_tab = sessions_table_ref!()
     marked_at = System.system_time(:second)
 
-    case :ets.lookup(@sessions_tab, session_id) do
+    case :ets.lookup(sessions_tab, session_id) do
       [] ->
-        :ets.insert(@sessions_tab, {session_id, marked_at, seq})
+        :ets.insert(sessions_tab, {session_id, marked_at, seq})
 
       [{^session_id, existing_marked_at, existing_seq}]
       when is_integer(existing_marked_at) and is_integer(existing_seq) ->
-        :ets.insert(@sessions_tab, {session_id, existing_marked_at, max(existing_seq, seq)})
+        :ets.insert(sessions_tab, {session_id, existing_marked_at, max(existing_seq, seq)})
 
       _ ->
-        :ets.insert(@sessions_tab, {session_id, marked_at, seq})
+        :ets.insert(sessions_tab, {session_id, marked_at, seq})
     end
 
     :ok
-  catch
-    :error, :badarg -> :ok
   end
 
   defp clear_session_marker_if_caught_up(session_id, archived_seq)
        when is_binary(session_id) and is_integer(archived_seq) and archived_seq >= 0 do
-    case :ets.lookup(@sessions_tab, session_id) do
+    sessions_tab = sessions_table_ref!()
+
+    case :ets.lookup(sessions_tab, session_id) do
       [{^session_id, _marked_at, max_dirty_seq}]
       when is_integer(max_dirty_seq) and max_dirty_seq <= archived_seq ->
-        :ets.delete(@sessions_tab, session_id)
+        :ets.delete(sessions_tab, session_id)
 
       _ ->
         :ok
     end
 
     :ok
-  catch
-    :error, :badarg -> :ok
   end
 
   defp sessions_list do
-    :ets.tab2list(@sessions_tab) |> Enum.map(fn {id, _marked_at, _max_dirty_seq} -> id end)
-  catch
-    :error, :badarg -> []
+    sessions_tab = sessions_table_ref!()
+    :ets.tab2list(sessions_tab) |> Enum.map(fn {id, _marked_at, _max_dirty_seq} -> id end)
   end
 
   defp oldest_age_seconds do
+    sessions_tab = sessions_table_ref!()
     now = System.system_time(:second)
 
-    :ets.tab2list(@sessions_tab)
+    :ets.tab2list(sessions_tab)
     |> Enum.map(fn
       {_session_id, marked_at, _max_dirty_seq} when is_integer(marked_at) ->
         max(now - marked_at, 0)
@@ -353,8 +353,6 @@ defmodule Starcite.Archive do
       [] -> 0
       ages -> Enum.max(ages)
     end
-  catch
-    :error, :badarg -> 0
   end
 
   defp maybe_reconcile(%{reconcile_enabled: false} = state), do: state
@@ -409,5 +407,15 @@ defmodule Starcite.Archive do
 
   defp archive_batch_limit do
     Application.get_env(:starcite, :archive_batch_size, 5_000)
+  end
+
+  defp sessions_table_ref! do
+    case :ets.whereis(@sessions_tab) do
+      :undefined ->
+        raise "#{@sessions_tab} is not initialized; archive coordinator must be running"
+
+      tid ->
+        tid
+    end
   end
 end

@@ -277,14 +277,32 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
-    archive_event =
-      {
-        :mod_call,
-        Starcite.Archive,
-        :mark_dirty,
-        [session_id, event.seq]
-      }
+    if archive_effects_enabled_now?() do
+      archive_event =
+        {
+          :mod_call,
+          Starcite.Archive,
+          :mark_dirty,
+          [session_id, event.seq]
+        }
 
-    [stream_event, archive_event]
+      [stream_event, archive_event]
+    else
+      [stream_event]
+    end
+  end
+
+  defp archive_effects_enabled_now? do
+    archive_expected?() or :ets.whereis(:starcite_archive_sessions) != :undefined
+  end
+
+  defp archive_expected? do
+    from_env =
+      case System.get_env("STARCITE_ARCHIVER_ENABLED") do
+        nil -> false
+        val -> val not in ["", "false", "0", "no", "off"]
+      end
+
+    Application.get_env(:starcite, :archive_enabled, false) || from_env
   end
 end
