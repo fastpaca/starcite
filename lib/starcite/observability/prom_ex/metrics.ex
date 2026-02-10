@@ -9,7 +9,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def event_metrics(_opts) do
     [
       events_metrics(),
-      archive_metrics()
+      archive_metrics(),
+      payload_plane_metrics()
     ]
   end
 
@@ -120,6 +121,41 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
           tags: [:session_id]
+        )
+      ]
+    )
+  end
+
+  defp payload_plane_metrics do
+    Event.build(
+      :starcite_payload_plane_metrics,
+      [
+        counter("starcite_payload_store_writes_total",
+          event_name: [:starcite, :payload_store, :write],
+          measurement: :count,
+          description: "Total events mirrored into ETS payload store"
+        ),
+        distribution("starcite_payload_store_payload_bytes",
+          event_name: [:starcite, :payload_store, :write],
+          measurement: :payload_bytes,
+          description: "Payload bytes per ETS payload-store write",
+          unit: :byte,
+          reporter_options: [buckets: [128, 512, 1024, 4096, 16384, 65536, 262_144, 1_048_576]]
+        ),
+        last_value("starcite_payload_store_entries",
+          event_name: [:starcite, :payload_store, :write],
+          measurement: :total_entries,
+          description: "Current entry count in ETS payload store"
+        ),
+        counter("starcite_cursor_updates_total",
+          event_name: [:starcite, :cursor, :update],
+          measurement: :count,
+          description: "Total payload-free cursor updates emitted"
+        ),
+        last_value("starcite_cursor_lag",
+          event_name: [:starcite, :cursor, :update],
+          measurement: :lag,
+          description: "Cursor update lag (last_seq - seq)"
         )
       ]
     )

@@ -7,6 +7,7 @@ defmodule Starcite.Runtime.RaftFSM do
 
   @behaviour :ra_machine
 
+  alias Starcite.Runtime.{CursorUpdate, PayloadStore}
   alias Starcite.Session
   alias Starcite.Session.EventLog
 
@@ -49,6 +50,9 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
+          assert_append_invariants!(session, updated_session, event)
+          :ok = maybe_dual_write_payload(session_id, event)
+
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
           new_state = put_in(state.lanes[lane_id], new_lane)
 
@@ -60,8 +64,14 @@ defmodule Starcite.Runtime.RaftFSM do
             byte_size(Jason.encode!(event.payload))
           )
 
+          Starcite.Observability.Telemetry.cursor_update_emitted(
+            session_id,
+            event.seq,
+            updated_session.last_seq
+          )
+
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          effects = build_effects(session_id, event)
+          effects = build_effects(session_id, event, updated_session.last_seq)
           {new_state, {:reply, {:ok, reply}}, effects}
 
         {:deduped, _session, seq} ->
@@ -172,7 +182,7 @@ defmodule Starcite.Runtime.RaftFSM do
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
-  defp build_effects(session_id, event) do
+  defp build_effects(session_id, event, last_seq) do
     stream_event =
       {
         :mod_call,
@@ -185,6 +195,18 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
+    cursor_update =
+      {
+        :mod_call,
+        Phoenix.PubSub,
+        :broadcast,
+        [
+          Starcite.PubSub,
+          CursorUpdate.topic(session_id),
+          CursorUpdate.message(session_id, event, last_seq)
+        ]
+      }
+
     archive_event =
       {
         :mod_call,
@@ -193,6 +215,42 @@ defmodule Starcite.Runtime.RaftFSM do
         [session_id, [event]]
       }
 
-    [stream_event, archive_event]
+    [stream_event, cursor_update, archive_event]
+  end
+
+  defp assert_append_invariants!(
+         %Session{last_seq: previous_last_seq},
+         %Session{last_seq: updated_last_seq},
+         %{seq: seq}
+       )
+       when is_integer(previous_last_seq) and previous_last_seq >= 0 and
+              is_integer(updated_last_seq) and updated_last_seq > 0 and is_integer(seq) and
+              seq > 0 and
+              seq == previous_last_seq + 1 and updated_last_seq == seq do
+    :ok
+  end
+
+  defp assert_append_invariants!(_session, _updated_session, _event) do
+    raise ArgumentError, "append invariant violated: expected seq to advance by exactly one"
+  end
+
+  defp maybe_dual_write_payload(session_id, event) do
+    case payload_plane_mode() do
+      :legacy ->
+        :ok
+
+      :dual_write ->
+        PayloadStore.put_event(session_id, event)
+    end
+  end
+
+  defp payload_plane_mode do
+    case Application.get_env(:starcite, :payload_plane, :legacy) do
+      :legacy -> :legacy
+      :dual_write -> :dual_write
+      "legacy" -> :legacy
+      "dual_write" -> :dual_write
+      other -> raise ArgumentError, "invalid :starcite, :payload_plane value: #{inspect(other)}"
+    end
   end
 end
