@@ -7,14 +7,14 @@ defmodule StarciteWeb.TailSocket do
 
   @behaviour WebSock
 
-  alias Starcite.Runtime
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
 
   @impl true
   def init(%{session_id: session_id, cursor: cursor}) do
-    topic = "session:#{session_id}"
+    topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
 
     state = %{
@@ -42,25 +42,38 @@ defmodule StarciteWeb.TailSocket do
     drain_replay(state)
   end
 
-  def handle_info({:event, event}, state) do
-    if event.seq <= state.cursor do
+  def handle_info({:cursor_update, update}, state) when is_map(update) do
+    handle_cursor_update(update, state)
+  end
+
+  def handle_info(_message, state), do: {:ok, state}
+
+  defp handle_cursor_update(%{seq: seq} = update, state)
+       when is_integer(seq) and seq > 0 do
+    if seq <= state.cursor do
       {:ok, state}
     else
       queue_empty? = :queue.is_empty(state.replay_queue)
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        next_state = %{state | cursor: event.seq}
-        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+        case EventStore.get_event(state.session_id, seq) do
+          {:ok, event} ->
+            next_state = %{state | cursor: event.seq}
+            {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+
+          :error ->
+            buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
+            next_state = %{state | live_buffer: buffered}
+            {:ok, maybe_schedule_drain(next_state)}
+        end
       else
-        buffered = Map.put(state.live_buffer, event.seq, event)
+        buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
         next_state = %{state | live_buffer: buffered}
         {:ok, maybe_schedule_drain(next_state)}
       end
     end
   end
-
-  def handle_info(_message, state), do: {:ok, state}
 
   defp drain_replay(state) do
     case :queue.out(state.replay_queue) do
@@ -83,44 +96,60 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp fetch_replay_batch(state) do
-    case Runtime.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
-      {:ok, []} ->
+    case EventStore.from_cursor(state.session_id, state.cursor, @replay_batch_size) do
+      [] ->
         state
         |> Map.put(:replay_done, true)
         |> flush_buffered()
 
-      {:ok, events} ->
+      events ->
         next_state =
           state
           |> Map.put(:replay_queue, :queue.from_list(events))
           |> maybe_schedule_drain()
 
         {:ok, next_state}
-
-      {:error, _reason} ->
-        {:stop, :normal, state}
     end
   end
 
   defp flush_buffered(state) do
-    buffered_events =
+    {buffered_events, unresolved} =
       state.live_buffer
-      |> Map.values()
-      |> Enum.filter(&(&1.seq > state.cursor))
-      |> Enum.sort_by(& &1.seq)
+      |> Enum.sort_by(fn {seq, _value} -> seq end)
+      |> Enum.reduce({[], %{}}, fn {seq, value}, {events, pending} ->
+        cond do
+          seq <= state.cursor ->
+            {events, pending}
+
+          true ->
+            case resolve_buffered_value(state, value) do
+              {:ok, event} -> {[event | events], pending}
+              :error -> {events, Map.put(pending, seq, value)}
+            end
+        end
+      end)
+
+    buffered_events = Enum.reverse(buffered_events)
 
     if buffered_events == [] do
-      {:ok, %{state | live_buffer: %{}}}
+      {:ok, %{state | live_buffer: unresolved}}
     else
       next_state =
         state
-        |> Map.put(:live_buffer, %{})
+        |> Map.put(:live_buffer, unresolved)
         |> Map.put(:replay_queue, :queue.from_list(buffered_events))
         |> maybe_schedule_drain()
 
       {:ok, next_state}
     end
   end
+
+  defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq}})
+       when is_integer(seq) and seq > 0 do
+    EventStore.get_event(session_id, seq)
+  end
+
+  defp resolve_buffered_value(_state, _value), do: :error
 
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)

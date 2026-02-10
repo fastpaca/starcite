@@ -2,10 +2,19 @@ defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Runtime
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias StarciteWeb.TailSocket
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+
+    old_mode = Application.get_env(:starcite, :event_plane, :legacy)
+    Application.put_env(:starcite, :event_plane, :dual_write)
+
+    on_exit(fn ->
+      Application.put_env(:starcite, :event_plane, old_mode)
+    end)
+
     :ok
   end
 
@@ -16,7 +25,7 @@ defmodule StarciteWeb.TailSocketTest do
   defp base_state(session_id, cursor) do
     %{
       session_id: session_id,
-      topic: "session:#{session_id}",
+      topic: CursorUpdate.topic(session_id),
       cursor: cursor,
       replay_queue: :queue.new(),
       replay_done: false,
@@ -79,10 +88,10 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, [event_three]} = Runtime.get_events_from_cursor(session_id, 2, 1)
+      {:ok, update_three} = cursor_update_for(session_id, 3)
 
       {:ok, state_with_buffered_live} =
-        TailSocket.handle_info({:event, event_three}, state_after_fetch)
+        TailSocket.handle_info({:cursor_update, update_three}, state_after_fetch)
 
       {frames, drained_state} = drain_until_idle(state_with_buffered_live)
 
@@ -90,7 +99,7 @@ defmodule StarciteWeb.TailSocketTest do
       assert drained_state.cursor == 3
 
       assert {:ok, ^drained_state} =
-               TailSocket.handle_info({:event, event_three}, drained_state)
+               TailSocket.handle_info({:cursor_update, update_three}, drained_state)
     end
 
     test "pushes live events immediately after replay is complete" do
@@ -106,15 +115,22 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, [event]} = Runtime.get_events_from_cursor(session_id, 0, 1)
+      {:ok, update} = cursor_update_for(session_id, 1)
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:event, event}, drained_state)
+               TailSocket.handle_info({:cursor_update, update}, drained_state)
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
       assert String.ends_with?(frame["inserted_at"], "Z")
       assert next_state.cursor == 1
+    end
+  end
+
+  defp cursor_update_for(session_id, seq) do
+    with {:ok, event} <- EventStore.get_event(session_id, seq) do
+      {:cursor_update, update} = CursorUpdate.message(session_id, event, seq)
+      {:ok, update}
     end
   end
 end

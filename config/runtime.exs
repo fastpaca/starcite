@@ -56,10 +56,10 @@ end
 event_plane =
   case System.get_env("STARCITE_EVENT_PLANE") do
     nil ->
-      :legacy
+      :dual_write
 
     "" ->
-      :legacy
+      :dual_write
 
     "legacy" ->
       :legacy
