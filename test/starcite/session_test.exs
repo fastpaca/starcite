@@ -2,7 +2,6 @@ defmodule Starcite.SessionTest do
   use ExUnit.Case, async: true
 
   alias Starcite.Session
-  alias Starcite.Session.EventLog
 
   describe "Session.new/2" do
     test "creates a session with default values" do
@@ -12,7 +11,7 @@ defmodule Starcite.SessionTest do
       assert session.last_seq == 0
       assert session.archived_seq == 0
       assert session.metadata == %{}
-      assert EventLog.entries(session.event_log) == []
+      assert Session.tail_size(session) == 0
     end
   end
 
@@ -77,38 +76,8 @@ defmodule Starcite.SessionTest do
     end
   end
 
-  describe "Session.events_from_cursor/3" do
-    test "returns events strictly after cursor in seq order" do
-      session = Session.new("ses-1")
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"text" => "one"},
-          actor: "agent:1"
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"text" => "two"},
-          actor: "agent:1"
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"text" => "three"},
-          actor: "agent:1"
-        })
-
-      events = Session.events_from_cursor(session, 1, 100)
-      assert Enum.map(events, & &1.seq) == [2, 3]
-    end
-  end
-
   describe "Session.persist_ack/2" do
-    test "trims acknowledged range while retaining bounded tail" do
+    test "advances archived cursor and updates tail retention accounting" do
       session = Session.new("ses-arch", tail_keep: 2)
 
       {:appended, session, _} =
@@ -127,11 +96,10 @@ defmodule Starcite.SessionTest do
         Session.append_event(session, %{type: "content", payload: %{"n" => 5}, actor: "a"})
 
       {session, trimmed} = Session.persist_ack(session, 3)
-      kept = session.event_log |> EventLog.entries() |> Enum.map(& &1.seq)
 
       assert session.archived_seq == 3
-      assert Enum.sort(kept) == [2, 3, 4, 5]
       assert trimmed == 1
+      assert Session.tail_size(session) == 4
     end
 
     test "prunes idempotency keys below retained tail floor" do
@@ -192,6 +160,21 @@ defmodule Starcite.SessionTest do
 
       assert replayed.seq == 6
       assert session.idempotency_index["k1"].seq == 6
+    end
+
+    test "does not advance archived cursor beyond last sequence" do
+      session = Session.new("ses-arch-clamp", tail_keep: 2)
+
+      {:appended, session, _} =
+        Session.append_event(session, %{type: "content", payload: %{"n" => 1}, actor: "a"})
+
+      {:appended, session, _} =
+        Session.append_event(session, %{type: "content", payload: %{"n" => 2}, actor: "a"})
+
+      {session, _trimmed} = Session.persist_ack(session, 10)
+
+      assert session.archived_seq == 2
+      assert Session.tail_size(session) == 2
     end
   end
 

@@ -11,7 +11,7 @@ defmodule Starcite.Runtime do
 
   require Logger
 
-  alias Starcite.Runtime.{RaftFSM, RaftManager, RaftTopology}
+  alias Starcite.Runtime.{EventStore, RaftFSM, RaftManager, RaftTopology}
   alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
@@ -160,13 +160,13 @@ defmodule Starcite.Runtime do
     with {:ok, server_id, lane, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
-             RaftFSM.query_events_from_cursor(state, lane, id, cursor, limit)
+             RaftFSM.query_session(state, lane, id)
            end) do
-        {:ok, {:ok, events}, _leader} when is_list(events) ->
-          {:ok, events}
+        {:ok, {:ok, _session}, _leader} ->
+          {:ok, EventStore.from_cursor(id, cursor, limit)}
 
-        {:ok, {{_term, _index}, {:ok, events}}, _leader} when is_list(events) ->
-          {:ok, events}
+        {:ok, {{_term, _index}, {:ok, _session}}, _leader} ->
+          {:ok, EventStore.from_cursor(id, cursor, limit)}
 
         {:ok, {:error, reason}, _leader} ->
           {:error, reason}

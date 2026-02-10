@@ -2,14 +2,13 @@ defmodule Starcite.Runtime.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
 
-  Stores append-only session event logs and supports cursor-based replay.
+  Stores session metadata and applies ordered commands through Raft consensus.
   """
 
   @behaviour :ra_machine
 
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
-  alias Starcite.Session.EventLog
 
   @num_lanes 16
 
@@ -98,11 +97,7 @@ defmodule Starcite.Runtime.RaftFSM do
       {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
       new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
-
-      tail_size =
-        updated_session.event_log
-        |> EventLog.entries()
-        |> length()
+      tail_size = Session.tail_size(updated_session)
 
       Starcite.Observability.Telemetry.archive_ack_applied(
         session_id,
@@ -125,18 +120,6 @@ defmodule Starcite.Runtime.RaftFSM do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Query events with `seq > cursor`, ordered ascending.
-  """
-  def query_events_from_cursor(state, lane_id, session_id, cursor, limit) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, session} <- fetch_session(lane, session_id) do
-      {:ok, Session.events_from_cursor(session, cursor, limit)}
-    else
-      _ -> {:error, :session_not_found}
-    end
-  end
-
-  @doc """
   Query one session by ID.
   """
   def query_session(state, lane_id, session_id) do
@@ -145,18 +128,6 @@ defmodule Starcite.Runtime.RaftFSM do
       {:ok, session}
     else
       _ -> {:error, :session_not_found}
-    end
-  end
-
-  @doc """
-  Query unarchived events (seq > archived_seq) up to `limit`.
-  """
-  def query_unarchived(state, lane_id, session_id, limit) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, %Session{} = session} <- fetch_session(lane, session_id) do
-      Session.events_from_cursor(session, session.archived_seq, limit)
-    else
-      _ -> []
     end
   end
 

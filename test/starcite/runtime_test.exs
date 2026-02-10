@@ -4,7 +4,7 @@ defmodule Starcite.RuntimeTest do
   import ExUnit.CaptureLog
 
   alias Starcite.Runtime
-  alias Starcite.Runtime.RaftManager
+  alias Starcite.Runtime.{EventStore, RaftManager}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -150,6 +150,25 @@ defmodule Starcite.RuntimeTest do
 
       {:ok, events} = Runtime.get_events_from_cursor(id, 2, 100)
       assert Enum.map(events, & &1.seq) == [3, 4, 5]
+    end
+
+    test "returns session_not_found when ETS has events for unknown session" do
+      missing_id = unique_id("missing")
+
+      :ok =
+        EventStore.put_event(missing_id, %{
+          seq: 1,
+          type: "content",
+          payload: %{text: "rogue"},
+          actor: "agent:1",
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: NaiveDateTime.utc_now()
+        })
+
+      assert {:error, :session_not_found} = Runtime.get_events_from_cursor(missing_id, 0, 100)
     end
   end
 

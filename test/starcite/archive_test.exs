@@ -2,6 +2,7 @@ defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Runtime
+  alias Starcite.Runtime.EventStore
   alias Starcite.Archive.IdempotentTestAdapter
 
   setup do
@@ -10,17 +11,7 @@ defmodule Starcite.ArchiveTest do
     :ok
   end
 
-  test "flush archives and trims via ack" do
-    # Keep a very small tail so trim is obvious
-    old = Application.get_env(:starcite, :tail_keep)
-    Application.put_env(:starcite, :tail_keep, 2)
-
-    on_exit(fn ->
-      if old,
-        do: Application.put_env(:starcite, :tail_keep, old),
-        else: Application.delete_env(:starcite, :tail_keep)
-    end)
-
+  test "flush archives and advances cursor via ack" do
     # Start Archive with the test adapter (no Postgres)
     {:ok, _pid} =
       start_supervised(
@@ -45,9 +36,7 @@ defmodule Starcite.ArchiveTest do
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
         assert session.archived_seq == session.last_seq
-        # Tail should retain only 2 events
-        tail = Starcite.Session.EventLog.entries(session.event_log)
-        assert length(tail) == 2
+        assert EventStore.session_size(session_id) == 5
       end,
       timeout: 2_000
     )
