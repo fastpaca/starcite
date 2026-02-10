@@ -57,7 +57,7 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert Enum.map(events, & &1.seq) == [3, 4]
   end
 
-  test "deletes entries below floor sequence per session" do
+  test "delete_below is a no-op while compaction is disabled" do
     session_id = "ses-evict-#{System.unique_integer([:positive, :monotonic])}"
     other_session = "ses-other-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -81,12 +81,12 @@ defmodule Starcite.Runtime.EventStoreTest do
         inserted_at: NaiveDateTime.utc_now()
       })
 
-    assert 2 = EventStore.delete_below(session_id, 3)
-    assert EventStore.session_size(session_id) == 2
+    assert 0 = EventStore.delete_below(session_id, 3)
+    assert EventStore.session_size(session_id) == 4
     assert EventStore.session_size(other_session) == 1
 
     remaining = EventStore.from_cursor(session_id, 0, 10)
-    assert Enum.map(remaining, & &1.seq) == [3, 4]
+    assert Enum.map(remaining, & &1.seq) == [1, 2, 3, 4]
   end
 
   test "tracks max sequence per session and returns indexed session ids" do
@@ -128,7 +128,7 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert session_ids == Enum.sort([session_a, session_b])
   end
 
-  test "removes session index when all events are evicted" do
+  test "keeps session index when delete_below is called" do
     session_id = "ses-index-clean-#{System.unique_integer([:positive, :monotonic])}"
 
     :ok =
@@ -150,9 +150,9 @@ defmodule Starcite.Runtime.EventStoreTest do
       })
 
     assert {:ok, 2} = EventStore.max_seq(session_id)
-    assert 2 = EventStore.delete_below(session_id, 3)
-    assert EventStore.session_size(session_id) == 0
-    assert :error = EventStore.max_seq(session_id)
-    refute session_id in EventStore.session_ids()
+    assert 0 = EventStore.delete_below(session_id, 3)
+    assert EventStore.session_size(session_id) == 2
+    assert {:ok, 2} = EventStore.max_seq(session_id)
+    assert session_id in EventStore.session_ids()
   end
 end

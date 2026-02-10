@@ -82,28 +82,14 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   @doc """
-  Delete entries where `seq < floor_seq` for one session.
+  No-op placeholder for future snapshot-coupled compaction.
   """
   @spec delete_below(String.t(), pos_integer()) :: non_neg_integer()
   def delete_below(session_id, floor_seq)
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
-    table = ensure_table()
-
-    ms = [
-      {
-        {{session_id, :"$1"}, :"$2"},
-        [{:<, :"$1", floor_seq}],
-        [true]
-      }
-    ]
-
-    deleted = :ets.select_delete(table, ms)
-
-    if session_size(session_id) == 0 do
-      :ets.delete(table, {:max_seq, session_id})
-    end
-
-    deleted
+    _ = session_id
+    _ = floor_seq
+    0
   end
 
   @doc """
