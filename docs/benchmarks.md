@@ -20,14 +20,18 @@ Starcite ships with a reproducible benchmark harness so you can validate perform
    ```bash
    ./scripts/test-cluster.sh
    ```
-3. Run scenarios sequentially:
+3. Verify archive cutover end-to-end (benchmark + probe + Postgres + cutover metrics):
+   ```bash
+   ./scripts/test-cutover.sh
+   ```
+4. Run scenarios sequentially:
    ```bash
    k6 run bench/k6/1-hot-path-throughput.js
    k6 run bench/k6/2-rest-read-write-mix.js
    k6 run bench/k6/3-cold-start-replay.js
    k6 run bench/k6/4-durability-cadence.js
    ```
-4. Stop the cluster:
+5. Stop the cluster:
    ```bash
    ./scripts/stop-cluster.sh
    ```

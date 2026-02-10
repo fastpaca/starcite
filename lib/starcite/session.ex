@@ -15,7 +15,6 @@ defmodule Starcite.Session do
 
   @enforce_keys [
     :id,
-    :event_log,
     :last_seq,
     :archived_seq,
     :inserted_at,
@@ -27,7 +26,6 @@ defmodule Starcite.Session do
     :id,
     :title,
     :metadata,
-    :event_log,
     :last_seq,
     :archived_seq,
     :inserted_at,
@@ -40,7 +38,6 @@ defmodule Starcite.Session do
           id: String.t(),
           title: String.t() | nil,
           metadata: map(),
-          event_log: EventLog.t(),
           last_seq: non_neg_integer(),
           archived_seq: non_neg_integer(),
           inserted_at: NaiveDateTime.t(),
@@ -61,7 +58,6 @@ defmodule Starcite.Session do
       id: id,
       title: Keyword.get(opts, :title),
       metadata: Keyword.get(opts, :metadata, %{}),
-      event_log: EventLog.new(),
       last_seq: 0,
       archived_seq: 0,
       inserted_at: now,
@@ -96,16 +92,26 @@ defmodule Starcite.Session do
         {:error, :idempotency_conflict}
 
       :append ->
-        {event_log, event, last_seq} =
-          EventLog.append_event(session.event_log, input, session.last_seq)
+        next_seq = session.last_seq + 1
+
+        event = %{
+          seq: next_seq,
+          type: input.type,
+          payload: input.payload,
+          actor: input.actor,
+          source: Map.get(input, :source),
+          metadata: Map.get(input, :metadata, %{}),
+          refs: Map.get(input, :refs, %{}),
+          idempotency_key: idempotency_key,
+          inserted_at: NaiveDateTime.utc_now()
+        }
 
         idempotency_index =
           put_idempotency(session.idempotency_index, idempotency_key, hash, event.seq)
 
         updated = %Session{
           session
-          | event_log: event_log,
-            last_seq: last_seq,
+          | last_seq: next_seq,
             updated_at: NaiveDateTime.utc_now(),
             idempotency_index: idempotency_index
         }
@@ -114,30 +120,34 @@ defmodule Starcite.Session do
     end
   end
 
-  @spec events_from_cursor(t(), non_neg_integer(), pos_integer()) :: [event()]
-  def events_from_cursor(%Session{} = session, cursor, limit),
-    do: EventLog.from_cursor(session.event_log, cursor, limit)
-
   @doc """
-  Apply an archive acknowledgement up to `upto_seq`, trimming the in-memory
-  event log while keeping a bounded tail.
+  Apply an archive acknowledgement up to `upto_seq` and update retention
+  metadata used for idempotency pruning and telemetry.
   """
   @spec persist_ack(t(), non_neg_integer()) :: {t(), non_neg_integer()}
   def persist_ack(%Session{} = session, upto_seq)
       when is_integer(upto_seq) and upto_seq >= 0 do
     tail_keep = session.retention.tail_keep
-    archived_seq = max(session.archived_seq, upto_seq)
-    {event_log, trimmed} = EventLog.trim_ack(session.event_log, archived_seq, tail_keep)
-    min_seq_to_keep = min_seq_to_keep(event_log, session.last_seq)
-    idempotency_index = prune_idempotency(session.idempotency_index, min_seq_to_keep)
+    archived_seq = max(session.archived_seq, min(upto_seq, session.last_seq))
+    old_floor = retained_floor(session.archived_seq, session.last_seq, tail_keep)
+    new_floor = retained_floor(archived_seq, session.last_seq, tail_keep)
+    trimmed = max(new_floor - old_floor, 0)
+    idempotency_index = prune_idempotency(session.idempotency_index, new_floor)
 
     {%Session{
        session
        | archived_seq: archived_seq,
-         event_log: event_log,
          idempotency_index: idempotency_index,
          updated_at: NaiveDateTime.utc_now()
      }, trimmed}
+  end
+
+  @doc """
+  Return the virtual tail size implied by retention metadata.
+  """
+  @spec tail_size(t()) :: non_neg_integer()
+  def tail_size(%Session{archived_seq: archived_seq, last_seq: last_seq}) do
+    max(last_seq - archived_seq, 0)
   end
 
   @spec to_map(t()) :: map()
@@ -173,12 +183,15 @@ defmodule Starcite.Session do
     Map.put(index, idempotency_key, %{hash: hash, seq: seq})
   end
 
-  defp min_seq_to_keep(%EventLog{} = event_log, last_seq)
-       when is_integer(last_seq) and last_seq >= 0 do
-    case EventLog.entries(event_log) do
-      [%{seq: seq} | _] when is_integer(seq) and seq >= 0 -> seq
-      [] -> last_seq + 1
-    end
+  defp retained_floor(archived_seq, last_seq, tail_keep)
+       when is_integer(archived_seq) and archived_seq >= 0 and is_integer(last_seq) and
+              last_seq >= 0 and
+              is_integer(tail_keep) and tail_keep > 0 do
+    archived_seq
+    |> min(last_seq)
+    |> Kernel.-(tail_keep)
+    |> Kernel.+(1)
+    |> max(1)
   end
 
   defp prune_idempotency(index, min_seq_to_keep)

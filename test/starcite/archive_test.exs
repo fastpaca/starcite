@@ -2,6 +2,7 @@ defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Runtime
+  alias Starcite.Runtime.EventStore
   alias Starcite.Archive.IdempotentTestAdapter
 
   setup do
@@ -10,17 +11,7 @@ defmodule Starcite.ArchiveTest do
     :ok
   end
 
-  test "flush archives and trims via ack" do
-    # Keep a very small tail so trim is obvious
-    old = Application.get_env(:starcite, :tail_keep)
-    Application.put_env(:starcite, :tail_keep, 2)
-
-    on_exit(fn ->
-      if old,
-        do: Application.put_env(:starcite, :tail_keep, old),
-        else: Application.delete_env(:starcite, :tail_keep)
-    end)
-
+  test "flush archives and advances cursor via ack" do
     # Start Archive with the test adapter (no Postgres)
     {:ok, _pid} =
       start_supervised(
@@ -45,9 +36,7 @@ defmodule Starcite.ArchiveTest do
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
         assert session.archived_seq == session.last_seq
-        # Tail should retain only 2 events
-        tail = Starcite.Session.EventLog.entries(session.event_log)
-        assert length(tail) == 2
+        assert EventStore.session_size(session_id) == 0
       end,
       timeout: 2_000
     )
@@ -294,6 +283,68 @@ defmodule Starcite.ArchiveTest do
             |> Enum.map(&length/1)
 
           assert batch_sizes == [2, 2, 1]
+        end,
+        timeout: 2_000
+      )
+    end
+
+    test "continues archiving new writes after a full ETS compaction" do
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
+
+      session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 3
+          assert EventStore.session_size(session_id) == 0
+        end,
+        timeout: 2_000
+      )
+
+      {:ok, _} =
+        Runtime.append_event(session_id, %{
+          type: "content",
+          payload: %{text: "m4"},
+          actor: "agent:test"
+        })
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == 4
+          assert EventStore.session_size(session_id) == 0
+
+          seqs =
+            IdempotentTestAdapter.get_writes()
+            |> Enum.filter(fn row -> row.session_id == session_id end)
+            |> Enum.map(& &1.seq)
+            |> Enum.uniq()
+            |> Enum.sort()
+
+          assert seqs == [1, 2, 3, 4]
         end,
         timeout: 2_000
       )

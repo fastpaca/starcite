@@ -4,7 +4,7 @@ defmodule Starcite.RuntimeTest do
   import ExUnit.CaptureLog
 
   alias Starcite.Runtime
-  alias Starcite.Runtime.RaftManager
+  alias Starcite.Runtime.{EventStore, RaftManager}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -150,6 +150,83 @@ defmodule Starcite.RuntimeTest do
 
       {:ok, events} = Runtime.get_events_from_cursor(id, 2, 100)
       assert Enum.map(events, & &1.seq) == [3, 4, 5]
+    end
+
+    test "returns only unarchived events after archive cutover compacts ETS" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..5 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+
+      {:ok, events} = Runtime.get_events_from_cursor(id, 0, 100)
+      assert Enum.map(events, & &1.seq) == [4, 5]
+    end
+
+    test "returns session_not_found when ETS has events for unknown session" do
+      missing_id = unique_id("missing")
+
+      :ok =
+        EventStore.put_event(missing_id, %{
+          seq: 1,
+          type: "content",
+          payload: %{text: "rogue"},
+          actor: "agent:1",
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: NaiveDateTime.utc_now()
+        })
+
+      assert {:error, :session_not_found} = Runtime.get_events_from_cursor(missing_id, 0, 100)
+    end
+  end
+
+  describe "ack_archived/2" do
+    test "is idempotent for the same archive cursor" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..4 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = Runtime.ack_archived(id, 2)
+      assert EventStore.session_size(id) == 2
+
+      assert {:ok, %{archived_seq: 2, trimmed: 0}} = Runtime.ack_archived(id, 2)
+      assert EventStore.session_size(id) == 2
+    end
+
+    test "clamps archive cursor to last_seq and compacts the full hot tail" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 10_000)
+      assert EventStore.session_size(id) == 0
     end
   end
 

@@ -2,14 +2,13 @@ defmodule Starcite.Runtime.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
 
-  Stores append-only session event logs and supports cursor-based replay.
+  Stores session metadata and applies ordered commands through Raft consensus.
   """
 
   @behaviour :ra_machine
 
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
-  alias Starcite.Session.EventLog
 
   @num_lanes 16
 
@@ -91,30 +90,40 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, {:ack_archived, lane_id, session_id, upto_seq}, state) do
+  def apply(meta, {:ack_archived, lane_id, session_id, upto_seq}, state) do
     lane = Map.fetch!(state.lanes, lane_id)
 
     with {:ok, session} <- fetch_session(lane, session_id) do
-      {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
+      previous_archived_seq = session.archived_seq
+      {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
       new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
 
-      tail_size =
-        updated_session.event_log
-        |> EventLog.entries()
-        |> length()
+      evicted =
+        evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
+
+      tail_size = Session.tail_size(updated_session)
 
       Starcite.Observability.Telemetry.archive_ack_applied(
         session_id,
         updated_session.last_seq,
         updated_session.archived_seq,
-        trimmed,
+        evicted,
         updated_session.retention.tail_keep,
         tail_size
       )
 
-      {new_state,
-       {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: trimmed}}}}
+      reply = {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: evicted}}}
+
+      case release_cursor_effect(
+             meta,
+             previous_archived_seq,
+             updated_session.archived_seq,
+             new_state
+           ) do
+        nil -> {new_state, reply}
+        effect -> {new_state, reply, [effect]}
+      end
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
     end
@@ -125,18 +134,6 @@ defmodule Starcite.Runtime.RaftFSM do
   # ---------------------------------------------------------------------------
 
   @doc """
-  Query events with `seq > cursor`, ordered ascending.
-  """
-  def query_events_from_cursor(state, lane_id, session_id, cursor, limit) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, session} <- fetch_session(lane, session_id) do
-      {:ok, Session.events_from_cursor(session, cursor, limit)}
-    else
-      _ -> {:error, :session_not_found}
-    end
-  end
-
-  @doc """
   Query one session by ID.
   """
   def query_session(state, lane_id, session_id) do
@@ -145,18 +142,6 @@ defmodule Starcite.Runtime.RaftFSM do
       {:ok, session}
     else
       _ -> {:error, :session_not_found}
-    end
-  end
-
-  @doc """
-  Query unarchived events (seq > archived_seq) up to `limit`.
-  """
-  def query_unarchived(state, lane_id, session_id, limit) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, %Session{} = session} <- fetch_session(lane, session_id) do
-      Session.events_from_cursor(session, session.archived_seq, limit)
-    else
-      _ -> []
     end
   end
 
@@ -180,6 +165,29 @@ defmodule Starcite.Runtime.RaftFSM do
   defp guard_expected_seq(%Session{last_seq: last_seq}, expected_seq)
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
+
+  defp evict_archived_events(_session_id, previous_archived_seq, updated_archived_seq)
+       when updated_archived_seq <= previous_archived_seq do
+    0
+  end
+
+  defp evict_archived_events(session_id, _previous_archived_seq, updated_archived_seq) do
+    EventStore.delete_below(session_id, updated_archived_seq + 1)
+  end
+
+  defp release_cursor_effect(
+         %{index: raft_index},
+         previous_archived_seq,
+         updated_archived_seq,
+         %__MODULE__{} = state
+       )
+       when is_integer(raft_index) and raft_index > 0 and
+              updated_archived_seq > previous_archived_seq do
+    {:release_cursor, raft_index, state}
+  end
+
+  defp release_cursor_effect(_meta, _previous_archived_seq, _updated_archived_seq, _state),
+    do: nil
 
   defp build_effects(session_id, event, last_seq) do
     stream_event =
