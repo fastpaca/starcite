@@ -87,11 +87,16 @@ function parseMetricSamples(body, metricName) {
   return samples;
 }
 
+function firstMetricValue(samples) {
+  if (!samples || samples.length === 0) return null;
+  return samples[0].value;
+}
+
 /**
  * Poll archive lag and queue pressure from /metrics.
  *
  * Returns per-session lag summary for the provided session IDs and selected
- * queue gauges exposed by PromEx.
+ * queue gauges exposed by PromEx, plus BEAM memory gauges.
  */
 export function getArchiveLagSnapshot(sessionIds, opts = {}) {
   if (!sessionIds || sessionIds.length === 0) {
@@ -116,6 +121,19 @@ export function getArchiveLagSnapshot(sessionIds, opts = {}) {
   const lagSamples = parseMetricSamples(res.body, 'starcite_archive_lag');
   const pendingSamples = parseMetricSamples(res.body, 'starcite_archive_pending_rows');
   const queueAgeSamples = parseMetricSamples(res.body, 'starcite_archive_oldest_age_seconds');
+  const beamAllocatedSamples = parseMetricSamples(
+    res.body,
+    'starcite_prom_ex_beam_memory_allocated_bytes',
+  );
+  const beamProcessesSamples = parseMetricSamples(
+    res.body,
+    'starcite_prom_ex_beam_memory_processes_total_bytes',
+  );
+  const beamEtsSamples = parseMetricSamples(res.body, 'starcite_prom_ex_beam_memory_ets_total_bytes');
+  const beamBinarySamples = parseMetricSamples(
+    res.body,
+    'starcite_prom_ex_beam_memory_binary_total_bytes',
+  );
 
   const lagBySession = {};
   for (const sample of lagSamples) {
@@ -138,8 +156,17 @@ export function getArchiveLagSnapshot(sessionIds, opts = {}) {
   const lagSum = lagValues.reduce((acc, value) => acc + value, 0);
   const lagMax = lagValues.length > 0 ? Math.max(...lagValues) : 0;
   const lagAvg = lagValues.length > 0 ? lagSum / lagValues.length : 0;
-  const pendingRows = pendingSamples.length > 0 ? pendingSamples[0].value : 0;
-  const queueAgeSeconds = queueAgeSamples.length > 0 ? queueAgeSamples[0].value : 0;
+  const pendingRows = firstMetricValue(pendingSamples) ?? 0;
+  const queueAgeSeconds = firstMetricValue(queueAgeSamples) ?? 0;
+  const beamMemoryAllocatedBytes = firstMetricValue(beamAllocatedSamples);
+  const beamMemoryProcessesBytes = firstMetricValue(beamProcessesSamples);
+  const beamMemoryEtsBytes = firstMetricValue(beamEtsSamples);
+  const beamMemoryBinaryBytes = firstMetricValue(beamBinarySamples);
+  const beamMemoryMissing =
+    beamMemoryAllocatedBytes === null ||
+    beamMemoryProcessesBytes === null ||
+    beamMemoryEtsBytes === null ||
+    beamMemoryBinaryBytes === null;
 
   return {
     ok: true,
@@ -152,6 +179,11 @@ export function getArchiveLagSnapshot(sessionIds, opts = {}) {
     lagSum,
     pendingRows,
     queueAgeSeconds,
+    beamMemoryAllocatedBytes,
+    beamMemoryProcessesBytes,
+    beamMemoryEtsBytes,
+    beamMemoryBinaryBytes,
+    beamMemoryMissing,
   };
 }
 

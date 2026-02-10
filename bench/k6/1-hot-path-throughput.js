@@ -18,6 +18,12 @@ const archiveQueueAgeSeconds = new Trend('archive_queue_age_seconds', false);
 const archiveLagSamples = new Counter('archive_lag_samples');
 const archiveLagProbeFailures = new Counter('archive_lag_probe_failures');
 const archiveLagMissingSessions = new Counter('archive_lag_missing_sessions');
+const beamMemoryAllocatedBytes = new Trend('beam_memory_allocated_bytes', false);
+const beamMemoryProcessesBytes = new Trend('beam_memory_processes_bytes', false);
+const beamMemoryEtsBytes = new Trend('beam_memory_ets_bytes', false);
+const beamMemoryBinaryBytes = new Trend('beam_memory_binary_bytes', false);
+const beamMemorySamples = new Counter('beam_memory_samples');
+const beamMemoryMissing = new Counter('beam_memory_missing');
 
 const maxVUs = Number(__ENV.MAX_VUS || 20);
 const rampDuration = __ENV.RAMP_DURATION || '30s';
@@ -134,6 +140,16 @@ export default function (data) {
       archiveLagAvg.add(snapshot.lagAvg);
       archivePendingRows.add(snapshot.pendingRows);
       archiveQueueAgeSeconds.add(snapshot.queueAgeSeconds);
+
+      if (snapshot.beamMemoryMissing) {
+        beamMemoryMissing.add(1);
+      } else {
+        beamMemorySamples.add(1);
+        beamMemoryAllocatedBytes.add(snapshot.beamMemoryAllocatedBytes);
+        beamMemoryProcessesBytes.add(snapshot.beamMemoryProcessesBytes);
+        beamMemoryEtsBytes.add(snapshot.beamMemoryEtsBytes);
+        beamMemoryBinaryBytes.add(snapshot.beamMemoryBinaryBytes);
+      }
 
       if (snapshot.missingSessions > 0) {
         archiveLagMissingSessions.add(snapshot.missingSessions);

@@ -13,7 +13,8 @@ defmodule Starcite.Observability.PromEx do
   @impl true
   def plugins do
     [
-      Starcite.Observability.PromEx.Metrics
+      Starcite.Observability.PromEx.Metrics,
+      PromEx.Plugins.Beam
     ]
   end
 
