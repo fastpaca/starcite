@@ -53,29 +53,6 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
-event_plane =
-  case System.get_env("STARCITE_EVENT_PLANE") do
-    nil ->
-      :legacy
-
-    "" ->
-      :legacy
-
-    "legacy" ->
-      :legacy
-
-    "dual_write" ->
-      :dual_write
-
-    value ->
-      raise """
-      invalid STARCITE_EVENT_PLANE=#{inspect(value)}.
-      expected one of: legacy, dual_write
-      """
-  end
-
-config :starcite, :event_plane, event_plane
-
 # Configure Postgres Repo at runtime when archiver is enabled
 if enabled_env?.(System.get_env("STARCITE_ARCHIVER_ENABLED")) do
   db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")

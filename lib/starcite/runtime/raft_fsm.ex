@@ -12,7 +12,6 @@ defmodule Starcite.Runtime.RaftFSM do
   alias Starcite.Session.EventLog
 
   @num_lanes 16
-  @event_plane_modes [:legacy, :dual_write]
 
   defmodule Lane do
     @moduledoc false
@@ -51,7 +50,7 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
-          :ok = maybe_dual_write_payload(session_id, event)
+          :ok = EventStore.put_event(session_id, event)
 
           new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
           new_state = put_in(state.lanes[lane_id], new_lane)
@@ -216,22 +215,5 @@ defmodule Starcite.Runtime.RaftFSM do
       }
 
     [stream_event, cursor_update, archive_event]
-  end
-
-  defp maybe_dual_write_payload(session_id, event) do
-    case event_plane_mode() do
-      :legacy ->
-        :ok
-
-      :dual_write ->
-        EventStore.put_event(session_id, event)
-    end
-  end
-
-  defp event_plane_mode do
-    case Application.get_env(:starcite, :event_plane, :legacy) do
-      mode when mode in @event_plane_modes -> mode
-      other -> raise ArgumentError, "invalid :starcite, :event_plane value: #{inspect(other)}"
-    end
   end
 end

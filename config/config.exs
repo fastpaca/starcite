@@ -10,8 +10,7 @@ import Config
 config :starcite,
   ecto_repos: [Starcite.Repo],
   raft_data_dir: "priv/raft",
-  raft_flush_interval_ms: 5000,
-  event_plane: :legacy
+  raft_flush_interval_ms: 5000
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,
