@@ -48,7 +48,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert event.payload == %{text: "one"}
   end
 
-  test "ack_archived evicts mirrored events below acknowledged cursor" do
+  test "ack_archived updates archived sequence without evicting ETS mirrored events" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
@@ -65,11 +65,16 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert {:ok, _} = EventStore.get_event(session_id, 2)
     assert {:ok, _} = EventStore.get_event(session_id, 3)
 
-    {_, {:reply, {:ok, %{archived_seq: 2, trimmed: _trimmed}}}} =
+    {next_state, {:reply, {:ok, %{archived_seq: 2, trimmed: _trimmed}}}} =
       RaftFSM.apply(nil, {:ack_archived, 0, session_id, 2}, state)
 
-    assert :error = EventStore.get_event(session_id, 1)
-    assert :error = EventStore.get_event(session_id, 2)
+    assert {:ok, session} = RaftFSM.query_session(next_state, 0, session_id)
+    assert session.archived_seq == 2
+
+    assert {:ok, event_one} = EventStore.get_event(session_id, 1)
+    assert event_one.payload == %{text: "one"}
+    assert {:ok, event_two} = EventStore.get_event(session_id, 2)
+    assert event_two.payload == %{text: "two"}
     assert {:ok, event} = EventStore.get_event(session_id, 3)
     assert event.payload == %{text: "three"}
   end

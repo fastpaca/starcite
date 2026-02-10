@@ -96,7 +96,6 @@ defmodule Starcite.Runtime.RaftFSM do
 
     with {:ok, session} <- fetch_session(lane, session_id) do
       {updated_session, trimmed} = Session.persist_ack(session, upto_seq)
-      _evicted = EventStore.delete_below(session_id, upto_seq + 1)
       new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
       new_state = put_in(state.lanes[lane_id], new_lane)
 

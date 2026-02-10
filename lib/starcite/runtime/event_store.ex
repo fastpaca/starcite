@@ -13,7 +13,6 @@ defmodule Starcite.Runtime.EventStore do
   alias Starcite.Session.EventLog
 
   @table :starcite_event_store
-  @session_index_table :starcite_event_store_sessions
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -22,7 +21,6 @@ defmodule Starcite.Runtime.EventStore do
   @impl true
   def init(_opts) do
     _table = ensure_table()
-    _session_index_table = ensure_session_index_table()
     {:ok, %{}}
   end
 
@@ -33,9 +31,8 @@ defmodule Starcite.Runtime.EventStore do
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
-    session_index_table = ensure_session_index_table()
     true = :ets.insert(table, {{session_id, seq}, event})
-    :ok = update_session_max_seq(session_index_table, session_id, seq)
+    :ok = update_session_max_seq(table, session_id, seq)
 
     Telemetry.event_store_write(
       session_id,
@@ -91,7 +88,6 @@ defmodule Starcite.Runtime.EventStore do
   def delete_below(session_id, floor_seq)
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
     table = ensure_table()
-    session_index_table = ensure_session_index_table()
 
     ms = [
       {
@@ -104,7 +100,7 @@ defmodule Starcite.Runtime.EventStore do
     deleted = :ets.select_delete(table, ms)
 
     if session_size(session_id) == 0 do
-      :ets.delete(session_index_table, session_id)
+      :ets.delete(table, {:max_seq, session_id})
     end
 
     deleted
@@ -116,7 +112,16 @@ defmodule Starcite.Runtime.EventStore do
   @spec size() :: non_neg_integer()
   def size do
     table = ensure_table()
-    :ets.info(table, :size) || 0
+
+    ms = [
+      {
+        {{:"$1", :"$2"}, :"$3"},
+        [{:is_binary, :"$1"}, {:is_integer, :"$2"}, {:>, :"$2", 0}],
+        [true]
+      }
+    ]
+
+    :ets.select_count(table, ms)
   end
 
   @doc """
@@ -142,11 +147,17 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec session_ids() :: [String.t()]
   def session_ids do
-    session_index_table = ensure_session_index_table()
+    table = ensure_table()
 
-    session_index_table
-    |> :ets.tab2list()
-    |> Enum.map(fn {session_id, _max_seq} -> session_id end)
+    ms = [
+      {
+        {{:max_seq, :"$1"}, :"$2"},
+        [],
+        [:"$1"]
+      }
+    ]
+
+    :ets.select(table, ms)
   end
 
   @doc """
@@ -154,10 +165,10 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec max_seq(String.t()) :: {:ok, pos_integer()} | :error
   def max_seq(session_id) when is_binary(session_id) and session_id != "" do
-    session_index_table = ensure_session_index_table()
+    table = ensure_table()
 
-    case :ets.lookup(session_index_table, session_id) do
-      [{^session_id, seq}] when is_integer(seq) and seq > 0 -> {:ok, seq}
+    case :ets.lookup(table, {:max_seq, session_id}) do
+      [{{:max_seq, ^session_id}, seq}] when is_integer(seq) and seq > 0 -> {:ok, seq}
       [] -> :error
     end
   end
@@ -166,14 +177,6 @@ defmodule Starcite.Runtime.EventStore do
   @spec clear() :: :ok
   def clear do
     case :ets.whereis(@table) do
-      :undefined ->
-        :ok
-
-      table ->
-        :ets.delete_all_objects(table)
-    end
-
-    case :ets.whereis(@session_index_table) do
       :undefined ->
         :ok
 
@@ -200,33 +203,19 @@ defmodule Starcite.Runtime.EventStore do
     end
   end
 
-  defp ensure_session_index_table do
-    case :ets.whereis(@session_index_table) do
-      :undefined ->
-        :ets.new(@session_index_table, [
-          :set,
-          :named_table,
-          :public,
-          {:read_concurrency, true},
-          {:write_concurrency, true}
-        ])
+  defp update_session_max_seq(table, session_id, seq) do
+    key = {:max_seq, session_id}
 
-      table ->
-        table
-    end
-  end
-
-  defp update_session_max_seq(session_index_table, session_id, seq) do
-    case :ets.lookup(session_index_table, session_id) do
+    case :ets.lookup(table, key) do
       [] ->
-        true = :ets.insert(session_index_table, {session_id, seq})
+        true = :ets.insert(table, {key, seq})
         :ok
 
-      [{^session_id, max_seq}] when is_integer(max_seq) and max_seq >= seq ->
+      [{^key, max_seq}] when is_integer(max_seq) and max_seq >= seq ->
         :ok
 
-      [{^session_id, _max_seq}] ->
-        true = :ets.insert(session_index_table, {session_id, seq})
+      [{^key, _max_seq}] ->
+        true = :ets.insert(table, {key, seq})
         :ok
     end
   end
