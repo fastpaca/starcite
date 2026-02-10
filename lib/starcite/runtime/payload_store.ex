@@ -10,20 +10,9 @@ defmodule Starcite.Runtime.PayloadStore do
   use GenServer
 
   alias Starcite.Observability.Telemetry
+  alias Starcite.Session.EventLog
 
   @table :starcite_payload_store
-
-  @type event :: %{
-          required(:seq) => pos_integer(),
-          required(:type) => String.t(),
-          required(:payload) => map(),
-          required(:actor) => String.t(),
-          optional(:source) => String.t() | nil,
-          required(:metadata) => map(),
-          required(:refs) => map(),
-          optional(:idempotency_key) => String.t() | nil,
-          required(:inserted_at) => NaiveDateTime.t() | DateTime.t()
-        }
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -38,45 +27,16 @@ defmodule Starcite.Runtime.PayloadStore do
   @doc """
   Insert one committed event for a session.
   """
-  @spec put_event(String.t(), event()) :: :ok
-  def put_event(
-        session_id,
-        %{
-          seq: seq,
-          type: type,
-          payload: payload,
-          actor: actor,
-          inserted_at: inserted_at
-        } = event
-      )
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and
-             actor != "" and
-             (is_struct(inserted_at, NaiveDateTime) or is_struct(inserted_at, DateTime)) do
-    source = optional_binary(Map.get(event, :source), :source)
-    metadata = optional_map(Map.get(event, :metadata, %{}), :metadata)
-    refs = optional_map(Map.get(event, :refs, %{}), :refs)
-    idempotency_key = optional_binary(Map.get(event, :idempotency_key), :idempotency_key)
-
-    normalized = %{
-      seq: seq,
-      type: type,
-      payload: payload,
-      actor: actor,
-      source: source,
-      metadata: metadata,
-      refs: refs,
-      idempotency_key: idempotency_key,
-      inserted_at: inserted_at
-    }
-
+  @spec put_event(String.t(), EventLog.event()) :: :ok
+  def put_event(session_id, %{seq: seq} = event)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
-    true = :ets.insert(table, {{session_id, seq}, normalized})
+    true = :ets.insert(table, {{session_id, seq}, event})
 
     Telemetry.payload_store_write(
       session_id,
       seq,
-      byte_size(Jason.encode!(payload)),
+      byte_size(Jason.encode!(event.payload)),
       size()
     )
 
@@ -86,7 +46,7 @@ defmodule Starcite.Runtime.PayloadStore do
   @doc """
   Fetch one event by exact `{session_id, seq}` key.
   """
-  @spec get_event(String.t(), pos_integer()) :: {:ok, event()} | :error
+  @spec get_event(String.t(), pos_integer()) :: {:ok, EventLog.event()} | :error
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
@@ -100,7 +60,7 @@ defmodule Starcite.Runtime.PayloadStore do
   @doc """
   Return events for `seq > cursor`, ordered ascending, up to `limit`.
   """
-  @spec from_cursor(String.t(), non_neg_integer(), pos_integer()) :: [event()]
+  @spec from_cursor(String.t(), non_neg_integer(), pos_integer()) :: [EventLog.event()]
   def from_cursor(session_id, cursor, limit)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 do
@@ -203,18 +163,5 @@ defmodule Starcite.Runtime.PayloadStore do
       :"$end_of_table" ->
         []
     end
-  end
-
-  defp optional_binary(nil, _label), do: nil
-  defp optional_binary(value, _label) when is_binary(value), do: value
-
-  defp optional_binary(value, label) do
-    raise ArgumentError, "expected #{label} to be nil or binary, got: #{inspect(value)}"
-  end
-
-  defp optional_map(value, _label) when is_map(value), do: value
-
-  defp optional_map(value, label) do
-    raise ArgumentError, "expected #{label} to be a map, got: #{inspect(value)}"
   end
 end

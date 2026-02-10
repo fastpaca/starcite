@@ -10,6 +10,7 @@ defmodule Starcite.Runtime.CursorUpdate do
   """
 
   @topic_prefix "session_cursor:"
+  alias Starcite.Session.EventLog
 
   @type t :: %{
           required(:version) => 1,
@@ -29,7 +30,7 @@ defmodule Starcite.Runtime.CursorUpdate do
     @topic_prefix <> session_id
   end
 
-  @spec message(String.t(), map(), pos_integer()) :: message()
+  @spec message(String.t(), EventLog.event(), pos_integer()) :: message()
   def message(
         session_id,
         %{
@@ -44,8 +45,6 @@ defmodule Starcite.Runtime.CursorUpdate do
              is_integer(last_seq) and last_seq >= seq and is_binary(type) and type != "" and
              is_binary(actor) and actor != "" and
              (is_struct(inserted_at, NaiveDateTime) or is_struct(inserted_at, DateTime)) do
-    source = optional_binary(Map.get(event, :source))
-
     {:cursor_update,
      %{
        version: 1,
@@ -54,15 +53,8 @@ defmodule Starcite.Runtime.CursorUpdate do
        last_seq: last_seq,
        type: type,
        actor: actor,
-       source: source,
+       source: Map.get(event, :source),
        inserted_at: inserted_at
      }}
-  end
-
-  defp optional_binary(nil), do: nil
-  defp optional_binary(value) when is_binary(value), do: value
-
-  defp optional_binary(value) do
-    raise ArgumentError, "expected source to be nil or binary, got: #{inspect(value)}"
   end
 end
