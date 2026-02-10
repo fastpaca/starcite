@@ -7,7 +7,7 @@ defmodule Starcite.Runtime.RaftFSM do
 
   @behaviour :ra_machine
 
-  alias Starcite.Runtime.{CursorUpdate, PayloadStore}
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
   alias Starcite.Session.EventLog
 
@@ -240,7 +240,7 @@ defmodule Starcite.Runtime.RaftFSM do
         :ok
 
       :dual_write ->
-        PayloadStore.put_event(session_id, event)
+        EventStore.put_event(session_id, event)
     end
   end
 

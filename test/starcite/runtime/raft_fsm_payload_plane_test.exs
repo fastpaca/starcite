@@ -1,15 +1,15 @@
 defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Runtime.{PayloadStore, RaftFSM}
+  alias Starcite.Runtime.{EventStore, RaftFSM}
 
   setup do
-    PayloadStore.clear()
+    EventStore.clear()
     old_mode = Application.get_env(:starcite, :payload_plane, :legacy)
 
     on_exit(fn ->
       Application.put_env(:starcite, :payload_plane, old_mode)
-      PayloadStore.clear()
+      EventStore.clear()
     end)
 
     :ok
@@ -24,8 +24,8 @@ defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
 
-    assert PayloadStore.size() == 0
-    assert :error = PayloadStore.get_event(session_id, 1)
+    assert EventStore.size() == 0
+    assert :error = EventStore.get_event(session_id, 1)
   end
 
   test "dual_write mode mirrors appended events to ETS" do
@@ -37,7 +37,7 @@ defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
 
-    assert {:ok, event} = PayloadStore.get_event(session_id, 1)
+    assert {:ok, event} = EventStore.get_event(session_id, 1)
     assert event.payload == %{text: "one"}
   end
 

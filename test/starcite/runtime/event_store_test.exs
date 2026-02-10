@@ -1,13 +1,13 @@
-defmodule Starcite.Runtime.PayloadStoreTest do
+defmodule Starcite.Runtime.EventStoreTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Runtime.PayloadStore
+  alias Starcite.Runtime.EventStore
 
   setup do
-    PayloadStore.clear()
+    EventStore.clear()
 
     on_exit(fn ->
-      PayloadStore.clear()
+      EventStore.clear()
     end)
 
     :ok
@@ -18,7 +18,7 @@ defmodule Starcite.Runtime.PayloadStoreTest do
     inserted_at = NaiveDateTime.utc_now()
 
     :ok =
-      PayloadStore.put_event(session_id, %{
+      EventStore.put_event(session_id, %{
         seq: 1,
         type: "content",
         payload: %{text: "hello"},
@@ -30,13 +30,13 @@ defmodule Starcite.Runtime.PayloadStoreTest do
         inserted_at: inserted_at
       })
 
-    assert {:ok, event} = PayloadStore.get_event(session_id, 1)
+    assert {:ok, event} = EventStore.get_event(session_id, 1)
     assert event.seq == 1
     assert event.payload == %{text: "hello"}
     assert event.inserted_at == inserted_at
 
-    assert :error = PayloadStore.get_event(session_id, 2)
-    assert PayloadStore.size() == 1
+    assert :error = EventStore.get_event(session_id, 2)
+    assert EventStore.size() == 1
   end
 
   test "reads ordered ranges from cursor with limit" do
@@ -44,7 +44,7 @@ defmodule Starcite.Runtime.PayloadStoreTest do
 
     for seq <- 1..5 do
       :ok =
-        PayloadStore.put_event(session_id, %{
+        EventStore.put_event(session_id, %{
           seq: seq,
           type: "content",
           payload: %{n: seq},
@@ -53,7 +53,7 @@ defmodule Starcite.Runtime.PayloadStoreTest do
         })
     end
 
-    events = PayloadStore.from_cursor(session_id, 2, 2)
+    events = EventStore.from_cursor(session_id, 2, 2)
     assert Enum.map(events, & &1.seq) == [3, 4]
   end
 
@@ -63,7 +63,7 @@ defmodule Starcite.Runtime.PayloadStoreTest do
 
     for seq <- 1..4 do
       :ok =
-        PayloadStore.put_event(session_id, %{
+        EventStore.put_event(session_id, %{
           seq: seq,
           type: "content",
           payload: %{n: seq},
@@ -73,7 +73,7 @@ defmodule Starcite.Runtime.PayloadStoreTest do
     end
 
     :ok =
-      PayloadStore.put_event(other_session, %{
+      EventStore.put_event(other_session, %{
         seq: 1,
         type: "content",
         payload: %{n: 1},
@@ -81,11 +81,11 @@ defmodule Starcite.Runtime.PayloadStoreTest do
         inserted_at: NaiveDateTime.utc_now()
       })
 
-    assert 2 = PayloadStore.delete_below(session_id, 3)
-    assert PayloadStore.session_size(session_id) == 2
-    assert PayloadStore.session_size(other_session) == 1
+    assert 2 = EventStore.delete_below(session_id, 3)
+    assert EventStore.session_size(session_id) == 2
+    assert EventStore.session_size(other_session) == 1
 
-    remaining = PayloadStore.from_cursor(session_id, 0, 10)
+    remaining = EventStore.from_cursor(session_id, 0, 10)
     assert Enum.map(remaining, & &1.seq) == [3, 4]
   end
 end

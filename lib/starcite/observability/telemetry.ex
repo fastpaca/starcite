@@ -35,7 +35,7 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
-  Emit telemetry for one payload-store write.
+  Emit telemetry for one event-store write.
 
   Measurements:
     - `:count` – fixed at 1 per write
@@ -46,14 +46,14 @@ defmodule Starcite.Observability.Telemetry do
     - `:session_id`
     - `:seq`
   """
-  @spec payload_store_write(String.t(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec event_store_write(String.t(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
           :ok
-  def payload_store_write(session_id, seq, payload_bytes, total_entries)
+  def event_store_write(session_id, seq, payload_bytes, total_entries)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
              is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
              total_entries >= 0 do
     :telemetry.execute(
-      [:starcite, :payload_store, :write],
+      [:starcite, :event_store, :write],
       %{count: 1, payload_bytes: payload_bytes, total_entries: total_entries},
       %{session_id: session_id, seq: seq}
     )

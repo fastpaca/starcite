@@ -1,10 +1,10 @@
-defmodule Starcite.Runtime.PayloadStore do
+defmodule Starcite.Runtime.EventStore do
   @moduledoc """
-  Node-local ETS payload store keyed by `{session_id, seq}`.
+  Node-local ETS event store keyed by `{session_id, seq}`.
 
   This store is intentionally independent from Raft FSM state. Raft `apply/3`
   may mirror committed events into this table so local consumers can read
-  payloads without traversing FSM event-log structures.
+  events without traversing FSM event-log structures.
   """
 
   use GenServer
@@ -12,7 +12,7 @@ defmodule Starcite.Runtime.PayloadStore do
   alias Starcite.Observability.Telemetry
   alias Starcite.Session.EventLog
 
-  @table :starcite_payload_store
+  @table :starcite_event_store
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -33,7 +33,7 @@ defmodule Starcite.Runtime.PayloadStore do
     table = ensure_table()
     true = :ets.insert(table, {{session_id, seq}, event})
 
-    Telemetry.payload_store_write(
+    Telemetry.event_store_write(
       session_id,
       seq,
       byte_size(Jason.encode!(event.payload)),
@@ -100,7 +100,7 @@ defmodule Starcite.Runtime.PayloadStore do
   end
 
   @doc """
-  Total payload entries currently in ETS.
+  Total event entries currently in ETS.
   """
   @spec size() :: non_neg_integer()
   def size do
@@ -109,7 +109,7 @@ defmodule Starcite.Runtime.PayloadStore do
   end
 
   @doc """
-  Number of payload entries for one session.
+  Number of event entries for one session.
   """
   @spec session_size(String.t()) :: non_neg_integer()
   def session_size(session_id) when is_binary(session_id) and session_id != "" do

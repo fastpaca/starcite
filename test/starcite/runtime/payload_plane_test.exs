@@ -3,17 +3,17 @@ defmodule Starcite.Runtime.PayloadPlaneTest do
 
   alias Phoenix.PubSub
   alias Starcite.Runtime
-  alias Starcite.Runtime.{CursorUpdate, PayloadStore}
+  alias Starcite.Runtime.{CursorUpdate, EventStore}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
-    PayloadStore.clear()
+    EventStore.clear()
 
     old_mode = Application.get_env(:starcite, :payload_plane, :legacy)
 
     on_exit(fn ->
       Application.put_env(:starcite, :payload_plane, old_mode)
-      PayloadStore.clear()
+      EventStore.clear()
     end)
 
     :ok
@@ -32,8 +32,8 @@ defmodule Starcite.Runtime.PayloadPlaneTest do
         actor: "agent:test"
       })
 
-    assert PayloadStore.size() == 0
-    assert :error = PayloadStore.get_event(session_id, 1)
+    assert EventStore.size() == 0
+    assert :error = EventStore.get_event(session_id, 1)
   end
 
   test "dual_write mode mirrors committed payloads into ETS" do
@@ -58,9 +58,9 @@ defmodule Starcite.Runtime.PayloadPlaneTest do
         idempotency_key: "idem-1"
       })
 
-    assert {:ok, stored} = PayloadStore.get_event(session_id, 1)
+    assert {:ok, stored} = EventStore.get_event(session_id, 1)
     assert stored.payload == %{text: "one"}
-    assert PayloadStore.session_size(session_id) == 1
+    assert EventStore.session_size(session_id) == 1
   end
 
   test "publishes payload-free cursor updates on the cursor topic" do
