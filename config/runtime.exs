@@ -76,6 +76,29 @@ event_plane =
 
 config :starcite, :event_plane, event_plane
 
+tail_source =
+  case System.get_env("STARCITE_TAIL_SOURCE") do
+    nil ->
+      :legacy
+
+    "" ->
+      :legacy
+
+    "legacy" ->
+      :legacy
+
+    "ets" ->
+      :ets
+
+    value ->
+      raise """
+      invalid STARCITE_TAIL_SOURCE=#{inspect(value)}.
+      expected one of: legacy, ets
+      """
+  end
+
+config :starcite, :tail_source, tail_source
+
 # Configure Postgres Repo at runtime when archiver is enabled
 if enabled_env?.(System.get_env("STARCITE_ARCHIVER_ENABLED")) do
   db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")
