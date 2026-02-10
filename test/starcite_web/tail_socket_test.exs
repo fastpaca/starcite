@@ -17,6 +17,7 @@ defmodule StarciteWeb.TailSocketTest do
     %{
       session_id: session_id,
       topic: "session:#{session_id}",
+      tail_source: :legacy,
       cursor: cursor,
       replay_queue: :queue.new(),
       replay_done: false,

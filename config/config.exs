@@ -11,7 +11,8 @@ config :starcite,
   ecto_repos: [Starcite.Repo],
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000,
-  payload_plane: :legacy
+  payload_plane: :legacy,
+  tail_source: :legacy
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,

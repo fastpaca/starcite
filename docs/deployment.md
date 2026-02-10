@@ -88,6 +88,7 @@ Prometheus metrics on `/metrics`.
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
 | `STARCITE_PAYLOAD_PLANE` | `legacy` | Payload mirroring mode (`legacy`, `dual_write`) |
+| `STARCITE_TAIL_SOURCE` | `legacy` | Tail read source (`legacy`, `ets`) |
 | `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
 | `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
