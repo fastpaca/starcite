@@ -36,7 +36,7 @@ defmodule Starcite.ArchiveTest do
       fn ->
         {:ok, session} = Runtime.get_session(session_id)
         assert session.archived_seq == session.last_seq
-        assert EventStore.session_size(session_id) == 5
+        assert EventStore.session_size(session_id) == 0
       end,
       timeout: 2_000
     )

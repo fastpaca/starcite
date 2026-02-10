@@ -146,14 +146,8 @@ defmodule Starcite.Session do
   Return the virtual tail size implied by retention metadata.
   """
   @spec tail_size(t()) :: non_neg_integer()
-  def tail_size(%Session{archived_seq: archived_seq, last_seq: last_seq, retention: retention}) do
-    floor = retained_floor(archived_seq, last_seq, retention.tail_keep)
-
-    if last_seq < floor do
-      0
-    else
-      last_seq - floor + 1
-    end
+  def tail_size(%Session{archived_seq: archived_seq, last_seq: last_seq}) do
+    max(last_seq - archived_seq, 0)
   end
 
   @spec to_map(t()) :: map()

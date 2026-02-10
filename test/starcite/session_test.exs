@@ -99,7 +99,7 @@ defmodule Starcite.SessionTest do
 
       assert session.archived_seq == 3
       assert trimmed == 1
-      assert Session.tail_size(session) == 4
+      assert Session.tail_size(session) == 2
     end
 
     test "prunes idempotency keys below retained tail floor" do
@@ -174,7 +174,7 @@ defmodule Starcite.SessionTest do
       {session, _trimmed} = Session.persist_ack(session, 10)
 
       assert session.archived_seq == 2
-      assert Session.tail_size(session) == 2
+      assert Session.tail_size(session) == 0
     end
   end
 
