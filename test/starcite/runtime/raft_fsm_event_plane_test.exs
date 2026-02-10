@@ -1,14 +1,14 @@
-defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
+defmodule Starcite.Runtime.RaftFSMEventPlaneTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Runtime.{EventStore, RaftFSM}
 
   setup do
     EventStore.clear()
-    old_mode = Application.get_env(:starcite, :payload_plane, :legacy)
+    old_mode = Application.get_env(:starcite, :event_plane, :legacy)
 
     on_exit(fn ->
-      Application.put_env(:starcite, :payload_plane, old_mode)
+      Application.put_env(:starcite, :event_plane, old_mode)
       EventStore.clear()
     end)
 
@@ -16,7 +16,7 @@ defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
   end
 
   test "legacy mode does not mirror appended events to ETS" do
-    Application.put_env(:starcite, :payload_plane, :legacy)
+    Application.put_env(:starcite, :event_plane, :legacy)
     session_id = unique_session_id()
 
     state = seeded_state(session_id)
@@ -29,7 +29,7 @@ defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
   end
 
   test "dual_write mode mirrors appended events to ETS" do
-    Application.put_env(:starcite, :payload_plane, :dual_write)
+    Application.put_env(:starcite, :event_plane, :dual_write)
     session_id = unique_session_id()
 
     state = seeded_state(session_id)
@@ -42,7 +42,7 @@ defmodule Starcite.Runtime.RaftFSMPayloadPlaneTest do
   end
 
   test "invalid mode raises from apply/3" do
-    Application.put_env(:starcite, :payload_plane, :unsupported)
+    Application.put_env(:starcite, :event_plane, :unsupported)
     session_id = unique_session_id()
 
     state = seeded_state(session_id)

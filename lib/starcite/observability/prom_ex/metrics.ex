@@ -10,7 +10,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
     [
       events_metrics(),
       archive_metrics(),
-      payload_plane_metrics()
+      event_plane_metrics()
     ]
   end
 
@@ -126,9 +126,9 @@ defmodule Starcite.Observability.PromEx.Metrics do
     )
   end
 
-  defp payload_plane_metrics do
+  defp event_plane_metrics do
     Event.build(
-      :starcite_payload_plane_metrics,
+      :starcite_event_plane_metrics,
       [
         counter("starcite_event_store_writes_total",
           event_name: [:starcite, :event_store, :write],

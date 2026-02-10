@@ -53,8 +53,8 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
-payload_plane =
-  case System.get_env("STARCITE_PAYLOAD_PLANE") do
+event_plane =
+  case System.get_env("STARCITE_EVENT_PLANE") do
     nil ->
       :legacy
 
@@ -69,12 +69,12 @@ payload_plane =
 
     value ->
       raise """
-      invalid STARCITE_PAYLOAD_PLANE=#{inspect(value)}.
+      invalid STARCITE_EVENT_PLANE=#{inspect(value)}.
       expected one of: legacy, dual_write
       """
   end
 
-config :starcite, :payload_plane, payload_plane
+config :starcite, :event_plane, event_plane
 
 # Configure Postgres Repo at runtime when archiver is enabled
 if enabled_env?.(System.get_env("STARCITE_ARCHIVER_ENABLED")) do

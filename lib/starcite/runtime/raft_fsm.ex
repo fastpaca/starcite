@@ -12,7 +12,7 @@ defmodule Starcite.Runtime.RaftFSM do
   alias Starcite.Session.EventLog
 
   @num_lanes 16
-  @payload_plane_modes [:legacy, :dual_write]
+  @event_plane_modes [:legacy, :dual_write]
 
   defmodule Lane do
     @moduledoc false
@@ -219,7 +219,7 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   defp maybe_dual_write_payload(session_id, event) do
-    case payload_plane_mode() do
+    case event_plane_mode() do
       :legacy ->
         :ok
 
@@ -228,10 +228,10 @@ defmodule Starcite.Runtime.RaftFSM do
     end
   end
 
-  defp payload_plane_mode do
-    case Application.get_env(:starcite, :payload_plane, :legacy) do
-      mode when mode in @payload_plane_modes -> mode
-      other -> raise ArgumentError, "invalid :starcite, :payload_plane value: #{inspect(other)}"
+  defp event_plane_mode do
+    case Application.get_env(:starcite, :event_plane, :legacy) do
+      mode when mode in @event_plane_modes -> mode
+      other -> raise ArgumentError, "invalid :starcite, :event_plane value: #{inspect(other)}"
     end
   end
 end
