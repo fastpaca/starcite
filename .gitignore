@@ -69,3 +69,4 @@ node*@127.0.0.1/
 
 # local branches/worktrees
 .worktrees
+*.plt
