@@ -54,9 +54,6 @@ defmodule StarciteWeb.TailSocketTest do
         else
           drain_until_idle(next_state, frames, remaining - 1)
         end
-
-      {:stop, _reason, next_state} ->
-        {Enum.reverse(frames), next_state}
     end
   end
 
