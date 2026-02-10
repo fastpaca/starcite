@@ -2,6 +2,7 @@ defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Runtime
+  alias Starcite.Archive.IdempotentTestAdapter
 
   setup do
     # Ensure clean raft data for isolation
@@ -177,6 +178,122 @@ defmodule Starcite.ArchiveTest do
           seqs = Enum.map(session_writes, & &1.seq)
           # Should have sequences 1-5 in order
           assert Enum.take(Enum.uniq(seqs), 5) == [1, 2, 3, 4, 5]
+        end,
+        timeout: 2_000
+      )
+    end
+  end
+
+  describe "pull-mode behavior" do
+    test "archives pending work across multiple sessions in one scan loop" do
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
+
+      session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
+      session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
+
+      {:ok, _} = Runtime.create_session(id: session_a)
+      {:ok, _} = Runtime.create_session(id: session_b)
+
+      for i <- 1..3 do
+        {:ok, _} =
+          Runtime.append_event(session_a, %{
+            type: "content",
+            payload: %{text: "a#{i}"},
+            actor: "agent:test"
+          })
+
+        {:ok, _} =
+          Runtime.append_event(session_b, %{
+            type: "content",
+            payload: %{text: "b#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session_a_state} = Runtime.get_session(session_a)
+          {:ok, session_b_state} = Runtime.get_session(session_b)
+
+          assert session_a_state.archived_seq == session_a_state.last_seq
+          assert session_b_state.archived_seq == session_b_state.last_seq
+
+          writes = IdempotentTestAdapter.get_writes()
+          written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
+
+          assert written_sessions == Enum.sort([session_a, session_b])
+        end,
+        timeout: 2_000
+      )
+    end
+
+    test "respects archive batch size per flush tick and converges over repeated ticks" do
+      old_batch_size = Application.get_env(:starcite, :archive_batch_size)
+      Application.put_env(:starcite, :archive_batch_size, 2)
+
+      on_exit(fn ->
+        if old_batch_size do
+          Application.put_env(:starcite, :archive_batch_size, old_batch_size)
+        else
+          Application.delete_env(:starcite, :archive_batch_size)
+        end
+      end)
+
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
+
+      session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for i <- 1..5 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{i}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          [first_batch | _] = IdempotentTestAdapter.get_write_batches()
+          assert length(first_batch) == 2
+        end,
+        timeout: 1_500
+      )
+
+      send(Starcite.Archive, :flush_tick)
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          {:ok, session} = Runtime.get_session(session_id)
+          assert session.archived_seq == session.last_seq
+
+          batch_sizes =
+            IdempotentTestAdapter.get_write_batches()
+            |> Enum.map(&length/1)
+
+          assert batch_sizes == [2, 2, 1]
         end,
         timeout: 2_000
       )

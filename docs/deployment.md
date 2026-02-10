@@ -66,8 +66,8 @@ Prometheus metrics on `/metrics`.
 | --- | --- |
 | `starcite_events_append_total` | Total appended events |
 | `starcite_events_payload_bytes` | Payload bytes appended |
-| `starcite_archive_pending_rows` | Rows waiting to flush |
-| `starcite_archive_pending_sessions` | Sessions with pending rows |
+| `starcite_archive_pending_rows` | Estimated unarchived events after flush |
+| `starcite_archive_pending_sessions` | Sessions still pending archival after flush |
 | `starcite_archive_flush_duration_ms` | Flush cycle duration |
 | `starcite_archive_attempted_total` | Rows attempted |
 | `starcite_archive_inserted_total` | Rows inserted |

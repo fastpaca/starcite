@@ -206,14 +206,6 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
-    archive_event =
-      {
-        :mod_call,
-        Starcite.Archive,
-        :append_events,
-        [session_id, [event]]
-      }
-
-    [stream_event, cursor_update, archive_event]
+    [stream_event, cursor_update]
   end
 end

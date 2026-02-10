@@ -32,6 +32,7 @@ defmodule Starcite.Runtime.EventStore do
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
     true = :ets.insert(table, {{session_id, seq}, event})
+    :ok = update_session_max_seq(table, session_id, seq)
 
     Telemetry.event_store_write(
       session_id,
@@ -96,7 +97,13 @@ defmodule Starcite.Runtime.EventStore do
       }
     ]
 
-    :ets.select_delete(table, ms)
+    deleted = :ets.select_delete(table, ms)
+
+    if session_size(session_id) == 0 do
+      :ets.delete(table, {:max_seq, session_id})
+    end
+
+    deleted
   end
 
   @doc """
@@ -105,7 +112,16 @@ defmodule Starcite.Runtime.EventStore do
   @spec size() :: non_neg_integer()
   def size do
     table = ensure_table()
-    :ets.info(table, :size) || 0
+
+    ms = [
+      {
+        {{:"$1", :"$2"}, :"$3"},
+        [{:is_binary, :"$1"}, {:is_integer, :"$2"}, {:>, :"$2", 0}],
+        [true]
+      }
+    ]
+
+    :ets.select_count(table, ms)
   end
 
   @doc """
@@ -126,6 +142,37 @@ defmodule Starcite.Runtime.EventStore do
     :ets.select_count(table, ms)
   end
 
+  @doc """
+  Return all session IDs currently represented in the event store index.
+  """
+  @spec session_ids() :: [String.t()]
+  def session_ids do
+    table = ensure_table()
+
+    ms = [
+      {
+        {{:max_seq, :"$1"}, :"$2"},
+        [],
+        [:"$1"]
+      }
+    ]
+
+    :ets.select(table, ms)
+  end
+
+  @doc """
+  Return the maximum mirrored sequence for one session.
+  """
+  @spec max_seq(String.t()) :: {:ok, pos_integer()} | :error
+  def max_seq(session_id) when is_binary(session_id) and session_id != "" do
+    table = ensure_table()
+
+    case :ets.lookup(table, {:max_seq, session_id}) do
+      [{{:max_seq, ^session_id}, seq}] when is_integer(seq) and seq > 0 -> {:ok, seq}
+      [] -> :error
+    end
+  end
+
   @doc false
   @spec clear() :: :ok
   def clear do
@@ -135,8 +182,9 @@ defmodule Starcite.Runtime.EventStore do
 
       table ->
         :ets.delete_all_objects(table)
-        :ok
     end
+
+    :ok
   end
 
   defp ensure_table do
@@ -152,6 +200,23 @@ defmodule Starcite.Runtime.EventStore do
 
       table ->
         table
+    end
+  end
+
+  defp update_session_max_seq(table, session_id, seq) do
+    key = {:max_seq, session_id}
+
+    case :ets.lookup(table, key) do
+      [] ->
+        true = :ets.insert(table, {key, seq})
+        :ok
+
+      [{^key, max_seq}] when is_integer(max_seq) and max_seq >= seq ->
+        :ok
+
+      [{^key, _max_seq}] ->
+        true = :ets.insert(table, {key, seq})
+        :ok
     end
   end
 

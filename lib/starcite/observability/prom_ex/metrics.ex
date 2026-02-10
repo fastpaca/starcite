@@ -42,12 +42,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
         last_value("starcite_archive_pending_rows",
           event_name: [:starcite, :archive, :flush],
           measurement: :pending_events,
-          description: "Pending rows in archive ETS queue"
+          description: "Estimated unarchived events pending after flush"
         ),
         last_value("starcite_archive_pending_sessions",
           event_name: [:starcite, :archive, :flush],
           measurement: :pending_sessions,
-          description: "Sessions with pending rows in archive ETS queue"
+          description: "Sessions still pending archival after flush"
         ),
         distribution("starcite_archive_flush_duration_ms",
           event_name: [:starcite, :archive, :flush],
@@ -102,7 +102,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
         last_value("starcite_archive_oldest_age_seconds",
           event_name: [:starcite, :archive, :queue_age],
           measurement: :seconds,
-          description: "Oldest pending event age across the archive queue (seconds)"
+          description: "Oldest pending archive backlog age across sessions (seconds)"
         ),
         last_value("starcite_archive_lag",
           event_name: [:starcite, :archive, :ack],
