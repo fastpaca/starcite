@@ -41,10 +41,7 @@ defmodule Starcite.Runtime.CursorUpdate do
         } = event,
         last_seq
       )
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_integer(last_seq) and last_seq >= seq and is_binary(type) and type != "" and
-             is_binary(actor) and actor != "" and
-             (is_struct(inserted_at, NaiveDateTime) or is_struct(inserted_at, DateTime)) do
+      when is_binary(session_id) and session_id != "" and is_integer(last_seq) and last_seq >= 0 do
     {:cursor_update,
      %{
        version: 1,
