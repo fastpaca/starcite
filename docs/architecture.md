@@ -23,7 +23,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Runtime | Applies create/append commands and tail replay queries |
 | Raft groups | 256 logical shards, each replicated across three nodes |
 | Snapshot manager | Raft snapshots for state recovery |
-| Archiver (optional) | Persists committed events to Postgres |
+| Archiver | Persists committed events to Postgres |
 | Event store (ETS) | Node-local payload mirror keyed by `{session_id, seq}` |
 
 ## Request flow
@@ -31,7 +31,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 1. **Create**: create session metadata in the shard owning that session id.
 2. **Append**: append one event; after quorum commit, ack with `seq`.
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
-4. **Archive (optional)**: committed events are persisted asynchronously; archive ack advances `archived_seq` and allows deterministic ETS release.
+4. **Archive**: committed events are persisted asynchronously; archive ack advances `archived_seq` and allows deterministic ETS release.
 
 ## Ordering and durability
 
@@ -49,14 +49,14 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | --- | --- |
 | Hot metadata (Raft) | Session metadata (`last_seq`, `archived_seq`, retention/idempotency state) |
 | Hot payloads (ETS) | Node-local event payloads keyed by `{session_id, seq}` |
-| Cold (optional Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
+| Cold (Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
 
 ## Replay behavior
 
 - `tail` replays committed events where `seq > cursor`.
 - Hot/live replay reads from local ETS.
 - Cold replay reads from archive adapter through Cachex.
-- When archive is enabled, archive acknowledgement advances `archived_seq` and releases ETS entries below that cursor.
+- Archive acknowledgement advances `archived_seq` and releases ETS entries below that cursor.
 
 ## Capacity and degradation
 
