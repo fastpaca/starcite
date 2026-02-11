@@ -48,6 +48,12 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - Emit telemetry via the centralized telemetry helper module; add new events there so tags stay normalised.
 - When you touch collections rendered in LiveView, prefer streams (`stream/3`) and track counts/empty states separately.
 - Use `mix test`, `mix test --failed`, or file-scoped runs to iterate quickly. End every work session with `mix precommit`.
+- Local cluster testing/benchmarking uses manual Compose lifecycle:
+  - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
+  - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/<scenario>.js`
+  - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
+- Avoid adding start/stop wrapper scripts for Docker Compose workflows; keep local failover drills explicit (`docker compose kill/pause/up`) and document them in `docs/local-testing.md`.
+- Treat cluster runs as optional vibe checks for local iteration; default to faster `mix test` loops when cluster behavior is not under test.
 
 ## Delivery Checklist
 

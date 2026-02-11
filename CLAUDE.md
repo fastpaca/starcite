@@ -10,6 +10,16 @@ Guidance for Claude Code when collaborating on Starcite.
 - `mix test` / `mix test path/to/file.exs` - execute test suites
 - `mix precommit` - final gate before handing work back (compile + format + tests)
 
+## Local Cluster Testing
+
+- Use manual Compose lifecycle with `docker-compose.integration.yml` (no wrapper start/stop scripts):
+  - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
+  - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/<scenario>.js`
+  - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
+- For failover drills, run workload and inject faults directly: `docker compose ... kill`, `pause`, `unpause`, `up -d`.
+- Use unique Compose project names for concurrent local clusters (`-p starcite-it-a`, `-p starcite-it-b`).
+- Keep cluster runs optional during local iteration; use `mix test` unless you specifically need cluster behavior/failover coverage.
+
 ## Product Surface
 
 Starcite exposes three primitives under `/v1`:

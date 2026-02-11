@@ -37,6 +37,8 @@ export function setup() {
   console.log('Setting up idempotency benchmark...');
   console.log(`Run ID: ${lib.config.runId}`);
 
+  lib.waitForClusterReady(90);
+
   const sessions = {};
 
   for (let vuId = 1; vuId <= sessionCount; vuId++) {

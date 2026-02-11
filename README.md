@@ -88,6 +88,7 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 - [Architecture](docs/architecture.md)
 - [Deployment](docs/deployment.md)
 - [Benchmarks](docs/benchmarks.md)
+- [Local Testing](docs/local-testing.md)
 
 ## Development
 
@@ -98,6 +99,17 @@ mix phx.server       # http://localhost:4000
 mix test
 mix precommit        # format + compile (warnings-as-errors) + test
 ```
+
+### Local Cluster (Manual Compose)
+
+```bash
+PROJECT_NAME=starcite-it-a
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/1-hot-path-throughput.js
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
+```
+
+See `docs/local-testing.md` for failover drills and multi-cluster local runs.
 
 ## Contributing
 

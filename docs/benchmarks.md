@@ -12,31 +12,27 @@ Starcite ships with a reproducible benchmark harness so you can validate perform
 
 ## Local quick run
 
-1. Start the local cluster:
+Use the manual Compose workflow from `docs/local-testing.md`.
+
+1. Start a local integration cluster:
    ```bash
-   ./scripts/start-cluster.sh
+   PROJECT_NAME=starcite-it-a
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
    ```
-2. Verify primitive health:
+2. Run scenarios sequentially from the Compose `k6` service:
    ```bash
-   ./scripts/test-cluster.sh
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/1-hot-path-throughput.js
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/2-rest-read-write-mix.js
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/3-cold-start-replay.js
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/4-durability-cadence.js
    ```
-3. Verify archive cutover end-to-end (benchmark + probe + Postgres + cutover metrics):
+3. Tear down:
    ```bash
-   ./scripts/test-cutover.sh
-   ```
-4. Run scenarios sequentially:
-   ```bash
-   k6 run bench/k6/1-hot-path-throughput.js
-   k6 run bench/k6/2-rest-read-write-mix.js
-   k6 run bench/k6/3-cold-start-replay.js
-   k6 run bench/k6/4-durability-cadence.js
-   ```
-5. Stop the cluster:
-   ```bash
-   ./scripts/stop-cluster.sh
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
    ```
 
 Run k6 scenarios sequentially, not in parallel. Each scenario includes threshold gates and may abort on failure.
+For manual failover drills (`kill`, `pause`, `restart`), see `docs/local-testing.md`.
 
 ## AWS reproducible setup
 
