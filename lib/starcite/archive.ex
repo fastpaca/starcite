@@ -10,6 +10,7 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  alias Starcite.Archive.Store
   alias Starcite.Runtime
   alias Starcite.Runtime.{EventStore, RaftManager}
 
@@ -113,7 +114,7 @@ defmodule Starcite.Archive do
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
-    case adapter.write_events(rows) do
+    case Store.write_events(adapter, rows) do
       {:ok, inserted} ->
         upto_seq = contiguous_upto(rows)
 

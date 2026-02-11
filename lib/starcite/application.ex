@@ -12,7 +12,7 @@ defmodule Starcite.Application do
       [
         # PromEx metrics
         Starcite.Observability.PromEx,
-        # Cache fronting archived Postgres reads
+        # Cache fronting archive reads
         archive_read_cache_spec(),
         # Ecto Repo for archive storage (only if archiving is enabled)
         repo_spec(),

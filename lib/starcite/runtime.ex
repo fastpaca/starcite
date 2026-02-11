@@ -11,7 +11,8 @@ defmodule Starcite.Runtime do
 
   require Logger
 
-  alias Starcite.Runtime.{ArchiveStore, EventStore, RaftFSM, RaftManager, RaftTopology}
+  alias Starcite.Archive.Store, as: ArchiveStore
+  alias Starcite.Runtime.{EventStore, RaftFSM, RaftManager, RaftTopology}
   alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
@@ -369,8 +370,10 @@ defmodule Starcite.Runtime do
   end
 
   defp read_cold_events(id, cursor, limit, %Session{archived_seq: archived_seq}) do
-    if archived_seq > cursor and ArchiveStore.available?() do
-      ArchiveStore.from_cursor(id, cursor, limit, archived_seq)
+    if archived_seq > cursor do
+      from_seq = cursor + 1
+      to_seq = min(archived_seq, cursor + limit)
+      ArchiveStore.read_events(id, from_seq, to_seq)
     else
       {:ok, []}
     end

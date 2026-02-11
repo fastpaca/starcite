@@ -20,4 +20,6 @@ defmodule Starcite.Archive.Adapter do
 
   @callback start_link(keyword()) :: GenServer.on_start()
   @callback write_events([event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @callback read_events(String.t(), pos_integer(), pos_integer()) ::
+              {:ok, [map()]} | {:error, term()}
 end

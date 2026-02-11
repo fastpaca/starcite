@@ -12,4 +12,7 @@ defmodule Starcite.Archive.TestAdapter do
 
   @impl true
   def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
+
+  @impl true
+  def read_events(_session_id, _from_seq, _to_seq), do: {:ok, []}
 end
