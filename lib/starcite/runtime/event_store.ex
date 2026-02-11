@@ -20,9 +20,8 @@ defmodule Starcite.Runtime.EventStore do
   # max_seq lookups without scanning the entire event table.
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
-  @max_entries_env "STARCITE_EVENT_STORE_MAX_ENTRIES"
-  @max_entries_per_session_env "STARCITE_EVENT_STORE_MAX_ENTRIES_PER_SESSION"
-  @enable_backpressure_env "STARCITE_ENABLE_BACKPRESSURE"
+  @max_size_env "STARCITE_EVENT_STORE_MAX_SIZE"
+  @default_max_size "256MB"
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -41,7 +40,7 @@ defmodule Starcite.Runtime.EventStore do
   @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    case ensure_capacity(session_id) do
+    case ensure_capacity(session_id, event) do
       :ok ->
         event_table = ensure_event_table()
         index_table = ensure_index_table()
@@ -52,7 +51,8 @@ defmodule Starcite.Runtime.EventStore do
           session_id,
           seq,
           byte_size(Jason.encode!(event.payload)),
-          size()
+          size(),
+          memory_bytes()
         )
 
         :ok
@@ -60,10 +60,9 @@ defmodule Starcite.Runtime.EventStore do
       {:error, :event_store_backpressure, metadata} ->
         Telemetry.event_store_backpressure(
           session_id,
-          metadata.total_entries,
-          metadata.session_entries,
-          metadata.global_limit,
-          metadata.session_limit,
+          metadata.current_memory_bytes,
+          metadata.projected_memory_bytes,
+          metadata.max_memory_bytes,
           metadata.reason
         )
 
@@ -171,6 +170,16 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   @doc """
+  Approximate ETS memory usage for the event store table in bytes.
+  """
+  @spec memory_bytes() :: non_neg_integer()
+  def memory_bytes do
+    table = ensure_event_table()
+    words = :ets.info(table, :memory) || 0
+    words * :erlang.system_info(:wordsize)
+  end
+
+  @doc """
   Return all session IDs currently represented in the event store index.
   """
   @spec session_ids() :: [String.t()]
@@ -268,113 +277,87 @@ defmodule Starcite.Runtime.EventStore do
     end
   end
 
-  defp ensure_capacity(session_id) when is_binary(session_id) and session_id != "" do
-    if backpressure_enabled?() do
-      total_entries = size()
-      session_entries = session_size(session_id)
-      global_limit = max_entries_limit()
-      session_limit = max_entries_per_session_limit()
+  defp ensure_capacity(session_id, event)
+       when is_binary(session_id) and session_id != "" and is_map(event) do
+    max_memory_bytes = max_memory_bytes_limit()
+    current_memory_bytes = memory_bytes()
+    projected_memory_bytes = current_memory_bytes + estimated_insert_bytes(session_id, event)
 
-      cond do
-        is_integer(global_limit) and total_entries >= global_limit ->
-          {:error, :event_store_backpressure,
-           %{
-             reason: :global_limit,
-             total_entries: total_entries,
-             session_entries: session_entries,
-             global_limit: global_limit,
-             session_limit: session_limit
-           }}
-
-        is_integer(session_limit) and session_entries >= session_limit ->
-          {:error, :event_store_backpressure,
-           %{
-             reason: :session_limit,
-             total_entries: total_entries,
-             session_entries: session_entries,
-             global_limit: global_limit,
-             session_limit: session_limit
-           }}
-
-        true ->
-          :ok
-      end
+    if projected_memory_bytes > max_memory_bytes do
+      {:error, :event_store_backpressure,
+       %{
+         reason: :memory_limit,
+         current_memory_bytes: current_memory_bytes,
+         projected_memory_bytes: projected_memory_bytes,
+         max_memory_bytes: max_memory_bytes
+       }}
     else
       :ok
     end
   end
 
-  defp backpressure_enabled? do
-    parse_bool_env_or_default(
-      @enable_backpressure_env,
-      Application.get_env(:starcite, :enable_backpressure, false)
+  defp max_memory_bytes_limit do
+    parse_size_env_or_default(
+      @max_size_env,
+      Application.get_env(:starcite, :event_store_max_size, @default_max_size)
     )
   end
 
-  defp max_entries_limit do
-    parse_int_env_or_default(
-      @max_entries_env,
-      Application.get_env(:starcite, :event_store_max_entries),
-      1
-    )
+  defp estimated_insert_bytes(session_id, %{seq: seq} = event)
+       when is_binary(session_id) and is_integer(seq) and seq > 0 do
+    :erlang.external_size({{session_id, seq}, event})
   end
 
-  defp max_entries_per_session_limit do
-    parse_int_env_or_default(
-      @max_entries_per_session_env,
-      Application.get_env(:starcite, :event_store_max_entries_per_session),
-      1
-    )
-  end
-
-  defp parse_int_env_or_default(env_key, default, min)
-       when is_binary(env_key) and is_integer(min) and min > 0 do
+  defp parse_size_env_or_default(env_key, default) when is_binary(env_key) do
     case System.get_env(env_key) do
-      nil -> validate_int!(default, env_key, min)
-      raw -> parse_int!(raw, env_key, min)
+      nil -> parse_size_value!(default, env_key)
+      raw -> parse_size_value!(raw, env_key)
     end
   end
 
-  defp parse_bool_env_or_default(env_key, default)
-       when is_binary(env_key) and is_boolean(default) do
-    case System.get_env(env_key) do
-      nil -> default
-      raw -> parse_bool!(raw, env_key)
-    end
+  defp parse_size_value!(value, _env_key) when is_integer(value) and value > 0 do
+    # Integer config values are interpreted as MB.
+    value * 1_048_576
   end
 
-  defp validate_int!(nil, _env_key, _min), do: nil
+  defp parse_size_value!(raw, env_key) when is_binary(raw) do
+    case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
+      [_, amount_raw, unit_raw] ->
+        amount = String.to_integer(amount_raw)
+        unit = String.upcase(unit_raw)
 
-  defp validate_int!(value, _env_key, min) when is_integer(value) and value >= min,
-    do: value
+        multiplier =
+          case unit do
+            "" -> 1_048_576
+            "B" -> 1
+            "K" -> 1_024
+            "KB" -> 1_024
+            "KIB" -> 1_024
+            "M" -> 1_048_576
+            "MB" -> 1_048_576
+            "MIB" -> 1_048_576
+            "G" -> 1_073_741_824
+            "GB" -> 1_073_741_824
+            "GIB" -> 1_073_741_824
+            "T" -> 1_099_511_627_776
+            "TB" -> 1_099_511_627_776
+            "TIB" -> 1_099_511_627_776
+            _ -> :invalid
+          end
 
-  defp validate_int!(value, env_key, min) do
-    raise ArgumentError,
-          "invalid integer for #{env_key}: #{inspect(value)} (expected nil or >= #{min})"
-  end
+        case {amount, multiplier} do
+          {amount, multiplier}
+          when is_integer(amount) and amount > 0 and is_integer(multiplier) ->
+            amount * multiplier
 
-  defp parse_int!(raw, env_key, min) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {value, ""} when value >= min ->
-        value
+          _ ->
+            raise ArgumentError,
+                  "invalid size for #{env_key}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
+        end
 
       _ ->
         raise ArgumentError,
-              "invalid integer for #{env_key}: #{inspect(raw)} (expected >= #{min})"
-    end
-  end
-
-  defp parse_bool!(raw, env_key) when is_binary(raw) do
-    case String.downcase(String.trim(raw)) do
-      "1" -> true
-      "true" -> true
-      "yes" -> true
-      "on" -> true
-      "0" -> false
-      "false" -> false
-      "no" -> false
-      "off" -> false
-      _ -> raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(raw)}"
+              "invalid size for #{env_key}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
     end
   end
 end

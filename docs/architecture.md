@@ -60,7 +60,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 
 ## Capacity and degradation
 
-- Event payload mirroring can enforce optional ETS backpressure limits.
+- Event payload mirroring is bounded by ETS memory backpressure limits.
 - When backpressure triggers, appends are rejected with explicit error (`event_store_backpressure`) rather than silently dropping or blocking forever.
 - Readiness remains red until local assigned Raft groups are running, reducing rollout-time partial availability.
 

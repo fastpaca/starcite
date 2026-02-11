@@ -41,20 +41,32 @@ defmodule Starcite.Observability.Telemetry do
     - `:count` – fixed at 1 per write
     - `:payload_bytes` – JSON payload size in bytes
     - `:total_entries` – current ETS entry count after insert
+    - `:memory_bytes` – current ETS table memory usage in bytes
 
   Metadata:
     - `:session_id`
     - `:seq`
   """
-  @spec event_store_write(String.t(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec event_store_write(
+          String.t(),
+          pos_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           :ok
-  def event_store_write(session_id, seq, payload_bytes, total_entries)
+  def event_store_write(session_id, seq, payload_bytes, total_entries, memory_bytes)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
              is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
-             total_entries >= 0 do
+             total_entries >= 0 and is_integer(memory_bytes) and memory_bytes >= 0 do
     :telemetry.execute(
       [:starcite, :event_store, :write],
-      %{count: 1, payload_bytes: payload_bytes, total_entries: total_entries},
+      %{
+        count: 1,
+        payload_bytes: payload_bytes,
+        total_entries: total_entries,
+        memory_bytes: memory_bytes
+      },
       %{session_id: session_id, seq: seq}
     )
 
@@ -66,43 +78,42 @@ defmodule Starcite.Observability.Telemetry do
 
   Measurements:
     - `:count` – fixed at 1 per rejection
-    - `:total_entries` – current global ETS event count
-    - `:session_entries` – current ETS event count for the session
+    - `:current_memory_bytes` – current ETS table memory usage in bytes
+    - `:projected_memory_bytes` – projected memory after attempted insert
 
   Metadata:
     - `:session_id`
-    - `:global_limit`
-    - `:session_limit`
-    - `:reason` (`:global_limit` or `:session_limit`)
+    - `:max_memory_bytes`
+    - `:reason` (`:memory_limit`)
   """
   @spec event_store_backpressure(
           String.t(),
           non_neg_integer(),
           non_neg_integer(),
-          pos_integer() | nil,
-          pos_integer() | nil,
-          :global_limit | :session_limit
+          pos_integer(),
+          :memory_limit
         ) :: :ok
   def event_store_backpressure(
         session_id,
-        total_entries,
-        session_entries,
-        global_limit,
-        session_limit,
+        current_memory_bytes,
+        projected_memory_bytes,
+        max_memory_bytes,
         reason
       )
-      when is_binary(session_id) and session_id != "" and is_integer(total_entries) and
-             total_entries >= 0 and is_integer(session_entries) and session_entries >= 0 and
-             (is_integer(global_limit) or is_nil(global_limit)) and
-             (is_integer(session_limit) or is_nil(session_limit)) and
-             reason in [:global_limit, :session_limit] do
+      when is_binary(session_id) and session_id != "" and is_integer(current_memory_bytes) and
+             current_memory_bytes >= 0 and is_integer(projected_memory_bytes) and
+             projected_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
+             reason in [:memory_limit] do
     :telemetry.execute(
       [:starcite, :event_store, :backpressure],
-      %{count: 1, total_entries: total_entries, session_entries: session_entries},
+      %{
+        count: 1,
+        current_memory_bytes: current_memory_bytes,
+        projected_memory_bytes: projected_memory_bytes
+      },
       %{
         session_id: session_id,
-        global_limit: global_limit,
-        session_limit: session_limit,
+        max_memory_bytes: max_memory_bytes,
         reason: reason
       }
     )

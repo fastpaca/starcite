@@ -105,15 +105,13 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
   end
 
   test "append_event rejects writes under event-store backpressure without advancing session" do
-    with_env(:starcite, :enable_backpressure, true)
-    with_env(:starcite, :event_store_max_entries, 1)
-    with_env(:starcite, :event_store_max_entries_per_session, nil)
-
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+
+    with_env(:starcite, :event_store_max_size, "#{EventStore.memory_bytes()}B")
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
       RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("two"), []}, state)

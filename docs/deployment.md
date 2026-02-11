@@ -83,6 +83,7 @@ Prometheus metrics on `/metrics`.
 | `starcite_archive_tail_size` | Hot tail size |
 | `starcite_archive_trimmed_total` | Rows trimmed after archive |
 | `starcite_event_store_backpressure_total` | Total append rejections from ETS capacity limits |
+| `starcite_event_store_memory_bytes` | Current ETS memory usage for event store |
 
 ## Configuration
 
@@ -94,9 +95,7 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `STARCITE_ENABLE_BACKPRESSURE` | `false` | Enable append backpressure on event-store capacity limits |
-| `STARCITE_EVENT_STORE_MAX_ENTRIES` | none | Global ETS event-store entry cap when backpressure is enabled |
-| `STARCITE_EVENT_STORE_MAX_ENTRIES_PER_SESSION` | none | Per-session ETS event-store entry cap when backpressure is enabled |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | `256MB` | Hard ETS memory cap for event-store payloads (accepts values like `512MB`, `4G`, `262144K`) |
 | `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
 | `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
