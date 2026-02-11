@@ -3,6 +3,7 @@ defmodule StarciteWeb.TailSocketTest do
 
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias Starcite.Repo
   alias StarciteWeb.TailSocket
 
   setup do
@@ -114,6 +115,32 @@ defmodule StarciteWeb.TailSocketTest do
       assert String.ends_with?(frame["inserted_at"], "Z")
       assert next_state.cursor == 1
     end
+
+    test "replays across Postgres cold + ETS hot boundary" do
+      start_supervised!(Repo)
+      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+      session_id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      for n <- 1..4 do
+        {:ok, _} =
+          Runtime.append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:test"
+          })
+      end
+
+      cold_rows = EventStore.from_cursor(session_id, 0, 2)
+      insert_cold_rows(session_id, cold_rows)
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = Runtime.ack_archived(session_id, 2)
+
+      {frames, final_state} = drain_until_idle(base_state(session_id, 0))
+      assert frames == [1, 2, 3, 4]
+      assert final_state.cursor == 4
+    end
   end
 
   defp cursor_update_for(session_id, seq) do
@@ -122,4 +149,35 @@ defmodule StarciteWeb.TailSocketTest do
       {:ok, update}
     end
   end
+
+  defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+    rows =
+      Enum.map(events, fn event ->
+        %{
+          session_id: session_id,
+          seq: event.seq,
+          type: event.type,
+          payload: event.payload,
+          actor: event.actor,
+          source: event.source,
+          metadata: event.metadata,
+          refs: event.refs,
+          idempotency_key: event.idempotency_key,
+          inserted_at: as_datetime(event.inserted_at)
+        }
+      end)
+
+    {count, _} =
+      Repo.insert_all(
+        "events",
+        rows,
+        on_conflict: :nothing,
+        conflict_target: [:session_id, :seq]
+      )
+
+    assert count == length(rows)
+  end
+
+  defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
+  defp as_datetime(%DateTime{} = value), do: value
 end

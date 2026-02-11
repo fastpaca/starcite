@@ -7,6 +7,7 @@ defmodule StarciteWeb.TailSocket do
 
   @behaviour WebSock
 
+  alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Phoenix.PubSub
 
@@ -96,19 +97,22 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp fetch_replay_batch(state) do
-    case EventStore.from_cursor(state.session_id, state.cursor, @replay_batch_size) do
-      [] ->
+    case Runtime.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
+      {:ok, []} ->
         state
         |> Map.put(:replay_done, true)
         |> flush_buffered()
 
-      events ->
+      {:ok, events} ->
         next_state =
           state
           |> Map.put(:replay_queue, :queue.from_list(events))
           |> maybe_schedule_drain()
 
         {:ok, next_state}
+
+      {:error, _reason} ->
+        {:stop, :normal, state}
     end
   end
 
@@ -146,7 +150,10 @@ defmodule StarciteWeb.TailSocket do
 
   defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq}})
        when is_integer(seq) and seq > 0 do
-    EventStore.get_event(session_id, seq)
+    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
+      {:ok, [%{seq: ^seq} = event]} -> {:ok, event}
+      _ -> :error
+    end
   end
 
   defp resolve_buffered_value(_state, _value), do: :error

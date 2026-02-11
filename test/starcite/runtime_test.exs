@@ -5,6 +5,7 @@ defmodule Starcite.RuntimeTest do
 
   alias Starcite.Runtime
   alias Starcite.Runtime.{EventStore, RaftManager}
+  alias Starcite.Repo
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -189,6 +190,58 @@ defmodule Starcite.RuntimeTest do
 
       assert {:error, :session_not_found} = Runtime.get_events_from_cursor(missing_id, 0, 100)
     end
+
+    test "returns ordered events across Postgres cold + ETS hot boundary" do
+      start_supervised!(Repo)
+      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..5 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      cold_rows = EventStore.from_cursor(id, 0, 3)
+      insert_cold_rows(id, cold_rows)
+
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+
+      {:ok, events} = Runtime.get_events_from_cursor(id, 0, 100)
+      assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
+    end
+
+    test "respects limit across Postgres cold + ETS hot boundary" do
+      start_supervised!(Repo)
+      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      for n <- 1..5 do
+        {:ok, _} =
+          Runtime.append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      cold_rows = EventStore.from_cursor(id, 0, 3)
+      insert_cold_rows(id, cold_rows)
+
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+
+      {:ok, events} = Runtime.get_events_from_cursor(id, 2, 2)
+      assert Enum.map(events, & &1.seq) == [3, 4]
+    end
   end
 
   describe "ack_archived/2" do
@@ -335,4 +388,35 @@ defmodule Starcite.RuntimeTest do
         end
     end
   end
+
+  defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+    rows =
+      Enum.map(events, fn event ->
+        %{
+          session_id: session_id,
+          seq: event.seq,
+          type: event.type,
+          payload: event.payload,
+          actor: event.actor,
+          source: event.source,
+          metadata: event.metadata,
+          refs: event.refs,
+          idempotency_key: event.idempotency_key,
+          inserted_at: as_datetime(event.inserted_at)
+        }
+      end)
+
+    {count, _} =
+      Repo.insert_all(
+        "events",
+        rows,
+        on_conflict: :nothing,
+        conflict_target: [:session_id, :seq]
+      )
+
+    assert count == length(rows)
+  end
+
+  defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
+  defp as_datetime(%DateTime{} = value), do: value
 end

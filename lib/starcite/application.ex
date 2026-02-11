@@ -2,6 +2,7 @@ defmodule Starcite.Application do
   @moduledoc false
 
   use Application
+  require Cachex.Spec
 
   @impl true
   def start(_type, _args) do
@@ -11,6 +12,8 @@ defmodule Starcite.Application do
       [
         # PromEx metrics
         Starcite.Observability.PromEx,
+        # Cache fronting historical Postgres reads
+        historical_cache_spec(),
         # Ecto Repo for archive storage (only if archiving is enabled)
         repo_spec(),
         # PubSub before runtime
@@ -37,6 +40,17 @@ defmodule Starcite.Application do
     else
       nil
     end
+  end
+
+  defp historical_cache_spec do
+    {Cachex,
+     name: :starcite_historical_cache,
+     expiration:
+       Cachex.Spec.expiration(
+         default: :timer.minutes(10),
+         interval: :timer.minutes(1)
+       ),
+     limit: 10_000}
   end
 
   defp archive_enabled? do
