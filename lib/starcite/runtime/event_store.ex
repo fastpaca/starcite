@@ -2,6 +2,9 @@ defmodule Starcite.Runtime.EventStore do
   @moduledoc """
   Node-local ETS event store keyed by `{session_id, seq}`.
 
+  This is used to store in-flight events such that they can be read
+  and referenced without interfering the wirte-path in Raft.
+
   This store is intentionally independent from Raft FSM state. Raft `apply/3`
   may mirror committed events into this table so local consumers can read
   events without traversing FSM event-log structures.
@@ -10,7 +13,7 @@ defmodule Starcite.Runtime.EventStore do
   use GenServer
 
   alias Starcite.Observability.Telemetry
-  alias Starcite.Session.EventLog
+  alias Starcite.Session.Event
 
   @table :starcite_event_store
 
@@ -27,7 +30,7 @@ defmodule Starcite.Runtime.EventStore do
   @doc """
   Insert one committed event for a session.
   """
-  @spec put_event(String.t(), EventLog.event()) :: :ok
+  @spec put_event(String.t(), Event.t()) :: :ok
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
@@ -47,7 +50,7 @@ defmodule Starcite.Runtime.EventStore do
   @doc """
   Fetch one event by exact `{session_id, seq}` key.
   """
-  @spec get_event(String.t(), pos_integer()) :: {:ok, EventLog.event()} | :error
+  @spec get_event(String.t(), pos_integer()) :: {:ok, Event.t()} | :error
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_table()
@@ -61,7 +64,7 @@ defmodule Starcite.Runtime.EventStore do
   @doc """
   Return events for `seq > cursor`, ordered ascending, up to `limit`.
   """
-  @spec from_cursor(String.t(), non_neg_integer(), pos_integer()) :: [EventLog.event()]
+  @spec from_cursor(String.t(), non_neg_integer(), pos_integer()) :: [Event.t()]
   def from_cursor(session_id, cursor, limit)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 do

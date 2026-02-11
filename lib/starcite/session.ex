@@ -8,10 +8,10 @@ defmodule Starcite.Session do
   """
 
   alias __MODULE__, as: Session
-  alias Starcite.Session.EventLog
+  alias Starcite.Session.Event
 
-  @type event_input :: EventLog.event_input()
-  @type event :: EventLog.event()
+  @type event_input :: Event.input()
+  @type event :: Event.t()
 
   @enforce_keys [
     :id,

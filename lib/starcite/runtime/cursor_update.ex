@@ -10,7 +10,7 @@ defmodule Starcite.Runtime.CursorUpdate do
   """
 
   @topic_prefix "session_cursor:"
-  alias Starcite.Session.EventLog
+  alias Starcite.Session.Event
 
   @type t :: %{
           required(:version) => 1,
@@ -30,7 +30,7 @@ defmodule Starcite.Runtime.CursorUpdate do
     @topic_prefix <> session_id
   end
 
-  @spec message(String.t(), EventLog.event(), pos_integer()) :: message()
+  @spec message(String.t(), Event.t(), pos_integer()) :: message()
   def message(
         session_id,
         %{
