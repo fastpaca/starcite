@@ -12,6 +12,7 @@ defmodule Starcite.Runtime.EventStore do
 
   use GenServer
 
+  alias Starcite.Config.Size
   alias Starcite.Observability.Telemetry
   alias Starcite.Session.Event
 
@@ -297,67 +298,15 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   defp max_memory_bytes_limit do
-    parse_size_env_or_default(
+    Size.env_bytes_or_default!(
       @max_size_env,
-      Application.get_env(:starcite, :event_store_max_size, @default_max_size)
+      Application.get_env(:starcite, :event_store_max_size, @default_max_size),
+      examples: "256MB, 4G, 1024M"
     )
   end
 
   defp estimated_insert_bytes(session_id, %{seq: seq} = event)
        when is_binary(session_id) and is_integer(seq) and seq > 0 do
     :erlang.external_size({{session_id, seq}, event})
-  end
-
-  defp parse_size_env_or_default(env_key, default) when is_binary(env_key) do
-    case System.get_env(env_key) do
-      nil -> parse_size_value!(default, env_key)
-      raw -> parse_size_value!(raw, env_key)
-    end
-  end
-
-  defp parse_size_value!(value, _env_key) when is_integer(value) and value > 0 do
-    # Integer config values are interpreted as MB.
-    value * 1_048_576
-  end
-
-  defp parse_size_value!(raw, env_key) when is_binary(raw) do
-    case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
-      [_, amount_raw, unit_raw] ->
-        amount = String.to_integer(amount_raw)
-        unit = String.upcase(unit_raw)
-
-        multiplier =
-          case unit do
-            "" -> 1_048_576
-            "B" -> 1
-            "K" -> 1_024
-            "KB" -> 1_024
-            "KIB" -> 1_024
-            "M" -> 1_048_576
-            "MB" -> 1_048_576
-            "MIB" -> 1_048_576
-            "G" -> 1_073_741_824
-            "GB" -> 1_073_741_824
-            "GIB" -> 1_073_741_824
-            "T" -> 1_099_511_627_776
-            "TB" -> 1_099_511_627_776
-            "TIB" -> 1_099_511_627_776
-            _ -> :invalid
-          end
-
-        case {amount, multiplier} do
-          {amount, multiplier}
-          when is_integer(amount) and amount > 0 and is_integer(multiplier) ->
-            amount * multiplier
-
-          _ ->
-            raise ArgumentError,
-                  "invalid size for #{env_key}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
-        end
-
-      _ ->
-        raise ArgumentError,
-              "invalid size for #{env_key}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
-    end
   end
 end

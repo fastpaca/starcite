@@ -6,10 +6,12 @@ defmodule Starcite.Archive.Store do
   """
 
   alias Starcite.Archive.Adapter
+  alias Starcite.Config.Size
 
   @cache :starcite_archive_read_cache
   @default_adapter Starcite.Archive.Adapter.Postgres
-  @default_cache_max_bytes 536_870_912
+  @max_size_env "STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE"
+  @default_cache_max_size "512MB"
   @default_cache_reclaim_fraction 0.25
 
   @spec adapter() :: module()
@@ -85,19 +87,15 @@ defmodule Starcite.Archive.Store do
   end
 
   defp maybe_enforce_memory_limit do
-    case cache_max_bytes() do
-      nil ->
+    max_bytes = cache_max_bytes()
+
+    case cache_memory_bytes() do
+      {:ok, current_bytes} when current_bytes > max_bytes ->
+        target_bytes = reclaim_target_bytes(max_bytes)
+        evict_to_target_memory(target_bytes)
+
+      _ ->
         :ok
-
-      max_bytes when is_integer(max_bytes) and max_bytes > 0 ->
-        case cache_memory_bytes() do
-          {:ok, current_bytes} when current_bytes > max_bytes ->
-            target_bytes = reclaim_target_bytes(max_bytes)
-            evict_to_target_memory(target_bytes)
-
-          _ ->
-            :ok
-        end
     end
   end
 
@@ -150,10 +148,10 @@ defmodule Starcite.Archive.Store do
   end
 
   defp cache_max_bytes do
-    env_int_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES",
-      Application.get_env(:starcite, :archive_read_cache_max_bytes, @default_cache_max_bytes),
-      1
+    Size.env_bytes_or_default!(
+      @max_size_env,
+      Application.get_env(:starcite, :archive_read_cache_max_size, @default_cache_max_size),
+      examples: "512MB, 4G, 262144K"
     )
   end
 
@@ -168,34 +166,6 @@ defmodule Starcite.Archive.Store do
       0.01,
       0.99
     )
-  end
-
-  defp env_int_or_default(env_key, default, min) when is_binary(env_key) and is_integer(min) do
-    case System.get_env(env_key) do
-      nil -> validate_int!(default, env_key, min)
-      raw -> parse_int!(raw, env_key, min)
-    end
-  end
-
-  defp validate_int!(nil, _env_key, _min), do: nil
-
-  defp validate_int!(value, _env_key, min) when is_integer(value) and value >= min,
-    do: value
-
-  defp validate_int!(value, env_key, min) do
-    raise ArgumentError,
-          "invalid default integer for #{env_key}: #{inspect(value)} (expected >= #{min})"
-  end
-
-  defp parse_int!(raw, env_key, min) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {value, ""} when value >= min ->
-        value
-
-      _ ->
-        raise ArgumentError,
-              "invalid integer for #{env_key}: #{inspect(raw)} (expected >= #{min})"
-    end
   end
 
   defp env_float_or_default(env_key, default, min, max)
