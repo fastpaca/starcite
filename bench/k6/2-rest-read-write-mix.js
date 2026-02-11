@@ -37,6 +37,8 @@ export function setup() {
   console.log(`Run ID: ${lib.config.runId}`);
   console.log(`VUs: ${vus}`);
 
+  lib.waitForClusterReady(90);
+
   const sessions = [];
 
   for (let i = 0; i < vus; i++) {

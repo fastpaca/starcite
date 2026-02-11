@@ -40,10 +40,12 @@ Use a load balancer in front of nodes for API traffic.
 ## Local cluster (development)
 
 ```bash
-./scripts/start-cluster.sh   # start 5-node local cluster
-./scripts/test-cluster.sh    # verify primitives
-./scripts/stop-cluster.sh    # tear down
+PROJECT_NAME=starcite-it-a
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
+
+For manual benchmarks and failover drills, see `docs/local-testing.md`.
 
 ## Postgres archive
 

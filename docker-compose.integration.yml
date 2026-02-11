@@ -1,0 +1,93 @@
+x-node-env: &node-env
+  SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
+  PHX_HOST: localhost
+  PORT: 4000
+  DATABASE_URL: ecto://postgres:postgres@db:5432/${STARCITE_IT_DB_NAME:-starcite_it}
+  CLUSTER_NODES: node1@node1,node2@node2,node3@node3
+  RELEASE_DISTRIBUTION: sname
+  RELEASE_COOKIE: ${RELEASE_COOKIE:-starcite_it_cookie}
+  STARCITE_RAFT_DATA_DIR: /var/lib/starcite/raft
+  DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+  DNS_CLUSTER_QUERY: ""
+  MIGRATE_ON_BOOT: "false"
+
+x-node-service: &node-service
+  image: ${STARCITE_IT_IMAGE:-starcite-it:integration}
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  node1:
+    <<: *node-service
+    build:
+      context: .
+    hostname: node1
+    environment:
+      <<: *node-env
+      RELEASE_NODE: node1@node1
+      NODE_NAME: node1
+      MIGRATE_ON_BOOT: "true"
+    ports:
+      - "${NODE1_PORT:-0}:4000"
+    volumes:
+      - node1-data:/var/lib/starcite
+
+  node2:
+    <<: *node-service
+    hostname: node2
+    environment:
+      <<: *node-env
+      RELEASE_NODE: node2@node2
+      NODE_NAME: node2
+    volumes:
+      - node2-data:/var/lib/starcite
+
+  node3:
+    <<: *node-service
+    hostname: node3
+    environment:
+      <<: *node-env
+      RELEASE_NODE: node3@node3
+      NODE_NAME: node3
+    volumes:
+      - node3-data:/var/lib/starcite
+
+  k6:
+    image: grafana/k6:0.50.0
+    profiles: ["tools"]
+    depends_on:
+      node1:
+        condition: service_started
+      node2:
+        condition: service_started
+      node3:
+        condition: service_started
+    working_dir: /bench
+    entrypoint: ["k6"]
+    environment:
+      CLUSTER_NODES: http://node1:4000/v1,http://node2:4000/v1,http://node3:4000/v1
+    volumes:
+      - ./bench/k6:/bench:ro
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${STARCITE_IT_DB_NAME:-starcite_it}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - db-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+volumes:
+  node1-data:
+  node2-data:
+  node3-data:
+  db-data:

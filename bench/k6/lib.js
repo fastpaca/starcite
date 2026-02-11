@@ -5,11 +5,21 @@
  */
 
 import http from 'k6/http';
-import { check } from 'k6';
+import { check, sleep } from 'k6';
 
-const clusterNodes = __ENV.CLUSTER_NODES
-  ? __ENV.CLUSTER_NODES.split(',').map((url) => url.trim().replace(/\/$/, ''))
-  : [(__ENV.API_URL || 'http://localhost:4000/v1').replace(/\/$/, '')];
+function parseClusterNodes(value) {
+  if (!value) return [];
+
+  return value
+    .split(',')
+    .map((url) => url.trim().replace(/\/$/, ''))
+    .filter((url) => url !== '');
+}
+
+const clusterNodes = parseClusterNodes(__ENV.CLUSTER_NODES);
+if (clusterNodes.length === 0) {
+  clusterNodes.push((__ENV.API_URL || 'http://localhost:4000/v1').replace(/\/$/, ''));
+}
 
 let nodeIndex = 0;
 
@@ -61,7 +71,7 @@ export function waitForClusterReady(timeoutSeconds = 60) {
       return true;
     }
 
-    http.get('https://httpbin.test.k6.io/delay/1');
+    sleep(1);
   }
 
   throw new Error(`Cluster did not become ready within ${timeoutSeconds}s`);
