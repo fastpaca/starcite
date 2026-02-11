@@ -29,7 +29,7 @@ defmodule Starcite.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, typecheck: :test, dialyzer: :dev]
+      preferred_envs: [precommit: :test, typecheck: :test, dialyzer: :dev, bench: :dev]
     ]
   end
 

@@ -51,9 +51,9 @@ docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile to
 Run Elixir attribution benchmarks from the host:
 
 ```bash
-mix run --no-start bench/elixir-hot-path-throughput.exs
-mix run --no-start bench/elixir-routing-attribution.exs
-mix run --no-start bench/elixir-internal-attribution.exs
+mix bench
+mix bench routing
+mix bench internal
 ```
 
 ## Manual failover drills

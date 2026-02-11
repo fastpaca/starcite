@@ -37,9 +37,10 @@ Use the manual Compose workflow from `docs/local-testing.md`.
 Run from repo root:
 
 ```bash
-mix run --no-start bench/elixir-hot-path-throughput.exs
-mix run --no-start bench/elixir-routing-attribution.exs
-mix run --no-start bench/elixir-internal-attribution.exs
+mix bench           # hot-path (default)
+mix bench routing
+mix bench internal
+mix bench k6        # runs k6 directly if installed locally
 ```
 
 Useful env knobs (all scripts):
