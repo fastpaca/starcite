@@ -10,30 +10,19 @@ defmodule Starcite.Runtime.RaftFSM do
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
 
-  @num_lanes 16
-
-  defmodule Lane do
-    @moduledoc false
-    defstruct sessions: %{}
-  end
-
-  defstruct [:group_id, :lanes]
+  defstruct [:group_id, :sessions]
 
   @impl true
   def init(%{group_id: group_id}) do
-    lanes = for lane <- 0..(@num_lanes - 1), into: %{}, do: {lane, %Lane{}}
-    %__MODULE__{group_id: group_id, lanes: lanes}
+    %__MODULE__{group_id: group_id, sessions: %{}}
   end
 
   @impl true
-  def apply(_meta, {:create_session, lane_id, session_id, title, metadata}, state) do
-    lane = Map.fetch!(state.lanes, lane_id)
-
-    case Map.get(lane.sessions, session_id) do
+  def apply(_meta, {:create_session, session_id, title, metadata}, state) do
+    case Map.get(state.sessions, session_id) do
       nil ->
         session = Session.new(session_id, title: title, metadata: metadata)
-        new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, session)}
-        new_state = put_in(state.lanes[lane_id], new_lane)
+        new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
         {new_state, {:reply, {:ok, Session.to_map(session)}}}
 
       %Session{} ->
@@ -42,17 +31,14 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, {:append_event, lane_id, session_id, input, opts}, state) do
-    lane = Map.fetch!(state.lanes, lane_id)
-
-    with {:ok, session} <- fetch_session(lane, session_id),
+  def apply(_meta, {:append_event, session_id, input, opts}, state) do
+    with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
           :ok = EventStore.put_event(session_id, event)
 
-          new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
-          new_state = put_in(state.lanes[lane_id], new_lane)
+          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
           Starcite.Observability.Telemetry.event_appended(
             session_id,
@@ -90,14 +76,11 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(meta, {:ack_archived, lane_id, session_id, upto_seq}, state) do
-    lane = Map.fetch!(state.lanes, lane_id)
-
-    with {:ok, session} <- fetch_session(lane, session_id) do
+  def apply(meta, {:ack_archived, session_id, upto_seq}, state) do
+    with {:ok, session} <- fetch_session(state.sessions, session_id) do
       previous_archived_seq = session.archived_seq
       {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
-      new_lane = %{lane | sessions: Map.put(lane.sessions, session_id, updated_session)}
-      new_state = put_in(state.lanes[lane_id], new_lane)
+      new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
       evicted =
         evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
@@ -136,9 +119,8 @@ defmodule Starcite.Runtime.RaftFSM do
   @doc """
   Query one session by ID.
   """
-  def query_session(state, lane_id, session_id) do
-    with {:ok, lane} <- Map.fetch(state.lanes, lane_id),
-         {:ok, session} <- fetch_session(lane, session_id) do
+  def query_session(state, session_id) do
+    with {:ok, session} <- fetch_session(state.sessions, session_id) do
       {:ok, session}
     else
       _ -> {:error, :session_not_found}
@@ -149,7 +131,7 @@ defmodule Starcite.Runtime.RaftFSM do
   # Helpers
   # ---------------------------------------------------------------------------
 
-  defp fetch_session(%Lane{sessions: sessions}, session_id) do
+  defp fetch_session(sessions, session_id) when is_map(sessions) do
     case Map.get(sessions, session_id) do
       nil -> {:error, :session_not_found}
       session -> {:ok, session}

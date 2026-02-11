@@ -19,7 +19,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     assert {:ok, event} = EventStore.get_event(session_id, 1)
     assert event.payload == %{text: "one"}
@@ -32,14 +32,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {next_state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, 0, session_id, event_payload("one", idempotency_key: "idem-1"), []},
+        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
         state
       )
 
     {_, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, 0, session_id, event_payload("one", idempotency_key: "idem-1"), []},
+        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
         next_state
       )
 
@@ -53,22 +53,22 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {state, {:reply, {:ok, %{seq: 2}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("two"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
 
     {state, {:reply, {:ok, %{seq: 3}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("three"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("three"), []}, state)
 
     assert {:ok, _} = EventStore.get_event(session_id, 1)
     assert {:ok, _} = EventStore.get_event(session_id, 2)
     assert {:ok, _} = EventStore.get_event(session_id, 3)
 
     {next_state, {:reply, {:ok, %{archived_seq: 2, trimmed: 2}}}} =
-      RaftFSM.apply(nil, {:ack_archived, 0, session_id, 2}, state)
+      RaftFSM.apply(nil, {:ack_archived, session_id, 2}, state)
 
-    assert {:ok, session} = RaftFSM.query_session(next_state, 0, session_id)
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
     assert session.archived_seq == 2
 
     assert :error = EventStore.get_event(session_id, 1)
@@ -82,10 +82,10 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, effects} =
-      RaftFSM.apply(%{index: 42}, {:ack_archived, 0, session_id, 1}, state)
+      RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
 
     assert [{:release_cursor, 42, %RaftFSM{}}] = effects
   end
@@ -95,20 +95,20 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
-      RaftFSM.apply(%{index: 42}, {:ack_archived, 0, session_id, 1}, state)
+      RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
 
     {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 0}}}} =
-      RaftFSM.apply(%{index: 43}, {:ack_archived, 0, session_id, 1}, state)
+      RaftFSM.apply(%{index: 43}, {:ack_archived, session_id, 1}, state)
   end
 
   defp seeded_state(session_id) do
     state = RaftFSM.init(%{group_id: 0})
 
     {seeded, {:reply, {:ok, _session}}} =
-      RaftFSM.apply(nil, {:create_session, 0, session_id, nil, %{}}, state)
+      RaftFSM.apply(nil, {:create_session, session_id, nil, %{}}, state)
 
     seeded
   end

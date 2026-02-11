@@ -15,7 +15,6 @@ defmodule Starcite.Runtime.EventStore do
   alias Starcite.Observability.Telemetry
   alias Starcite.Session.Event
 
-
   # Event entries are keyed by `{session_id, seq}` and session max-sequence
   # index entries are keyed by `session_id`. This allows us to do quick
   # max_seq lookups without scanning the entire event table.

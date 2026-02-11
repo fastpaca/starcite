@@ -21,7 +21,6 @@ defmodule Starcite.Runtime.RaftManager do
 
   # TODO: make these configurable
   @num_groups 256
-  @num_lanes 16
   @replication_factor 3
 
   @doc false
@@ -30,11 +29,6 @@ defmodule Starcite.Runtime.RaftManager do
   @doc "Map session_id → group_id (0..#{@num_groups - 1})"
   def group_for_session(session_id) do
     :erlang.phash2(session_id, @num_groups)
-  end
-
-  @doc "Map session_id → lane_id (0..#{@num_lanes - 1}) within its group"
-  def lane_for_session(session_id) do
-    :erlang.phash2(session_id, @num_lanes)
   end
 
   @doc "Get Ra server ID (process name) for a group"
