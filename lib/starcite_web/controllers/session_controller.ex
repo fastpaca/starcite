@@ -38,9 +38,7 @@ defmodule StarciteWeb.SessionController do
 
   def append(_conn, _params), do: {:error, :invalid_event}
 
-  # ---------------------------------------------------------------------------
   # Validation
-  # ---------------------------------------------------------------------------
 
   defp validate_create(params) when is_map(params) do
     with {:ok, id} <- optional_non_empty_string(Map.get(params, "id")),

@@ -112,9 +112,7 @@ defmodule Starcite.Runtime.RaftFSM do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Queries
-  # ---------------------------------------------------------------------------
 
   @doc """
   Query one session by ID.
@@ -127,9 +125,7 @@ defmodule Starcite.Runtime.RaftFSM do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Helpers
-  # ---------------------------------------------------------------------------
 
   defp fetch_session(sessions, session_id) when is_map(sessions) do
     case Map.get(sessions, session_id) do

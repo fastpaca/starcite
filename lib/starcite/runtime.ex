@@ -20,9 +20,7 @@ defmodule Starcite.Runtime do
 
   @default_tail_batch_size 1_000
 
-  # ---------------------------------------------------------------------------
   # Session lifecycle
-  # ---------------------------------------------------------------------------
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -100,9 +98,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Append and tail
-  # ---------------------------------------------------------------------------
 
   @spec append_event(String.t(), map(), keyword()) ::
           {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
@@ -184,9 +180,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Archival acknowledgements (tiered storage integration point)
-  # ---------------------------------------------------------------------------
 
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
@@ -216,9 +210,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Helpers
-  # ---------------------------------------------------------------------------
 
   defp locate(id) do
     group = RaftManager.group_for_session(id)
