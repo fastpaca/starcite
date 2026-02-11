@@ -10,7 +10,10 @@ import Config
 config :starcite,
   ecto_repos: [Starcite.Repo],
   raft_data_dir: "priv/raft",
-  raft_flush_interval_ms: 5000
+  raft_flush_interval_ms: 5000,
+  archive_name: Starcite.Archive,
+  archive_adapter: Starcite.Archive.Adapter.Postgres,
+  archive_adapter_opts: []
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,

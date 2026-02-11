@@ -1,14 +1,15 @@
 services:
   app:
     image: ${STARCITE_IMAGE:-ghcr.io/fastpaca/starcite:latest}
+    depends_on:
+      db:
+        condition: service_healthy
     environment:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
       PHX_HOST: ${PHX_HOST:-localhost}
       PORT: 4000
-      # Database is optional - Starcite runs fine with Raft storage only
-      # Uncomment DATABASE_URL to enable archiver (optional Postgres persistence)
-      # DATABASE_URL: ${DATABASE_URL:-}
-      MIGRATE_ON_BOOT: ${MIGRATE_ON_BOOT:-false}
+      DATABASE_URL: ${DATABASE_URL:-ecto://postgres:postgres@db:5432/starcite_dev}
+      MIGRATE_ON_BOOT: ${MIGRATE_ON_BOOT:-true}
       # DNS clustering is disabled locally; set DNS_CLUSTER_QUERY in deployments
       DNS_CLUSTER_QUERY: ${DNS_CLUSTER_QUERY:-}
       DNS_CLUSTER_NODE_BASENAME: ${DNS_CLUSTER_NODE_BASENAME:-starcite}
@@ -17,12 +18,8 @@ services:
       - "4000:4000"
     restart: unless-stopped
 
-  # Optional: Enable database for archival/persistence
-  # Start with: docker compose --profile with-db up -d
   db:
     image: postgres:15
-    profiles:
-      - with-db
     environment:
       POSTGRES_DB: starcite_dev
       POSTGRES_USER: postgres

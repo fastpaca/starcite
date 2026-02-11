@@ -5,29 +5,23 @@ APP_BIN="/app/starcite/bin/starcite"
 CMD="${1:-start}"
 MIGRATE_ON_BOOT="${MIGRATE_ON_BOOT:-true}"
 
-run_migrations() {
-  # Only attempt migrations when the archiver (Postgres) is enabled
-  case "${STARCITE_ARCHIVER_ENABLED:-}" in
-    true|1|yes|on)
-      : ;;
-    *)
-      echo "Skipping database migrations (archiver disabled)."
-      return 0
-      ;;
-  esac
-
+require_database_url() {
   DB_URL="${DATABASE_URL:-${STARCITE_POSTGRES_URL:-}}"
   if [ -z "$DB_URL" ]; then
-    echo "Skipping database migrations (no DATABASE_URL provided)."
-    return 0
+    echo "DATABASE_URL or STARCITE_POSTGRES_URL is required (archiver is mandatory)."
+    exit 1
   fi
+}
 
+run_migrations() {
   echo "Running database migrations..."
   "$APP_BIN" eval 'Starcite.ReleaseTasks.migrate()'
 }
 
 case "$CMD" in
   start|start_iex|daemon|daemon_iex)
+    require_database_url
+
     if [ "${MIGRATE_ON_BOOT}" = "true" ]; then
       run_migrations
     else

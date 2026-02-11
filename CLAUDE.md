@@ -33,7 +33,7 @@ Contract reminders:
 - **Storage:** 256 Raft groups (Ra library) with 3 replicas each. Quorum writes (2 of 3) and automatic leader election.
 - **No per-session processes:** Request handling is stateless; Raft state machines are the long-lived state holders.
 - **Session state in Raft:** Session metadata and ordered event logs are cached in Raft state.
-- **Postgres as write-behind:** Optional background archiver flushes committed events to Postgres. Failures do not block append acks.
+- **Postgres as write-behind:** Background archiver flushes committed events to Postgres. Failures do not block append acks.
 - **Cluster membership:** Erlang distribution + coordinator reconcile topology and deterministic replica assignment.
 
 ## Working Standards
@@ -50,7 +50,7 @@ Contract reminders:
 - Events are append-only per session and ordered by monotonic `seq`.
 - Clients recover from disconnects by reconnecting `tail` with their last processed cursor.
 - `metadata` and `refs` are opaque application data; Starcite stores and replays them.
-- **Background flush**: Flusher batch-inserts committed events to Postgres when archiver is enabled. Idempotent on `[session_id, seq]`.
+- **Background flush**: Flusher batch-inserts committed events to Postgres. Idempotent on `[session_id, seq]`.
 - **Snapshots**: Raft snapshots are used for recovery and log compaction.
 
 ## Tooling Shortcuts

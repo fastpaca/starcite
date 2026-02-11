@@ -11,8 +11,8 @@ defmodule Starcite.Application do
       [
         # PromEx metrics
         Starcite.Observability.PromEx,
-        # Ecto Repo for archive storage (only if archiving is enabled)
-        repo_spec(),
+        # Ecto Repo for archive storage
+        Starcite.Repo,
         # PubSub before runtime
         pubsub_spec(),
         # DNS / clustering
@@ -29,24 +29,6 @@ defmodule Starcite.Application do
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]
     Supervisor.start_link(children, opts)
-  end
-
-  defp repo_spec do
-    if archive_enabled?() do
-      Starcite.Repo
-    else
-      nil
-    end
-  end
-
-  defp archive_enabled? do
-    from_env =
-      case System.get_env("STARCITE_ARCHIVER_ENABLED") do
-        nil -> false
-        val -> val not in ["", "false", "0", "no", "off"]
-      end
-
-    Application.get_env(:starcite, :archive_enabled, false) || from_env
   end
 
   defp pubsub_spec do
