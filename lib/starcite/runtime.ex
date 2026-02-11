@@ -20,9 +20,7 @@ defmodule Starcite.Runtime do
 
   @default_tail_batch_size 1_000
 
-  # ---------------------------------------------------------------------------
   # Session lifecycle
-  # ---------------------------------------------------------------------------
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -44,11 +42,11 @@ defmodule Starcite.Runtime do
   @doc false
   def create_session_local(id, title, metadata)
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and is_map(metadata) do
-    with {:ok, server_id, lane, group} <- locate(id),
+    with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.process_command(
              {server_id, Node.self()},
-             {:create_session, lane, id, title, metadata},
+             {:create_session, id, title, metadata},
              @timeout
            ) do
         {:ok, {:reply, {:ok, data}}, _leader} -> {:ok, data}
@@ -74,10 +72,10 @@ defmodule Starcite.Runtime do
 
   @doc false
   def get_session_local(id) when is_binary(id) and id != "" do
-    with {:ok, server_id, lane, group} <- locate(id),
+    with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
-             RaftFSM.query_session(state, lane, id)
+             RaftFSM.query_session(state, id)
            end) do
         {:ok, {:ok, session}, _leader} ->
           {:ok, session}
@@ -100,9 +98,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Append and tail
-  # ---------------------------------------------------------------------------
 
   @spec append_event(String.t(), map(), keyword()) ::
           {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
@@ -123,11 +119,11 @@ defmodule Starcite.Runtime do
   @doc false
   def append_event_local(id, event, opts \\ [])
       when is_binary(id) and id != "" and is_map(event) do
-    with {:ok, server_id, lane, group} <- locate(id),
+    with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.process_command(
              {server_id, Node.self()},
-             {:append_event, lane, id, event, opts},
+             {:append_event, id, event, opts},
              @timeout
            ) do
         {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
@@ -158,10 +154,10 @@ defmodule Starcite.Runtime do
   def get_events_from_cursor_local(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    with {:ok, server_id, lane, group} <- locate(id),
+    with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
-             RaftFSM.query_session(state, lane, id)
+             RaftFSM.query_session(state, id)
            end) do
         {:ok, {:ok, session}, _leader} ->
           read_events_across_tiers(id, cursor, limit, session)
@@ -184,9 +180,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Archival acknowledgements (tiered storage integration point)
-  # ---------------------------------------------------------------------------
 
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
@@ -201,11 +195,11 @@ defmodule Starcite.Runtime do
   @doc false
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    with {:ok, server_id, lane, group} <- locate(id),
+    with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.process_command(
              {server_id, Node.self()},
-             {:ack_archived, lane, id, upto_seq},
+             {:ack_archived, id, upto_seq},
              @timeout
            ) do
         {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
@@ -216,15 +210,12 @@ defmodule Starcite.Runtime do
     end
   end
 
-  # ---------------------------------------------------------------------------
   # Helpers
-  # ---------------------------------------------------------------------------
 
   defp locate(id) do
     group = RaftManager.group_for_session(id)
-    lane = RaftManager.lane_for_session(id)
     server_id = RaftManager.server_id(group)
-    {:ok, server_id, lane, group}
+    {:ok, server_id, group}
   end
 
   defp ensure_group_started(group_id) do

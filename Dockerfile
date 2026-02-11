@@ -2,7 +2,6 @@ ARG ELIXIR_VERSION=1.18.4
 ARG OTP_VERSION=28.0
 ARG DEBIAN_VERSION=trixie-slim
 
-# -------
 # BUILD
 FROM elixir:${ELIXIR_VERSION} AS build
 
@@ -33,7 +32,6 @@ COPY lib lib
 RUN mix compile
 RUN mix release
 
-# -------
 # RUNTIME
 
 FROM debian:${DEBIAN_VERSION} AS app
