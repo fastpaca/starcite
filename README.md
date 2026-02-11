@@ -25,7 +25,7 @@ Three primitives:
 ## Quick Start
 
 ```bash
-docker run -d -p 4000:4000 -v starcite_data:/data ghcr.io/fastpaca/starcite:latest
+docker compose up -d
 ```
 
 ### Create a session
@@ -72,7 +72,7 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 - **Shared** — one append API for humans and agents
 - **Idempotent** — optional `idempotency_key` for safe retries
 - **Concurrent** — optional `expected_seq` for optimistic locking
-- **Archivable** — optional Postgres cold storage
+- **Archived** — Postgres cold storage for full history
 
 ## What Starcite doesn't do
 

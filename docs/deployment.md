@@ -17,6 +17,7 @@ Set `STARCITE_RAFT_DATA_DIR` to persistent storage so Raft state survives restar
 docker run -d \
   -p 4000:4000 \
   -v starcite_data:/data \
+  -e DATABASE_URL=postgres://user:password@host/db \
   ghcr.io/fastpaca/starcite:latest
 ```
 
@@ -26,6 +27,7 @@ docker run -d \
 docker run -d \
   -p 4000:4000 \
   -v /var/lib/starcite:/data \
+  -e DATABASE_URL=postgres://user:password@host/db \
   -e CLUSTER_NODES=starcite-1@starcite.internal,starcite-2@starcite.internal,starcite-3@starcite.internal \
   -e NODE_NAME=starcite-1 \
   ghcr.io/fastpaca/starcite:latest
@@ -43,10 +45,9 @@ Use a load balancer in front of nodes for API traffic.
 ./scripts/stop-cluster.sh    # tear down
 ```
 
-## Postgres archive (optional)
+## Postgres archive
 
 ```bash
--e STARCITE_ARCHIVER_ENABLED=true \
 -e DATABASE_URL=postgres://user:password@host/db \
 -e STARCITE_ARCHIVE_FLUSH_INTERVAL_MS=5000 \
 -e DB_POOL_SIZE=10
@@ -87,8 +88,7 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
-| `DATABASE_URL` | none | Postgres URL (archive) |
+| `DATABASE_URL` | none | Postgres URL for required archive storage |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
 | `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |

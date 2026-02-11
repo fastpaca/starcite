@@ -26,7 +26,6 @@ end
 
 # Cluster configuration (works in all environments, not just prod)
 cluster_nodes = System.get_env("CLUSTER_NODES")
-enabled_env? = fn value -> value not in [nil, "", "false", "0", "no", "off"] end
 
 if cluster_nodes && cluster_nodes != "" do
   hosts =
@@ -53,24 +52,29 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
-# Configure Postgres Repo at runtime when archiver is enabled
-if enabled_env?.(System.get_env("STARCITE_ARCHIVER_ENABLED")) do
-  db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")
+db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")
+repo_url = db_url || Keyword.get(Application.get_env(:starcite, Starcite.Repo, []), :url)
 
-  if db_url && db_url != "" do
-    pool_size =
-      System.get_env("DB_POOL_SIZE", "10")
-      |> String.to_integer()
+if db_url && db_url != "" do
+  pool_size =
+    System.get_env("DB_POOL_SIZE", "10")
+    |> String.to_integer()
 
-    config :starcite, Starcite.Repo,
-      url: db_url,
-      pool_size: pool_size,
-      queue_target: 5000,
-      queue_interval: 1000
-  end
+  config :starcite, Starcite.Repo,
+    url: db_url,
+    pool_size: pool_size,
+    queue_target: 5000,
+    queue_interval: 1000
 end
 
 if config_env() == :prod do
+  if repo_url in [nil, ""] do
+    raise """
+    environment variable DATABASE_URL or STARCITE_POSTGRES_URL is missing.
+    Starcite requires a configured archive database.
+    """
+  end
+
   # Optional: Override slot log directory (for mounting NVMe, etc)
   if slot_log_dir = System.get_env("SLOT_LOG_DIR") do
     config :starcite, :slot_log_dir, slot_log_dir

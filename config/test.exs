@@ -25,4 +25,6 @@ config :starcite, :pubsub_adapter, :local
 # Raft test configuration
 config :starcite,
   raft_data_dir: "tmp/test_raft",
-  raft_flush_interval_ms: 100
+  raft_flush_interval_ms: 100,
+  archive_name: Starcite.Runtime.Archive,
+  archive_flush_interval_ms: 3_600_000
