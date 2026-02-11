@@ -58,6 +58,7 @@ defmodule Starcite.Application do
 
     {Cachex, options}
   end
+
   defp pubsub_spec do
     case Application.get_env(:starcite, :pubsub_adapter, :local) do
       :redis ->

@@ -117,18 +117,7 @@ defmodule StarciteWeb.TailSocketTest do
     end
 
     test "replays across Postgres cold + ETS hot boundary" do
-      old_archive_enabled = Application.get_env(:starcite, :archive_enabled)
-      Application.put_env(:starcite, :archive_enabled, true)
-
-      on_exit(fn ->
-        if is_nil(old_archive_enabled) do
-          Application.delete_env(:starcite, :archive_enabled)
-        else
-          Application.put_env(:starcite, :archive_enabled, old_archive_enabled)
-        end
-      end)
-
-      start_supervised!(Repo)
+      ensure_repo_started()
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
@@ -191,4 +180,13 @@ defmodule StarciteWeb.TailSocketTest do
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
+
+  defp ensure_repo_started do
+    if Process.whereis(Repo) do
+      :ok
+    else
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+  end
 end
