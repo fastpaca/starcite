@@ -11,6 +11,7 @@ defmodule Starcite.Runtime do
 
   require Logger
 
+  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Runtime.{EventStore, RaftFSM, RaftManager, RaftTopology}
   alias Starcite.Session
 
@@ -162,11 +163,11 @@ defmodule Starcite.Runtime do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
              RaftFSM.query_session(state, lane, id)
            end) do
-        {:ok, {:ok, _session}, _leader} ->
-          {:ok, EventStore.from_cursor(id, cursor, limit)}
+        {:ok, {:ok, session}, _leader} ->
+          read_events_across_tiers(id, cursor, limit, session)
 
-        {:ok, {{_term, _index}, {:ok, _session}}, _leader} ->
-          {:ok, EventStore.from_cursor(id, cursor, limit)}
+        {:ok, {{_term, _index}, {:ok, session}}, _leader} ->
+          read_events_across_tiers(id, cursor, limit, session)
 
         {:ok, {:error, reason}, _leader} ->
           {:error, reason}
@@ -358,5 +359,82 @@ defmodule Starcite.Runtime do
 
   defp generate_session_id do
     "ses_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+  end
+
+  defp read_events_across_tiers(id, cursor, limit, %Session{} = session) do
+    with {:ok, cold_events} <- read_cold_events(id, cursor, limit, session),
+         {:ok, hot_events} <- read_hot_events(id, cursor, limit, session, cold_events),
+         {:ok, merged} <- merge_events(cold_events, hot_events, limit) do
+      {:ok, merged}
+    end
+  end
+
+  defp read_cold_events(id, cursor, limit, %Session{archived_seq: archived_seq}) do
+    if archived_seq > cursor and archive_enabled?() do
+      from_seq = cursor + 1
+      to_seq = min(archived_seq, cursor + limit)
+      ArchiveStore.read_events(id, from_seq, to_seq)
+    else
+      {:ok, []}
+    end
+  end
+
+  defp read_hot_events(id, cursor, limit, %Session{archived_seq: archived_seq}, cold_events) do
+    remaining = max(limit - length(cold_events), 0)
+
+    if remaining == 0 do
+      {:ok, []}
+    else
+      hot_cursor = max(cursor, archived_seq)
+      {:ok, EventStore.from_cursor(id, hot_cursor, remaining)}
+    end
+  end
+
+  defp merge_events(cold_events, hot_events, limit) do
+    merged =
+      (cold_events ++ hot_events)
+      |> Enum.uniq_by(& &1.seq)
+      |> Enum.sort_by(& &1.seq)
+      |> Enum.take(limit)
+
+    ensure_gap_free(merged)
+  end
+
+  defp ensure_gap_free([]), do: {:ok, []}
+
+  defp ensure_gap_free([_single] = events), do: {:ok, events}
+
+  defp ensure_gap_free(events) do
+    gap? =
+      events
+      |> Enum.reduce_while(nil, fn event, previous_seq ->
+        cond do
+          previous_seq == nil ->
+            {:cont, event.seq}
+
+          event.seq == previous_seq + 1 ->
+            {:cont, event.seq}
+
+          true ->
+            {:halt, :gap}
+        end
+      end)
+      |> Kernel.==(:gap)
+
+    if gap? do
+      {:error, :event_gap_detected}
+    else
+      {:ok, events}
+    end
+  end
+
+  defp archive_enabled? do
+    from_env =
+      case System.get_env("STARCITE_ARCHIVER_ENABLED") do
+        nil -> false
+        val -> val not in ["", "false", "0", "no", "off"]
+      end
+
+    Application.get_env(:starcite, :archive_enabled, false) || from_env
   end
 end

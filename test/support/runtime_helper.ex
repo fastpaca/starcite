@@ -19,6 +19,7 @@ defmodule Starcite.Runtime.TestHelper do
 
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
+      clear_archive_read_cache()
 
       # Brief wait to ensure all cleanup completes
       Process.sleep(50)
@@ -59,6 +60,12 @@ defmodule Starcite.Runtime.TestHelper do
   defp clear_event_store do
     if Code.ensure_loaded?(Starcite.Runtime.EventStore) do
       Starcite.Runtime.EventStore.clear()
+    end
+  end
+
+  defp clear_archive_read_cache do
+    if Process.whereis(:starcite_archive_read_cache) do
+      _ = Cachex.clear(:starcite_archive_read_cache)
     end
   end
 end

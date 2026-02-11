@@ -9,6 +9,9 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   use GenServer
 
+  import Ecto.Query
+
+  alias Starcite.Archive.Event
   alias Starcite.Repo
 
   @impl true
@@ -36,6 +39,30 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
       {:ok, total_count}
     end
+  end
+
+  @impl true
+  def read_events(session_id, from_seq, to_seq)
+      when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
+             is_integer(to_seq) and to_seq >= from_seq do
+    query =
+      from(e in Event,
+        where: e.session_id == ^session_id and e.seq >= ^from_seq and e.seq <= ^to_seq,
+        order_by: [asc: e.seq],
+        select: %{
+          seq: e.seq,
+          type: e.type,
+          payload: e.payload,
+          actor: e.actor,
+          source: e.source,
+          metadata: e.metadata,
+          refs: e.refs,
+          idempotency_key: e.idempotency_key,
+          inserted_at: e.inserted_at
+        }
+      )
+
+    {:ok, Repo.all(query)}
   end
 
   defp insert_all_with_conflict(rows) do

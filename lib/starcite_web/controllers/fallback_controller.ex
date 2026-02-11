@@ -46,6 +46,14 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "raft_unavailable", "No available replicas")
   end
 
+  def call(conn, {:error, :archive_read_unavailable}) do
+    error(conn, :service_unavailable, "archive_read_unavailable", "Archive read unavailable")
+  end
+
+  def call(conn, {:error, :event_gap_detected}) do
+    error(conn, :service_unavailable, "event_gap_detected", "Ordered replay gap detected")
+  end
+
   def call(conn, {:error, reason})
       when reason in [
              :invalid_event,

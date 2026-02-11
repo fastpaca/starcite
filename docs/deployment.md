@@ -91,6 +91,12 @@ Prometheus metrics on `/metrics`.
 | `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
+| `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |
+| `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Archive read cache cleanup interval in milliseconds |
+| `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_ENTRIES` | none | Optional hard entry cap for archive read cache |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES` | `134217728` | Archive read cache memory budget in bytes |
+| `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP server port |
 | `PHX_SERVER` | unset | Start endpoint in release mode |
