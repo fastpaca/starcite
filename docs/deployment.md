@@ -95,7 +95,7 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `STARCITE_EVENT_STORE_MAX_SIZE` | `256MB` | Hard ETS memory cap for event-store payloads (accepts values like `512MB`, `4G`, `262144K`) |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hard ETS memory cap for event-store payloads (accepts values like `512MB`, `4G`, `262144K`) |
 | `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
 | `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
@@ -104,7 +104,7 @@ Prometheus metrics on `/metrics`.
 | `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Archive read cache cleanup interval in milliseconds |
 | `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
 | `STARCITE_ARCHIVE_READ_CACHE_MAX_ENTRIES` | none | Optional hard entry cap for archive read cache |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES` | `134217728` | Archive read cache memory budget in bytes |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES` | `536870912` | Archive read cache memory budget in bytes |
 | `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP server port |

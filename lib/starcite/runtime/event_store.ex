@@ -21,7 +21,7 @@ defmodule Starcite.Runtime.EventStore do
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
   @max_size_env "STARCITE_EVENT_STORE_MAX_SIZE"
-  @default_max_size "256MB"
+  @default_max_size "2GB"
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)

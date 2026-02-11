@@ -9,7 +9,7 @@ defmodule Starcite.Archive.Store do
 
   @cache :starcite_archive_read_cache
   @default_adapter Starcite.Archive.Adapter.Postgres
-  @default_cache_max_bytes 134_217_728
+  @default_cache_max_bytes 536_870_912
   @default_cache_reclaim_fraction 0.25
 
   @spec adapter() :: module()
