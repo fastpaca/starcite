@@ -11,7 +11,7 @@ defmodule Starcite.Observability.Telemetry do
   Emit an event when an event is appended to a session.
 
   Measurements:
-    - `:payload_bytes` – approximate JSON payload bytes for the event
+    - `:payload_bytes` – approximate binary payload bytes for the event
 
   Metadata:
     - `:session_id` – session identifier
@@ -39,7 +39,7 @@ defmodule Starcite.Observability.Telemetry do
 
   Measurements:
     - `:count` – fixed at 1 per write
-    - `:payload_bytes` – JSON payload size in bytes
+    - `:payload_bytes` – payload size in bytes
     - `:total_entries` – current ETS entry count after insert
     - `:memory_bytes` – current ETS table memory usage in bytes
 
@@ -79,7 +79,6 @@ defmodule Starcite.Observability.Telemetry do
   Measurements:
     - `:count` – fixed at 1 per rejection
     - `:current_memory_bytes` – current ETS table memory usage in bytes
-    - `:projected_memory_bytes` – projected memory after attempted insert
 
   Metadata:
     - `:session_id`
@@ -89,27 +88,23 @@ defmodule Starcite.Observability.Telemetry do
   @spec event_store_backpressure(
           String.t(),
           non_neg_integer(),
-          non_neg_integer(),
           pos_integer(),
           :memory_limit
         ) :: :ok
   def event_store_backpressure(
         session_id,
         current_memory_bytes,
-        projected_memory_bytes,
         max_memory_bytes,
         reason
       )
       when is_binary(session_id) and session_id != "" and is_integer(current_memory_bytes) and
-             current_memory_bytes >= 0 and is_integer(projected_memory_bytes) and
-             projected_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
+             current_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
              reason in [:memory_limit] do
     :telemetry.execute(
       [:starcite, :event_store, :backpressure],
       %{
         count: 1,
-        current_memory_bytes: current_memory_bytes,
-        projected_memory_bytes: projected_memory_bytes
+        current_memory_bytes: current_memory_bytes
       },
       %{
         session_id: session_id,

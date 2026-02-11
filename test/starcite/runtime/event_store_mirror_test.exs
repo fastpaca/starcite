@@ -45,7 +45,6 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
     session_id = "ses-cursor-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = Runtime.create_session(id: session_id)
 
-    :ok = PubSub.subscribe(Starcite.PubSub, "session:#{session_id}")
     :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
 
     {:ok, %{seq: 1}} =
@@ -55,9 +54,6 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
         actor: "agent:test",
         source: "agent"
       })
-
-    assert_receive {:event, event}, 1_000
-    assert event.seq == 1
 
     assert_receive {:cursor_update, update}, 1_000
     assert update.version == 1

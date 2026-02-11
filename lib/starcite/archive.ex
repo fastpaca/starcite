@@ -33,20 +33,24 @@ defmodule Starcite.Archive do
     {:ok,
      %{
        interval: interval,
-       adapter: adapter_mod
+       adapter: adapter_mod,
+       archived_seq_cache: %{}
      }}
   end
 
   @impl true
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
+    session_ids = EventStore.session_ids()
 
-    stats =
-      EventStore.session_ids()
-      |> Enum.reduce(zero_stats(), fn session_id, stats_acc ->
-        session_stats = flush_session(session_id, state.adapter)
-        merge_stats(stats_acc, session_stats)
+    {stats, archived_seq_cache} =
+      Enum.reduce(session_ids, {zero_stats(), state.archived_seq_cache}, fn session_id,
+                                                                            {stats_acc, cache_acc} ->
+        {session_stats, cache_next} = flush_session(session_id, state.adapter, cache_acc)
+        {merge_stats(stats_acc, session_stats), cache_next}
       end)
+
+    archived_seq_cache = Map.take(archived_seq_cache, session_ids)
 
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
@@ -64,35 +68,41 @@ defmodule Starcite.Archive do
     )
 
     schedule_flush(state.interval)
-    {:noreply, state}
+    {:noreply, %{state | archived_seq_cache: archived_seq_cache}}
   end
 
-  defp flush_session(session_id, adapter) when is_binary(session_id) and session_id != "" do
-    with :ok <- ensure_local_group_leader(session_id),
-         {:ok, max_seq} <- EventStore.max_seq(session_id),
-         {:ok, session} <- Runtime.get_session_local(session_id) do
-      archived_seq = session.archived_seq
+  defp flush_session(session_id, adapter, archived_seq_cache)
+       when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) do
+    with {:ok, max_seq} <- EventStore.max_seq(session_id),
+         {:ok, archived_seq, archived_seq_cache} <-
+           load_archived_seq(session_id, archived_seq_cache) do
       pending_before = max(max_seq - archived_seq, 0)
 
       cond do
         pending_before == 0 ->
-          zero_stats()
+          {zero_stats(), archived_seq_cache}
+
+        ensure_local_group_leader(session_id) != :ok ->
+          {zero_stats(), archived_seq_cache}
 
         true ->
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
 
-          persist_rows(
-            rows,
-            session_id,
-            max_seq,
-            pending_before,
-            adapter
-          )
+          {session_stats, next_archived_seq} =
+            persist_rows(
+              rows,
+              session_id,
+              max_seq,
+              pending_before,
+              adapter
+            )
+
+          {session_stats, put_archived_seq(archived_seq_cache, session_id, next_archived_seq)}
       end
     else
-      _ -> zero_stats()
+      _ -> {zero_stats(), Map.delete(archived_seq_cache, session_id)}
     end
   end
 
@@ -104,7 +114,7 @@ defmodule Starcite.Archive do
          _adapter
        )
        when is_integer(pending_before) and pending_before > 0 do
-    %{zero_stats() | pending_after: pending_before, pending_sessions: 1}
+    {%{zero_stats() | pending_after: pending_before, pending_sessions: 1}, nil}
   end
 
   defp persist_rows(
@@ -141,42 +151,51 @@ defmodule Starcite.Archive do
                 0
               end
 
-            %{
-              attempted: attempted,
-              inserted: inserted,
-              bytes_attempted: bytes_attempted,
-              bytes_inserted: bytes_inserted,
-              pending_after: pending_after,
-              pending_sessions: if(pending_after > 0, do: 1, else: 0)
+            {
+              %{
+                attempted: attempted,
+                inserted: inserted,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: bytes_inserted,
+                pending_after: pending_after,
+                pending_sessions: if(pending_after > 0, do: 1, else: 0)
+              },
+              acked_seq
             }
 
           _ack_error ->
-            %{
-              attempted: attempted,
-              inserted: 0,
-              bytes_attempted: bytes_attempted,
-              bytes_inserted: 0,
-              pending_after: pending_before,
-              pending_sessions: 1
+            {
+              %{
+                attempted: attempted,
+                inserted: 0,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: 0,
+                pending_after: pending_before,
+                pending_sessions: 1
+              },
+              nil
             }
         end
 
       {:error, _reason} ->
-        %{
-          attempted: attempted,
-          inserted: 0,
-          bytes_attempted: bytes_attempted,
-          bytes_inserted: 0,
-          pending_after: pending_before,
-          pending_sessions: 1
+        {
+          %{
+            attempted: attempted,
+            inserted: 0,
+            bytes_attempted: bytes_attempted,
+            bytes_inserted: 0,
+            pending_after: pending_before,
+            pending_sessions: 1
+          },
+          nil
         }
     end
   end
 
   defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do
-    byte_size(Jason.encode!(payload)) +
-      byte_size(Jason.encode!(metadata)) +
-      byte_size(Jason.encode!(refs))
+    :erlang.external_size(payload) +
+      :erlang.external_size(metadata) +
+      :erlang.external_size(refs)
   end
 
   defp archive_batch_size do
@@ -185,7 +204,6 @@ defmodule Starcite.Archive do
 
   defp contiguous_upto(rows) when is_list(rows) do
     rows
-    |> Enum.sort_by(& &1.seq)
     |> Enum.reduce({nil, 0}, fn %{seq: seq}, {prev, upto} ->
       cond do
         prev == nil -> {seq, seq}
@@ -207,6 +225,32 @@ defmodule Starcite.Archive do
       _ ->
         :error
     end
+  end
+
+  defp load_archived_seq(session_id, archived_seq_cache)
+       when is_binary(session_id) and is_map(archived_seq_cache) do
+    case Map.fetch(archived_seq_cache, session_id) do
+      {:ok, archived_seq} when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq, archived_seq_cache}
+
+      _ ->
+        case Runtime.get_session_local(session_id) do
+          {:ok, %{archived_seq: archived_seq}}
+          when is_integer(archived_seq) and archived_seq >= 0 ->
+            {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
+
+          _ ->
+            {:error, :session_lookup_failed}
+        end
+    end
+  end
+
+  defp put_archived_seq(cache, _session_id, nil), do: cache
+
+  defp put_archived_seq(cache, session_id, archived_seq)
+       when is_map(cache) and is_binary(session_id) and is_integer(archived_seq) and
+              archived_seq >= 0 do
+    Map.put(cache, session_id, archived_seq)
   end
 
   defp zero_stats do

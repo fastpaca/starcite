@@ -10,10 +10,16 @@ defmodule Starcite.Runtime.RaftFSM do
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
 
+  @append_pubsub_env "STARCITE_APPEND_PUBSUB_EFFECTS"
+  @append_telemetry_env "STARCITE_APPEND_TELEMETRY"
+  @append_pubsub_cache_key {__MODULE__, :append_pubsub_effects_enabled}
+  @append_telemetry_cache_key {__MODULE__, :append_telemetry_enabled}
+
   defstruct [:group_id, :sessions]
 
   @impl true
   def init(%{group_id: group_id}) do
+    sync_append_envs()
     %__MODULE__{group_id: group_id, sessions: %{}}
   end
 
@@ -43,23 +49,23 @@ defmodule Starcite.Runtime.RaftFSM do
                 | sessions: Map.put(state.sessions, session_id, updated_session)
               }
 
-              Starcite.Observability.Telemetry.event_appended(
-                session_id,
-                event.type,
-                event.actor,
-                event.source,
-                byte_size(Jason.encode!(event.payload))
-              )
-
-              Starcite.Observability.Telemetry.cursor_update_emitted(
-                session_id,
-                event.seq,
-                updated_session.last_seq
-              )
+              if append_telemetry_enabled?() do
+                Starcite.Observability.Telemetry.event_appended(
+                  session_id,
+                  event.type,
+                  event.actor,
+                  event.source,
+                  payload_bytes(event.payload)
+                )
+              end
 
               reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
               effects = build_effects(session_id, event, updated_session.last_seq)
-              {new_state, {:reply, {:ok, reply}}, effects}
+
+              case effects do
+                [] -> {new_state, {:reply, {:ok, reply}}}
+                _ -> {new_state, {:reply, {:ok, reply}}, effects}
+              end
 
             {:error, :event_store_backpressure} ->
               {state, {:reply, {:error, :event_store_backpressure}}}
@@ -175,30 +181,94 @@ defmodule Starcite.Runtime.RaftFSM do
     do: nil
 
   defp build_effects(session_id, event, last_seq) do
-    stream_event =
-      {
-        :mod_call,
-        Phoenix.PubSub,
-        :broadcast,
-        [
-          Starcite.PubSub,
-          "session:#{session_id}",
-          {:event, event}
-        ]
-      }
+    if append_pubsub_effects_enabled?() do
+      cursor_update =
+        {
+          :mod_call,
+          Phoenix.PubSub,
+          :broadcast,
+          [
+            Starcite.PubSub,
+            CursorUpdate.topic(session_id),
+            CursorUpdate.message(session_id, event, last_seq)
+          ]
+        }
 
-    cursor_update =
-      {
-        :mod_call,
-        Phoenix.PubSub,
-        :broadcast,
-        [
-          Starcite.PubSub,
-          CursorUpdate.topic(session_id),
-          CursorUpdate.message(session_id, event, last_seq)
-        ]
-      }
+      [cursor_update]
+    else
+      []
+    end
+  end
 
-    [stream_event, cursor_update]
+  defp payload_bytes(payload), do: :erlang.external_size(payload)
+
+  defp append_pubsub_effects_enabled? do
+    bool_config(
+      :append_pubsub_effects,
+      true,
+      @append_pubsub_cache_key,
+      @append_pubsub_env
+    )
+  end
+
+  defp append_telemetry_enabled? do
+    bool_config(
+      :append_telemetry,
+      true,
+      @append_telemetry_cache_key,
+      @append_telemetry_env
+    )
+  end
+
+  defp bool_config(config_key, default, cache_key, env_name)
+       when is_atom(config_key) and is_boolean(default) and is_tuple(cache_key) and
+              is_binary(env_name) do
+    raw = Application.get_env(:starcite, config_key, default)
+
+    case :persistent_term.get(cache_key, :undefined) do
+      {^raw, enabled} when is_boolean(enabled) ->
+        enabled
+
+      _ ->
+        enabled = parse_bool!(raw, env_name)
+        :persistent_term.put(cache_key, {raw, enabled})
+        enabled
+    end
+  end
+
+  defp sync_append_envs do
+    sync_bool_env(@append_pubsub_env, :append_pubsub_effects)
+    sync_bool_env(@append_telemetry_env, :append_telemetry)
+  end
+
+  defp sync_bool_env(env_name, config_key) when is_binary(env_name) and is_atom(config_key) do
+    case System.get_env(env_name) do
+      nil ->
+        :ok
+
+      value ->
+        Application.put_env(:starcite, config_key, parse_bool!(value, env_name))
+        :ok
+    end
+  end
+
+  defp parse_bool!(value, _env_name) when is_boolean(value), do: value
+
+  defp parse_bool!(value, env_name) when is_binary(value) do
+    case String.downcase(String.trim(value)) do
+      "1" -> true
+      "true" -> true
+      "yes" -> true
+      "on" -> true
+      "0" -> false
+      "false" -> false
+      "no" -> false
+      "off" -> false
+      _ -> raise ArgumentError, "invalid boolean for #{env_name}: #{inspect(value)}"
+    end
+  end
+
+  defp parse_bool!(value, env_name) do
+    raise ArgumentError, "invalid boolean for #{env_name}: #{inspect(value)}"
   end
 end

@@ -22,7 +22,10 @@ defmodule Starcite.Runtime.EventStore do
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
   @max_size_env "STARCITE_EVENT_STORE_MAX_SIZE"
+  @capacity_check_env "STARCITE_EVENT_STORE_CAPACITY_CHECK"
   @default_max_size "2GB"
+  @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
+  @capacity_check_cache_key {__MODULE__, :capacity_check_enabled}
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -32,6 +35,8 @@ defmodule Starcite.Runtime.EventStore do
   def init(_opts) do
     _event_table = ensure_event_table()
     _index_table = ensure_index_table()
+    sync_max_size_env()
+    sync_capacity_check_env()
     {:ok, %{}}
   end
 
@@ -42,19 +47,11 @@ defmodule Starcite.Runtime.EventStore do
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     case ensure_capacity(session_id, event) do
-      :ok ->
+      {:ok, _current_memory_bytes} ->
         event_table = ensure_event_table()
         index_table = ensure_index_table()
         true = :ets.insert(event_table, {{session_id, seq}, event})
         :ok = update_session_max_seq(index_table, session_id, seq)
-
-        Telemetry.event_store_write(
-          session_id,
-          seq,
-          byte_size(Jason.encode!(event.payload)),
-          size(),
-          memory_bytes()
-        )
 
         :ok
 
@@ -62,7 +59,6 @@ defmodule Starcite.Runtime.EventStore do
         Telemetry.event_store_backpressure(
           session_id,
           metadata.current_memory_bytes,
-          metadata.projected_memory_bytes,
           metadata.max_memory_bytes,
           metadata.reason
         )
@@ -104,7 +100,6 @@ defmodule Starcite.Runtime.EventStore do
 
     event_table
     |> select_take(ms, limit)
-    |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map(&elem(&1, 1))
   end
 
@@ -116,6 +111,7 @@ defmodule Starcite.Runtime.EventStore do
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
     event_table = ensure_event_table()
     index_table = ensure_index_table()
+    max_seq_before_delete = max_seq_value(index_table, session_id)
 
     ms = [
       {
@@ -127,7 +123,7 @@ defmodule Starcite.Runtime.EventStore do
 
     deleted = :ets.select_delete(event_table, ms)
 
-    if session_size(session_id) == 0 do
+    if should_drop_index?(max_seq_before_delete, floor_seq) do
       :ets.delete(index_table, session_id)
     end
 
@@ -140,16 +136,7 @@ defmodule Starcite.Runtime.EventStore do
   @spec size() :: non_neg_integer()
   def size do
     event_table = ensure_event_table()
-
-    ms = [
-      {
-        {{:"$1", :"$2"}, :"$3"},
-        [{:is_binary, :"$1"}, {:is_integer, :"$2"}, {:>, :"$2", 0}],
-        [true]
-      }
-    ]
-
-    :ets.select_count(event_table, ms)
+    table_size(event_table)
   end
 
   @doc """
@@ -252,20 +239,8 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   defp update_session_max_seq(index_table, session_id, seq) do
-    key = session_id
-
-    case :ets.lookup(index_table, key) do
-      [] ->
-        true = :ets.insert(index_table, {key, seq})
-        :ok
-
-      [{^key, max_seq}] when is_integer(max_seq) and max_seq >= seq ->
-        :ok
-
-      [{^key, _max_seq}] ->
-        true = :ets.insert(index_table, {key, seq})
-        :ok
-    end
+    true = :ets.insert(index_table, {session_id, seq})
+    :ok
   end
 
   defp select_take(table, ms, limit) when limit > 0 do
@@ -280,33 +255,113 @@ defmodule Starcite.Runtime.EventStore do
 
   defp ensure_capacity(session_id, event)
        when is_binary(session_id) and session_id != "" and is_map(event) do
-    max_memory_bytes = max_memory_bytes_limit()
-    current_memory_bytes = memory_bytes()
-    projected_memory_bytes = current_memory_bytes + estimated_insert_bytes(session_id, event)
+    if capacity_check_enabled?() do
+      max_memory_bytes = max_memory_bytes_limit()
+      current_memory_bytes = memory_bytes()
 
-    if projected_memory_bytes > max_memory_bytes do
-      {:error, :event_store_backpressure,
-       %{
-         reason: :memory_limit,
-         current_memory_bytes: current_memory_bytes,
-         projected_memory_bytes: projected_memory_bytes,
-         max_memory_bytes: max_memory_bytes
-       }}
+      if current_memory_bytes >= max_memory_bytes do
+        {:error, :event_store_backpressure,
+         %{
+           reason: :memory_limit,
+           current_memory_bytes: current_memory_bytes,
+           max_memory_bytes: max_memory_bytes
+         }}
+      else
+        {:ok, current_memory_bytes}
+      end
     else
-      :ok
+      {:ok, 0}
+    end
+  end
+
+  defp capacity_check_enabled? do
+    raw = Application.get_env(:starcite, :event_store_capacity_check, true)
+
+    case :persistent_term.get(@capacity_check_cache_key, :undefined) do
+      {^raw, enabled} when is_boolean(enabled) ->
+        enabled
+
+      _ ->
+        enabled = parse_bool!(raw, @capacity_check_env)
+        :persistent_term.put(@capacity_check_cache_key, {raw, enabled})
+        enabled
     end
   end
 
   defp max_memory_bytes_limit do
-    Size.env_bytes_or_default!(
-      @max_size_env,
-      Application.get_env(:starcite, :event_store_max_size, @default_max_size),
-      examples: "256MB, 4G, 1024M"
-    )
+    raw = Application.get_env(:starcite, :event_store_max_size, @default_max_size)
+
+    case :persistent_term.get(@max_memory_limit_cache_key, :undefined) do
+      {^raw, bytes} when is_integer(bytes) and bytes > 0 ->
+        bytes
+
+      _ ->
+        bytes =
+          Size.parse_bytes!(
+            raw,
+            @max_size_env,
+            examples: "256MB, 4G, 1024M"
+          )
+
+        :persistent_term.put(@max_memory_limit_cache_key, {raw, bytes})
+        bytes
+    end
   end
 
-  defp estimated_insert_bytes(session_id, %{seq: seq} = event)
-       when is_binary(session_id) and is_integer(seq) and seq > 0 do
-    :erlang.external_size({{session_id, seq}, event})
+  defp table_size(table) do
+    :ets.info(table, :size) || 0
+  end
+
+  defp max_seq_value(index_table, session_id) do
+    case :ets.lookup(index_table, session_id) do
+      [{^session_id, seq}] when is_integer(seq) and seq > 0 -> seq
+      _ -> nil
+    end
+  end
+
+  defp should_drop_index?(nil, _floor_seq), do: true
+  defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
+
+  defp sync_max_size_env do
+    case System.get_env(@max_size_env) do
+      nil ->
+        :ok
+
+      value ->
+        Application.put_env(:starcite, :event_store_max_size, value)
+        :ok
+    end
+  end
+
+  defp sync_capacity_check_env do
+    case System.get_env(@capacity_check_env) do
+      nil ->
+        :ok
+
+      value ->
+        enabled = parse_bool!(value, @capacity_check_env)
+        Application.put_env(:starcite, :event_store_capacity_check, enabled)
+        :ok
+    end
+  end
+
+  defp parse_bool!(value, _env_key) when is_boolean(value), do: value
+
+  defp parse_bool!(value, env_key) when is_binary(value) do
+    case String.downcase(String.trim(value)) do
+      "1" -> true
+      "true" -> true
+      "yes" -> true
+      "on" -> true
+      "0" -> false
+      "false" -> false
+      "no" -> false
+      "off" -> false
+      _ -> raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(value)}"
+    end
+  end
+
+  defp parse_bool!(value, env_key) do
+    raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(value)}"
   end
 end

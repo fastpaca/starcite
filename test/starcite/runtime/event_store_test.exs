@@ -208,6 +208,21 @@ defmodule Starcite.Runtime.EventStoreTest do
              })
   end
 
+  test "skips memory limit when event store capacity check is disabled" do
+    session_id = "ses-cap-off-#{System.unique_integer([:positive, :monotonic])}"
+    with_env(:starcite, :event_store_max_size, "1B")
+    with_env(:starcite, :event_store_capacity_check, false)
+
+    assert :ok =
+             EventStore.put_event(session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: NaiveDateTime.utc_now()
+             })
+  end
+
   defp with_env(app, key, value) do
     previous = Application.get_env(app, key)
     Application.put_env(app, key, value)
