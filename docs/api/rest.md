@@ -1,6 +1,7 @@
 # REST API
 
 All endpoints are under `/v1`.
+Machine-readable OpenAPI spec is available at `/v1/openapi` with Swagger UI at `/v1/docs`.
 
 ## POST `/v1/sessions`
 
@@ -117,7 +118,7 @@ See [WebSocket API](./websocket.md).
 
 ## Error shape
 
-All API errors return:
+Runtime/domain errors return:
 
 ```json
 {
@@ -126,9 +127,23 @@ All API errors return:
 }
 ```
 
+Schema validation errors return `422` with:
+
+```json
+{
+  "errors": [
+    {
+      "title": "Invalid value",
+      "source": { "pointer": "/metadata" },
+      "detail": "Invalid object. Got: string"
+    }
+  ]
+}
+```
+
 Status codes:
 
-- `400` invalid payload
+- `422` schema validation failure
 - `404` session not found
 - `409` expected sequence or idempotency conflict
 - `503` unavailable (quorum/routing failure)
