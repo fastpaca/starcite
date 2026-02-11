@@ -13,6 +13,11 @@ defmodule Starcite.Archive.StoreTest do
     _ = Cachex.clear(:starcite_archive_read_cache)
 
     previous_adapter = Application.get_env(:starcite, :archive_adapter)
+    previous_cache_max_bytes = Application.get_env(:starcite, :archive_read_cache_max_bytes)
+
+    previous_cache_reclaim_fraction =
+      Application.get_env(:starcite, :archive_read_cache_reclaim_fraction)
+
     Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
 
     on_exit(fn ->
@@ -22,6 +27,22 @@ defmodule Starcite.Archive.StoreTest do
         Application.put_env(:starcite, :archive_adapter, previous_adapter)
       else
         Application.delete_env(:starcite, :archive_adapter)
+      end
+
+      if is_nil(previous_cache_max_bytes) do
+        Application.delete_env(:starcite, :archive_read_cache_max_bytes)
+      else
+        Application.put_env(:starcite, :archive_read_cache_max_bytes, previous_cache_max_bytes)
+      end
+
+      if is_nil(previous_cache_reclaim_fraction) do
+        Application.delete_env(:starcite, :archive_read_cache_reclaim_fraction)
+      else
+        Application.put_env(
+          :starcite,
+          :archive_read_cache_reclaim_fraction,
+          previous_cache_reclaim_fraction
+        )
       end
     end)
 
@@ -53,6 +74,20 @@ defmodule Starcite.Archive.StoreTest do
     assert Enum.map(hot, & &1.seq) == [1]
 
     assert {:ok, []} = Store.read_events(TestAdapter, session_id, 1, 1)
+  end
+
+  test "cache enforcement evicts when max bytes budget is exceeded" do
+    Application.put_env(:starcite, :archive_read_cache_max_bytes, 1)
+    Application.put_env(:starcite, :archive_read_cache_reclaim_fraction, 0.5)
+
+    session_id = "ses-store-budget-#{System.unique_integer([:positive, :monotonic])}"
+    rows = build_rows(session_id, 1..1)
+    assert {:ok, 1} = Store.write_events(rows)
+
+    assert {:ok, [%{seq: 1}]} = Store.read_events(session_id, 1, 1)
+    assert {:ok, [%{seq: 1}]} = Store.read_events(session_id, 1, 1)
+
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 1}, {session_id, 1, 1}]
   end
 
   defp build_rows(session_id, seqs) do
