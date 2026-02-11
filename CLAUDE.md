@@ -1,94 +1,108 @@
 # CLAUDE.md
 
-Guidance for Claude Code when collaborating on Starcite.
+Starcite: durable, low-latency session event storage for LLM applications.
 
-## Quick Start
+## Commands
 
-- `mix deps.get` - install dependencies
-- `mix compile` - compile the application
-- `mix phx.server` - run the dev server
-- `mix test` / `mix test path/to/file.exs` - execute test suites
-- `mix precommit` - final gate before handing work back (compile + format + tests)
+```bash
+mix deps.get          # Install dependencies
+mix compile           # Compile the application
+mix phx.server        # Run dev server at localhost:4000
+mix test              # Run tests (creates/migrates DB automatically)
+mix test path/to/file # Run specific test file
+mix precommit         # Gate before finishing: typecheck + dialyzer + format + test
+```
+
+## API Surface
+
+Three endpoints under `/v1`:
+
+| Endpoint | Method | Purpose |
+|----------|--------|---------|
+| `/v1/sessions` | POST | Create session |
+| `/v1/sessions/:id/append` | POST | Append event |
+| `/v1/sessions/:id/tail?cursor=N` | GET (WebSocket) | Replay from cursor, then stream live |
+
+Required fields on append: `type`, `payload`, `actor`. Optional: `source`, `metadata`, `refs`, `idempotency_key`, `expected_seq`.
+
+Session IDs: auto-generated as `ses_<base64>` or client-provided.
+
+## Architecture
+
+```
+Client → Phoenix Gateway → Runtime → Raft Groups (256 × 3 replicas)
+                                          ↓
+                              Archiver → Postgres (cold storage)
+```
+
+**Key insight:** Session metadata and event logs live in Raft memory. No synchronous DB lookups on append—Postgres is write-behind only.
+
+| Component | Module | Role |
+|-----------|--------|------|
+| Runtime | `Starcite.Runtime` | Routes commands to correct Raft group |
+| Raft FSM | `Starcite.Runtime.RaftFSM` | State machine for sessions/events |
+| Raft Manager | `Starcite.Runtime.RaftManager` | Group lifecycle, shard assignment |
+| Event Store | `Starcite.Runtime.EventStore` | In-memory event cache (ETS) |
+| Archiver | `Starcite.Archive` | Background flush to Postgres (5s interval) |
+| Tail Socket | `StarciteWeb.TailSocket` | WebSocket handler for replay + live streaming |
+
+**Storage tiers:**
+- Hot (Raft): Session metadata + recent events
+- Cold (Postgres): Full event history, keyed by `(session_id, seq)`
+
+## Coding Standards
+
+**Pattern matching:** Fail loudly on bad input. Use function-head guards or `with` pipelines. Only provide defaults when product intentionally supports omissions.
+
+**Telemetry:** All events emit through `Starcite.Observability.Telemetry`. Add explicit clauses for new metadata—never swallow unexpected shapes into a fallback.
+
+**Boundary normalization:** Destructure params once at the controller/socket boundary. Avoid `Map.get` chains deeper in.
+
+**Contract semantics:** Preserve idempotency dedupe, expected-seq conflicts, and replay ordering.
+
+## Key Files
+
+| Task | Files |
+|------|-------|
+| API request handling | `lib/starcite_web/controllers/session_controller.ex` |
+| WebSocket tail | `lib/starcite_web/tail_socket.ex` |
+| Runtime logic | `lib/starcite/runtime.ex` |
+| Raft state machine | `lib/starcite/runtime/raft_fsm.ex` |
+| Background archival | `lib/starcite/archive.ex` |
+| Telemetry events | `lib/starcite/observability/telemetry.ex` |
+| Tests | `test/starcite/runtime_test.exs`, `test/starcite_web/` |
+
+## Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `DATABASE_URL` / `STARCITE_POSTGRES_URL` | Postgres connection |
+| `STARCITE_RAFT_DATA_DIR` | Raft log/snapshot directory |
+| `CLUSTER_NODES` | Comma-separated node list for local clusters |
+| `DNS_CLUSTER_QUERY` | K8s headless service DNS for prod clustering |
+| `SECRET_KEY_BASE` | Required in prod |
+| `PHX_SERVER=true` | Enable HTTP server in releases |
 
 ## Local Cluster Testing
 
-- Use manual Compose lifecycle with `docker-compose.integration.yml` (no wrapper start/stop scripts):
-  - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
-  - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/<scenario>.js`
-  - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
-- For failover drills, run workload and inject faults directly: `docker compose ... kill`, `pause`, `unpause`, `up -d`.
-- Use unique Compose project names for concurrent local clusters (`-p starcite-it-a`, `-p starcite-it-b`).
-- Keep cluster runs optional during local iteration; use `mix test` unless you specifically need cluster behavior/failover coverage.
+Use manual Compose lifecycle for integration tests:
 
-## Product Surface
+```bash
+PROJECT=starcite-it-a
+docker compose -f docker-compose.integration.yml -p "$PROJECT" up -d --build
+docker compose -f docker-compose.integration.yml -p "$PROJECT" \
+  --profile tools run --rm k6 run /bench/1-hot-path-throughput.js
+docker compose -f docker-compose.integration.yml -p "$PROJECT" down -v --remove-orphans
+```
 
-Starcite exposes three primitives under `/v1`:
+For failover drills: `docker compose ... kill`, `pause`, `unpause`, `up -d`.
 
-- `POST /v1/sessions` (`create`)
-- `POST /v1/sessions/:id/append` (`append`)
-- `GET /v1/sessions/:id/tail?cursor=N` (WebSocket `tail`)
+Keep cluster runs optional during iteration—default to `mix test` unless testing cluster behavior specifically.
 
-Contract reminders:
+## Before Finishing
 
-- `tail` means catch up from `cursor`, then stream live on one socket.
-- `append` is shared by humans and agents.
-- `actor` is required on append and is an opaque string.
-- `type` + `payload` are protocol-agnostic in this iteration.
-- `idempotency_key` and `expected_seq` are optional controls.
-- Auth is upstream; Starcite does not own authn/authz.
-- Starcite does not push outbound webhooks.
-
-## Architecture Cheat Sheet
-
-- **Storage:** 256 Raft groups (Ra library) with 3 replicas each. Quorum writes (2 of 3) and automatic leader election.
-- **No per-session processes:** Request handling is stateless; Raft state machines are the long-lived state holders.
-- **Session state in Raft:** Session metadata and ordered event logs are cached in Raft state.
-- **Postgres as write-behind:** Background archiver flushes committed events to Postgres. Failures do not block append acks.
-- **Cluster membership:** Erlang distribution + coordinator reconcile topology and deterministic replica assignment.
-
-## Working Standards
-
-- Pattern-match required input (controller params, runtime commands, websocket params); return descriptive errors for invalid shapes.
-- Make telemetry strict. Add clauses like `defp message_tags(%{role: role})` and treat everything else as the fallback path that highlights anomalies.
-- When serializing structs/maps, destructure once and build the response. Avoid peppering `Map.get` across atom/string variants; normalize at the boundary.
-- Preserve API contract semantics: idempotency dedupe, expected-seq conflicts, and replay ordering.
-- Lint, format, and test locally. Every PR should pass `mix precommit`.
-
-## Domain Assumptions & Conventions
-
-- Sessions are the primary resource.
-- Events are append-only per session and ordered by monotonic `seq`.
-- Clients recover from disconnects by reconnecting `tail` with their last processed cursor.
-- `metadata` and `refs` are opaque application data; Starcite stores and replays them.
-- **Background flush**: Flusher batch-inserts committed events to Postgres. Idempotent on `[session_id, seq]`.
-- **Snapshots**: Raft snapshots are used for recovery and log compaction.
-
-## Tooling Shortcuts
-
-- `mix ecto.migrate` / `mix ecto.rollback` for schema changes
-- `mix assets.build` for rebuilding Tailwind + JS bundles
-- `mix phx.gen.html` / `mix phx.gen.live` are unused-prefer handcrafted components consistent with the design language
-
-## Checklist Before You Finish
-
-1. All new/modified modules follow the fail-loud, pattern-matching style.
-2. Telemetry tags remain explicit; no new "unknown" defaults unless product requirements demand it.
-3. Tests cover new code paths, especially create/append/tail contracts, conflict handling, and Raft group behavior.
-4. Run `mix precommit` and address every warning, formatter diff, and test failure.
-5. Document runtime changes (Raft membership, rebalancing, storage) in `docs/` if behaviour shifts meaningfully.
-
-## Hot Path Design
-
-**The goal:** Sub-150ms p99 latency for message appends, even under load.
-
-**Critical path:**
-1. Client calls `POST /v1/sessions/:id/append`
-2. Runtime routes append to the session's Raft group
-3. Quorum commit assigns next `seq`
-4. API responds with committed `seq`; tail subscribers receive the committed event
-
-**What's NOT on the critical path:**
-- Database writes (background flusher, 5s interval)
-- Snapshots (triggered at 100k appends, async)
-
-**Key insight:** Session metadata and ordered event state live in Raft memory/log state, avoiding synchronous database lookups on append.
+1. Run `mix precommit` and fix all warnings/failures
+2. New modules follow pattern-matching, fail-loud style
+3. Telemetry tags are explicit—no silent "unknown" defaults
+4. Tests cover new code paths, especially API contracts and conflict handling
+5. Document runtime behavior changes in `docs/` if significant
