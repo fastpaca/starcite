@@ -110,14 +110,14 @@ defmodule Starcite.Runtime.RaftManager do
       server_ids = for node <- replica_nodes, do: {server_id, node}
 
       # Deterministic coordinator = lowest node name
+      # .. poor mans leader election but gets the job done
       bootstrap_node = Enum.min(replica_nodes)
-      am_bootstrap = my_node == bootstrap_node
 
       Logger.debug(
         "RaftManager: Starting group #{group_id} with #{length(replica_nodes)} replicas (bootstrap: #{bootstrap_node == my_node})"
       )
 
-      if am_bootstrap do
+      if my_node == bootstrap_node do
         # Ensure only one node bootstraps this group across the cluster
         :global.trans(
           {:raft_bootstrap, group_id},
@@ -128,7 +128,9 @@ defmodule Starcite.Runtime.RaftManager do
           10_000
         )
       else
-        # Retry join until bootstrap node creates cluster
+        # Retry join until bootstrap node creates cluster, which will brute force
+        # until the bootstrap node is done but what can we do. It will only affect
+        # cold starts.
         join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
       end
     end
@@ -170,6 +172,7 @@ defmodule Starcite.Runtime.RaftManager do
 
       {:error, :enoent} ->
         # Cluster doesn't exist yet, retry with small backoff
+        # TODO: exponential backoff instead of hammering
         Process.sleep(100)
 
         join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)

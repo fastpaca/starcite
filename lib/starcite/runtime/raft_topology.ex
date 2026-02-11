@@ -1,25 +1,23 @@
 defmodule Starcite.Runtime.RaftTopology do
   @moduledoc """
-  Coordinates Raft group membership using battle-tested patterns from RabbitMQ and Consul.
+  Topology controller for Raft groups on this node.
 
-  ## Design Principles (Boring = Reliable)
+  Handles startup/join and keeps membership converged as cluster nodes come and
+  go. This module controls when topology work runs; it does not define the
+  placement algorithm or state-machine semantics.
 
-  - **Erlang distribution** for cluster membership (not Presence/CRDT)
-  - **Coordinator pattern**: lowest node ID manages all group topology
-  - **Continuous reconciliation**: coordinator ensures groups match desired state
-  - **Explicit startup readiness**: ready only after bootstrap/join phase completes
+  ## Responsibilities
 
-  ## Bootstrap
+  - Coordinate bootstrap/join flow for local Raft groups.
+  - Report local readiness via `ready?/0`.
+  - Reconcile membership after node up/down and on periodic checks.
+  - Apply membership transitions safely (add before remove).
 
-  - Coordinator: detects groups don't exist, bootstraps them with initial replicas
-  - Non-coordinators: start local groups, join existing clusters
-  - No racing: groups either exist or they don't (via :ra.members check)
+  ## NOT Responsible For
 
-  ## Dynamic Membership
-
-  - Coordinator runs rebalancing on {:nodeup, _} and {:nodedown, _}
-  - Uses rendezvous hashing for deterministic replica placement
-  - Adds members first, then removes (safe rebalancing)
+  - Replica placement policy (`RaftManager`).
+  - Raft state-machine command handling (`RaftFSM`).
+  - Request routing, storage API, or client behavior.
   """
 
   use GenServer
