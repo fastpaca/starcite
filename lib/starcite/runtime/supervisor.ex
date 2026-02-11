@@ -9,20 +9,6 @@ defmodule Starcite.Runtime.Supervisor do
 
   @impl true
   def init(_arg) do
-    archive_children =
-      if archive_enabled?() do
-        [
-          {Starcite.Archive,
-           [
-             flush_interval_ms: archive_interval(),
-             adapter: Store.adapter(),
-             adapter_opts: []
-           ]}
-        ]
-      else
-        []
-      end
-
     children =
       [
         # Stable owner for ETS event mirror table
@@ -30,8 +16,15 @@ defmodule Starcite.Runtime.Supervisor do
         # Task.Supervisor for async Raft group startup
         {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
         # Topology coordinator (uses Erlang distribution, not Presence)
-        Starcite.Runtime.RaftTopology
-      ] ++ archive_children
+        Starcite.Runtime.RaftTopology,
+        {Starcite.Archive,
+         [
+           name: archive_name(),
+           flush_interval_ms: archive_interval(),
+           adapter: Store.adapter(),
+           adapter_opts: archive_adapter_opts()
+         ]}
+      ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end
@@ -45,13 +38,7 @@ defmodule Starcite.Runtime.Supervisor do
     end
   end
 
-  defp archive_enabled? do
-    from_env =
-      case System.get_env("STARCITE_ARCHIVER_ENABLED") do
-        nil -> false
-        val -> val not in ["", "false", "0", "no", "off"]
-      end
+  defp archive_adapter_opts, do: Application.get_env(:starcite, :archive_adapter_opts, [])
 
-    Application.get_env(:starcite, :archive_enabled, false) || from_env
-  end
+  defp archive_name, do: Application.get_env(:starcite, :archive_name, Starcite.Archive)
 end

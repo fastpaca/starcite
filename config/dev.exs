@@ -1,6 +1,6 @@
 import Config
 
-# Configure database (optional - only needed if archiving is enabled)
+# Configure database for archive storage.
 config :starcite, Starcite.Repo,
   url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost:5432/starcite_dev",
   pool_size: 10,
