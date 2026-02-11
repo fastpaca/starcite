@@ -14,7 +14,7 @@ Guidance for Claude Code when collaborating on Starcite.
 
 - Use manual Compose lifecycle with `docker-compose.integration.yml` (no wrapper start/stop scripts):
   - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
-  - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/<scenario>.js`
+  - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js`
   - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
 - For failover drills, run workload and inject faults directly: `docker compose ... kill`, `pause`, `unpause`, `up -d`.
 - Use unique Compose project names for concurrent local clusters (`-p starcite-it-a`, `-p starcite-it-b`).
