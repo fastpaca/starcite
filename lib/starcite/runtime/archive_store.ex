@@ -1,6 +1,6 @@
-defmodule Starcite.Runtime.HistoricalStore do
+defmodule Starcite.Runtime.ArchiveStore do
   @moduledoc """
-  Historical event reader backed by Postgres with Cachex fronting.
+  Archived event reader backed by Postgres with Cachex fronting.
 
   This module is used only for cold reads (`seq <= archived_seq`).
   Hot/live reads stay on the ETS event store path.
@@ -11,10 +11,10 @@ defmodule Starcite.Runtime.HistoricalStore do
   alias Starcite.Archive.Event
   alias Starcite.Repo
 
-  @cache :starcite_historical_cache
+  @cache :starcite_archive_read_cache
 
   @spec from_cursor(String.t(), non_neg_integer(), pos_integer(), non_neg_integer()) ::
-          {:ok, [map()]} | {:error, :historical_unavailable}
+          {:ok, [map()]} | {:error, :archive_read_unavailable}
   def from_cursor(session_id, cursor, limit, archived_seq)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 and is_integer(archived_seq) and archived_seq >= 0 do
@@ -23,7 +23,7 @@ defmodule Starcite.Runtime.HistoricalStore do
     else
       lower = cursor + 1
       upper = min(archived_seq, cursor + limit)
-      key = {:historical_range, session_id, lower, upper}
+      key = {:archive_range, session_id, lower, upper}
 
       case get_cached(key) do
         {:ok, events} ->
@@ -82,10 +82,10 @@ defmodule Starcite.Runtime.HistoricalStore do
 
       {:ok, Repo.all(query)}
     else
-      {:error, :historical_unavailable}
+      {:error, :archive_read_unavailable}
     end
   rescue
     _ ->
-      {:error, :historical_unavailable}
+      {:error, :archive_read_unavailable}
   end
 end

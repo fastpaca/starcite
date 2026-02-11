@@ -46,8 +46,8 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "raft_unavailable", "No available replicas")
   end
 
-  def call(conn, {:error, :historical_unavailable}) do
-    error(conn, :service_unavailable, "historical_unavailable", "Historical storage unavailable")
+  def call(conn, {:error, :archive_read_unavailable}) do
+    error(conn, :service_unavailable, "archive_read_unavailable", "Archive read unavailable")
   end
 
   def call(conn, {:error, :event_gap_detected}) do
