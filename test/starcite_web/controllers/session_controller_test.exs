@@ -90,6 +90,22 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["error"] == "session_exists"
       assert is_binary(body["message"])
     end
+
+    test "invalid metadata returns 422 schema error" do
+      conn =
+        json_conn(:post, "/v1/sessions", %{
+          "title" => "Draft",
+          "metadata" => "bad"
+        })
+
+      assert conn.status == 422
+      body = Jason.decode!(conn.resp_body)
+      assert is_list(body["errors"])
+
+      assert Enum.any?(body["errors"], fn error ->
+               get_in(error, ["source", "pointer"]) == "/metadata"
+             end)
+    end
   end
 
   describe "POST /v1/sessions/:id/append" do
@@ -188,16 +204,44 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body2["deduped"] == true
     end
 
-    test "missing required fields returns 400" do
+    test "missing required fields returns 422 schema error" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
       conn = json_conn(:post, "/v1/sessions/#{id}/append", %{"payload" => %{"text" => "hi"}})
 
-      assert conn.status == 400
+      assert conn.status == 422
       body = Jason.decode!(conn.resp_body)
-      assert body["error"] == "invalid_event"
-      assert is_binary(body["message"])
+      assert is_list(body["errors"])
+
+      assert Enum.any?(body["errors"], fn error ->
+               get_in(error, ["source", "pointer"]) == "/type"
+             end)
+
+      assert Enum.any?(body["errors"], fn error ->
+               get_in(error, ["source", "pointer"]) == "/actor"
+             end)
+    end
+
+    test "invalid refs payload returns 422 schema error" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "agent:test",
+          "refs" => "bad"
+        })
+
+      assert conn.status == 422
+      body = Jason.decode!(conn.resp_body)
+      assert is_list(body["errors"])
+
+      assert Enum.any?(body["errors"], fn error ->
+               get_in(error, ["source", "pointer"]) == "/refs"
+             end)
     end
 
     test "returns 404 with error message when session is missing" do

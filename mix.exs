@@ -56,6 +56,7 @@ defmodule Starcite.MixProject do
       {:redix, "~> 1.5"},
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
+      {:open_api_spex, "~> 3.22"},
       {:ra, "~> 2.13"},
       {:bypass, "~> 2.1", only: :test},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

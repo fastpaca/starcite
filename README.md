@@ -83,6 +83,8 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 
 ## Documentation
 
+- OpenAPI JSON: `/v1/openapi`
+- Swagger UI: `/v1/docs`
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
 - [Architecture](docs/architecture.md)
