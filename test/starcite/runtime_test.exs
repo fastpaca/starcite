@@ -192,6 +192,17 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "returns ordered events across Postgres cold + ETS hot boundary" do
+      old_archive_enabled = Application.get_env(:starcite, :archive_enabled)
+      Application.put_env(:starcite, :archive_enabled, true)
+
+      on_exit(fn ->
+        if is_nil(old_archive_enabled) do
+          Application.delete_env(:starcite, :archive_enabled)
+        else
+          Application.put_env(:starcite, :archive_enabled, old_archive_enabled)
+        end
+      end)
+
       start_supervised!(Repo)
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
@@ -218,6 +229,17 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "respects limit across Postgres cold + ETS hot boundary" do
+      old_archive_enabled = Application.get_env(:starcite, :archive_enabled)
+      Application.put_env(:starcite, :archive_enabled, true)
+
+      on_exit(fn ->
+        if is_nil(old_archive_enabled) do
+          Application.delete_env(:starcite, :archive_enabled)
+        else
+          Application.put_env(:starcite, :archive_enabled, old_archive_enabled)
+        end
+      end)
+
       start_supervised!(Repo)
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})

@@ -370,7 +370,7 @@ defmodule Starcite.Runtime do
   end
 
   defp read_cold_events(id, cursor, limit, %Session{archived_seq: archived_seq}) do
-    if archived_seq > cursor do
+    if archived_seq > cursor and archive_enabled?() do
       from_seq = cursor + 1
       to_seq = min(archived_seq, cursor + limit)
       ArchiveStore.read_events(id, from_seq, to_seq)
@@ -426,5 +426,15 @@ defmodule Starcite.Runtime do
     else
       {:ok, events}
     end
+  end
+
+  defp archive_enabled? do
+    from_env =
+      case System.get_env("STARCITE_ARCHIVER_ENABLED") do
+        nil -> false
+        val -> val not in ["", "false", "0", "no", "off"]
+      end
+
+    Application.get_env(:starcite, :archive_enabled, false) || from_env
   end
 end

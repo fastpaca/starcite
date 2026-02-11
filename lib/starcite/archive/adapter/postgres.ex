@@ -45,30 +45,24 @@ defmodule Starcite.Archive.Adapter.Postgres do
   def read_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    if Process.whereis(Repo) == nil do
-      {:ok, []}
-    else
-      query =
-        from(e in Event,
-          where: e.session_id == ^session_id and e.seq >= ^from_seq and e.seq <= ^to_seq,
-          order_by: [asc: e.seq],
-          select: %{
-            seq: e.seq,
-            type: e.type,
-            payload: e.payload,
-            actor: e.actor,
-            source: e.source,
-            metadata: e.metadata,
-            refs: e.refs,
-            idempotency_key: e.idempotency_key,
-            inserted_at: e.inserted_at
-          }
-        )
+    query =
+      from(e in Event,
+        where: e.session_id == ^session_id and e.seq >= ^from_seq and e.seq <= ^to_seq,
+        order_by: [asc: e.seq],
+        select: %{
+          seq: e.seq,
+          type: e.type,
+          payload: e.payload,
+          actor: e.actor,
+          source: e.source,
+          metadata: e.metadata,
+          refs: e.refs,
+          idempotency_key: e.idempotency_key,
+          inserted_at: e.inserted_at
+        }
+      )
 
-      {:ok, Repo.all(query)}
-    end
-  rescue
-    _ -> {:error, :archive_read_unavailable}
+    {:ok, Repo.all(query)}
   end
 
   defp insert_all_with_conflict(rows) do
