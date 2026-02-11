@@ -147,6 +147,23 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :total_entries,
           description: "Current entry count in ETS event store"
         ),
+        counter("starcite_event_store_backpressure_total",
+          event_name: [:starcite, :event_store, :backpressure],
+          measurement: :count,
+          description: "Total append rejections due to ETS capacity limits",
+          tags: [:reason]
+        ),
+        last_value("starcite_event_store_entries_on_backpressure",
+          event_name: [:starcite, :event_store, :backpressure],
+          measurement: :total_entries,
+          description: "Global ETS entry count when backpressure triggers"
+        ),
+        last_value("starcite_event_store_session_entries_on_backpressure",
+          event_name: [:starcite, :event_store, :backpressure],
+          measurement: :session_entries,
+          description: "Per-session ETS entry count when backpressure triggers",
+          tags: [:session_id]
+        ),
         counter("starcite_cursor_updates_total",
           event_name: [:starcite, :cursor, :update],
           measurement: :count,

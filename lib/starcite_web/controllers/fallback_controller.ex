@@ -54,6 +54,15 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "event_gap_detected", "Ordered replay gap detected")
   end
 
+  def call(conn, {:error, :event_store_backpressure}) do
+    error(
+      conn,
+      :too_many_requests,
+      "event_store_backpressure",
+      "Node is backpressuring writes due to event-store capacity"
+    )
+  end
+
   def call(conn, {:error, reason})
       when reason in [
              :invalid_event,

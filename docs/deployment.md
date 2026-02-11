@@ -17,7 +17,6 @@ Set `STARCITE_RAFT_DATA_DIR` to persistent storage so Raft state survives restar
 docker run -d \
   -p 4000:4000 \
   -v starcite_data:/data \
-  -e DATABASE_URL=postgres://user:password@host/db \
   ghcr.io/fastpaca/starcite:latest
 ```
 
@@ -27,7 +26,6 @@ docker run -d \
 docker run -d \
   -p 4000:4000 \
   -v /var/lib/starcite:/data \
-  -e DATABASE_URL=postgres://user:password@host/db \
   -e CLUSTER_NODES=starcite-1@starcite.internal,starcite-2@starcite.internal,starcite-3@starcite.internal \
   -e NODE_NAME=starcite-1 \
   ghcr.io/fastpaca/starcite:latest
@@ -37,6 +35,12 @@ Repeat with `NODE_NAME=starcite-2` and `NODE_NAME=starcite-3`.
 
 Use a load balancer in front of nodes for API traffic.
 
+For rolling updates, rely on infrastructure-level draining:
+
+1. Mark node/pod unready before termination so new traffic stops.
+2. Keep a graceful termination window so in-flight HTTP and WebSocket clients reconnect.
+3. Require clients to reconnect tails with cursor resume and retry appends idempotently.
+
 ## Local cluster (development)
 
 ```bash
@@ -45,11 +49,10 @@ docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --buil
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
 
-For manual benchmarks and failover drills, see `docs/local-testing.md`.
-
-## Postgres archive
+## Postgres archive (optional)
 
 ```bash
+-e STARCITE_ARCHIVER_ENABLED=true \
 -e DATABASE_URL=postgres://user:password@host/db \
 -e STARCITE_ARCHIVE_FLUSH_INTERVAL_MS=5000 \
 -e DB_POOL_SIZE=10
@@ -79,6 +82,7 @@ Prometheus metrics on `/metrics`.
 | `starcite_archive_lag` | Archive lag |
 | `starcite_archive_tail_size` | Hot tail size |
 | `starcite_archive_trimmed_total` | Rows trimmed after archive |
+| `starcite_event_store_backpressure_total` | Total append rejections from ETS capacity limits |
 
 ## Configuration
 
@@ -90,7 +94,11 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `DATABASE_URL` | none | Postgres URL for required archive storage |
+| `STARCITE_ENABLE_BACKPRESSURE` | `false` | Enable append backpressure on event-store capacity limits |
+| `STARCITE_EVENT_STORE_MAX_ENTRIES` | none | Global ETS event-store entry cap when backpressure is enabled |
+| `STARCITE_EVENT_STORE_MAX_ENTRIES_PER_SESSION` | none | Per-session ETS event-store entry cap when backpressure is enabled |
+| `STARCITE_ARCHIVER_ENABLED` | `false` | Enable Postgres archiver |
+| `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
 | `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |

@@ -62,6 +62,55 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry when an event-store write is rejected due to capacity.
+
+  Measurements:
+    - `:count` – fixed at 1 per rejection
+    - `:total_entries` – current global ETS event count
+    - `:session_entries` – current ETS event count for the session
+
+  Metadata:
+    - `:session_id`
+    - `:global_limit`
+    - `:session_limit`
+    - `:reason` (`:global_limit` or `:session_limit`)
+  """
+  @spec event_store_backpressure(
+          String.t(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer() | nil,
+          pos_integer() | nil,
+          :global_limit | :session_limit
+        ) :: :ok
+  def event_store_backpressure(
+        session_id,
+        total_entries,
+        session_entries,
+        global_limit,
+        session_limit,
+        reason
+      )
+      when is_binary(session_id) and session_id != "" and is_integer(total_entries) and
+             total_entries >= 0 and is_integer(session_entries) and session_entries >= 0 and
+             (is_integer(global_limit) or is_nil(global_limit)) and
+             (is_integer(session_limit) or is_nil(session_limit)) and
+             reason in [:global_limit, :session_limit] do
+    :telemetry.execute(
+      [:starcite, :event_store, :backpressure],
+      %{count: 1, total_entries: total_entries, session_entries: session_entries},
+      %{
+        session_id: session_id,
+        global_limit: global_limit,
+        session_limit: session_limit,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry when a cursor update is published on PubSub.
 
   Measurements:

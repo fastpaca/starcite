@@ -20,6 +20,9 @@ defmodule Starcite.Runtime.EventStore do
   # max_seq lookups without scanning the entire event table.
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
+  @max_entries_env "STARCITE_EVENT_STORE_MAX_ENTRIES"
+  @max_entries_per_session_env "STARCITE_EVENT_STORE_MAX_ENTRIES_PER_SESSION"
+  @enable_backpressure_env "STARCITE_ENABLE_BACKPRESSURE"
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -35,22 +38,37 @@ defmodule Starcite.Runtime.EventStore do
   @doc """
   Insert one committed event for a session.
   """
-  @spec put_event(String.t(), Event.t()) :: :ok
+  @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    event_table = ensure_event_table()
-    index_table = ensure_index_table()
-    true = :ets.insert(event_table, {{session_id, seq}, event})
-    :ok = update_session_max_seq(index_table, session_id, seq)
+    case ensure_capacity(session_id) do
+      :ok ->
+        event_table = ensure_event_table()
+        index_table = ensure_index_table()
+        true = :ets.insert(event_table, {{session_id, seq}, event})
+        :ok = update_session_max_seq(index_table, session_id, seq)
 
-    Telemetry.event_store_write(
-      session_id,
-      seq,
-      byte_size(Jason.encode!(event.payload)),
-      size()
-    )
+        Telemetry.event_store_write(
+          session_id,
+          seq,
+          byte_size(Jason.encode!(event.payload)),
+          size()
+        )
 
-    :ok
+        :ok
+
+      {:error, :event_store_backpressure, metadata} ->
+        Telemetry.event_store_backpressure(
+          session_id,
+          metadata.total_entries,
+          metadata.session_entries,
+          metadata.global_limit,
+          metadata.session_limit,
+          metadata.reason
+        )
+
+        {:error, :event_store_backpressure}
+    end
   end
 
   @doc """
@@ -247,6 +265,116 @@ defmodule Starcite.Runtime.EventStore do
 
       :"$end_of_table" ->
         []
+    end
+  end
+
+  defp ensure_capacity(session_id) when is_binary(session_id) and session_id != "" do
+    if backpressure_enabled?() do
+      total_entries = size()
+      session_entries = session_size(session_id)
+      global_limit = max_entries_limit()
+      session_limit = max_entries_per_session_limit()
+
+      cond do
+        is_integer(global_limit) and total_entries >= global_limit ->
+          {:error, :event_store_backpressure,
+           %{
+             reason: :global_limit,
+             total_entries: total_entries,
+             session_entries: session_entries,
+             global_limit: global_limit,
+             session_limit: session_limit
+           }}
+
+        is_integer(session_limit) and session_entries >= session_limit ->
+          {:error, :event_store_backpressure,
+           %{
+             reason: :session_limit,
+             total_entries: total_entries,
+             session_entries: session_entries,
+             global_limit: global_limit,
+             session_limit: session_limit
+           }}
+
+        true ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp backpressure_enabled? do
+    parse_bool_env_or_default(
+      @enable_backpressure_env,
+      Application.get_env(:starcite, :enable_backpressure, false)
+    )
+  end
+
+  defp max_entries_limit do
+    parse_int_env_or_default(
+      @max_entries_env,
+      Application.get_env(:starcite, :event_store_max_entries),
+      1
+    )
+  end
+
+  defp max_entries_per_session_limit do
+    parse_int_env_or_default(
+      @max_entries_per_session_env,
+      Application.get_env(:starcite, :event_store_max_entries_per_session),
+      1
+    )
+  end
+
+  defp parse_int_env_or_default(env_key, default, min)
+       when is_binary(env_key) and is_integer(min) and min > 0 do
+    case System.get_env(env_key) do
+      nil -> validate_int!(default, env_key, min)
+      raw -> parse_int!(raw, env_key, min)
+    end
+  end
+
+  defp parse_bool_env_or_default(env_key, default)
+       when is_binary(env_key) and is_boolean(default) do
+    case System.get_env(env_key) do
+      nil -> default
+      raw -> parse_bool!(raw, env_key)
+    end
+  end
+
+  defp validate_int!(nil, _env_key, _min), do: nil
+
+  defp validate_int!(value, _env_key, min) when is_integer(value) and value >= min,
+    do: value
+
+  defp validate_int!(value, env_key, min) do
+    raise ArgumentError,
+          "invalid integer for #{env_key}: #{inspect(value)} (expected nil or >= #{min})"
+  end
+
+  defp parse_int!(raw, env_key, min) when is_binary(raw) do
+    case Integer.parse(raw) do
+      {value, ""} when value >= min ->
+        value
+
+      _ ->
+        raise ArgumentError,
+              "invalid integer for #{env_key}: #{inspect(raw)} (expected >= #{min})"
+    end
+  end
+
+  defp parse_bool!(raw, env_key) when is_binary(raw) do
+    case String.downcase(String.trim(raw)) do
+      "1" -> true
+      "true" -> true
+      "yes" -> true
+      "on" -> true
+      "0" -> false
+      "false" -> false
+      "no" -> false
+      "off" -> false
+      _ -> raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(raw)}"
     end
   end
 end

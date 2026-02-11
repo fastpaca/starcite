@@ -225,8 +225,8 @@ defmodule Starcite.Runtime do
     end
   end
 
-  defp call_on_replica(group_id, fun, args, local_fun) do
-    case route_target(group_id) do
+  defp call_on_replica(group_id, fun, args, local_fun, route_opts \\ []) do
+    case route_target(group_id, route_opts) do
       {:local, _node} ->
         local_fun.()
 
@@ -290,7 +290,8 @@ defmodule Starcite.Runtime do
               :invalid_cursor,
               :session_not_found,
               :session_exists,
-              :idempotency_conflict
+              :idempotency_conflict,
+              :event_store_backpressure
             ] do
     false
   end
@@ -323,13 +324,20 @@ defmodule Starcite.Runtime do
     replicas = Keyword.get(opts, :replicas, RaftManager.replicas_for_group(group_id))
     ready_nodes = Keyword.get(opts, :ready_nodes, RaftTopology.ready_nodes())
     local_running = Keyword.get(opts, :local_running, group_running?(group_id))
-    remote_replicas = if local_running, do: replicas, else: replicas -- [self_node]
+    allow_local = Keyword.get(opts, :allow_local, true)
+
+    remote_replicas =
+      if local_running and allow_local do
+        replicas
+      else
+        replicas -- [self_node]
+      end
 
     cond do
-      self_node in replicas and local_running ->
+      self_node in replicas and local_running and allow_local ->
         {:local, self_node}
 
-      self_node in replicas and remote_replicas == [] ->
+      self_node in replicas and remote_replicas == [] and allow_local ->
         {:local, self_node}
 
       true ->

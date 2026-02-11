@@ -155,4 +155,87 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert :error = EventStore.max_seq(session_id)
     refute session_id in EventStore.session_ids()
   end
+
+  test "enforces global backpressure limit when enabled" do
+    with_env(:starcite, :enable_backpressure, true)
+    with_env(:starcite, :event_store_max_entries, 1)
+    with_env(:starcite, :event_store_max_entries_per_session, nil)
+
+    session_id = "ses-cap-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    assert :ok =
+             EventStore.put_event(session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert {:error, :event_store_backpressure} =
+             EventStore.put_event(session_id, %{
+               seq: 2,
+               type: "content",
+               payload: %{n: 2},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert EventStore.size() == 1
+  end
+
+  test "enforces per-session backpressure limit when enabled" do
+    with_env(:starcite, :enable_backpressure, true)
+    with_env(:starcite, :event_store_max_entries, nil)
+    with_env(:starcite, :event_store_max_entries_per_session, 1)
+
+    session_a = "ses-cap-a-#{System.unique_integer([:positive, :monotonic])}"
+    session_b = "ses-cap-b-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    assert :ok =
+             EventStore.put_event(session_a, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert :ok =
+             EventStore.put_event(session_b, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert {:error, :event_store_backpressure} =
+             EventStore.put_event(session_a, %{
+               seq: 2,
+               type: "content",
+               payload: %{n: 2},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert EventStore.size() == 2
+    assert EventStore.session_size(session_a) == 1
+    assert EventStore.session_size(session_b) == 1
+  end
+
+  defp with_env(app, key, value) do
+    previous = Application.get_env(app, key)
+    Application.put_env(app, key, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(app, key)
+      else
+        Application.put_env(app, key, previous)
+      end
+    end)
+  end
 end

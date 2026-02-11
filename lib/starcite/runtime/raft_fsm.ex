@@ -36,27 +36,34 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
-          :ok = EventStore.put_event(session_id, event)
+          case EventStore.put_event(session_id, event) do
+            :ok ->
+              new_state = %{
+                state
+                | sessions: Map.put(state.sessions, session_id, updated_session)
+              }
 
-          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+              Starcite.Observability.Telemetry.event_appended(
+                session_id,
+                event.type,
+                event.actor,
+                event.source,
+                byte_size(Jason.encode!(event.payload))
+              )
 
-          Starcite.Observability.Telemetry.event_appended(
-            session_id,
-            event.type,
-            event.actor,
-            event.source,
-            byte_size(Jason.encode!(event.payload))
-          )
+              Starcite.Observability.Telemetry.cursor_update_emitted(
+                session_id,
+                event.seq,
+                updated_session.last_seq
+              )
 
-          Starcite.Observability.Telemetry.cursor_update_emitted(
-            session_id,
-            event.seq,
-            updated_session.last_seq
-          )
+              reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+              effects = build_effects(session_id, event, updated_session.last_seq)
+              {new_state, {:reply, {:ok, reply}}, effects}
 
-          reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          effects = build_effects(session_id, event, updated_session.last_seq)
-          {new_state, {:reply, {:ok, reply}}, effects}
+            {:error, :event_store_backpressure} ->
+              {state, {:reply, {:error, :event_store_backpressure}}}
+          end
 
         {:deduped, _session, seq} ->
           reply = %{seq: seq, last_seq: session.last_seq, deduped: true}
