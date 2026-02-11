@@ -109,16 +109,16 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     with_env(:starcite, :event_store_max_size, "#{EventStore.memory_bytes()}B")
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
-      RaftFSM.apply(nil, {:append_event, 0, session_id, event_payload("two"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
 
     assert next_state == state
     assert EventStore.session_size(session_id) == 1
-    assert {:ok, session} = RaftFSM.query_session(next_state, 0, session_id)
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
     assert session.last_seq == 1
   end
 
