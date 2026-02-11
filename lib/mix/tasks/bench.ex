@@ -52,15 +52,15 @@ defmodule Mix.Tasks.Bench do
   end
 
   defp run_scenario(:hot_path) do
-    Mix.Task.run("run", ["--no-start", "bench/elixir-hot-path-throughput.exs"])
+    Mix.Tasks.Bench.HotPath.run()
   end
 
   defp run_scenario(:routing) do
-    Mix.Task.run("run", ["--no-start", "bench/elixir-routing-attribution.exs"])
+    Mix.Tasks.Bench.Routing.run()
   end
 
   defp run_scenario(:internal) do
-    Mix.Task.run("run", ["--no-start", "bench/elixir-internal-attribution.exs"])
+    Mix.Tasks.Bench.Internal.run()
   end
 
   defp run_scenario(:k6) do

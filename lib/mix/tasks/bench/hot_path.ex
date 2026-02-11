@@ -1,6 +1,4 @@
-Mix.Task.run("loadpaths")
-
-defmodule Starcite.Bench.HotPathThroughput do
+defmodule Mix.Tasks.Bench.HotPath do
   require Logger
 
   alias Starcite.Runtime
@@ -37,7 +35,7 @@ defmodule Starcite.Bench.HotPathThroughput do
       end
     end
 
-    Benchee.run(
+    run_benchee(
       %{"runtime.append_event" => append_event},
       parallel: config.parallel,
       warmup: config.warmup_seconds,
@@ -45,6 +43,16 @@ defmodule Starcite.Bench.HotPathThroughput do
       memory_time: 0,
       print: [fast_warning: false]
     )
+  end
+
+  defp run_benchee(scenarios, options) when is_map(scenarios) and is_list(options) do
+    benchee = :"Elixir.Benchee"
+
+    if Code.ensure_loaded?(benchee) do
+      apply(benchee, :run, [scenarios, options])
+    else
+      Mix.raise("Benchee is not available. Run benchmarks with MIX_ENV=dev.")
+    end
   end
 
   defp ensure_apps_stopped do
@@ -210,5 +218,3 @@ defmodule Starcite.Bench.HotPathThroughput do
     end
   end
 end
-
-Starcite.Bench.HotPathThroughput.run()

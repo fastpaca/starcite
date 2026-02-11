@@ -9,9 +9,9 @@ Starcite keeps benchmarks intentionally small and explicit:
 
 - `bench/k6-hot-path-throughput.js`: external API hot-path throughput/latency benchmark.
 - `bench/k6-lib.js`: shared k6 helpers used by the hot-path benchmark.
-- `bench/elixir-hot-path-throughput.exs`: closed-loop `Runtime.append_event/3` benchmark.
-- `bench/elixir-routing-attribution.exs`: append-path attribution (`append_event`, local call, RPC self-hop, direct `:ra.process_command`).
-- `bench/elixir-internal-attribution.exs`: internal attribution across `Session`, `EventStore`, `RaftFSM.apply`, and full runtime append.
+- `lib/mix/tasks/bench/hot_path.ex`: closed-loop `Runtime.append_event/3` benchmark.
+- `lib/mix/tasks/bench/routing.ex`: append-path attribution (`append_event`, local call, RPC self-hop, direct `:ra.process_command`).
+- `lib/mix/tasks/bench/internal.ex`: internal attribution across `Session`, `EventStore`, `RaftFSM.apply`, and full runtime append.
 
 ## Local Quick Run (k6 Hot Path)
 
@@ -43,7 +43,7 @@ mix bench internal
 mix bench k6        # runs k6 directly if installed locally
 ```
 
-Useful env knobs (all scripts):
+Useful env knobs (all Elixir benchmark scenarios):
 
 - `BENCH_LOG_LEVEL` (default: `error`)
 - `BENCH_RAFT_DATA_DIR`
@@ -57,15 +57,15 @@ Useful env knobs (all scripts):
 
 Additional knobs:
 
-- `bench/elixir-hot-path-throughput.exs`:
+- `mix bench` / `mix bench hot-path`:
   - `BENCH_EVENT_STORE_MAX_SIZE`
   - `BENCH_EVENT_STORE_CAPACITY_CHECK`
   - `BENCH_APPEND_PUBSUB_EFFECTS`
   - `BENCH_APPEND_TELEMETRY`
-- `bench/elixir-routing-attribution.exs`:
+- `mix bench routing`:
   - `BENCH_APPEND_PUBSUB_EFFECTS`
   - `BENCH_APPEND_TELEMETRY`
-- `bench/elixir-internal-attribution.exs`:
+- `mix bench internal`:
   - `BENCH_EVENT_STORE_MAX_SIZE`
   - `BENCH_APPEND_PUBSUB_EFFECTS`
   - `BENCH_APPEND_TELEMETRY`

@@ -1,6 +1,4 @@
-Mix.Task.run("loadpaths")
-
-defmodule Starcite.Bench.InternalAttribution do
+defmodule Mix.Tasks.Bench.Internal do
   require Logger
 
   alias Starcite.Runtime
@@ -18,7 +16,8 @@ defmodule Starcite.Bench.InternalAttribution do
 
     sessions = build_session_ids(config.session_count)
     session_count = tuple_size(sessions)
-    event_template = event_template(config.payload_bytes)
+    input_event_template = input_event_template(config.payload_bytes)
+    stored_event_template = stored_event_template(input_event_template)
 
     runtime_sessions = prepare_runtime_sessions(sessions)
     fsm_initial_state = build_fsm_state(runtime_sessions)
@@ -35,14 +34,18 @@ defmodule Starcite.Bench.InternalAttribution do
     fsm_counter = :atomics.new(1, [])
     :atomics.put(fsm_counter, 1, 0)
 
-    session_append = fn ->
-      session =
-        Process.get(:bench_session_append_state) ||
-          Session.new("bench-session-#{System.unique_integer([:positive])}")
+    session_counter = :atomics.new(1, [])
+    :atomics.put(session_counter, 1, 0)
 
-      case Session.append_event(session, event_template) do
-        {:appended, updated, _event} ->
-          Process.put(:bench_session_append_state, updated)
+    base_session =
+      Session.new("bench-session", metadata: %{bench: true, scenario: "internal_attribution"})
+
+    session_append = fn ->
+      seq = :atomics.add_get(session_counter, 1, 1)
+      session = %Session{base_session | last_seq: seq - 1}
+
+      case Session.append_event(session, input_event_template) do
+        {:appended, _updated, _event} ->
           :ok
 
         {:deduped, _session, _seq} ->
@@ -56,7 +59,7 @@ defmodule Starcite.Bench.InternalAttribution do
     put_event = fn ->
       seq = :atomics.add_get(put_counter, 1, 1)
       session_id = elem(sessions, rem(seq - 1, session_count))
-      event = Map.put(event_template, :seq, seq)
+      event = Map.put(stored_event_template, :seq, seq)
 
       case EventStore.put_event(session_id, event) do
         :ok -> :ok
@@ -67,7 +70,7 @@ defmodule Starcite.Bench.InternalAttribution do
     raw_ets_insert = fn ->
       seq = :atomics.add_get(raw_insert_counter, 1, 1)
       session_id = elem(sessions, rem(seq - 1, session_count))
-      event = Map.put(event_template, :seq, seq)
+      event = Map.put(stored_event_template, :seq, seq)
 
       event_table = :ets.whereis(:starcite_event_store_events)
       index_table = :ets.whereis(:starcite_event_store_session_max_seq)
@@ -83,7 +86,7 @@ defmodule Starcite.Bench.InternalAttribution do
       fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
       meta = %{index: seq}
 
-      case RaftFSM.apply(meta, {:append_event, session_id, event_template, []}, fsm_state) do
+      case RaftFSM.apply(meta, {:append_event, session_id, input_event_template, []}, fsm_state) do
         {updated_state, {:reply, {:ok, _reply}}, _effects} ->
           Process.put(:bench_fsm_state, updated_state)
           :ok
@@ -101,14 +104,14 @@ defmodule Starcite.Bench.InternalAttribution do
       seq = :atomics.add_get(runtime_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
 
-      case Runtime.append_event(session_id, event_template) do
+      case Runtime.append_event(session_id, input_event_template) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "runtime.append_event failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "runtime.append_event timeout: #{inspect(leader)}"
       end
     end
 
-    Benchee.run(
+    run_benchee(
       %{
         "session.append_event" => session_append,
         "event_store.memory_bytes" => fn -> EventStore.memory_bytes() end,
@@ -123,6 +126,16 @@ defmodule Starcite.Bench.InternalAttribution do
       memory_time: 0,
       print: [fast_warning: false]
     )
+  end
+
+  defp run_benchee(scenarios, options) when is_map(scenarios) and is_list(options) do
+    benchee = :"Elixir.Benchee"
+
+    if Code.ensure_loaded?(benchee) do
+      apply(benchee, :run, [scenarios, options])
+    else
+      Mix.raise("Benchee is not available. Run benchmarks with MIX_ENV=dev.")
+    end
   end
 
   defp ensure_apps_stopped do
@@ -253,7 +266,7 @@ defmodule Starcite.Bench.InternalAttribution do
     %RaftFSM{group_id: 0, sessions: sessions}
   end
 
-  defp event_template(payload_bytes) do
+  defp input_event_template(payload_bytes) do
     %{
       type: "content",
       payload: %{text: payload_text(payload_bytes)},
@@ -261,9 +274,12 @@ defmodule Starcite.Bench.InternalAttribution do
       source: "benchmark",
       metadata: %{bench: true, scenario: "internal_attribution"},
       idempotency_key: nil,
-      refs: %{},
-      inserted_at: NaiveDateTime.utc_now()
+      refs: %{}
     }
+  end
+
+  defp stored_event_template(input_event_template) when is_map(input_event_template) do
+    Map.put(input_event_template, :inserted_at, NaiveDateTime.utc_now())
   end
 
   defp payload_text(payload_bytes) when is_integer(payload_bytes) and payload_bytes > 0 do
@@ -315,5 +331,3 @@ defmodule Starcite.Bench.InternalAttribution do
     end
   end
 end
-
-Starcite.Bench.InternalAttribution.run()
