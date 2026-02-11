@@ -120,3 +120,11 @@ See `docs/local-testing.md` for failover drills and multi-cluster local runs.
 ## License
 
 [Apache 2.0](LICENSE)
+
+---
+
+*A session that just wouldn't break,*
+*Through reconnects, refreshes at stake,*
+*With events in a row,*
+*Raft keeps up the flow,*
+*And your AI state's safe for your sake.*
