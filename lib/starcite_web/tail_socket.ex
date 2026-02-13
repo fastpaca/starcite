@@ -14,9 +14,10 @@ defmodule StarciteWeb.TailSocket do
   @replay_batch_size 1_000
 
   @impl true
-  def init(%{session_id: session_id, cursor: cursor}) do
+  def init(%{session_id: session_id, cursor: cursor} = params) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
+    auth_expires_at = Map.get(params, :auth_expires_at)
 
     state = %{
       session_id: session_id,
@@ -25,10 +26,12 @@ defmodule StarciteWeb.TailSocket do
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
-      drain_scheduled: false
+      drain_scheduled: false,
+      auth_expires_at: auth_expires_at,
+      auth_expiry_timer_ref: nil
     }
 
-    {:ok, schedule_drain(state)}
+    {:ok, state |> schedule_auth_expiry() |> schedule_drain()}
   end
 
   @impl true
@@ -43,11 +46,23 @@ defmodule StarciteWeb.TailSocket do
     drain_replay(state)
   end
 
+  def handle_info(:auth_expired, state) do
+    {:stop, :token_expired, {4001, "token_expired"}, state}
+  end
+
   def handle_info({:cursor_update, update}, state) when is_map(update) do
     handle_cursor_update(update, state)
   end
 
   def handle_info(_message, state), do: {:ok, state}
+
+  @impl true
+  def terminate(_reason, %{auth_expiry_timer_ref: timer_ref}) when is_reference(timer_ref) do
+    _ = Process.cancel_timer(timer_ref)
+    :ok
+  end
+
+  def terminate(_reason, _state), do: :ok
 
   defp handle_cursor_update(%{seq: seq} = update, state)
        when is_integer(seq) and seq > 0 do
@@ -179,6 +194,16 @@ defmodule StarciteWeb.TailSocket do
     send(self(), :drain_replay)
     %{state | drain_scheduled: true}
   end
+
+  defp schedule_auth_expiry(%{auth_expires_at: expires_at} = state)
+       when is_integer(expires_at) and expires_at > 0 do
+    now = System.system_time(:second)
+    timeout_ms = max((expires_at - now) * 1_000, 0)
+    timer_ref = Process.send_after(self(), :auth_expired, timeout_ms)
+    %{state | auth_expiry_timer_ref: timer_ref}
+  end
+
+  defp schedule_auth_expiry(state), do: state
 
   defp render_event(event) when is_map(event) do
     Map.update(event, :inserted_at, nil, &iso8601_utc/1)

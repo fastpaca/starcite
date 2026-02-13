@@ -66,6 +66,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 
 ## Intentional boundaries
 
+- Starcite does not issue OAuth/JWT credentials or manage auth client lifecycle.
 - Starcite does not define domain event vocabularies.
 - Starcite does not run agent business logic.
 - Starcite does not push outbound webhooks.
