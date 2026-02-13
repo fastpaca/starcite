@@ -142,22 +142,6 @@ defmodule Mix.Tasks.Bench.Routing do
 
     archive_flush_interval_ms = env_integer("BENCH_ARCHIVE_FLUSH_INTERVAL_MS", 60_000)
     Application.put_env(:starcite, :archive_flush_interval_ms, archive_flush_interval_ms)
-
-    if append_pubsub = System.get_env("BENCH_APPEND_PUBSUB_EFFECTS") do
-      Application.put_env(
-        :starcite,
-        :append_pubsub_effects,
-        env_boolean_value!("BENCH_APPEND_PUBSUB_EFFECTS", append_pubsub)
-      )
-    end
-
-    if append_telemetry = System.get_env("BENCH_APPEND_TELEMETRY") do
-      Application.put_env(
-        :starcite,
-        :append_telemetry,
-        env_boolean_value!("BENCH_APPEND_TELEMETRY", append_telemetry)
-      )
-    end
   end
 
   defp benchmark_config do
@@ -186,14 +170,6 @@ defmodule Mix.Tasks.Bench.Routing do
 
     IO.puts(
       "  archive_flush_interval_ms: #{Application.get_env(:starcite, :archive_flush_interval_ms)}"
-    )
-
-    IO.puts(
-      "  append_pubsub_effects: #{inspect(Application.get_env(:starcite, :append_pubsub_effects, true))}"
-    )
-
-    IO.puts(
-      "  append_telemetry: #{inspect(Application.get_env(:starcite, :append_telemetry, true))}"
     )
   end
 

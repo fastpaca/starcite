@@ -172,22 +172,6 @@ defmodule Mix.Tasks.Bench.Internal do
         examples: "256MB, 4G, 1024M"
       )
     )
-
-    if append_pubsub = System.get_env("BENCH_APPEND_PUBSUB_EFFECTS") do
-      Application.put_env(
-        :starcite,
-        :append_pubsub_effects,
-        env_boolean_value!("BENCH_APPEND_PUBSUB_EFFECTS", append_pubsub)
-      )
-    end
-
-    if append_telemetry = System.get_env("BENCH_APPEND_TELEMETRY") do
-      Application.put_env(
-        :starcite,
-        :append_telemetry,
-        env_boolean_value!("BENCH_APPEND_TELEMETRY", append_telemetry)
-      )
-    end
   end
 
   defp benchmark_config do
@@ -220,14 +204,6 @@ defmodule Mix.Tasks.Bench.Internal do
 
     IO.puts(
       "  event_store_max_bytes: #{inspect(Application.get_env(:starcite, :event_store_max_bytes))}"
-    )
-
-    IO.puts(
-      "  append_pubsub_effects: #{inspect(Application.get_env(:starcite, :append_pubsub_effects, true))}"
-    )
-
-    IO.puts(
-      "  append_telemetry: #{inspect(Application.get_env(:starcite, :append_telemetry, true))}"
     )
   end
 

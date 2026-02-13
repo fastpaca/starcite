@@ -59,16 +59,8 @@ Additional knobs:
 
 - `mix bench` / `mix bench hot-path`:
   - `BENCH_EVENT_STORE_MAX_SIZE`
-  - `BENCH_EVENT_STORE_CAPACITY_CHECK`
-  - `BENCH_APPEND_PUBSUB_EFFECTS`
-  - `BENCH_APPEND_TELEMETRY`
-- `mix bench routing`:
-  - `BENCH_APPEND_PUBSUB_EFFECTS`
-  - `BENCH_APPEND_TELEMETRY`
 - `mix bench internal`:
   - `BENCH_EVENT_STORE_MAX_SIZE`
-  - `BENCH_APPEND_PUBSUB_EFFECTS`
-  - `BENCH_APPEND_TELEMETRY`
 
 ## Interpreting Results
 

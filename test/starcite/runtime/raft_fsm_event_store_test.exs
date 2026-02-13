@@ -25,46 +25,6 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert event.payload == %{text: "one"}
   end
 
-  test "append_event omits pubsub effects when append pubsub effects are disabled" do
-    session_id = unique_session_id()
-    state = seeded_state(session_id)
-    with_env(:starcite, :append_pubsub_effects, false)
-
-    {_, {:reply, {:ok, %{seq: 1}}}} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
-
-    assert {:ok, event} = EventStore.get_event(session_id, 1)
-    assert event.payload == %{text: "one"}
-  end
-
-  test "append_event omits append telemetry when disabled" do
-    session_id = unique_session_id()
-    state = seeded_state(session_id)
-    with_env(:starcite, :append_telemetry, false)
-    parent = self()
-
-    handler_id = "raft-fsm-append-telemetry-#{System.unique_integer([:positive, :monotonic])}"
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:starcite, :events, :append],
-        fn _event, _measurements, _metadata, _config ->
-          send(parent, :append_telemetry_emitted)
-        end,
-        nil
-      )
-
-    on_exit(fn ->
-      :telemetry.detach(handler_id)
-    end)
-
-    {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
-
-    refute_receive :append_telemetry_emitted
-  end
-
   test "append_event dedupe does not create extra event-store entries" do
     session_id = unique_session_id()
     state = seeded_state(session_id)

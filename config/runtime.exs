@@ -52,20 +52,6 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
-parse_boolean! = fn env_name, raw ->
-  case String.downcase(String.trim(raw)) do
-    "1" -> true
-    "true" -> true
-    "yes" -> true
-    "on" -> true
-    "0" -> false
-    "false" -> false
-    "no" -> false
-    "off" -> false
-    _ -> raise ArgumentError, "invalid boolean for #{env_name}: #{inspect(raw)}"
-  end
-end
-
 parse_positive_integer! = fn env_name, raw ->
   case Integer.parse(String.trim(raw)) do
     {value, ""} when value > 0 -> value
@@ -133,24 +119,6 @@ if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
   config :starcite,
          :event_store_max_bytes,
          parse_size_bytes!.("STARCITE_EVENT_STORE_MAX_SIZE", event_store_max_size)
-end
-
-if event_store_capacity_check = System.get_env("STARCITE_EVENT_STORE_CAPACITY_CHECK") do
-  config :starcite,
-         :event_store_capacity_check,
-         parse_boolean!.("STARCITE_EVENT_STORE_CAPACITY_CHECK", event_store_capacity_check)
-end
-
-if append_pubsub_effects = System.get_env("STARCITE_APPEND_PUBSUB_EFFECTS") do
-  config :starcite,
-         :append_pubsub_effects,
-         parse_boolean!.("STARCITE_APPEND_PUBSUB_EFFECTS", append_pubsub_effects)
-end
-
-if append_telemetry = System.get_env("STARCITE_APPEND_TELEMETRY") do
-  config :starcite,
-         :append_telemetry,
-         parse_boolean!.("STARCITE_APPEND_TELEMETRY", append_telemetry)
 end
 
 if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do

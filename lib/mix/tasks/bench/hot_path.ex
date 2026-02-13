@@ -87,30 +87,6 @@ defmodule Mix.Tasks.Bench.HotPath do
         Size.parse_bytes!(max_size, "BENCH_EVENT_STORE_MAX_SIZE", examples: "256MB, 4G, 1024M")
       )
     end
-
-    if capacity_check = System.get_env("BENCH_EVENT_STORE_CAPACITY_CHECK") do
-      Application.put_env(
-        :starcite,
-        :event_store_capacity_check,
-        env_boolean_value!("BENCH_EVENT_STORE_CAPACITY_CHECK", capacity_check)
-      )
-    end
-
-    if append_pubsub = System.get_env("BENCH_APPEND_PUBSUB_EFFECTS") do
-      Application.put_env(
-        :starcite,
-        :append_pubsub_effects,
-        env_boolean_value!("BENCH_APPEND_PUBSUB_EFFECTS", append_pubsub)
-      )
-    end
-
-    if append_telemetry = System.get_env("BENCH_APPEND_TELEMETRY") do
-      Application.put_env(
-        :starcite,
-        :append_telemetry,
-        env_boolean_value!("BENCH_APPEND_TELEMETRY", append_telemetry)
-      )
-    end
   end
 
   defp benchmark_config do
@@ -144,18 +120,6 @@ defmodule Mix.Tasks.Bench.HotPath do
     if max_bytes = Application.get_env(:starcite, :event_store_max_bytes) do
       IO.puts("  event_store_max_bytes: #{inspect(max_bytes)}")
     end
-
-    IO.puts(
-      "  event_store_capacity_check: #{inspect(Application.get_env(:starcite, :event_store_capacity_check, true))}"
-    )
-
-    IO.puts(
-      "  append_pubsub_effects: #{inspect(Application.get_env(:starcite, :append_pubsub_effects, true))}"
-    )
-
-    IO.puts(
-      "  append_telemetry: #{inspect(Application.get_env(:starcite, :append_telemetry, true))}"
-    )
   end
 
   defp prepare_sessions(session_count) when is_integer(session_count) and session_count > 0 do

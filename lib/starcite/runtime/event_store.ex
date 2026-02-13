@@ -22,7 +22,6 @@ defmodule Starcite.Runtime.EventStore do
   @index_table :starcite_event_store_session_max_seq
   @default_max_memory_bytes 2_147_483_648
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
-  @capacity_check_cache_key {__MODULE__, :capacity_check_enabled}
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -250,36 +249,18 @@ defmodule Starcite.Runtime.EventStore do
 
   defp ensure_capacity(session_id, event)
        when is_binary(session_id) and session_id != "" and is_map(event) do
-    if capacity_check_enabled?() do
-      max_memory_bytes = max_memory_bytes_limit()
-      current_memory_bytes = memory_bytes()
+    max_memory_bytes = max_memory_bytes_limit()
+    current_memory_bytes = memory_bytes()
 
-      if current_memory_bytes >= max_memory_bytes do
-        {:error, :event_store_backpressure,
-         %{
-           reason: :memory_limit,
-           current_memory_bytes: current_memory_bytes,
-           max_memory_bytes: max_memory_bytes
-         }}
-      else
-        {:ok, current_memory_bytes}
-      end
+    if current_memory_bytes >= max_memory_bytes do
+      {:error, :event_store_backpressure,
+       %{
+         reason: :memory_limit,
+         current_memory_bytes: current_memory_bytes,
+         max_memory_bytes: max_memory_bytes
+       }}
     else
-      {:ok, 0}
-    end
-  end
-
-  defp capacity_check_enabled? do
-    raw = Application.get_env(:starcite, :event_store_capacity_check, true)
-
-    case :persistent_term.get(@capacity_check_cache_key, :undefined) do
-      {^raw, enabled} when is_boolean(enabled) ->
-        enabled
-
-      _ ->
-        enabled = normalize_capacity_check!(raw)
-        :persistent_term.put(@capacity_check_cache_key, {raw, enabled})
-        enabled
+      {:ok, current_memory_bytes}
     end
   end
 
@@ -310,13 +291,6 @@ defmodule Starcite.Runtime.EventStore do
 
   defp should_drop_index?(nil, _floor_seq), do: true
   defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
-
-  defp normalize_capacity_check!(value) when is_boolean(value), do: value
-
-  defp normalize_capacity_check!(value) do
-    raise ArgumentError,
-          "invalid value for event_store_capacity_check: #{inspect(value)} (expected true/false)"
-  end
 
   defp normalize_max_memory_bytes!(value) when is_integer(value) and value > 0, do: value
 
