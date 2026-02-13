@@ -34,9 +34,16 @@ defmodule Starcite.Runtime do
     metadata = Keyword.get(opts, :metadata, %{})
     group = RaftManager.group_for_session(id)
 
-    call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
-      create_session_local(id, title, metadata)
-    end)
+    case call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
+           create_session_local(id, title, metadata)
+         end) do
+      {:ok, session} = ok ->
+        _ = maybe_index_session(session)
+        ok
+
+      other ->
+        other
+    end
   end
 
   @doc false
@@ -96,6 +103,23 @@ defmodule Starcite.Runtime do
           other
       end
     end
+  end
+
+  @spec list_active_session_ids() :: {:ok, [String.t()]}
+  def list_active_session_ids do
+    active_ids =
+      [Node.self() | Node.list()]
+      |> Enum.uniq()
+      |> Enum.flat_map(&gather_active_session_ids/1)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    {:ok, active_ids}
+  end
+
+  @doc false
+  def list_active_session_ids_local do
+    EventStore.session_ids()
   end
 
   # Append and tail
@@ -225,8 +249,8 @@ defmodule Starcite.Runtime do
     end
   end
 
-  defp call_on_replica(group_id, fun, args, local_fun, route_opts \\ []) do
-    case route_target(group_id, route_opts) do
+  defp call_on_replica(group_id, fun, args, local_fun) do
+    case route_target(group_id) do
       {:local, _node} ->
         local_fun.()
 
@@ -290,14 +314,14 @@ defmodule Starcite.Runtime do
               :invalid_cursor,
               :session_not_found,
               :session_exists,
-              :idempotency_conflict,
-              :event_store_backpressure
+              :producer_replay_conflict
             ] do
     false
   end
 
   defp retriable_error?({:expected_seq_conflict, _current}), do: false
   defp retriable_error?({:expected_seq_conflict, _expected, _current}), do: false
+  defp retriable_error?({:producer_seq_conflict, _producer_id, _expected, _got}), do: false
   defp retriable_error?(_reason), do: true
 
   defp safe_rpc_call(node, fun, args) do
@@ -324,20 +348,13 @@ defmodule Starcite.Runtime do
     replicas = Keyword.get(opts, :replicas, RaftManager.replicas_for_group(group_id))
     ready_nodes = Keyword.get(opts, :ready_nodes, RaftTopology.ready_nodes())
     local_running = Keyword.get(opts, :local_running, group_running?(group_id))
-    allow_local = Keyword.get(opts, :allow_local, true)
-
-    remote_replicas =
-      if local_running and allow_local do
-        replicas
-      else
-        replicas -- [self_node]
-      end
+    remote_replicas = if local_running, do: replicas, else: replicas -- [self_node]
 
     cond do
-      self_node in replicas and local_running and allow_local ->
+      self_node in replicas and local_running ->
         {:local, self_node}
 
-      self_node in replicas and remote_replicas == [] and allow_local ->
+      self_node in replicas and remote_replicas == [] ->
         {:local, self_node}
 
       true ->
@@ -355,6 +372,51 @@ defmodule Starcite.Runtime do
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
   end
+
+  defp gather_active_session_ids(node) do
+    if node == Node.self() do
+      list_active_session_ids_local()
+    else
+      case safe_rpc_call(node, :list_active_session_ids_local, []) do
+        ids when is_list(ids) ->
+          ids
+
+        {:badrpc, reason} ->
+          Logger.warning(
+            "Runtime active-session RPC to #{inspect(node)} failed: #{inspect(reason)}"
+          )
+
+          []
+
+        other ->
+          Logger.warning(
+            "Runtime active-session RPC to #{inspect(node)} returned #{inspect(other)}"
+          )
+
+          []
+      end
+    end
+  end
+
+  defp maybe_index_session(%{id: id} = session) when is_binary(id) and id != "" do
+    row = %{
+      id: id,
+      title: Map.get(session, :title),
+      metadata: Map.get(session, :metadata, %{}),
+      created_at: Map.get(session, :created_at),
+      updated_at: Map.get(session, :updated_at)
+    }
+
+    case ArchiveStore.upsert_session(row) do
+      :ok ->
+        :ok
+
+      {:error, :archive_write_unavailable} ->
+        :ok
+    end
+  end
+
+  defp maybe_index_session(_session), do: :ok
 
   defp generate_session_id do
     "ses_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

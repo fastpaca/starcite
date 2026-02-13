@@ -8,7 +8,7 @@ defmodule Starcite.Session do
   """
 
   alias __MODULE__, as: Session
-  alias Starcite.Session.Event
+  alias Starcite.Session.{Event, ProducerIndex}
 
   @type event_input :: Event.input()
   @type event :: Event.t()
@@ -20,7 +20,7 @@ defmodule Starcite.Session do
     :inserted_at,
     :updated_at,
     :retention,
-    :idempotency_index
+    :producer_cursors
   ]
   defstruct [
     :id,
@@ -31,7 +31,7 @@ defmodule Starcite.Session do
     :inserted_at,
     :updated_at,
     :retention,
-    :idempotency_index
+    :producer_cursors
   ]
 
   @type t :: %Session{
@@ -42,9 +42,12 @@ defmodule Starcite.Session do
           archived_seq: non_neg_integer(),
           inserted_at: NaiveDateTime.t(),
           updated_at: NaiveDateTime.t(),
-          retention: %{tail_keep: pos_integer()},
-          idempotency_index: %{optional(String.t()) => %{seq: non_neg_integer(), hash: binary()}}
+          retention: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()},
+          producer_cursors: %{optional(String.t()) => ProducerIndex.cursor()}
         }
+
+  @default_tail_keep 1_000
+  @default_producer_max_entries 10_000
 
   @doc """
   Create a new session.
@@ -52,7 +55,22 @@ defmodule Starcite.Session do
   @spec new(String.t(), keyword()) :: t()
   def new(id, opts \\ []) when is_binary(id) do
     now = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
-    tail_keep = opts[:tail_keep] || Application.get_env(:starcite, :tail_keep, 1_000)
+
+    tail_keep =
+      normalize_positive_integer(
+        opts[:tail_keep],
+        Application.get_env(:starcite, :tail_keep, @default_tail_keep)
+      )
+
+    producer_max_entries =
+      normalize_positive_integer(
+        opts[:producer_max_entries],
+        Application.get_env(
+          :starcite,
+          :producer_max_entries,
+          @default_producer_max_entries
+        )
+      )
 
     %Session{
       id: id,
@@ -62,8 +80,8 @@ defmodule Starcite.Session do
       archived_seq: 0,
       inserted_at: now,
       updated_at: now,
-      retention: %{tail_keep: tail_keep},
-      idempotency_index: %{}
+      retention: %{tail_keep: tail_keep, producer_max_entries: producer_max_entries},
+      producer_cursors: %{}
     }
   end
 
@@ -73,26 +91,41 @@ defmodule Starcite.Session do
   Returns one of:
 
     - `{:appended, updated_session, event}`
-    - `{:deduped, unchanged_session, existing_seq}`
-    - `{:error, :idempotency_conflict}`
+    - `{:deduped, updated_session, existing_seq}`
+    - `{:error, :producer_replay_conflict}`
+    - `{:error, {:producer_seq_conflict, producer_id, expected_seq, producer_seq}}`
   """
   @spec append_event(t(), event_input()) ::
           {:appended, t(), event()}
           | {:deduped, t(), non_neg_integer()}
-          | {:error, :idempotency_conflict}
-  def append_event(%Session{} = session, input) do
-    idempotency_key = Map.get(input, :idempotency_key)
+          | {:error, :producer_replay_conflict}
+          | {:error, {:producer_seq_conflict, String.t(), pos_integer(), pos_integer()}}
+          | {:error, :invalid_event}
+  def append_event(
+        %Session{} = session,
+        %{producer_id: producer_id, producer_seq: producer_seq} = input
+      )
+      when is_binary(producer_id) and producer_id != "" and is_integer(producer_seq) and
+             producer_seq > 0 do
     hash = event_hash(input)
+    next_seq = session.last_seq + 1
 
-    case dedupe_action(session.idempotency_index, idempotency_key, hash) do
-      {:deduped, seq} ->
-        {:deduped, session, seq}
+    case ProducerIndex.decide(
+           session.producer_cursors,
+           producer_id,
+           producer_seq,
+           hash,
+           next_seq,
+           session.retention.producer_max_entries
+         ) do
+      {:deduped, seq, updated_index} ->
+        updated =
+          maybe_update_cursors(session, updated_index)
 
-      {:error, :idempotency_conflict} ->
-        {:error, :idempotency_conflict}
+        {:deduped, updated, seq}
 
-      :append ->
-        next_seq = session.last_seq + 1
+      {:append, updated_index} ->
+        now = NaiveDateTime.utc_now()
 
         event = %{
           seq: next_seq,
@@ -102,27 +135,31 @@ defmodule Starcite.Session do
           source: Map.get(input, :source),
           metadata: Map.get(input, :metadata, %{}),
           refs: Map.get(input, :refs, %{}),
-          idempotency_key: idempotency_key,
-          inserted_at: NaiveDateTime.utc_now()
+          idempotency_key: Map.get(input, :idempotency_key),
+          producer_id: producer_id,
+          producer_seq: producer_seq,
+          inserted_at: now
         }
-
-        idempotency_index =
-          put_idempotency(session.idempotency_index, idempotency_key, hash, event.seq)
 
         updated = %Session{
           session
           | last_seq: next_seq,
-            updated_at: NaiveDateTime.utc_now(),
-            idempotency_index: idempotency_index
+            updated_at: now,
+            producer_cursors: updated_index
         }
 
         {:appended, updated, event}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
+  def append_event(%Session{}, _input), do: {:error, :invalid_event}
+
   @doc """
   Apply an archive acknowledgement up to `upto_seq` and update retention
-  metadata used for idempotency pruning and telemetry.
+  metadata used for telemetry and tail accounting.
   """
   @spec persist_ack(t(), non_neg_integer()) :: {t(), non_neg_integer()}
   def persist_ack(%Session{} = session, upto_seq)
@@ -132,14 +169,8 @@ defmodule Starcite.Session do
     old_floor = retained_floor(session.archived_seq, session.last_seq, tail_keep)
     new_floor = retained_floor(archived_seq, session.last_seq, tail_keep)
     trimmed = max(new_floor - old_floor, 0)
-    idempotency_index = prune_idempotency(session.idempotency_index, new_floor)
 
-    {%Session{
-       session
-       | archived_seq: archived_seq,
-         idempotency_index: idempotency_index,
-         updated_at: NaiveDateTime.utc_now()
-     }, trimmed}
+    {%Session{session | archived_seq: archived_seq, updated_at: NaiveDateTime.utc_now()}, trimmed}
   end
 
   @doc """
@@ -162,25 +193,13 @@ defmodule Starcite.Session do
     }
   end
 
-  defp dedupe_action(_index, nil, _hash), do: :append
-
-  defp dedupe_action(index, idempotency_key, hash) do
-    case Map.get(index, idempotency_key) do
-      nil ->
-        :append
-
-      %{hash: ^hash, seq: seq} ->
-        {:deduped, seq}
-
-      %{hash: _other_hash} ->
-        {:error, :idempotency_conflict}
-    end
+  defp maybe_update_cursors(%Session{} = session, updated_index)
+       when updated_index == session.producer_cursors do
+    session
   end
 
-  defp put_idempotency(index, nil, _hash, _seq), do: index
-
-  defp put_idempotency(index, idempotency_key, hash, seq) do
-    Map.put(index, idempotency_key, %{hash: hash, seq: seq})
+  defp maybe_update_cursors(%Session{} = session, updated_index) when is_map(updated_index) do
+    %Session{session | producer_cursors: updated_index, updated_at: NaiveDateTime.utc_now()}
   end
 
   defp retained_floor(archived_seq, last_seq, tail_keep)
@@ -194,21 +213,19 @@ defmodule Starcite.Session do
     |> max(1)
   end
 
-  defp prune_idempotency(index, min_seq_to_keep)
-       when is_map(index) and is_integer(min_seq_to_keep) and min_seq_to_keep >= 0 do
-    Enum.reduce(index, %{}, fn
-      {key, %{seq: seq} = value}, acc
-      when is_binary(key) and is_integer(seq) and seq >= min_seq_to_keep ->
-        Map.put(acc, key, value)
-
-      _, acc ->
-        acc
-    end)
-  end
-
   defp event_hash(input) do
     input
-    |> Map.take([:type, :payload, :actor, :source, :metadata, :refs])
+    |> Map.take([
+      :type,
+      :payload,
+      :actor,
+      :source,
+      :metadata,
+      :refs,
+      :idempotency_key,
+      :producer_id,
+      :producer_seq
+    ])
     |> :erlang.term_to_binary()
     |> then(&:crypto.hash(:sha256, &1))
   end
@@ -220,4 +237,13 @@ defmodule Starcite.Session do
   end
 
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+
+  defp normalize_positive_integer(nil, default) when is_integer(default) and default > 0,
+    do: default
+
+  defp normalize_positive_integer(value, _default) when is_integer(value) and value > 0,
+    do: value
+
+  defp normalize_positive_integer(_value, default) when is_integer(default) and default > 0,
+    do: default
 end

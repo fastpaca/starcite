@@ -28,8 +28,9 @@ defmodule Mix.Tasks.Bench.HotPath do
     append_event = fn ->
       index = :atomics.add_get(counter, 1, 1)
       session_id = elem(sessions, rem(index - 1, session_count))
+      event_with_producer = with_bench_producer(event, index)
 
-      case Runtime.append_event(session_id, event) do
+      case Runtime.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append timeout: #{inspect(leader)}"
@@ -136,6 +137,12 @@ defmodule Mix.Tasks.Bench.HotPath do
       end
     end)
     |> List.to_tuple()
+  end
+
+  defp with_bench_producer(event, index) when is_map(event) and is_integer(index) and index > 0 do
+    event
+    |> Map.put(:producer_id, "bench-producer-#{index}")
+    |> Map.put(:producer_seq, 1)
   end
 
   defp payload_text(payload_bytes) when is_integer(payload_bytes) and payload_bytes > 0 do

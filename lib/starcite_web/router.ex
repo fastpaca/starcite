@@ -9,6 +9,8 @@ defmodule StarciteWeb.Router do
     pipe_through :api
 
     post "/sessions", SessionController, :create
+    get "/sessions", SessionController, :index
+    get "/sessions/active", SessionController, :active
     post "/sessions/:id/append", SessionController, :append
     get "/sessions/:id/tail", TailController, :tail
   end

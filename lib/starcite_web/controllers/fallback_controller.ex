@@ -25,12 +25,21 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :conflict, "expected_seq_conflict", "Current seq is #{current}")
   end
 
-  def call(conn, {:error, :idempotency_conflict}) do
+  def call(conn, {:error, {:producer_seq_conflict, producer_id, expected, current}}) do
     error(
       conn,
       :conflict,
-      "idempotency_conflict",
-      "Idempotency key was already used with different event content"
+      "producer_seq_conflict",
+      "Producer #{producer_id} expected seq #{expected}, got #{current}"
+    )
+  end
+
+  def call(conn, {:error, :producer_replay_conflict}) do
+    error(
+      conn,
+      :conflict,
+      "producer_replay_conflict",
+      "Producer sequence was already used with different event content"
     )
   end
 
@@ -69,6 +78,8 @@ defmodule StarciteWeb.FallbackController do
              :invalid_metadata,
              :invalid_refs,
              :invalid_cursor,
+             :invalid_limit,
+             :invalid_list_query,
              :invalid_websocket_upgrade,
              :invalid_session,
              :invalid_session_id
@@ -84,6 +95,8 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_metadata), do: "Invalid metadata payload"
   defp reason_message(:invalid_refs), do: "Invalid refs payload"
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
+  defp reason_message(:invalid_limit), do: "Invalid limit value"
+  defp reason_message(:invalid_list_query), do: "Invalid list query"
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"

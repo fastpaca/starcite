@@ -4,13 +4,29 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.Runtime
+  alias Starcite.{Repo, Runtime}
 
   @endpoint StarciteWeb.Endpoint
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+    :ok = ensure_repo_started()
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
+  end
+
+  defp ensure_repo_started do
+    case Process.whereis(Repo) do
+      nil ->
+        case Repo.start_link() do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+
+      _pid ->
+        :ok
+    end
   end
 
   defp unique_id(prefix) do
@@ -92,6 +108,127 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
+  describe "GET /v1/sessions" do
+    test "lists sessions and supports metadata filter" do
+      marker = unique_id("marker")
+      id1 = unique_id("ses")
+      id2 = unique_id("ses")
+      id3 = unique_id("ses")
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id1,
+                 "title" => "A",
+                 "metadata" => %{"user_id" => "u1", "tenant_id" => "acme", "marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id2,
+                 "title" => "B",
+                 "metadata" => %{"user_id" => "u2", "tenant_id" => "acme", "marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id3,
+                 "title" => "C",
+                 "metadata" => %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
+               }).status
+
+      conn =
+        json_conn(
+          :get,
+          "/v1/sessions?metadata[user_id]=u1&metadata[marker]=#{marker}",
+          nil
+        )
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      ids = body["sessions"] |> Enum.map(& &1["id"]) |> Enum.sort()
+
+      assert ids == Enum.sort([id1, id3])
+      assert body["next_cursor"] in [nil, id1, id3]
+    end
+
+    test "supports cursor pagination" do
+      marker = unique_id("marker")
+      id1 = "ses-a-#{System.unique_integer([:positive, :monotonic])}"
+      id2 = "ses-b-#{System.unique_integer([:positive, :monotonic])}"
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id1,
+                 "metadata" => %{"marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id2,
+                 "metadata" => %{"marker" => marker}
+               }).status
+
+      conn1 = json_conn(:get, "/v1/sessions?limit=1&metadata[marker]=#{marker}", nil)
+      assert conn1.status == 200
+
+      body1 = Jason.decode!(conn1.resp_body)
+      assert length(body1["sessions"]) == 1
+      assert is_binary(body1["next_cursor"])
+
+      cursor = body1["next_cursor"]
+
+      conn2 =
+        json_conn(
+          :get,
+          "/v1/sessions?limit=1&metadata[marker]=#{marker}&cursor=#{cursor}",
+          nil
+        )
+
+      assert conn2.status == 200
+      body2 = Jason.decode!(conn2.resp_body)
+      assert length(body2["sessions"]) == 1
+
+      ids = [hd(body1["sessions"])["id"], hd(body2["sessions"])["id"]] |> Enum.sort()
+      assert ids == Enum.sort([id1, id2])
+    end
+
+    test "invalid limit returns 400" do
+      conn = json_conn(:get, "/v1/sessions?limit=0", nil)
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_limit"
+    end
+  end
+
+  describe "GET /v1/sessions/active" do
+    test "returns only active in-flight sessions" do
+      active_id = unique_id("ses")
+      inactive_id = unique_id("ses")
+
+      assert 201 == json_conn(:post, "/v1/sessions", %{"id" => active_id}).status
+      assert 201 == json_conn(:post, "/v1/sessions", %{"id" => inactive_id}).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions/#{active_id}/append", %{
+                 "type" => "content",
+                 "payload" => %{"text" => "hello"},
+                 "actor" => "agent:test",
+                 "producer_id" => "writer-1",
+                 "producer_seq" => 1
+               }).status
+
+      conn = json_conn(:get, "/v1/sessions/active", nil)
+      assert conn.status == 200
+
+      body = Jason.decode!(conn.resp_body)
+      ids = body["sessions"] |> Enum.map(& &1["id"])
+
+      assert active_id in ids
+      refute inactive_id in ids
+    end
+  end
+
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")
@@ -101,7 +238,9 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test"
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn.status == 201
@@ -119,7 +258,9 @@ defmodule StarciteWeb.SessionControllerTest do
         Runtime.append_event(id, %{
           type: "content",
           payload: %{text: "one"},
-          actor: "agent:test"
+          actor: "agent:test",
+          producer_id: "writer-1",
+          producer_seq: 1
         })
 
       conn =
@@ -127,6 +268,8 @@ defmodule StarciteWeb.SessionControllerTest do
           "type" => "content",
           "payload" => %{"text" => "two"},
           "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2,
           "expected_seq" => 0
         })
 
@@ -136,17 +279,19 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
-    test "idempotency conflict returns 409" do
+    test "producer replay conflict returns 409" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
-      conn1 =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "state",
-          "payload" => %{"state" => "running"},
-          "actor" => "agent:test",
-          "idempotency_key" => "k1"
-        })
+      body = %{
+        "type" => "state",
+        "payload" => %{"state" => "running"},
+        "actor" => "agent:test",
+        "producer_id" => "writer-1",
+        "producer_seq" => 1
+      }
+
+      conn1 = json_conn(:post, "/v1/sessions/#{id}/append", body)
 
       assert conn1.status == 201
 
@@ -155,16 +300,17 @@ defmodule StarciteWeb.SessionControllerTest do
           "type" => "state",
           "payload" => %{"state" => "completed"},
           "actor" => "agent:test",
-          "idempotency_key" => "k1"
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn2.status == 409
-      body = Jason.decode!(conn2.resp_body)
-      assert body["error"] == "idempotency_conflict"
-      assert is_binary(body["message"])
+      body2 = Jason.decode!(conn2.resp_body)
+      assert body2["error"] == "producer_replay_conflict"
+      assert is_binary(body2["message"])
     end
 
-    test "same idempotency key and payload dedupes" do
+    test "same producer sequence and payload dedupes" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
@@ -172,7 +318,8 @@ defmodule StarciteWeb.SessionControllerTest do
         "type" => "state",
         "payload" => %{"state" => "running"},
         "actor" => "agent:test",
-        "idempotency_key" => "k1"
+        "producer_id" => "writer-1",
+        "producer_seq" => 1
       }
 
       conn1 = json_conn(:post, "/v1/sessions/#{id}/append", body)
@@ -186,6 +333,25 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert body2["seq"] == seq1
       assert body2["deduped"] == true
+    end
+
+    test "producer sequence conflict returns 409" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "state",
+          "payload" => %{"state" => "running"},
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2
+        })
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "producer_seq_conflict"
+      assert is_binary(body["message"])
     end
 
     test "missing required fields returns 400" do
@@ -207,7 +373,9 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test"
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn.status == 404

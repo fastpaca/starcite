@@ -1,7 +1,6 @@
 # Architecture
 
-Starcite runs a thin-FSM Raft runtime where payload events are mirrored into
-node-local ETS and replayed from ETS/cold archive tiers.
+Starcite runs a Raft-backed state machine that stores session event logs and serves tail streams.
 
 ![Starcite Architecture](./img/architecture.png)
 
@@ -10,6 +9,8 @@ node-local ETS and replayed from ETS/cold archive tiers.
 The public API surface is intentionally small:
 
 - `POST /v1/sessions`
+- `GET /v1/sessions`
+- `GET /v1/sessions/active`
 - `POST /v1/sessions/:id/append`
 - `GET /v1/sessions/:id/tail?cursor=N` (WebSocket upgrade)
 
@@ -24,14 +25,14 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Raft groups | 256 logical shards, each replicated across three nodes |
 | Snapshot manager | Raft snapshots for state recovery |
 | Archiver | Persists committed events to Postgres |
-| Event store (ETS) | Node-local payload mirror keyed by `{session_id, seq}` |
+| Session catalog (adapter-backed) | Lists/filter sessions for API reads |
 
 ## Request flow
 
 1. **Create**: create session metadata in the shard owning that session id.
 2. **Append**: append one event; after quorum commit, ack with `seq`.
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
-4. **Archive**: committed events are persisted asynchronously; archive ack advances `archived_seq` and allows deterministic ETS release.
+4. **Archive**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
 
 ## Ordering and durability
 
@@ -40,6 +41,8 @@ Everything else in this document exists to preserve one behavior chain: `create 
 - `tail` replay is always ordered ascending by `seq`.
 - Client recovery is reconnect + `cursor` (last processed `seq`).
 - Append-only event history — no deletes, no updates.
+- Producer dedupe uses `(producer_id, producer_seq)` cursors scoped to a session.
+- Producer cursor state is bounded by LRU eviction policy per session.
 - Idempotent archival writes (`ON CONFLICT DO NOTHING`).
 - At-least-once delivery from runtime to archive.
 
@@ -47,26 +50,17 @@ Everything else in this document exists to preserve one behavior chain: `create 
 
 | Tier | Contents |
 | --- | --- |
-| Hot metadata (Raft) | Session metadata (`last_seq`, `archived_seq`, retention/idempotency state) |
-| Hot payloads (ETS) | Node-local event payloads keyed by `{session_id, seq}` |
-| Cold (Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
+| Hot (Raft) | Session metadata (`last_seq`, `archived_seq`, retention state) + bounded producer cursors |
+| Hot mirror (ETS) | In-flight committed events and active session IDs |
+| Cold (adapter-backed) | Full event history + session catalog projection |
 
 ## Replay behavior
 
 - `tail` replays committed events where `seq > cursor`.
-- Hot/live replay reads from local ETS.
-- Cold replay reads from archive adapter through Cachex.
-- Archive acknowledgement advances `archived_seq` and releases ETS entries below that cursor.
-
-## Capacity and degradation
-
-- Event payload mirroring is bounded by ETS memory backpressure limits.
-- When backpressure triggers, appends are rejected with explicit error (`event_store_backpressure`) rather than silently dropping or blocking forever.
-- Readiness remains red until local assigned Raft groups are running, reducing rollout-time partial availability.
+- Runtime trims older hot entries after archive acknowledgement.
 
 ## Intentional boundaries
 
 - Starcite does not define domain event vocabularies.
 - Starcite does not run agent business logic.
 - Starcite does not push outbound webhooks.
-- Connection draining for rolling updates is infrastructure-level (LB + readiness), not a custom runtime drain mode.

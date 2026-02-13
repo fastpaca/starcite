@@ -44,8 +44,9 @@ defmodule Mix.Tasks.Bench.Internal do
     session_append = fn ->
       seq = :atomics.add_get(session_counter, 1, 1)
       session = %Session{base_session | last_seq: seq - 1}
+      event_with_producer = with_bench_producer(input_event_template, "bench-session", 1)
 
-      case Session.append_event(session, input_event_template) do
+      case Session.append_event(session, event_with_producer) do
         {:appended, _updated, _event} ->
           :ok
 
@@ -83,11 +84,13 @@ defmodule Mix.Tasks.Bench.Internal do
 
     fsm_apply_append = fn ->
       seq = :atomics.add_get(fsm_counter, 1, 1)
-      session_id = elem(sessions, rem(seq - 1, session_count))
+      session_id = elem(runtime_sessions, rem(seq - 1, session_count))
+      producer_seq = div(seq - 1, session_count) + 1
+      event_with_producer = with_bench_producer(input_event_template, session_id, producer_seq)
       fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
       meta = %{index: seq}
 
-      case RaftFSM.apply(meta, {:append_event, session_id, input_event_template, []}, fsm_state) do
+      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, []}, fsm_state) do
         {updated_state, {:reply, {:ok, _reply}}, _effects} ->
           Process.put(:bench_fsm_state, updated_state)
           :ok
@@ -104,8 +107,10 @@ defmodule Mix.Tasks.Bench.Internal do
     runtime_append = fn ->
       seq = :atomics.add_get(runtime_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
+      producer_seq = div(seq - 1, session_count) + 1
+      event_with_producer = with_bench_producer(input_event_template, session_id, producer_seq)
 
-      case Runtime.append_event(session_id, input_event_template) do
+      case Runtime.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "runtime.append_event failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "runtime.append_event timeout: #{inspect(leader)}"
@@ -254,6 +259,8 @@ defmodule Mix.Tasks.Bench.Internal do
       actor: "agent:benchee",
       source: "benchmark",
       metadata: %{bench: true, scenario: "internal_attribution"},
+      producer_id: "bench-producer",
+      producer_seq: 1,
       idempotency_key: nil,
       refs: %{}
     }
@@ -265,6 +272,14 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp payload_text(payload_bytes) when is_integer(payload_bytes) and payload_bytes > 0 do
     String.duplicate("x", payload_bytes)
+  end
+
+  defp with_bench_producer(event, producer_id, producer_seq)
+       when is_map(event) and is_binary(producer_id) and producer_id != "" and
+              is_integer(producer_seq) and producer_seq > 0 do
+    event
+    |> Map.put(:producer_id, producer_id)
+    |> Map.put(:producer_seq, producer_seq)
   end
 
   defp env_integer(name, default) when is_binary(name) and is_integer(default) and default > 0 do

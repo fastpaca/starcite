@@ -23,6 +23,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{text: "hello"},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
         source: "agent",
         metadata: %{trace_id: "t-1"},
         refs: %{},
@@ -49,6 +51,8 @@ defmodule Starcite.Runtime.EventStoreTest do
           type: "content",
           payload: %{n: seq},
           actor: "agent:test",
+          producer_id: "writer:test",
+          producer_seq: seq,
           inserted_at: NaiveDateTime.utc_now()
         })
     end
@@ -68,6 +72,8 @@ defmodule Starcite.Runtime.EventStoreTest do
           type: "content",
           payload: %{n: seq},
           actor: "agent:test",
+          producer_id: "writer:test",
+          producer_seq: seq,
           inserted_at: NaiveDateTime.utc_now()
         })
     end
@@ -78,6 +84,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 1},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
         inserted_at: NaiveDateTime.utc_now()
       })
 
@@ -99,6 +107,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 1},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
         inserted_at: NaiveDateTime.utc_now()
       })
 
@@ -108,6 +118,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 2},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 2,
         inserted_at: NaiveDateTime.utc_now()
       })
 
@@ -117,6 +129,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 1},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
         inserted_at: NaiveDateTime.utc_now()
       })
 
@@ -137,6 +151,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 1},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
         inserted_at: NaiveDateTime.utc_now()
       })
 
@@ -146,6 +162,8 @@ defmodule Starcite.Runtime.EventStoreTest do
         type: "content",
         payload: %{n: 2},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 2,
         inserted_at: NaiveDateTime.utc_now()
       })
 

@@ -65,6 +65,83 @@ defmodule Starcite.Archive.Store do
     _ -> {:error, :archive_read_unavailable}
   end
 
+  @spec upsert_session(map()) :: :ok | {:error, :archive_write_unavailable}
+  def upsert_session(session) when is_map(session) do
+    upsert_session(adapter(), session)
+  end
+
+  @spec upsert_session(module(), map()) :: :ok | {:error, :archive_write_unavailable}
+  def upsert_session(adapter_mod, session) when is_atom(adapter_mod) and is_map(session) do
+    if function_exported?(adapter_mod, :upsert_session, 1) do
+      case adapter_mod.upsert_session(session) do
+        :ok -> :ok
+        {:error, _reason} -> {:error, :archive_write_unavailable}
+        _other -> {:error, :archive_write_unavailable}
+      end
+    else
+      :ok
+    end
+  rescue
+    _ -> {:error, :archive_write_unavailable}
+  end
+
+  @spec list_sessions(map()) ::
+          {:ok, Adapter.session_page()} | {:error, :archive_read_unavailable}
+  def list_sessions(query_opts) when is_map(query_opts) do
+    list_sessions(adapter(), query_opts)
+  end
+
+  @spec list_sessions(module(), map()) ::
+          {:ok, Adapter.session_page()} | {:error, :archive_read_unavailable}
+  def list_sessions(adapter_mod, query_opts) when is_atom(adapter_mod) and is_map(query_opts) do
+    if function_exported?(adapter_mod, :list_sessions, 1) do
+      case adapter_mod.list_sessions(query_opts) do
+        {:ok, %{sessions: sessions, next_cursor: next_cursor}}
+        when is_list(sessions) and (is_binary(next_cursor) or is_nil(next_cursor)) ->
+          {:ok, %{sessions: sessions, next_cursor: next_cursor}}
+
+        {:error, _reason} ->
+          {:error, :archive_read_unavailable}
+
+        _other ->
+          {:error, :archive_read_unavailable}
+      end
+    else
+      {:ok, %{sessions: [], next_cursor: nil}}
+    end
+  rescue
+    _ -> {:error, :archive_read_unavailable}
+  end
+
+  @spec list_sessions_by_ids([String.t()], map()) ::
+          {:ok, Adapter.session_page()} | {:error, :archive_read_unavailable}
+  def list_sessions_by_ids(ids, query_opts) when is_list(ids) and is_map(query_opts) do
+    list_sessions_by_ids(adapter(), ids, query_opts)
+  end
+
+  @spec list_sessions_by_ids(module(), [String.t()], map()) ::
+          {:ok, Adapter.session_page()} | {:error, :archive_read_unavailable}
+  def list_sessions_by_ids(adapter_mod, ids, query_opts)
+      when is_atom(adapter_mod) and is_list(ids) and is_map(query_opts) do
+    if function_exported?(adapter_mod, :list_sessions_by_ids, 2) do
+      case adapter_mod.list_sessions_by_ids(ids, query_opts) do
+        {:ok, %{sessions: sessions, next_cursor: next_cursor}}
+        when is_list(sessions) and (is_binary(next_cursor) or is_nil(next_cursor)) ->
+          {:ok, %{sessions: sessions, next_cursor: next_cursor}}
+
+        {:error, _reason} ->
+          {:error, :archive_read_unavailable}
+
+        _other ->
+          {:error, :archive_read_unavailable}
+      end
+    else
+      {:ok, %{sessions: [], next_cursor: nil}}
+    end
+  rescue
+    _ -> {:error, :archive_read_unavailable}
+  end
+
   defp get_cached(key) do
     case Cachex.get(@cache, key) do
       {:ok, nil} ->
