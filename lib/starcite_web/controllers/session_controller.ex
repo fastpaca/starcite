@@ -4,13 +4,18 @@ defmodule StarciteWeb.SessionController do
 
   - `create` via `POST /v1/sessions`
   - `append` via `POST /v1/sessions/:id/append`
+  - `index` via `GET /v1/sessions`
   """
 
   use StarciteWeb, :controller
 
+  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Runtime
 
   action_fallback StarciteWeb.FallbackController
+
+  @default_list_limit 100
+  @max_list_limit 1000
 
   @doc """
   Create a session.
@@ -37,6 +42,16 @@ defmodule StarciteWeb.SessionController do
   end
 
   def append(_conn, _params), do: {:error, :invalid_event}
+
+  @doc """
+  List sessions from the archive-backed catalog.
+  """
+  def index(conn, params) do
+    with {:ok, opts} <- validate_list(params),
+         {:ok, page} <- ArchiveStore.list_sessions(opts) do
+      json(conn, page)
+    end
+  end
 
   # Validation
 
@@ -71,6 +86,16 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp validate_append(_params), do: {:error, :invalid_event}
+
+  defp validate_list(params) when is_map(params) do
+    with {:ok, limit} <- optional_limit(Map.get(params, "limit")),
+         {:ok, cursor} <- optional_cursor(Map.get(params, "cursor")),
+         {:ok, metadata} <- optional_metadata_filters(params) do
+      {:ok, %{limit: limit, cursor: cursor, metadata: metadata}}
+    end
+  end
+
+  defp validate_list(_params), do: {:error, :invalid_list_query}
 
   defp optional_non_empty_string(nil), do: {:ok, nil}
   defp optional_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
@@ -108,4 +133,63 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp optional_non_neg_integer(_value), do: {:error, :invalid_event}
+
+  defp optional_limit(nil), do: {:ok, @default_list_limit}
+
+  defp optional_limit(value) when is_integer(value) and value > 0 and value <= @max_list_limit,
+    do: {:ok, value}
+
+  defp optional_limit(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} when parsed > 0 and parsed <= @max_list_limit -> {:ok, parsed}
+      _ -> {:error, :invalid_limit}
+    end
+  end
+
+  defp optional_limit(_value), do: {:error, :invalid_limit}
+
+  defp optional_cursor(nil), do: {:ok, nil}
+  defp optional_cursor(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp optional_cursor(_value), do: {:error, :invalid_cursor}
+
+  defp optional_metadata_filters(params) when is_map(params) do
+    with {:ok, nested} <- optional_metadata_filter_map(Map.get(params, "metadata")) do
+      dotted =
+        Enum.reduce(params, %{}, fn
+          {<<"metadata.", key::binary>>, value}, acc when key != "" ->
+            case metadata_filter_value(value) do
+              {:ok, normalized} -> Map.put(acc, key, normalized)
+              :error -> acc
+            end
+
+          _, acc ->
+            acc
+        end)
+
+      {:ok, Map.merge(nested, dotted)}
+    end
+  end
+
+  defp optional_metadata_filter_map(nil), do: {:ok, %{}}
+
+  defp optional_metadata_filter_map(value) when is_map(value) do
+    Enum.reduce_while(value, {:ok, %{}}, fn
+      {key, entry}, {:ok, acc} when is_binary(key) and key != "" ->
+        case metadata_filter_value(entry) do
+          {:ok, normalized} -> {:cont, {:ok, Map.put(acc, key, normalized)}}
+          :error -> {:halt, {:error, :invalid_metadata}}
+        end
+
+      _, _ ->
+        {:halt, {:error, :invalid_metadata}}
+    end)
+  end
+
+  defp optional_metadata_filter_map(_value), do: {:error, :invalid_metadata}
+
+  defp metadata_filter_value(value)
+       when is_binary(value) or is_boolean(value) or is_number(value),
+       do: {:ok, value}
+
+  defp metadata_filter_value(_value), do: :error
 end

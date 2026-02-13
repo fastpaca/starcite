@@ -34,9 +34,16 @@ defmodule Starcite.Runtime do
     metadata = Keyword.get(opts, :metadata, %{})
     group = RaftManager.group_for_session(id)
 
-    call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
-      create_session_local(id, title, metadata)
-    end)
+    case call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
+           create_session_local(id, title, metadata)
+         end) do
+      {:ok, session} = ok ->
+        _ = maybe_index_session(session)
+        ok
+
+      other ->
+        other
+    end
   end
 
   @doc false
@@ -354,6 +361,33 @@ defmodule Starcite.Runtime do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
+  end
+
+  defp maybe_index_session(%{id: id, title: title, metadata: metadata, created_at: created_at})
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) do
+    row = %{
+      id: id,
+      title: title,
+      metadata: metadata,
+      created_at: parse_utc_datetime!(created_at)
+    }
+
+    case ArchiveStore.upsert_session(row) do
+      :ok -> :ok
+      {:error, :archive_write_unavailable} -> :ok
+    end
+  end
+
+  defp maybe_index_session(_session), do: :ok
+
+  defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
+
+  defp parse_utc_datetime!(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      {:error, reason} -> raise ArgumentError, "invalid datetime: #{inspect(reason)}"
+    end
   end
 
   defp generate_session_id do

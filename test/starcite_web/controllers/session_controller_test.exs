@@ -4,13 +4,29 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.Runtime
+  alias Starcite.{Repo, Runtime}
 
   @endpoint StarciteWeb.Endpoint
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+    :ok = ensure_repo_started()
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
+  end
+
+  defp ensure_repo_started do
+    case Process.whereis(Repo) do
+      nil ->
+        case Repo.start_link() do
+          {:ok, _pid} -> :ok
+          {:error, {:already_started, _pid}} -> :ok
+        end
+
+      _pid ->
+        :ok
+    end
   end
 
   defp unique_id(prefix) do
@@ -89,6 +105,99 @@ defmodule StarciteWeb.SessionControllerTest do
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "session_exists"
       assert is_binary(body["message"])
+    end
+  end
+
+  describe "GET /v1/sessions" do
+    test "lists sessions and supports metadata filter" do
+      marker = unique_id("marker")
+      id1 = unique_id("ses")
+      id2 = unique_id("ses")
+      id3 = unique_id("ses")
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id1,
+                 "title" => "A",
+                 "metadata" => %{"user_id" => "u1", "tenant_id" => "acme", "marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id2,
+                 "title" => "B",
+                 "metadata" => %{"user_id" => "u2", "tenant_id" => "acme", "marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id3,
+                 "title" => "C",
+                 "metadata" => %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
+               }).status
+
+      conn =
+        json_conn(
+          :get,
+          "/v1/sessions?metadata[user_id]=u1&metadata[marker]=#{marker}",
+          nil
+        )
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      ids = body["sessions"] |> Enum.map(& &1["id"]) |> Enum.sort()
+
+      assert ids == Enum.sort([id1, id3])
+      assert body["next_cursor"] in [nil, id1, id3]
+    end
+
+    test "supports cursor pagination" do
+      marker = unique_id("marker")
+      id1 = "ses-a-#{System.unique_integer([:positive, :monotonic])}"
+      id2 = "ses-b-#{System.unique_integer([:positive, :monotonic])}"
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id1,
+                 "metadata" => %{"marker" => marker}
+               }).status
+
+      assert 201 ==
+               json_conn(:post, "/v1/sessions", %{
+                 "id" => id2,
+                 "metadata" => %{"marker" => marker}
+               }).status
+
+      conn1 = json_conn(:get, "/v1/sessions?limit=1&metadata[marker]=#{marker}", nil)
+      assert conn1.status == 200
+
+      body1 = Jason.decode!(conn1.resp_body)
+      assert length(body1["sessions"]) == 1
+      assert is_binary(body1["next_cursor"])
+
+      cursor = body1["next_cursor"]
+
+      conn2 =
+        json_conn(
+          :get,
+          "/v1/sessions?limit=1&metadata[marker]=#{marker}&cursor=#{cursor}",
+          nil
+        )
+
+      assert conn2.status == 200
+      body2 = Jason.decode!(conn2.resp_body)
+      assert length(body2["sessions"]) == 1
+
+      ids = [hd(body1["sessions"])["id"], hd(body2["sessions"])["id"]] |> Enum.sort()
+      assert ids == Enum.sort([id1, id2])
+    end
+
+    test "invalid limit returns 400" do
+      conn = json_conn(:get, "/v1/sessions?limit=0", nil)
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_limit"
     end
   end
 

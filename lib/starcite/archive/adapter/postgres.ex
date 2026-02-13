@@ -11,7 +11,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   import Ecto.Query
 
-  alias Starcite.Archive.Event
+  alias Starcite.Archive.{Event, SessionRecord}
   alias Starcite.Repo
 
   @impl true
@@ -65,6 +65,86 @@ defmodule Starcite.Archive.Adapter.Postgres do
     {:ok, Repo.all(query)}
   end
 
+  @impl true
+  def upsert_session(%{
+        id: id,
+        title: title,
+        metadata: metadata,
+        created_at: %DateTime{} = created_at
+      })
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_map(metadata) do
+    {_inserted, _} =
+      Repo.insert_all(
+        "sessions",
+        [
+          %{
+            id: id,
+            title: title,
+            metadata: metadata,
+            created_at: created_at
+          }
+        ],
+        on_conflict: :nothing,
+        conflict_target: [:id]
+      )
+
+    :ok
+  rescue
+    _ -> {:error, :archive_write_unavailable}
+  end
+
+  @impl true
+  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata})
+      when is_integer(limit) and limit > 0 and
+             (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
+    query =
+      SessionRecord
+      |> apply_cursor(cursor)
+      |> apply_metadata_filters(metadata)
+      |> order_by([s], asc: s.id)
+      |> limit(^limit)
+
+    rows = Repo.all(query)
+
+    {:ok,
+     %{
+       sessions: Enum.map(rows, &to_session_map/1),
+       next_cursor: next_cursor(rows, limit)
+     }}
+  rescue
+    _ -> {:error, :archive_read_unavailable}
+  end
+
+  @impl true
+  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata})
+      when is_list(ids) and is_integer(limit) and limit > 0 and
+             (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
+    session_ids = ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
+
+    if session_ids == [] do
+      {:ok, %{sessions: [], next_cursor: nil}}
+    else
+      query =
+        SessionRecord
+        |> where([s], s.id in ^session_ids)
+        |> apply_cursor(cursor)
+        |> apply_metadata_filters(metadata)
+        |> order_by([s], asc: s.id)
+        |> limit(^limit)
+
+      rows = Repo.all(query)
+
+      {:ok,
+       %{
+         sessions: Enum.map(rows, &to_session_map/1),
+         next_cursor: next_cursor(rows, limit)
+       }}
+    end
+  rescue
+    _ -> {:error, :archive_read_unavailable}
+  end
+
   defp insert_all_with_conflict(rows) do
     entries =
       Enum.map(rows, fn row ->
@@ -97,4 +177,35 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   defp normalize_inserted_at(%DateTime{} = datetime), do: DateTime.truncate(datetime, :second)
+
+  defp apply_cursor(query, nil), do: query
+
+  defp apply_cursor(query, cursor) when is_binary(cursor) and cursor != "" do
+    where(query, [s], s.id > ^cursor)
+  end
+
+  defp apply_metadata_filters(query, metadata_filters) when map_size(metadata_filters) == 0,
+    do: query
+
+  defp apply_metadata_filters(query, metadata_filters) do
+    Enum.reduce(metadata_filters, query, fn {key, value}, acc ->
+      where(acc, [s], fragment("? @> ?", s.metadata, type(^%{key => value}, :map)))
+    end)
+  end
+
+  defp next_cursor(rows, limit) when is_list(rows) and length(rows) == limit do
+    %SessionRecord{id: id} = List.last(rows)
+    id
+  end
+
+  defp next_cursor(_rows, _limit), do: nil
+
+  defp to_session_map(%SessionRecord{} = session) do
+    %{
+      id: session.id,
+      title: session.title,
+      metadata: session.metadata || %{},
+      created_at: DateTime.to_iso8601(session.created_at)
+    }
+  end
 end

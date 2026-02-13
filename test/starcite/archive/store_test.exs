@@ -90,6 +90,36 @@ defmodule Starcite.Archive.StoreTest do
     assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 1}, {session_id, 1, 1}]
   end
 
+  test "upserts and lists session catalog rows" do
+    now = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    assert :ok =
+             Store.upsert_session(%{
+               id: "ses-a",
+               title: "A",
+               metadata: %{"tenant_id" => "acme", "user_id" => "u1"},
+               created_at: now
+             })
+
+    assert :ok =
+             Store.upsert_session(%{
+               id: "ses-b",
+               title: "B",
+               metadata: %{"tenant_id" => "acme", "user_id" => "u2"},
+               created_at: now
+             })
+
+    assert {:ok, %{sessions: sessions, next_cursor: nil}} =
+             Store.list_sessions(%{limit: 10, metadata: %{"tenant_id" => "acme"}})
+
+    assert Enum.map(sessions, & &1.id) == ["ses-a", "ses-b"]
+
+    assert {:ok, %{sessions: [session], next_cursor: nil}} =
+             Store.list_sessions_by_ids(["ses-b"], %{limit: 10, metadata: %{}})
+
+    assert session.id == "ses-b"
+  end
+
   defp build_rows(session_id, seqs) do
     inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 

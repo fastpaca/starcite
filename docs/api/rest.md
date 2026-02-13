@@ -43,6 +43,40 @@ Validation:
 
 If the chosen `id` already exists, returns `409` with `error: "session_exists"`.
 
+## GET `/v1/sessions`
+
+List sessions from the archive-backed catalog.
+
+Query params:
+
+- `limit`: optional positive integer (`<= 1000`, default `100`)
+- `cursor`: optional session id cursor for pagination
+- metadata filters (exact match):
+  - nested form: `metadata[tenant_id]=acme`
+  - dotted form: `metadata.tenant_id=acme`
+
+Response `200`:
+
+```json
+{
+  "sessions": [
+    {
+      "id": "ses_custom_123",
+      "title": "Draft contract",
+      "metadata": {
+        "tenant_id": "acme",
+        "workflow": "contract_drafting"
+      },
+      "created_at": "2026-02-08T15:00:00Z"
+    }
+  ],
+  "next_cursor": "ses_custom_123"
+}
+```
+
+`next_cursor` is `null` when no more rows are available.
+
+
 ## POST `/v1/sessions/:id/append`
 
 Append one event.

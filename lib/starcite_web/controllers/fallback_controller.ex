@@ -69,6 +69,8 @@ defmodule StarciteWeb.FallbackController do
              :invalid_metadata,
              :invalid_refs,
              :invalid_cursor,
+             :invalid_limit,
+             :invalid_list_query,
              :invalid_websocket_upgrade,
              :invalid_session,
              :invalid_session_id
@@ -84,6 +86,8 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_metadata), do: "Invalid metadata payload"
   defp reason_message(:invalid_refs), do: "Invalid refs payload"
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
+  defp reason_message(:invalid_limit), do: "Invalid limit value"
+  defp reason_message(:invalid_list_query), do: "Invalid list query"
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"
