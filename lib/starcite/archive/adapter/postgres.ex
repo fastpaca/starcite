@@ -24,8 +24,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
   # we can safely insert ~6000 rows per batch. Use 5000 to be safe.
   @chunk_size 5_000
 
-  @default_limit 100
-
   @impl true
   def write_events(rows) when is_list(rows) do
     if rows == [] do
@@ -70,107 +68,125 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def upsert_session(row) when is_map(row) do
-    with {:ok, id} <- required_non_empty_string(fetch_field(row, :id)),
-         {:ok, title} <- optional_string(fetch_field(row, :title)),
-         {:ok, metadata} <- optional_object(fetch_field(row, :metadata)),
-         {:ok, created_at} <- required_utc_datetime(fetch_field(row, :created_at)),
-         {:ok, updated_at} <- required_utc_datetime(fetch_field(row, :updated_at)) do
-      entry = %{
+  def upsert_session(%{
         id: id,
         title: title,
         metadata: metadata,
-        created_at: created_at,
-        updated_at: updated_at
-      }
+        created_at: %DateTime{} = created_at,
+        updated_at: %DateTime{} = updated_at
+      })
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_map(metadata) do
+    entry = %{
+      id: id,
+      title: title,
+      metadata: metadata,
+      created_at: created_at,
+      updated_at: updated_at
+    }
 
-      {_inserted, _} =
-        Repo.insert_all(
-          "sessions",
-          [entry],
-          on_conflict: :nothing,
-          conflict_target: [:id]
-        )
+    {_inserted, _} =
+      Repo.insert_all(
+        "sessions",
+        [entry],
+        on_conflict: :nothing,
+        conflict_target: [:id]
+      )
 
-      :ok
-    else
-      {:error, _reason} = error ->
-        error
-    end
+    :ok
   rescue
     _ -> {:error, :archive_write_unavailable}
   end
 
+  def upsert_session(_row), do: {:error, :invalid_session}
+
   @impl true
-  def list_sessions(query_opts) when is_map(query_opts) do
-    with {:ok, opts} <- normalize_query_opts(query_opts) do
+  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata})
+      when is_integer(limit) and limit > 0 and
+             (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
+    :ok = validate_metadata_filters!(metadata)
+
+    query =
+      SessionRecord
+      |> apply_cursor(cursor)
+      |> apply_metadata_filters(metadata)
+      |> order_by([s], asc: s.id)
+      |> limit(^limit)
+
+    rows = Repo.all(query)
+
+    {:ok,
+     %{
+       sessions: Enum.map(rows, &to_session_map/1),
+       next_cursor: next_cursor(rows, limit)
+     }}
+  rescue
+    _ -> {:error, :archive_read_unavailable}
+  end
+
+  def list_sessions(_query_opts), do: {:error, :invalid_list_query}
+
+  @impl true
+  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata})
+      when is_list(ids) and is_integer(limit) and limit > 0 and
+             (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
+    :ok = validate_metadata_filters!(metadata)
+    session_ids = normalize_ids!(ids)
+
+    if session_ids == [] do
+      {:ok, %{sessions: [], next_cursor: nil}}
+    else
       query =
         SessionRecord
-        |> apply_cursor(opts.cursor)
-        |> apply_metadata_filters(opts.metadata)
+        |> where([s], s.id in ^session_ids)
+        |> apply_cursor(cursor)
+        |> apply_metadata_filters(metadata)
         |> order_by([s], asc: s.id)
-        |> limit(^opts.limit)
+        |> limit(^limit)
 
       rows = Repo.all(query)
 
       {:ok,
        %{
          sessions: Enum.map(rows, &to_session_map/1),
-         next_cursor: next_cursor(rows, opts.limit)
+         next_cursor: next_cursor(rows, limit)
        }}
     end
   rescue
     _ -> {:error, :archive_read_unavailable}
   end
 
-  @impl true
-  def list_sessions_by_ids(ids, query_opts) when is_list(ids) and is_map(query_opts) do
-    valid_ids =
-      ids
-      |> Enum.filter(&(is_binary(&1) and &1 != ""))
-      |> Enum.uniq()
-
-    if valid_ids == [] do
-      {:ok, %{sessions: [], next_cursor: nil}}
-    else
-      with {:ok, opts} <- normalize_query_opts(query_opts) do
-        query =
-          SessionRecord
-          |> where([s], s.id in ^valid_ids)
-          |> apply_cursor(opts.cursor)
-          |> apply_metadata_filters(opts.metadata)
-          |> order_by([s], asc: s.id)
-          |> limit(^opts.limit)
-
-        rows = Repo.all(query)
-
-        {:ok,
-         %{
-           sessions: Enum.map(rows, &to_session_map/1),
-           next_cursor: next_cursor(rows, opts.limit)
-         }}
-      end
-    end
-  rescue
-    _ -> {:error, :archive_read_unavailable}
-  end
+  def list_sessions_by_ids(_ids, _query_opts), do: {:error, :invalid_list_query}
 
   defp insert_all_with_conflict(rows) do
     entries =
-      Enum.map(rows, fn row ->
+      Enum.map(rows, fn %{
+                          session_id: session_id,
+                          seq: seq,
+                          type: type,
+                          actor: actor,
+                          producer_id: producer_id,
+                          producer_seq: producer_seq,
+                          source: source,
+                          payload: payload,
+                          metadata: metadata,
+                          refs: refs,
+                          idempotency_key: idempotency_key,
+                          inserted_at: inserted_at
+                        } ->
         %{
-          session_id: row.session_id,
-          seq: row.seq,
-          type: row.type,
-          actor: row.actor,
-          producer_id: row.producer_id,
-          producer_seq: row.producer_seq,
-          source: row.source,
-          payload: Jason.encode!(row.payload),
-          metadata: Jason.encode!(row.metadata),
-          refs: Jason.encode!(row.refs),
-          idempotency_key: row.idempotency_key,
-          inserted_at: DateTime.from_naive!(row.inserted_at, "Etc/UTC")
+          session_id: session_id,
+          seq: seq,
+          type: type,
+          actor: actor,
+          producer_id: producer_id,
+          producer_seq: producer_seq,
+          source: source,
+          payload: Jason.encode!(payload),
+          metadata: Jason.encode!(metadata),
+          refs: Jason.encode!(refs),
+          idempotency_key: idempotency_key,
+          inserted_at: DateTime.from_naive!(inserted_at, "Etc/UTC")
         }
       end)
 
@@ -198,15 +214,12 @@ defmodule Starcite.Archive.Adapter.Postgres do
     end)
   end
 
-  defp next_cursor(rows, limit) when is_list(rows) and is_integer(limit) do
-    if length(rows) == limit do
-      rows
-      |> List.last()
-      |> Map.get(:id)
-    else
-      nil
-    end
+  defp next_cursor(rows, limit) when is_list(rows) and length(rows) == limit do
+    %SessionRecord{id: id} = List.last(rows)
+    id
   end
+
+  defp next_cursor(_rows, _limit), do: nil
 
   defp to_session_map(%SessionRecord{} = session) do
     %{
@@ -218,60 +231,26 @@ defmodule Starcite.Archive.Adapter.Postgres do
     }
   end
 
-  defp normalize_query_opts(opts) when is_map(opts) do
-    with {:ok, limit} <- optional_limit(Map.get(opts, :limit)),
-         {:ok, cursor} <- optional_cursor(Map.get(opts, :cursor)),
-         {:ok, metadata} <- optional_metadata(Map.get(opts, :metadata)) do
-      {:ok, %{limit: limit, cursor: cursor, metadata: metadata}}
-    end
-  end
-
-  defp optional_limit(nil), do: {:ok, @default_limit}
-  defp optional_limit(limit) when is_integer(limit) and limit > 0, do: {:ok, limit}
-  defp optional_limit(_limit), do: {:error, :invalid_limit}
-
-  defp optional_cursor(nil), do: {:ok, nil}
-  defp optional_cursor(cursor) when is_binary(cursor) and cursor != "", do: {:ok, cursor}
-  defp optional_cursor(_cursor), do: {:error, :invalid_cursor}
-
-  defp optional_metadata(nil), do: {:ok, %{}}
-
-  defp optional_metadata(metadata) when is_map(metadata) do
-    Enum.reduce_while(metadata, {:ok, %{}}, fn
-      {key, value}, {:ok, acc}
+  defp validate_metadata_filters!(metadata_filters) when is_map(metadata_filters) do
+    Enum.each(metadata_filters, fn
+      {key, value}
       when is_binary(key) and key != "" and not is_map(value) and not is_list(value) ->
-        {:cont, {:ok, Map.put(acc, key, value)}}
+        :ok
 
-      _, _ ->
-        {:halt, {:error, :invalid_metadata}}
+      _ ->
+        raise ArgumentError, "invalid metadata filter"
     end)
+
+    :ok
   end
 
-  defp optional_metadata(_metadata), do: {:error, :invalid_metadata}
-
-  defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
-  defp required_non_empty_string(_value), do: {:error, :invalid_session}
-
-  defp optional_string(nil), do: {:ok, nil}
-  defp optional_string(value) when is_binary(value), do: {:ok, value}
-  defp optional_string(_value), do: {:error, :invalid_session}
-
-  defp optional_object(nil), do: {:ok, %{}}
-  defp optional_object(value) when is_map(value), do: {:ok, value}
-  defp optional_object(_value), do: {:error, :invalid_metadata}
-
-  defp required_utc_datetime(%DateTime{} = datetime), do: {:ok, datetime}
-
-  defp required_utc_datetime(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> {:ok, datetime}
-      _ -> {:error, :invalid_session}
-    end
-  end
-
-  defp required_utc_datetime(_value), do: {:error, :invalid_session}
-
-  defp fetch_field(map, key) when is_map(map) and is_atom(key) do
-    Map.get(map, key) || Map.get(map, Atom.to_string(key))
+  defp normalize_ids!(ids) when is_list(ids) do
+    ids
+    |> Enum.reduce([], fn
+      id, acc when is_binary(id) and id != "" -> [id | acc]
+      _, _ -> raise ArgumentError, "invalid session id"
+    end)
+    |> Enum.reverse()
+    |> Enum.uniq()
   end
 end

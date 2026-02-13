@@ -398,13 +398,21 @@ defmodule Starcite.Runtime do
     end
   end
 
-  defp maybe_index_session(%{id: id} = session) when is_binary(id) and id != "" do
+  defp maybe_index_session(%{
+         id: id,
+         title: title,
+         metadata: metadata,
+         created_at: created_at,
+         updated_at: updated_at
+       })
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) do
     row = %{
       id: id,
-      title: Map.get(session, :title),
-      metadata: Map.get(session, :metadata, %{}),
-      created_at: Map.get(session, :created_at),
-      updated_at: Map.get(session, :updated_at)
+      title: title,
+      metadata: metadata,
+      created_at: parse_utc_datetime!(created_at),
+      updated_at: parse_utc_datetime!(updated_at)
     }
 
     case ArchiveStore.upsert_session(row) do
@@ -417,6 +425,15 @@ defmodule Starcite.Runtime do
   end
 
   defp maybe_index_session(_session), do: :ok
+
+  defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
+
+  defp parse_utc_datetime!(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      {:error, reason} -> raise ArgumentError, "invalid datetime: #{inspect(reason)}"
+    end
+  end
 
   defp generate_session_id do
     "ses_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

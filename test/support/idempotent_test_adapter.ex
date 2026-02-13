@@ -89,15 +89,15 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def handle_call({:upsert_session, session}, _from, state) do
-    id = Map.get(session, :id) || Map.get(session, "id")
+  def handle_call({:upsert_session, %{id: id} = session}, _from, state)
+      when is_binary(id) and id != "" do
+    normalized = normalize_session(session)
+    {:reply, :ok, %{state | sessions: Map.put(state.sessions, id, normalized)}}
+  end
 
-    if is_binary(id) and id != "" do
-      normalized = normalize_session(session)
-      {:reply, :ok, %{state | sessions: Map.put(state.sessions, id, normalized)}}
-    else
-      {:reply, {:error, :invalid_session}, state}
-    end
+  @impl true
+  def handle_call({:upsert_session, _session}, _from, state) do
+    {:reply, {:error, :invalid_session}, state}
   end
 
   @impl true
@@ -157,13 +157,19 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
     }
   end
 
-  defp normalize_session(session) do
+  defp normalize_session(%{
+         id: id,
+         title: title,
+         metadata: metadata,
+         created_at: created_at,
+         updated_at: updated_at
+       }) do
     %{
-      id: Map.get(session, :id) || Map.get(session, "id"),
-      title: Map.get(session, :title) || Map.get(session, "title"),
-      metadata: Map.get(session, :metadata) || Map.get(session, "metadata") || %{},
-      created_at: Map.get(session, :created_at) || Map.get(session, "created_at"),
-      updated_at: Map.get(session, :updated_at) || Map.get(session, "updated_at")
+      id: id,
+      title: title,
+      metadata: metadata,
+      created_at: created_at,
+      updated_at: updated_at
     }
   end
 
