@@ -5,7 +5,6 @@ defmodule StarciteWeb.SessionController do
   - `create` via `POST /v1/sessions`
   - `append` via `POST /v1/sessions/:id/append`
   - `index` via `GET /v1/sessions`
-  - `active` via `GET /v1/sessions/active`
   """
 
   use StarciteWeb, :controller
@@ -50,17 +49,6 @@ defmodule StarciteWeb.SessionController do
   def index(conn, params) do
     with {:ok, opts} <- validate_list(params),
          {:ok, page} <- ArchiveStore.list_sessions(opts) do
-      json(conn, page)
-    end
-  end
-
-  @doc """
-  List in-flight active sessions backed by local/cluster runtime hot state.
-  """
-  def active(conn, params) do
-    with {:ok, opts} <- validate_list(params),
-         {:ok, active_ids} <- Runtime.list_active_session_ids(),
-         {:ok, page} <- ArchiveStore.list_sessions_by_ids(active_ids, opts) do
       json(conn, page)
     end
   end

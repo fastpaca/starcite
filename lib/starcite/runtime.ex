@@ -105,23 +105,6 @@ defmodule Starcite.Runtime do
     end
   end
 
-  @spec list_active_session_ids() :: {:ok, [String.t()]}
-  def list_active_session_ids do
-    active_ids =
-      [Node.self() | Node.list()]
-      |> Enum.uniq()
-      |> Enum.flat_map(&gather_active_session_ids/1)
-      |> Enum.uniq()
-      |> Enum.sort()
-
-    {:ok, active_ids}
-  end
-
-  @doc false
-  def list_active_session_ids_local do
-    EventStore.session_ids()
-  end
-
   # Append and tail
 
   @spec append_event(String.t(), map(), keyword()) ::
@@ -371,31 +354,6 @@ defmodule Starcite.Runtime do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
-  end
-
-  defp gather_active_session_ids(node) do
-    if node == Node.self() do
-      list_active_session_ids_local()
-    else
-      case safe_rpc_call(node, :list_active_session_ids_local, []) do
-        ids when is_list(ids) ->
-          ids
-
-        {:badrpc, reason} ->
-          Logger.warning(
-            "Runtime active-session RPC to #{inspect(node)} failed: #{inspect(reason)}"
-          )
-
-          []
-
-        other ->
-          Logger.warning(
-            "Runtime active-session RPC to #{inspect(node)} returned #{inspect(other)}"
-          )
-
-          []
-      end
-    end
   end
 
   defp maybe_index_session(%{

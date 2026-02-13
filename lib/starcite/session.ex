@@ -18,7 +18,6 @@ defmodule Starcite.Session do
     :last_seq,
     :archived_seq,
     :inserted_at,
-    :updated_at,
     :retention,
     :producer_cursors
   ]
@@ -29,7 +28,6 @@ defmodule Starcite.Session do
     :last_seq,
     :archived_seq,
     :inserted_at,
-    :updated_at,
     :retention,
     :producer_cursors
   ]
@@ -41,7 +39,6 @@ defmodule Starcite.Session do
           last_seq: non_neg_integer(),
           archived_seq: non_neg_integer(),
           inserted_at: NaiveDateTime.t(),
-          updated_at: NaiveDateTime.t(),
           retention: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()},
           producer_cursors: %{optional(String.t()) => ProducerIndex.cursor()}
         }
@@ -57,19 +54,17 @@ defmodule Starcite.Session do
     now = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
 
     tail_keep =
-      normalize_positive_integer(
-        opts[:tail_keep],
+      Keyword.get(
+        opts,
+        :tail_keep,
         Application.get_env(:starcite, :tail_keep, @default_tail_keep)
       )
 
     producer_max_entries =
-      normalize_positive_integer(
-        opts[:producer_max_entries],
-        Application.get_env(
-          :starcite,
-          :producer_max_entries,
-          @default_producer_max_entries
-        )
+      Keyword.get(
+        opts,
+        :producer_max_entries,
+        Application.get_env(:starcite, :producer_max_entries, @default_producer_max_entries)
       )
 
     %Session{
@@ -79,7 +74,6 @@ defmodule Starcite.Session do
       last_seq: 0,
       archived_seq: 0,
       inserted_at: now,
-      updated_at: now,
       retention: %{tail_keep: tail_keep, producer_max_entries: producer_max_entries},
       producer_cursors: %{}
     }
@@ -144,7 +138,6 @@ defmodule Starcite.Session do
         updated = %Session{
           session
           | last_seq: next_seq,
-            updated_at: now,
             producer_cursors: updated_index
         }
 
@@ -170,7 +163,7 @@ defmodule Starcite.Session do
     new_floor = retained_floor(archived_seq, session.last_seq, tail_keep)
     trimmed = max(new_floor - old_floor, 0)
 
-    {%Session{session | archived_seq: archived_seq, updated_at: NaiveDateTime.utc_now()}, trimmed}
+    {%Session{session | archived_seq: archived_seq}, trimmed}
   end
 
   @doc """
@@ -183,13 +176,15 @@ defmodule Starcite.Session do
 
   @spec to_map(t()) :: map()
   def to_map(%Session{} = session) do
+    created_at = iso8601_utc(session.inserted_at)
+
     %{
       id: session.id,
       title: session.title,
       metadata: session.metadata,
       last_seq: session.last_seq,
-      created_at: iso8601_utc(session.inserted_at),
-      updated_at: iso8601_utc(session.updated_at)
+      created_at: created_at,
+      updated_at: created_at
     }
   end
 
@@ -199,7 +194,7 @@ defmodule Starcite.Session do
   end
 
   defp maybe_update_cursors(%Session{} = session, updated_index) when is_map(updated_index) do
-    %Session{session | producer_cursors: updated_index, updated_at: NaiveDateTime.utc_now()}
+    %Session{session | producer_cursors: updated_index}
   end
 
   defp retained_floor(archived_seq, last_seq, tail_keep)
@@ -237,13 +232,4 @@ defmodule Starcite.Session do
   end
 
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-
-  defp normalize_positive_integer(nil, default) when is_integer(default) and default > 0,
-    do: default
-
-  defp normalize_positive_integer(value, _default) when is_integer(value) and value > 0,
-    do: value
-
-  defp normalize_positive_integer(_value, default) when is_integer(default) and default > 0,
-    do: default
 end

@@ -201,34 +201,6 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
-  describe "GET /v1/sessions/active" do
-    test "returns only active in-flight sessions" do
-      active_id = unique_id("ses")
-      inactive_id = unique_id("ses")
-
-      assert 201 == json_conn(:post, "/v1/sessions", %{"id" => active_id}).status
-      assert 201 == json_conn(:post, "/v1/sessions", %{"id" => inactive_id}).status
-
-      assert 201 ==
-               json_conn(:post, "/v1/sessions/#{active_id}/append", %{
-                 "type" => "content",
-                 "payload" => %{"text" => "hello"},
-                 "actor" => "agent:test",
-                 "producer_id" => "writer-1",
-                 "producer_seq" => 1
-               }).status
-
-      conn = json_conn(:get, "/v1/sessions/active", nil)
-      assert conn.status == 200
-
-      body = Jason.decode!(conn.resp_body)
-      ids = body["sessions"] |> Enum.map(& &1["id"])
-
-      assert active_id in ids
-      refute inactive_id in ids
-    end
-  end
-
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")

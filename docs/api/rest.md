@@ -77,17 +77,6 @@ Response `200`:
 
 `next_cursor` is `null` when no more rows are available.
 
-## GET `/v1/sessions/active`
-
-List sessions currently in-flight in hot runtime state.
-
-Active membership comes from runtime event mirrors (hot path) and the response is
-joined with the session catalog through the configured archive adapter.
-
-Query params are the same as `GET /v1/sessions`.
-
-Response `200` shape is identical to `GET /v1/sessions`.
-
 ## POST `/v1/sessions/:id/append`
 
 Append one event.

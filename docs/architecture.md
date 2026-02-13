@@ -10,7 +10,6 @@ The public API surface is intentionally small:
 
 - `POST /v1/sessions`
 - `GET /v1/sessions`
-- `GET /v1/sessions/active`
 - `POST /v1/sessions/:id/append`
 - `GET /v1/sessions/:id/tail?cursor=N` (WebSocket upgrade)
 
@@ -51,7 +50,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Tier | Contents |
 | --- | --- |
 | Hot (Raft) | Session metadata (`last_seq`, `archived_seq`, retention state) + bounded producer cursors |
-| Hot mirror (ETS) | In-flight committed events and active session IDs |
+| Hot mirror (ETS) | In-flight committed events |
 | Cold (adapter-backed) | Full event history + session catalog projection |
 
 ## Replay behavior
