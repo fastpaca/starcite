@@ -169,7 +169,7 @@ defmodule Starcite.Runtime.EventStoreTest do
                inserted_at: inserted_at
              })
 
-    with_env(:starcite, :event_store_max_size, "#{EventStore.memory_bytes()}B")
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     assert {:error, :event_store_backpressure} =
              EventStore.put_event(session_id, %{
@@ -183,8 +183,8 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert EventStore.size() == 1
   end
 
-  test "parses MB and unit-suffixed size settings" do
-    with_env(:starcite, :event_store_max_size, "1B")
+  test "enforces byte-based size settings" do
+    with_env(:starcite, :event_store_max_bytes, 1)
     session_id = "ses-size-#{System.unique_integer([:positive, :monotonic])}"
 
     assert {:error, :event_store_backpressure} =
@@ -196,7 +196,7 @@ defmodule Starcite.Runtime.EventStoreTest do
                inserted_at: NaiveDateTime.utc_now()
              })
 
-    with_env(:starcite, :event_store_max_size, "4G")
+    with_env(:starcite, :event_store_max_bytes, 4_294_967_296)
 
     assert :ok =
              EventStore.put_event(session_id, %{
@@ -210,7 +210,7 @@ defmodule Starcite.Runtime.EventStoreTest do
 
   test "skips memory limit when event store capacity check is disabled" do
     session_id = "ses-cap-off-#{System.unique_integer([:positive, :monotonic])}"
-    with_env(:starcite, :event_store_max_size, "1B")
+    with_env(:starcite, :event_store_max_bytes, 1)
     with_env(:starcite, :event_store_capacity_check, false)
 
     assert :ok =

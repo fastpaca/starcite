@@ -13,7 +13,7 @@ defmodule Starcite.Archive.StoreTest do
     _ = Cachex.clear(:starcite_archive_read_cache)
 
     previous_adapter = Application.get_env(:starcite, :archive_adapter)
-    previous_cache_max_size = Application.get_env(:starcite, :archive_read_cache_max_size)
+    previous_cache_max_bytes = Application.get_env(:starcite, :archive_read_cache_max_bytes)
 
     previous_cache_reclaim_fraction =
       Application.get_env(:starcite, :archive_read_cache_reclaim_fraction)
@@ -29,10 +29,10 @@ defmodule Starcite.Archive.StoreTest do
         Application.delete_env(:starcite, :archive_adapter)
       end
 
-      if is_nil(previous_cache_max_size) do
-        Application.delete_env(:starcite, :archive_read_cache_max_size)
+      if is_nil(previous_cache_max_bytes) do
+        Application.delete_env(:starcite, :archive_read_cache_max_bytes)
       else
-        Application.put_env(:starcite, :archive_read_cache_max_size, previous_cache_max_size)
+        Application.put_env(:starcite, :archive_read_cache_max_bytes, previous_cache_max_bytes)
       end
 
       if is_nil(previous_cache_reclaim_fraction) do
@@ -77,7 +77,7 @@ defmodule Starcite.Archive.StoreTest do
   end
 
   test "cache enforcement evicts when max bytes budget is exceeded" do
-    Application.put_env(:starcite, :archive_read_cache_max_size, "1B")
+    Application.put_env(:starcite, :archive_read_cache_max_bytes, 1)
     Application.put_env(:starcite, :archive_read_cache_reclaim_fraction, 0.5)
 
     session_id = "ses-store-budget-#{System.unique_integer([:positive, :monotonic])}"

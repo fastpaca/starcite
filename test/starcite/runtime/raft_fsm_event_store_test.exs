@@ -151,7 +151,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
-    with_env(:starcite, :event_store_max_size, "#{EventStore.memory_bytes()}B")
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
       RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)

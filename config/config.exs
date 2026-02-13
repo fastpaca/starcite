@@ -15,11 +15,11 @@ config :starcite,
   archive_name: Starcite.Archive,
   archive_adapter: Starcite.Archive.Adapter.Postgres,
   archive_adapter_opts: [],
-  event_store_max_size: "2GB",
+  event_store_max_bytes: 2_147_483_648,
   event_store_capacity_check: true,
   append_pubsub_effects: true,
   append_telemetry: true,
-  archive_read_cache_max_size: "512MB",
+  archive_read_cache_max_bytes: 536_870_912,
   archive_read_cache_reclaim_fraction: 0.25
 
 # Configures the endpoint

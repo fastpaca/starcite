@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.Bench.Internal do
   require Logger
 
+  alias Starcite.Config.Size
   alias Starcite.Runtime
   alias Starcite.Runtime.{EventStore, RaftFSM}
   alias Starcite.Session
@@ -164,8 +165,12 @@ defmodule Mix.Tasks.Bench.Internal do
 
     Application.put_env(
       :starcite,
-      :event_store_max_size,
-      System.get_env("BENCH_EVENT_STORE_MAX_SIZE", "64GB")
+      :event_store_max_bytes,
+      Size.parse_bytes!(
+        System.get_env("BENCH_EVENT_STORE_MAX_SIZE", "64GB"),
+        "BENCH_EVENT_STORE_MAX_SIZE",
+        examples: "256MB, 4G, 1024M"
+      )
     )
 
     if append_pubsub = System.get_env("BENCH_APPEND_PUBSUB_EFFECTS") do
@@ -214,7 +219,7 @@ defmodule Mix.Tasks.Bench.Internal do
     )
 
     IO.puts(
-      "  event_store_max_size: #{inspect(Application.get_env(:starcite, :event_store_max_size))}"
+      "  event_store_max_bytes: #{inspect(Application.get_env(:starcite, :event_store_max_bytes))}"
     )
 
     IO.puts(

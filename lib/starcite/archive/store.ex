@@ -6,13 +6,10 @@ defmodule Starcite.Archive.Store do
   """
 
   alias Starcite.Archive.Adapter
-  alias Starcite.Config.Size
 
   @cache :starcite_archive_read_cache
   @default_adapter Starcite.Archive.Adapter.Postgres
-  @cache_max_size_key "archive_read_cache_max_size"
-  @cache_reclaim_fraction_key "archive_read_cache_reclaim_fraction"
-  @default_cache_max_size "512MB"
+  @default_cache_max_bytes 536_870_912
   @default_cache_reclaim_fraction 0.25
 
   @spec adapter() :: module()
@@ -149,45 +146,14 @@ defmodule Starcite.Archive.Store do
   end
 
   defp cache_max_bytes do
-    Size.parse_bytes!(
-      Application.get_env(:starcite, :archive_read_cache_max_size, @default_cache_max_size),
-      @cache_max_size_key,
-      examples: "512MB, 4G, 262144K"
-    )
+    Application.get_env(:starcite, :archive_read_cache_max_bytes, @default_cache_max_bytes)
   end
 
   defp cache_reclaim_fraction do
-    validate_reclaim_fraction!(
-      Application.get_env(
-        :starcite,
-        :archive_read_cache_reclaim_fraction,
-        @default_cache_reclaim_fraction
-      ),
-      @cache_reclaim_fraction_key
+    Application.get_env(
+      :starcite,
+      :archive_read_cache_reclaim_fraction,
+      @default_cache_reclaim_fraction
     )
-  end
-
-  defp validate_reclaim_fraction!(value, _key)
-       when is_float(value) and value >= 0.01 and value <= 0.99,
-       do: value
-
-  defp validate_reclaim_fraction!(value, _key)
-       when is_integer(value) and value >= 1 and value <= 99,
-       do: value / 100
-
-  defp validate_reclaim_fraction!(value, key) when is_binary(value) do
-    case Float.parse(String.trim(value)) do
-      {parsed, ""} when parsed >= 0.01 and parsed <= 0.99 -> parsed
-      _ -> invalid_reclaim_fraction!(value, key)
-    end
-  end
-
-  defp validate_reclaim_fraction!(value, key) do
-    invalid_reclaim_fraction!(value, key)
-  end
-
-  defp invalid_reclaim_fraction!(value, key) do
-    raise ArgumentError,
-          "invalid value for #{key}: #{inspect(value)} (expected 0.01..0.99)"
   end
 end

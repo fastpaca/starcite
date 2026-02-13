@@ -84,6 +84,45 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
+parse_size_bytes! = fn env_name, raw ->
+  case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
+    [_, amount_raw, unit_raw] ->
+      amount = String.to_integer(amount_raw)
+
+      multiplier =
+        case String.upcase(unit_raw) do
+          "" -> 1_048_576
+          "B" -> 1
+          "K" -> 1_024
+          "KB" -> 1_024
+          "KIB" -> 1_024
+          "M" -> 1_048_576
+          "MB" -> 1_048_576
+          "MIB" -> 1_048_576
+          "G" -> 1_073_741_824
+          "GB" -> 1_073_741_824
+          "GIB" -> 1_073_741_824
+          "T" -> 1_099_511_627_776
+          "TB" -> 1_099_511_627_776
+          "TIB" -> 1_099_511_627_776
+          _ -> :invalid
+        end
+
+      case {amount, multiplier} do
+        {value, mult} when is_integer(value) and value > 0 and is_integer(mult) ->
+          value * mult
+
+        _ ->
+          raise ArgumentError,
+                "invalid size for #{env_name}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
+      end
+
+    _ ->
+      raise ArgumentError,
+            "invalid size for #{env_name}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
+  end
+end
+
 if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
   config :starcite,
          :archive_flush_interval_ms,
@@ -91,7 +130,9 @@ if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS")
 end
 
 if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
-  config :starcite, :event_store_max_size, event_store_max_size
+  config :starcite,
+         :event_store_max_bytes,
+         parse_size_bytes!.("STARCITE_EVENT_STORE_MAX_SIZE", event_store_max_size)
 end
 
 if event_store_capacity_check = System.get_env("STARCITE_EVENT_STORE_CAPACITY_CHECK") do
@@ -113,7 +154,9 @@ if append_telemetry = System.get_env("STARCITE_APPEND_TELEMETRY") do
 end
 
 if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do
-  config :starcite, :archive_read_cache_max_size, archive_read_cache_max_size
+  config :starcite,
+         :archive_read_cache_max_bytes,
+         parse_size_bytes!.("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE", archive_read_cache_max_size)
 end
 
 if archive_read_cache_reclaim_fraction =

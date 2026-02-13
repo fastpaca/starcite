@@ -12,7 +12,6 @@ defmodule Starcite.Runtime.EventStore do
 
   use GenServer
 
-  alias Starcite.Config.Size
   alias Starcite.Observability.Telemetry
   alias Starcite.Session.Event
 
@@ -21,9 +20,7 @@ defmodule Starcite.Runtime.EventStore do
   # max_seq lookups without scanning the entire event table.
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
-  @max_size_env "STARCITE_EVENT_STORE_MAX_SIZE"
-  @capacity_check_env "STARCITE_EVENT_STORE_CAPACITY_CHECK"
-  @default_max_size "2GB"
+  @default_max_memory_bytes 2_147_483_648
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
   @capacity_check_cache_key {__MODULE__, :capacity_check_enabled}
 
@@ -280,27 +277,21 @@ defmodule Starcite.Runtime.EventStore do
         enabled
 
       _ ->
-        enabled = parse_bool!(raw, @capacity_check_env)
+        enabled = normalize_capacity_check!(raw)
         :persistent_term.put(@capacity_check_cache_key, {raw, enabled})
         enabled
     end
   end
 
   defp max_memory_bytes_limit do
-    raw = Application.get_env(:starcite, :event_store_max_size, @default_max_size)
+    raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)
 
     case :persistent_term.get(@max_memory_limit_cache_key, :undefined) do
       {^raw, bytes} when is_integer(bytes) and bytes > 0 ->
         bytes
 
       _ ->
-        bytes =
-          Size.parse_bytes!(
-            raw,
-            @max_size_env,
-            examples: "256MB, 4G, 1024M"
-          )
-
+        bytes = normalize_max_memory_bytes!(raw)
         :persistent_term.put(@max_memory_limit_cache_key, {raw, bytes})
         bytes
     end
@@ -320,23 +311,17 @@ defmodule Starcite.Runtime.EventStore do
   defp should_drop_index?(nil, _floor_seq), do: true
   defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
 
-  defp parse_bool!(value, _env_key) when is_boolean(value), do: value
+  defp normalize_capacity_check!(value) when is_boolean(value), do: value
 
-  defp parse_bool!(value, env_key) when is_binary(value) do
-    case String.downcase(String.trim(value)) do
-      "1" -> true
-      "true" -> true
-      "yes" -> true
-      "on" -> true
-      "0" -> false
-      "false" -> false
-      "no" -> false
-      "off" -> false
-      _ -> raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(value)}"
-    end
+  defp normalize_capacity_check!(value) do
+    raise ArgumentError,
+          "invalid value for event_store_capacity_check: #{inspect(value)} (expected true/false)"
   end
 
-  defp parse_bool!(value, env_key) do
-    raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(value)}"
+  defp normalize_max_memory_bytes!(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_max_memory_bytes!(value) do
+    raise ArgumentError,
+          "invalid value for event_store_max_bytes: #{inspect(value)} (expected positive integer bytes)"
   end
 end

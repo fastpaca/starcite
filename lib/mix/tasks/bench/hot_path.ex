@@ -1,6 +1,7 @@
 defmodule Mix.Tasks.Bench.HotPath do
   require Logger
 
+  alias Starcite.Config.Size
   alias Starcite.Runtime
 
   def run do
@@ -80,7 +81,11 @@ defmodule Mix.Tasks.Bench.HotPath do
     Application.put_env(:starcite, :archive_flush_interval_ms, archive_flush_interval_ms)
 
     if max_size = System.get_env("BENCH_EVENT_STORE_MAX_SIZE") do
-      Application.put_env(:starcite, :event_store_max_size, max_size)
+      Application.put_env(
+        :starcite,
+        :event_store_max_bytes,
+        Size.parse_bytes!(max_size, "BENCH_EVENT_STORE_MAX_SIZE", examples: "256MB, 4G, 1024M")
+      )
     end
 
     if capacity_check = System.get_env("BENCH_EVENT_STORE_CAPACITY_CHECK") do
@@ -136,8 +141,8 @@ defmodule Mix.Tasks.Bench.HotPath do
       "  archive_flush_interval_ms: #{Application.get_env(:starcite, :archive_flush_interval_ms)}"
     )
 
-    if max_size = Application.get_env(:starcite, :event_store_max_size) do
-      IO.puts("  event_store_max_size: #{inspect(max_size)}")
+    if max_bytes = Application.get_env(:starcite, :event_store_max_bytes) do
+      IO.puts("  event_store_max_bytes: #{inspect(max_bytes)}")
     end
 
     IO.puts(
