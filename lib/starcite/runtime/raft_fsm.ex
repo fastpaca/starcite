@@ -9,8 +9,16 @@ defmodule Starcite.Runtime.RaftFSM do
 
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
+  alias Starcite.Session.ProducerIndex
 
   defstruct [:group_id, :sessions]
+
+  @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
+
+  @type t :: %__MODULE__{
+          group_id: term(),
+          sessions: %{optional(String.t()) => session_state()}
+        }
 
   @impl true
   def init(%{group_id: group_id}) do
@@ -120,6 +128,7 @@ defmodule Starcite.Runtime.RaftFSM do
   @doc """
   Query one session by ID.
   """
+  @spec query_session(t(), String.t()) :: {:ok, session_state()} | {:error, :session_not_found}
   def query_session(state, session_id) do
     with {:ok, session} <- fetch_session(state.sessions, session_id) do
       {:ok, session}
@@ -130,6 +139,8 @@ defmodule Starcite.Runtime.RaftFSM do
 
   # Helpers
 
+  @spec fetch_session(%{optional(String.t()) => session_state()}, String.t()) ::
+          {:ok, session_state()} | {:error, :session_not_found}
   defp fetch_session(sessions, session_id) when is_map(sessions) do
     case Map.get(sessions, session_id) do
       nil -> {:error, :session_not_found}

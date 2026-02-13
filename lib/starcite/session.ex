@@ -40,7 +40,7 @@ defmodule Starcite.Session do
           archived_seq: non_neg_integer(),
           inserted_at: NaiveDateTime.t(),
           retention: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()},
-          producer_cursors: %{optional(String.t()) => ProducerIndex.cursor()}
+          producer_cursors: ProducerIndex.t()
         }
 
   @default_tail_keep 1_000
