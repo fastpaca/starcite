@@ -9,6 +9,7 @@ defmodule Starcite.RuntimeTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+    Process.put(:producer_seq_counters, %{})
     :ok
   end
 
@@ -56,14 +57,14 @@ defmodule Starcite.RuntimeTest do
       {:ok, _} = Runtime.create_session(id: id)
 
       {:ok, r1} =
-        Runtime.append_event(id, %{
+        append_event(id, %{
           type: "content",
           payload: %{text: "one"},
           actor: "agent:1"
         })
 
       {:ok, r2} =
-        Runtime.append_event(id, %{
+        append_event(id, %{
           type: "content",
           payload: %{text: "two"},
           actor: "agent:1"
@@ -80,21 +81,21 @@ defmodule Starcite.RuntimeTest do
       {:ok, _} = Runtime.create_session(id: id)
 
       {:ok, _} =
-        Runtime.append_event(id, %{
+        append_event(id, %{
           type: "content",
           payload: %{text: "one"},
           actor: "agent:1"
         })
 
       assert {:error, {:expected_seq_conflict, 0, 1}} =
-               Runtime.append_event(
+               append_event(
                  id,
                  %{type: "content", payload: %{text: "two"}, actor: "agent:1"},
                  expected_seq: 0
                )
     end
 
-    test "dedupes when idempotency key repeats with same payload" do
+    test "dedupes when producer sequence repeats with same payload" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
@@ -102,35 +103,38 @@ defmodule Starcite.RuntimeTest do
         type: "state",
         payload: %{state: "running"},
         actor: "agent:1",
-        idempotency_key: "k1"
+        producer_id: "writer-1",
+        producer_seq: 1
       }
 
-      {:ok, first} = Runtime.append_event(id, event)
-      {:ok, second} = Runtime.append_event(id, event)
+      {:ok, first} = append_event(id, event)
+      {:ok, second} = append_event(id, event)
 
       assert first.seq == second.seq
       assert second.deduped
       assert second.last_seq == 1
     end
 
-    test "errors on idempotency conflict" do
+    test "errors on producer replay conflict" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
       {:ok, _} =
-        Runtime.append_event(id, %{
+        append_event(id, %{
           type: "state",
           payload: %{state: "running"},
           actor: "agent:1",
-          idempotency_key: "k1"
+          producer_id: "writer-1",
+          producer_seq: 1
         })
 
-      assert {:error, :idempotency_conflict} =
-               Runtime.append_event(id, %{
+      assert {:error, :producer_replay_conflict} =
+               append_event(id, %{
                  type: "state",
                  payload: %{state: "completed"},
                  actor: "agent:1",
-                 idempotency_key: "k1"
+                 producer_id: "writer-1",
+                 producer_seq: 1
                })
     end
   end
@@ -142,7 +146,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..5 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -159,7 +163,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..5 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -181,6 +185,8 @@ defmodule Starcite.RuntimeTest do
           type: "content",
           payload: %{text: "rogue"},
           actor: "agent:1",
+          producer_id: "writer:test",
+          producer_seq: 1,
           source: nil,
           metadata: %{},
           refs: %{},
@@ -201,7 +207,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..5 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -227,7 +233,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..5 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -251,7 +257,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..4 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -271,7 +277,7 @@ defmodule Starcite.RuntimeTest do
 
       for n <- 1..3 do
         {:ok, _} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "m#{n}"},
             actor: "agent:1"
@@ -291,7 +297,7 @@ defmodule Starcite.RuntimeTest do
         {:ok, _} = Runtime.create_session(id: id)
 
         {:ok, first} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "before crash"},
             actor: "agent:1"
@@ -322,7 +328,7 @@ defmodule Starcite.RuntimeTest do
         )
 
         {:ok, second} =
-          Runtime.append_event(id, %{
+          append_event(id, %{
             type: "content",
             payload: %{text: "after crash"},
             actor: "agent:1"
@@ -351,7 +357,7 @@ defmodule Starcite.RuntimeTest do
       tasks =
         Enum.map(ids, fn id ->
           Task.async(fn ->
-            Runtime.append_event(id, %{
+            append_event(id, %{
               type: "content",
               payload: %{text: "hello"},
               actor: "agent:1"
@@ -366,6 +372,27 @@ defmodule Starcite.RuntimeTest do
                _ -> false
              end)
     end
+  end
+
+  defp append_event(id, event, opts \\ [])
+       when is_binary(id) and is_map(event) and is_list(opts) do
+    producer_id = Map.get(event, :producer_id, "writer:test")
+
+    enriched_event =
+      event
+      |> Map.put_new(:producer_id, producer_id)
+      |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
+
+    Runtime.append_event(id, enriched_event, opts)
+  end
+
+  defp next_producer_seq(session_id, producer_id)
+       when is_binary(session_id) and is_binary(producer_id) do
+    counters = Process.get(:producer_seq_counters, %{})
+    key = {session_id, producer_id}
+    seq = Map.get(counters, key, 0) + 1
+    Process.put(:producer_seq_counters, Map.put(counters, key, seq))
+    seq
   end
 
   defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
@@ -398,6 +425,8 @@ defmodule Starcite.RuntimeTest do
           type: event.type,
           payload: event.payload,
           actor: event.actor,
+          producer_id: event.producer_id,
+          producer_seq: event.producer_seq,
           source: event.source,
           metadata: event.metadata,
           refs: event.refs,

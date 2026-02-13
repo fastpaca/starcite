@@ -25,6 +25,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+    Process.put(:producer_seq_counters, %{})
     :ok
   end
 
@@ -37,7 +38,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     {:ok, _} = Runtime.create_session(id: session_id)
 
     {:ok, _reply} =
-      Runtime.append_event(session_id, %{
+      append_event(session_id, %{
         type: "content",
         payload: %{text: "replay"},
         actor: "agent:test"
@@ -55,7 +56,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     assert String.ends_with?(replay_event["inserted_at"], "Z")
 
     {:ok, _reply} =
-      Runtime.append_event(session_id, %{
+      append_event(session_id, %{
         type: "state",
         payload: %{state: "running"},
         actor: "agent:test"
@@ -70,6 +71,27 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     assert String.ends_with?(live_event["inserted_at"], "Z")
 
     :ok = :gen_tcp.close(socket)
+  end
+
+  defp append_event(id, event, opts \\ [])
+       when is_binary(id) and is_map(event) and is_list(opts) do
+    producer_id = Map.get(event, :producer_id, "writer:test")
+
+    enriched_event =
+      event
+      |> Map.put_new(:producer_id, producer_id)
+      |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
+
+    Runtime.append_event(id, enriched_event, opts)
+  end
+
+  defp next_producer_seq(session_id, producer_id)
+       when is_binary(session_id) and is_binary(producer_id) do
+    counters = Process.get(:producer_seq_counters, %{})
+    key = {session_id, producer_id}
+    seq = Map.get(counters, key, 0) + 1
+    Process.put(:producer_seq_counters, Map.put(counters, key, seq))
+    seq
   end
 
   defp connect_tail_ws(session_id, cursor) do

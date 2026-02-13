@@ -110,10 +110,16 @@ export function ensureSession(id, overrides = {}) {
  * Append one event using POST /v1/sessions/:id/append.
  */
 export function appendEvent(id, event, opts = {}) {
+  if (event.producer_id === undefined || event.producer_seq === undefined) {
+    throw new Error('appendEvent requires producer_id and producer_seq');
+  }
+
   const payload = {
     type: event.type,
     payload: event.payload,
     actor: event.actor,
+    producer_id: event.producer_id,
+    producer_seq: event.producer_seq,
   };
 
   if (event.source !== undefined) payload.source = event.source;

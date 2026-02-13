@@ -59,12 +59,19 @@ defmodule Starcite.Runtime.RaftFSM do
               {state, {:reply, {:error, :event_store_backpressure}}}
           end
 
-        {:deduped, _session, seq} ->
-          reply = %{seq: seq, last_seq: session.last_seq, deduped: true}
-          {state, {:reply, {:ok, reply}}}
+        {:deduped, updated_session, seq} ->
+          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+          reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+          {new_state, {:reply, {:ok, reply}}}
 
-        {:error, :idempotency_conflict} ->
-          {state, {:reply, {:error, :idempotency_conflict}}}
+        {:error, :producer_replay_conflict} ->
+          {state, {:reply, {:error, :producer_replay_conflict}}}
+
+        {:error, {:producer_seq_conflict, _producer_id, _expected, _got} = reason} ->
+          {state, {:reply, {:error, reason}}}
+
+        {:error, :invalid_event} ->
+          {state, {:reply, {:error, :invalid_event}}}
       end
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}

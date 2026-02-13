@@ -25,7 +25,8 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",
-        idempotency_key: "idem-1"
+        producer_id: "writer:test",
+        producer_seq: 1
       })
 
     {:ok, %{seq: 1, deduped: true}} =
@@ -33,7 +34,8 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",
-        idempotency_key: "idem-1"
+        producer_id: "writer:test",
+        producer_seq: 1
       })
 
     assert {:ok, stored} = EventStore.get_event(session_id, 1)
@@ -52,7 +54,9 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
         type: "state",
         payload: %{state: "running"},
         actor: "agent:test",
-        source: "agent"
+        source: "agent",
+        producer_id: "writer:test",
+        producer_seq: 1
       })
 
     assert_receive {:cursor_update, update}, 1_000

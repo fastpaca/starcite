@@ -147,6 +147,8 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       type: row.type,
       payload: row.payload,
       actor: row.actor,
+      producer_id: row.producer_id,
+      producer_seq: row.producer_seq,
       source: row.source,
       metadata: row.metadata,
       refs: row.refs,
