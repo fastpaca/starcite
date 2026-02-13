@@ -7,14 +7,6 @@ defmodule Starcite.Config.Size do
   @tib 1_099_511_627_776
   @default_examples "256MB, 4G, 1024M"
 
-  @spec env_bytes_or_default!(String.t(), term(), keyword()) :: pos_integer()
-  def env_bytes_or_default!(env_key, default, opts \\ []) when is_binary(env_key) do
-    case System.get_env(env_key) do
-      nil -> parse_bytes!(default, env_key, opts)
-      raw -> parse_bytes!(raw, env_key, opts)
-    end
-  end
-
   @spec parse_bytes!(term(), String.t(), keyword()) :: pos_integer()
   def parse_bytes!(value, _env_key, _opts) when is_integer(value) and value > 0 do
     # Integer config values are interpreted as MB.

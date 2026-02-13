@@ -19,7 +19,6 @@ defmodule Starcite.Runtime.RaftFSM do
 
   @impl true
   def init(%{group_id: group_id}) do
-    sync_append_envs()
     %__MODULE__{group_id: group_id, sessions: %{}}
   end
 
@@ -233,22 +232,6 @@ defmodule Starcite.Runtime.RaftFSM do
         enabled = parse_bool!(raw, env_name)
         :persistent_term.put(cache_key, {raw, enabled})
         enabled
-    end
-  end
-
-  defp sync_append_envs do
-    sync_bool_env(@append_pubsub_env, :append_pubsub_effects)
-    sync_bool_env(@append_telemetry_env, :append_telemetry)
-  end
-
-  defp sync_bool_env(env_name, config_key) when is_binary(env_name) and is_atom(config_key) do
-    case System.get_env(env_name) do
-      nil ->
-        :ok
-
-      value ->
-        Application.put_env(:starcite, config_key, parse_bool!(value, env_name))
-        :ok
     end
   end
 

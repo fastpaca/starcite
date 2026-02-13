@@ -35,8 +35,6 @@ defmodule Starcite.Runtime.EventStore do
   def init(_opts) do
     _event_table = ensure_event_table()
     _index_table = ensure_index_table()
-    sync_max_size_env()
-    sync_capacity_check_env()
     {:ok, %{}}
   end
 
@@ -321,29 +319,6 @@ defmodule Starcite.Runtime.EventStore do
 
   defp should_drop_index?(nil, _floor_seq), do: true
   defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
-
-  defp sync_max_size_env do
-    case System.get_env(@max_size_env) do
-      nil ->
-        :ok
-
-      value ->
-        Application.put_env(:starcite, :event_store_max_size, value)
-        :ok
-    end
-  end
-
-  defp sync_capacity_check_env do
-    case System.get_env(@capacity_check_env) do
-      nil ->
-        :ok
-
-      value ->
-        enabled = parse_bool!(value, @capacity_check_env)
-        Application.put_env(:starcite, :event_store_capacity_check, enabled)
-        :ok
-    end
-  end
 
   defp parse_bool!(value, _env_key) when is_boolean(value), do: value
 

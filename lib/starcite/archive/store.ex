@@ -10,7 +10,8 @@ defmodule Starcite.Archive.Store do
 
   @cache :starcite_archive_read_cache
   @default_adapter Starcite.Archive.Adapter.Postgres
-  @max_size_env "STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE"
+  @cache_max_size_key "archive_read_cache_max_size"
+  @cache_reclaim_fraction_key "archive_read_cache_reclaim_fraction"
   @default_cache_max_size "512MB"
   @default_cache_reclaim_fraction 0.25
 
@@ -148,55 +149,45 @@ defmodule Starcite.Archive.Store do
   end
 
   defp cache_max_bytes do
-    Size.env_bytes_or_default!(
-      @max_size_env,
+    Size.parse_bytes!(
       Application.get_env(:starcite, :archive_read_cache_max_size, @default_cache_max_size),
+      @cache_max_size_key,
       examples: "512MB, 4G, 262144K"
     )
   end
 
   defp cache_reclaim_fraction do
-    env_float_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION",
+    validate_reclaim_fraction!(
       Application.get_env(
         :starcite,
         :archive_read_cache_reclaim_fraction,
         @default_cache_reclaim_fraction
       ),
-      0.01,
-      0.99
+      @cache_reclaim_fraction_key
     )
   end
 
-  defp env_float_or_default(env_key, default, min, max)
-       when is_binary(env_key) and is_number(min) and is_number(max) and min < max do
-    case System.get_env(env_key) do
-      nil -> validate_float!(default, env_key, min, max)
-      raw -> parse_float!(raw, env_key, min, max)
-    end
-  end
-
-  defp validate_float!(value, _env_key, min, max)
-       when is_float(value) and value >= min and value <= max,
+  defp validate_reclaim_fraction!(value, _key)
+       when is_float(value) and value >= 0.01 and value <= 0.99,
        do: value
 
-  defp validate_float!(value, _env_key, min, max)
-       when is_integer(value) and value >= min and value <= max,
-       do: value / 1
+  defp validate_reclaim_fraction!(value, _key)
+       when is_integer(value) and value >= 1 and value <= 99,
+       do: value / 100
 
-  defp validate_float!(value, env_key, min, max) do
-    raise ArgumentError,
-          "invalid default float for #{env_key}: #{inspect(value)} (expected #{min}..#{max})"
+  defp validate_reclaim_fraction!(value, key) when is_binary(value) do
+    case Float.parse(String.trim(value)) do
+      {parsed, ""} when parsed >= 0.01 and parsed <= 0.99 -> parsed
+      _ -> invalid_reclaim_fraction!(value, key)
+    end
   end
 
-  defp parse_float!(raw, env_key, min, max) when is_binary(raw) do
-    case Float.parse(raw) do
-      {value, ""} when value >= min and value <= max ->
-        value
+  defp validate_reclaim_fraction!(value, key) do
+    invalid_reclaim_fraction!(value, key)
+  end
 
-      _ ->
-        raise ArgumentError,
-              "invalid float for #{env_key}: #{inspect(raw)} (expected #{min}..#{max})"
-    end
+  defp invalid_reclaim_fraction!(value, key) do
+    raise ArgumentError,
+          "invalid value for #{key}: #{inspect(value)} (expected 0.01..0.99)"
   end
 end
