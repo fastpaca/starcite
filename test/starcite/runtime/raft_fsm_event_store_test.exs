@@ -104,6 +104,24 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
       RaftFSM.apply(%{index: 43}, {:ack_archived, session_id, 1}, state)
   end
 
+  test "append_event rejects writes under event-store backpressure without advancing session" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
+
+    {next_state, {:reply, {:error, :event_store_backpressure}}} =
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
+
+    assert next_state == state
+    assert EventStore.session_size(session_id) == 1
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
+    assert session.last_seq == 1
+  end
+
   defp seeded_state(session_id) do
     state = RaftFSM.init(%{group_id: 0})
 
@@ -124,5 +142,18 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
 
   defp unique_session_id do
     "ses-fsm-#{System.unique_integer([:positive, :monotonic])}"
+  end
+
+  defp with_env(app, key, value) do
+    previous = Application.get_env(app, key)
+    Application.put_env(app, key, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(app, key)
+      else
+        Application.put_env(app, key, previous)
+      end
+    end)
   end
 end

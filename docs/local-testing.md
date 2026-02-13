@@ -34,31 +34,26 @@ docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" port node1 4
 
 ## Run benchmarks
 
-Run k6 in the same Compose network (service-name DNS, no host-port wiring needed):
+Run the k6 hot-path benchmark in the same Compose network (service-name DNS, no host-port wiring needed):
 
 ```bash
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-  k6 run /bench/1-hot-path-throughput.js
-```
-
-Other scenarios:
-
-```bash
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-  k6 run /bench/2-rest-read-write-mix.js
-
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-  k6 run /bench/3-cold-start-replay.js
-
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-  k6 run /bench/4-durability-cadence.js
+  k6 run /bench/k6-hot-path-throughput.js
 ```
 
 Tune scenario params with `-e` flags:
 
 ```bash
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-  k6 run -e MAX_VUS=10 -e STEADY_DURATION=30s /bench/1-hot-path-throughput.js
+  k6 run -e MAX_VUS=10 -e STEADY_DURATION=30s /bench/k6-hot-path-throughput.js
+```
+
+Run Elixir attribution benchmarks from the host:
+
+```bash
+mix bench
+mix bench routing
+mix bench internal
 ```
 
 ## Manual failover drills

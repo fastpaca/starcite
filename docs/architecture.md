@@ -1,6 +1,7 @@
 # Architecture
 
-Starcite runs a Raft-backed state machine that stores session event logs and serves tail streams.
+Starcite runs a thin-FSM Raft runtime where payload events are mirrored into
+node-local ETS and replayed from ETS/cold archive tiers.
 
 ![Starcite Architecture](./img/architecture.png)
 
@@ -23,13 +24,14 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Raft groups | 256 logical shards, each replicated across three nodes |
 | Snapshot manager | Raft snapshots for state recovery |
 | Archiver | Persists committed events to Postgres |
+| Event store (ETS) | Node-local payload mirror keyed by `{session_id, seq}` |
 
 ## Request flow
 
 1. **Create**: create session metadata in the shard owning that session id.
 2. **Append**: append one event; after quorum commit, ack with `seq`.
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
-4. **Archive**: committed events are queued for Postgres; archive ack advances `archived_seq` and allows bounded in-memory trimming.
+4. **Archive**: committed events are persisted asynchronously; archive ack advances `archived_seq` and allows deterministic ETS release.
 
 ## Ordering and durability
 
@@ -45,16 +47,26 @@ Everything else in this document exists to preserve one behavior chain: `create 
 
 | Tier | Contents |
 | --- | --- |
-| Hot (Raft) | Session metadata (`last_seq`, `archived_seq`, retention state) + ordered event log |
+| Hot metadata (Raft) | Session metadata (`last_seq`, `archived_seq`, retention/idempotency state) |
+| Hot payloads (ETS) | Node-local event payloads keyed by `{session_id, seq}` |
 | Cold (Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
 
 ## Replay behavior
 
 - `tail` replays committed events where `seq > cursor`.
-- Runtime trims older hot entries after archive acknowledgement.
+- Hot/live replay reads from local ETS.
+- Cold replay reads from archive adapter through Cachex.
+- Archive acknowledgement advances `archived_seq` and releases ETS entries below that cursor.
+
+## Capacity and degradation
+
+- Event payload mirroring is bounded by ETS memory backpressure limits.
+- When backpressure triggers, appends are rejected with explicit error (`event_store_backpressure`) rather than silently dropping or blocking forever.
+- Readiness remains red until local assigned Raft groups are running, reducing rollout-time partial availability.
 
 ## Intentional boundaries
 
 - Starcite does not define domain event vocabularies.
 - Starcite does not run agent business logic.
 - Starcite does not push outbound webhooks.
+- Connection draining for rolling updates is infrastructure-level (LB + readiness), not a custom runtime drain mode.

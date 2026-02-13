@@ -81,7 +81,7 @@ defmodule Starcite.Runtime.RaftTopology do
   def handle_call(:ready?, _from, state) do
     # Readiness = startup phase complete + local raft presence.
     my_groups = compute_my_groups()
-    local_ready = my_groups == [] or Enum.any?(my_groups, &group_running?/1)
+    local_ready = my_groups == [] or Enum.all?(my_groups, &group_running?/1)
     ready = state.startup_complete? and local_ready
 
     {:reply, ready, state}

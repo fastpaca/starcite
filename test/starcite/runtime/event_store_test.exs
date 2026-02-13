@@ -155,4 +155,69 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert :error = EventStore.max_seq(session_id)
     refute session_id in EventStore.session_ids()
   end
+
+  test "enforces memory-based backpressure limit" do
+    session_id = "ses-cap-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    assert :ok =
+             EventStore.put_event(session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
+
+    assert {:error, :event_store_backpressure} =
+             EventStore.put_event(session_id, %{
+               seq: 2,
+               type: "content",
+               payload: %{n: 2},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert EventStore.size() == 1
+  end
+
+  test "enforces byte-based size settings" do
+    with_env(:starcite, :event_store_max_bytes, 1)
+    session_id = "ses-size-#{System.unique_integer([:positive, :monotonic])}"
+
+    assert {:error, :event_store_backpressure} =
+             EventStore.put_event(session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: NaiveDateTime.utc_now()
+             })
+
+    with_env(:starcite, :event_store_max_bytes, 4_294_967_296)
+
+    assert :ok =
+             EventStore.put_event(session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: NaiveDateTime.utc_now()
+             })
+  end
+
+  defp with_env(app, key, value) do
+    previous = Application.get_env(app, key)
+    Application.put_env(app, key, value)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(app, key)
+      else
+        Application.put_env(app, key, previous)
+      end
+    end)
+  end
 end

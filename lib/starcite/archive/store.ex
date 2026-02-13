@@ -9,7 +9,7 @@ defmodule Starcite.Archive.Store do
 
   @cache :starcite_archive_read_cache
   @default_adapter Starcite.Archive.Adapter.Postgres
-  @default_cache_max_bytes 134_217_728
+  @default_cache_max_bytes 536_870_912
   @default_cache_reclaim_fraction 0.25
 
   @spec adapter() :: module()
@@ -85,19 +85,15 @@ defmodule Starcite.Archive.Store do
   end
 
   defp maybe_enforce_memory_limit do
-    case cache_max_bytes() do
-      nil ->
+    max_bytes = cache_max_bytes()
+
+    case cache_memory_bytes() do
+      {:ok, current_bytes} when current_bytes > max_bytes ->
+        target_bytes = reclaim_target_bytes(max_bytes)
+        evict_to_target_memory(target_bytes)
+
+      _ ->
         :ok
-
-      max_bytes when is_integer(max_bytes) and max_bytes > 0 ->
-        case cache_memory_bytes() do
-          {:ok, current_bytes} when current_bytes > max_bytes ->
-            target_bytes = reclaim_target_bytes(max_bytes)
-            evict_to_target_memory(target_bytes)
-
-          _ ->
-            :ok
-        end
     end
   end
 
@@ -150,83 +146,14 @@ defmodule Starcite.Archive.Store do
   end
 
   defp cache_max_bytes do
-    env_int_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES",
-      Application.get_env(:starcite, :archive_read_cache_max_bytes, @default_cache_max_bytes),
-      1
-    )
+    Application.get_env(:starcite, :archive_read_cache_max_bytes, @default_cache_max_bytes)
   end
 
   defp cache_reclaim_fraction do
-    env_float_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION",
-      Application.get_env(
-        :starcite,
-        :archive_read_cache_reclaim_fraction,
-        @default_cache_reclaim_fraction
-      ),
-      0.01,
-      0.99
+    Application.get_env(
+      :starcite,
+      :archive_read_cache_reclaim_fraction,
+      @default_cache_reclaim_fraction
     )
-  end
-
-  defp env_int_or_default(env_key, default, min) when is_binary(env_key) and is_integer(min) do
-    case System.get_env(env_key) do
-      nil -> validate_int!(default, env_key, min)
-      raw -> parse_int!(raw, env_key, min)
-    end
-  end
-
-  defp validate_int!(nil, _env_key, _min), do: nil
-
-  defp validate_int!(value, _env_key, min) when is_integer(value) and value >= min,
-    do: value
-
-  defp validate_int!(value, env_key, min) do
-    raise ArgumentError,
-          "invalid default integer for #{env_key}: #{inspect(value)} (expected >= #{min})"
-  end
-
-  defp parse_int!(raw, env_key, min) when is_binary(raw) do
-    case Integer.parse(raw) do
-      {value, ""} when value >= min ->
-        value
-
-      _ ->
-        raise ArgumentError,
-              "invalid integer for #{env_key}: #{inspect(raw)} (expected >= #{min})"
-    end
-  end
-
-  defp env_float_or_default(env_key, default, min, max)
-       when is_binary(env_key) and is_number(min) and is_number(max) and min < max do
-    case System.get_env(env_key) do
-      nil -> validate_float!(default, env_key, min, max)
-      raw -> parse_float!(raw, env_key, min, max)
-    end
-  end
-
-  defp validate_float!(value, _env_key, min, max)
-       when is_float(value) and value >= min and value <= max,
-       do: value
-
-  defp validate_float!(value, _env_key, min, max)
-       when is_integer(value) and value >= min and value <= max,
-       do: value / 1
-
-  defp validate_float!(value, env_key, min, max) do
-    raise ArgumentError,
-          "invalid default float for #{env_key}: #{inspect(value)} (expected #{min}..#{max})"
-  end
-
-  defp parse_float!(raw, env_key, min, max) when is_binary(raw) do
-    case Float.parse(raw) do
-      {value, ""} when value >= min and value <= max ->
-        value
-
-      _ ->
-        raise ArgumentError,
-              "invalid float for #{env_key}: #{inspect(raw)} (expected #{min}..#{max})"
-    end
   end
 end

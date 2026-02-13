@@ -1,12 +1,12 @@
 /**
- * Starcite Scenario 1: Hot-Path Append Throughput
+ * Starcite k6: Hot-Path Append Throughput
  *
  * Measures write throughput against session append API.
  */
 
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
-import * as lib from './lib.js';
+import * as lib from './k6-lib.js';
 
 const eventsSent = new Counter('events_sent');
 const appendLatency = new Trend('append_latency', true);

@@ -131,21 +131,26 @@ defmodule Starcite.Observability.PromEx.Metrics do
       :starcite_event_store_metrics,
       [
         counter("starcite_event_store_writes_total",
-          event_name: [:starcite, :event_store, :write],
-          measurement: :count,
+          event_name: [:starcite, :events, :append],
           description: "Total events mirrored into ETS event store"
         ),
         distribution("starcite_event_store_payload_bytes",
-          event_name: [:starcite, :event_store, :write],
+          event_name: [:starcite, :events, :append],
           measurement: :payload_bytes,
           description: "Payload bytes per ETS event-store write",
           unit: :byte,
           reporter_options: [buckets: [128, 512, 1024, 4096, 16384, 65536, 262_144, 1_048_576]]
         ),
-        last_value("starcite_event_store_entries",
-          event_name: [:starcite, :event_store, :write],
-          measurement: :total_entries,
-          description: "Current entry count in ETS event store"
+        counter("starcite_event_store_backpressure_total",
+          event_name: [:starcite, :event_store, :backpressure],
+          measurement: :count,
+          description: "Total append rejections due to ETS capacity limits",
+          tags: [:reason]
+        ),
+        last_value("starcite_event_store_current_memory_bytes_on_backpressure",
+          event_name: [:starcite, :event_store, :backpressure],
+          measurement: :current_memory_bytes,
+          description: "Current ETS memory usage when backpressure triggers"
         ),
         counter("starcite_cursor_updates_total",
           event_name: [:starcite, :cursor, :update],

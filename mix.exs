@@ -29,7 +29,7 @@ defmodule Starcite.MixProject do
 
   def cli do
     [
-      preferred_envs: [precommit: :test, typecheck: :test, dialyzer: :dev]
+      preferred_envs: [precommit: :test, typecheck: :test, dialyzer: :dev, bench: :dev]
     ]
   end
 
@@ -57,6 +57,7 @@ defmodule Starcite.MixProject do
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
       {:ra, "~> 2.13"},
+      {:benchee, "~> 1.5.0", only: :dev},
       {:bypass, "~> 2.1", only: :test},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}
     ]

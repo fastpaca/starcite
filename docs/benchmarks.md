@@ -1,61 +1,69 @@
 # Benchmarks
 
-Starcite ships with a reproducible benchmark harness so you can validate performance on your own hardware.
+Starcite keeps benchmarks intentionally small and explicit:
 
-## What's included
+- One end-to-end k6 benchmark for the API hot path.
+- Three Elixir Benchee benchmarks for internal attribution.
 
-- `bench/k6/1-hot-path-throughput.js`: high-throughput append latency and failure-rate guardrails
-- `bench/k6/2-rest-read-write-mix.js`: append mix with `expected_seq` guard behavior
-- `bench/k6/3-cold-start-replay.js`: idempotency retry/dedupe behavior
-- `bench/k6/4-durability-cadence.js`: sustained ordered append workload with ordering checks
-- `bench/aws/*`: Terraform + scripts to run k6 in the same VPC as the cluster
+## Benchmark Files
 
-## Local quick run
+- `bench/k6-hot-path-throughput.js`: external API hot-path throughput/latency benchmark.
+- `bench/k6-lib.js`: shared k6 helpers used by the hot-path benchmark.
+- `lib/mix/tasks/bench/hot_path.ex`: closed-loop `Runtime.append_event/3` benchmark.
+- `lib/mix/tasks/bench/routing.ex`: append-path attribution (`append_event`, local call, RPC self-hop, direct `:ra.process_command`).
+- `lib/mix/tasks/bench/internal.ex`: internal attribution across `Session`, `EventStore`, `RaftFSM.apply`, and full runtime append.
+
+## Local Quick Run (k6 Hot Path)
 
 Use the manual Compose workflow from `docs/local-testing.md`.
 
-1. Start a local integration cluster:
+1. Start cluster:
    ```bash
    PROJECT_NAME=starcite-it-a
    docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
    ```
-2. Run scenarios sequentially from the Compose `k6` service:
+2. Run k6 hot path:
    ```bash
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/1-hot-path-throughput.js
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/2-rest-read-write-mix.js
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/3-cold-start-replay.js
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/4-durability-cadence.js
+   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
+     k6 run /bench/k6-hot-path-throughput.js
    ```
 3. Tear down:
    ```bash
    docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
    ```
 
-Run k6 scenarios sequentially, not in parallel. Each scenario includes threshold gates and may abort on failure.
-For manual failover drills (`kill`, `pause`, `restart`), see `docs/local-testing.md`.
+## Elixir Benchmarks
 
-## AWS reproducible setup
-
-```bash
-cd bench/aws/terraform
-terraform init
-terraform apply -var="ssh_public_key=$(cat ~/.ssh/id_rsa.pub)"
-
-cd ../scripts
-./deploy.sh
-./run-k6-remote.sh 1-hot-path-throughput
-```
-
-Tear down:
+Run from repo root:
 
 ```bash
-cd bench/aws/terraform && terraform destroy
+mix bench           # hot-path (default)
+mix bench routing
+mix bench internal
+mix bench k6        # runs k6 directly if installed locally
 ```
 
-## Interpreting results
+Useful env knobs (all Elixir benchmark scenarios):
 
-- Append latency depends on network RTT between replicas. Keep cluster nodes close.
-- Throughput scales with independent sessions and cluster size.
-- `503` responses mean quorum is not formed. Verify health and retry with backoff.
+- `BENCH_LOG_LEVEL` (default: `error`)
+- `BENCH_RAFT_DATA_DIR`
+- `BENCH_CLEAN_RAFT_DATA_DIR` (`true`/`false`)
+- `BENCH_SESSION_COUNT`
+- `BENCH_PAYLOAD_BYTES`
+- `BENCH_PARALLEL`
+- `BENCH_WARMUP_SECONDS`
+- `BENCH_TIME_SECONDS`
+- `BENCH_ARCHIVE_FLUSH_INTERVAL_MS`
 
-If publishing numbers, capture: instance types, region/AZ layout, cluster size, k6 scenario config, and commit SHA.
+Additional knobs:
+
+- `mix bench` / `mix bench hot-path`:
+  - `BENCH_EVENT_STORE_MAX_SIZE`
+- `mix bench internal`:
+  - `BENCH_EVENT_STORE_MAX_SIZE`
+
+## Interpreting Results
+
+- Use k6 results as end-to-end truth (network + HTTP + runtime path).
+- Use Elixir benchmarks to attribute internal cost and compare implementation changes quickly.
+- Publish benchmark numbers with commit SHA and benchmark command/env.

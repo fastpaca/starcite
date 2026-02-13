@@ -11,7 +11,7 @@ defmodule Starcite.Observability.Telemetry do
   Emit an event when an event is appended to a session.
 
   Measurements:
-    - `:payload_bytes` – approximate JSON payload bytes for the event
+    - `:payload_bytes` – approximate binary payload bytes for the event
 
   Metadata:
     - `:session_id` – session identifier
@@ -39,23 +39,78 @@ defmodule Starcite.Observability.Telemetry do
 
   Measurements:
     - `:count` – fixed at 1 per write
-    - `:payload_bytes` – JSON payload size in bytes
+    - `:payload_bytes` – payload size in bytes
     - `:total_entries` – current ETS entry count after insert
+    - `:memory_bytes` – current ETS table memory usage in bytes
 
   Metadata:
     - `:session_id`
     - `:seq`
   """
-  @spec event_store_write(String.t(), pos_integer(), non_neg_integer(), non_neg_integer()) ::
+  @spec event_store_write(
+          String.t(),
+          pos_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) ::
           :ok
-  def event_store_write(session_id, seq, payload_bytes, total_entries)
+  def event_store_write(session_id, seq, payload_bytes, total_entries, memory_bytes)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
              is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
-             total_entries >= 0 do
+             total_entries >= 0 and is_integer(memory_bytes) and memory_bytes >= 0 do
     :telemetry.execute(
       [:starcite, :event_store, :write],
-      %{count: 1, payload_bytes: payload_bytes, total_entries: total_entries},
+      %{
+        count: 1,
+        payload_bytes: payload_bytes,
+        total_entries: total_entries,
+        memory_bytes: memory_bytes
+      },
       %{session_id: session_id, seq: seq}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry when an event-store write is rejected due to capacity.
+
+  Measurements:
+    - `:count` – fixed at 1 per rejection
+    - `:current_memory_bytes` – current ETS table memory usage in bytes
+
+  Metadata:
+    - `:session_id`
+    - `:max_memory_bytes`
+    - `:reason` (`:memory_limit`)
+  """
+  @spec event_store_backpressure(
+          String.t(),
+          non_neg_integer(),
+          pos_integer(),
+          :memory_limit
+        ) :: :ok
+  def event_store_backpressure(
+        session_id,
+        current_memory_bytes,
+        max_memory_bytes,
+        reason
+      )
+      when is_binary(session_id) and session_id != "" and is_integer(current_memory_bytes) and
+             current_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
+             reason in [:memory_limit] do
+    :telemetry.execute(
+      [:starcite, :event_store, :backpressure],
+      %{
+        count: 1,
+        current_memory_bytes: current_memory_bytes
+      },
+      %{
+        session_id: session_id,
+        max_memory_bytes: max_memory_bytes,
+        reason: reason
+      }
     )
 
     :ok

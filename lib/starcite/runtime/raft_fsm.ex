@@ -36,27 +36,28 @@ defmodule Starcite.Runtime.RaftFSM do
          :ok <- guard_expected_seq(session, opts[:expected_seq]) do
       case Session.append_event(session, input) do
         {:appended, updated_session, event} ->
-          :ok = EventStore.put_event(session_id, event)
+          case EventStore.put_event(session_id, event) do
+            :ok ->
+              new_state = %{
+                state
+                | sessions: Map.put(state.sessions, session_id, updated_session)
+              }
 
-          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+              Starcite.Observability.Telemetry.event_appended(
+                session_id,
+                event.type,
+                event.actor,
+                event.source,
+                payload_bytes(event.payload)
+              )
 
-          Starcite.Observability.Telemetry.event_appended(
-            session_id,
-            event.type,
-            event.actor,
-            event.source,
-            byte_size(Jason.encode!(event.payload))
-          )
+              reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+              effects = build_effects(session_id, event, updated_session.last_seq)
+              {new_state, {:reply, {:ok, reply}}, effects}
 
-          Starcite.Observability.Telemetry.cursor_update_emitted(
-            session_id,
-            event.seq,
-            updated_session.last_seq
-          )
-
-          reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          effects = build_effects(session_id, event, updated_session.last_seq)
-          {new_state, {:reply, {:ok, reply}}, effects}
+            {:error, :event_store_backpressure} ->
+              {state, {:reply, {:error, :event_store_backpressure}}}
+          end
 
         {:deduped, _session, seq} ->
           reply = %{seq: seq, last_seq: session.last_seq, deduped: true}
@@ -68,11 +69,6 @@ defmodule Starcite.Runtime.RaftFSM do
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
     end
-  end
-
-  @impl true
-  def apply(_meta, :force_snapshot, state) do
-    {state, {:reply, :ok}}
   end
 
   @impl true
@@ -168,18 +164,6 @@ defmodule Starcite.Runtime.RaftFSM do
     do: nil
 
   defp build_effects(session_id, event, last_seq) do
-    stream_event =
-      {
-        :mod_call,
-        Phoenix.PubSub,
-        :broadcast,
-        [
-          Starcite.PubSub,
-          "session:#{session_id}",
-          {:event, event}
-        ]
-      }
-
     cursor_update =
       {
         :mod_call,
@@ -192,6 +176,8 @@ defmodule Starcite.Runtime.RaftFSM do
         ]
       }
 
-    [stream_event, cursor_update]
+    [cursor_update]
   end
+
+  defp payload_bytes(payload), do: :erlang.external_size(payload)
 end

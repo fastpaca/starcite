@@ -74,20 +74,27 @@ defmodule Starcite.Archive.Adapter.Postgres do
           type: row.type,
           actor: row.actor,
           source: row.source,
-          payload: Jason.encode!(row.payload),
-          metadata: Jason.encode!(row.metadata),
-          refs: Jason.encode!(row.refs),
+          payload: row.payload,
+          metadata: row.metadata,
+          refs: row.refs,
           idempotency_key: row.idempotency_key,
-          inserted_at: DateTime.from_naive!(row.inserted_at, "Etc/UTC")
+          inserted_at: normalize_inserted_at(row.inserted_at)
         }
       end)
 
     Repo.insert_all(
-      "events",
+      Event,
       entries,
-      placeholders: %{payload: :string, metadata: :string, refs: :string},
       on_conflict: :nothing,
       conflict_target: [:session_id, :seq]
     )
   end
+
+  defp normalize_inserted_at(%NaiveDateTime{} = naive_datetime) do
+    naive_datetime
+    |> DateTime.from_naive!("Etc/UTC")
+    |> DateTime.truncate(:second)
+  end
+
+  defp normalize_inserted_at(%DateTime{} = datetime), do: DateTime.truncate(datetime, :second)
 end

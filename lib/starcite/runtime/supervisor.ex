@@ -30,11 +30,23 @@ defmodule Starcite.Runtime.Supervisor do
   end
 
   defp archive_interval do
-    case Application.get_env(:starcite, :archive_flush_interval_ms) ||
-           System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
-      nil -> 5_000
-      val when is_integer(val) -> val
-      val when is_binary(val) -> String.to_integer(val)
+    case Application.get_env(:starcite, :archive_flush_interval_ms, 5_000) do
+      val when is_integer(val) and val > 0 ->
+        val
+
+      val when is_binary(val) ->
+        case Integer.parse(String.trim(val)) do
+          {parsed, ""} when parsed > 0 ->
+            parsed
+
+          _ ->
+            raise ArgumentError,
+                  "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
+        end
+
+      val ->
+        raise ArgumentError,
+              "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
     end
   end
 

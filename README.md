@@ -105,7 +105,7 @@ mix precommit        # format + compile (warnings-as-errors) + test
 ```bash
 PROJECT_NAME=starcite-it-a
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/1-hot-path-throughput.js
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
 

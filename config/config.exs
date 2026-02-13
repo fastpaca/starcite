@@ -11,9 +11,13 @@ config :starcite,
   ecto_repos: [Starcite.Repo],
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000,
+  archive_flush_interval_ms: 5_000,
   archive_name: Starcite.Archive,
   archive_adapter: Starcite.Archive.Adapter.Postgres,
-  archive_adapter_opts: []
+  archive_adapter_opts: [],
+  event_store_max_bytes: 2_147_483_648,
+  archive_read_cache_max_bytes: 536_870_912,
+  archive_read_cache_reclaim_fraction: 0.25
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,

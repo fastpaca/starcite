@@ -37,6 +37,12 @@ Repeat with `NODE_NAME=starcite-2` and `NODE_NAME=starcite-3`.
 
 Use a load balancer in front of nodes for API traffic.
 
+For rolling updates, rely on infrastructure-level draining:
+
+1. Mark node/pod unready before termination so new traffic stops.
+2. Keep a graceful termination window so in-flight HTTP and WebSocket clients reconnect.
+3. Require clients to reconnect tails with cursor resume and retry appends idempotently.
+
 ## Local cluster (development)
 
 ```bash
@@ -44,8 +50,6 @@ PROJECT_NAME=starcite-it-a
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
-
-For manual benchmarks and failover drills, see `docs/local-testing.md`.
 
 ## Postgres archive
 
@@ -79,6 +83,8 @@ Prometheus metrics on `/metrics`.
 | `starcite_archive_lag` | Archive lag |
 | `starcite_archive_tail_size` | Hot tail size |
 | `starcite_archive_trimmed_total` | Rows trimmed after archive |
+| `starcite_event_store_backpressure_total` | Total append rejections from ETS capacity limits |
+| `starcite_event_store_memory_bytes` | Current ETS memory usage for event store |
 
 ## Configuration
 
@@ -90,24 +96,17 @@ Prometheus metrics on `/metrics`.
 | `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `DATABASE_URL` | none | Postgres URL for required archive storage |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hard ETS memory cap for event-store payloads (accepts values like `512MB`, `4G`, `262144K`; unsuffixed integers are treated as MB) |
+| `DATABASE_URL` | none | Postgres URL (archive) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
 | `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |
 | `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Archive read cache cleanup interval in milliseconds |
 | `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_ENTRIES` | none | Optional hard entry cap for archive read cache |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_BYTES` | `134217728` | Archive read cache memory budget in bytes |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache memory budget (accepts values like `256MB`, `2G`, `1048576K`; unsuffixed integers are treated as MB) |
 | `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP server port |
 | `PHX_SERVER` | unset | Start endpoint in release mode |
 | `SECRET_KEY_BASE` | none | Phoenix secret (required in prod) |
 | `PHX_HOST` | `example.com` | Public host for endpoint URLs |
-
-Redis PubSub (when adapter is `:redis`):
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `REDIS_HOST` | `localhost` | Redis host |
-| `REDIS_PORT` | `6379` | Redis port |

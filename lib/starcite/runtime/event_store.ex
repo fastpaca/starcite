@@ -20,6 +20,8 @@ defmodule Starcite.Runtime.EventStore do
   # max_seq lookups without scanning the entire event table.
   @event_table :starcite_event_store_events
   @index_table :starcite_event_store_session_max_seq
+  @default_max_memory_bytes 2_147_483_648
+  @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
 
   def start_link(opts \\ []) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -35,22 +37,28 @@ defmodule Starcite.Runtime.EventStore do
   @doc """
   Insert one committed event for a session.
   """
-  @spec put_event(String.t(), Event.t()) :: :ok
+  @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    event_table = ensure_event_table()
-    index_table = ensure_index_table()
-    true = :ets.insert(event_table, {{session_id, seq}, event})
-    :ok = update_session_max_seq(index_table, session_id, seq)
+    case ensure_capacity(session_id, event) do
+      {:ok, _current_memory_bytes} ->
+        event_table = ensure_event_table()
+        index_table = ensure_index_table()
+        true = :ets.insert(event_table, {{session_id, seq}, event})
+        :ok = update_session_max_seq(index_table, session_id, seq)
 
-    Telemetry.event_store_write(
-      session_id,
-      seq,
-      byte_size(Jason.encode!(event.payload)),
-      size()
-    )
+        :ok
 
-    :ok
+      {:error, :event_store_backpressure, metadata} ->
+        Telemetry.event_store_backpressure(
+          session_id,
+          metadata.current_memory_bytes,
+          metadata.max_memory_bytes,
+          metadata.reason
+        )
+
+        {:error, :event_store_backpressure}
+    end
   end
 
   @doc """
@@ -86,7 +94,6 @@ defmodule Starcite.Runtime.EventStore do
 
     event_table
     |> select_take(ms, limit)
-    |> Enum.sort_by(&elem(&1, 0))
     |> Enum.map(&elem(&1, 1))
   end
 
@@ -98,6 +105,7 @@ defmodule Starcite.Runtime.EventStore do
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
     event_table = ensure_event_table()
     index_table = ensure_index_table()
+    max_seq_before_delete = max_seq_value(index_table, session_id)
 
     ms = [
       {
@@ -109,7 +117,7 @@ defmodule Starcite.Runtime.EventStore do
 
     deleted = :ets.select_delete(event_table, ms)
 
-    if session_size(session_id) == 0 do
+    if should_drop_index?(max_seq_before_delete, floor_seq) do
       :ets.delete(index_table, session_id)
     end
 
@@ -122,16 +130,7 @@ defmodule Starcite.Runtime.EventStore do
   @spec size() :: non_neg_integer()
   def size do
     event_table = ensure_event_table()
-
-    ms = [
-      {
-        {{:"$1", :"$2"}, :"$3"},
-        [{:is_binary, :"$1"}, {:is_integer, :"$2"}, {:>, :"$2", 0}],
-        [true]
-      }
-    ]
-
-    :ets.select_count(event_table, ms)
+    table_size(event_table)
   end
 
   @doc """
@@ -150,6 +149,16 @@ defmodule Starcite.Runtime.EventStore do
     ]
 
     :ets.select_count(event_table, ms)
+  end
+
+  @doc """
+  Approximate ETS memory usage for the event store table in bytes.
+  """
+  @spec memory_bytes() :: non_neg_integer()
+  def memory_bytes do
+    table = ensure_event_table()
+    words = :ets.info(table, :memory) || 0
+    words * :erlang.system_info(:wordsize)
   end
 
   @doc """
@@ -224,20 +233,8 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   defp update_session_max_seq(index_table, session_id, seq) do
-    key = session_id
-
-    case :ets.lookup(index_table, key) do
-      [] ->
-        true = :ets.insert(index_table, {key, seq})
-        :ok
-
-      [{^key, max_seq}] when is_integer(max_seq) and max_seq >= seq ->
-        :ok
-
-      [{^key, _max_seq}] ->
-        true = :ets.insert(index_table, {key, seq})
-        :ok
-    end
+    true = :ets.insert(index_table, {session_id, seq})
+    :ok
   end
 
   defp select_take(table, ms, limit) when limit > 0 do
@@ -248,5 +245,57 @@ defmodule Starcite.Runtime.EventStore do
       :"$end_of_table" ->
         []
     end
+  end
+
+  defp ensure_capacity(session_id, event)
+       when is_binary(session_id) and session_id != "" and is_map(event) do
+    max_memory_bytes = max_memory_bytes_limit()
+    current_memory_bytes = memory_bytes()
+
+    if current_memory_bytes >= max_memory_bytes do
+      {:error, :event_store_backpressure,
+       %{
+         reason: :memory_limit,
+         current_memory_bytes: current_memory_bytes,
+         max_memory_bytes: max_memory_bytes
+       }}
+    else
+      {:ok, current_memory_bytes}
+    end
+  end
+
+  defp max_memory_bytes_limit do
+    raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)
+
+    case :persistent_term.get(@max_memory_limit_cache_key, :undefined) do
+      {^raw, bytes} when is_integer(bytes) and bytes > 0 ->
+        bytes
+
+      _ ->
+        bytes = normalize_max_memory_bytes!(raw)
+        :persistent_term.put(@max_memory_limit_cache_key, {raw, bytes})
+        bytes
+    end
+  end
+
+  defp table_size(table) do
+    :ets.info(table, :size) || 0
+  end
+
+  defp max_seq_value(index_table, session_id) do
+    case :ets.lookup(index_table, session_id) do
+      [{^session_id, seq}] when is_integer(seq) and seq > 0 -> seq
+      _ -> nil
+    end
+  end
+
+  defp should_drop_index?(nil, _floor_seq), do: true
+  defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
+
+  defp normalize_max_memory_bytes!(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_max_memory_bytes!(value) do
+    raise ArgumentError,
+          "invalid value for event_store_max_bytes: #{inspect(value)} (expected positive integer bytes)"
   end
 end

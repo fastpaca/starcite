@@ -52,6 +52,91 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
   config :starcite, :raft_data_dir, raft_dir
 end
 
+parse_positive_integer! = fn env_name, raw ->
+  case Integer.parse(String.trim(raw)) do
+    {value, ""} when value > 0 -> value
+    _ -> raise ArgumentError, "invalid integer for #{env_name}: #{inspect(raw)}"
+  end
+end
+
+parse_fraction! = fn env_name, raw ->
+  case Float.parse(String.trim(raw)) do
+    {value, ""} when value >= 0.01 and value <= 0.99 ->
+      value
+
+    _ ->
+      raise ArgumentError,
+            "invalid float for #{env_name}: #{inspect(raw)} (expected 0.01..0.99)"
+  end
+end
+
+parse_size_bytes! = fn env_name, raw ->
+  case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
+    [_, amount_raw, unit_raw] ->
+      amount = String.to_integer(amount_raw)
+
+      multiplier =
+        case String.upcase(unit_raw) do
+          "" -> 1_048_576
+          "B" -> 1
+          "K" -> 1_024
+          "KB" -> 1_024
+          "KIB" -> 1_024
+          "M" -> 1_048_576
+          "MB" -> 1_048_576
+          "MIB" -> 1_048_576
+          "G" -> 1_073_741_824
+          "GB" -> 1_073_741_824
+          "GIB" -> 1_073_741_824
+          "T" -> 1_099_511_627_776
+          "TB" -> 1_099_511_627_776
+          "TIB" -> 1_099_511_627_776
+          _ -> :invalid
+        end
+
+      case {amount, multiplier} do
+        {value, mult} when is_integer(value) and value > 0 and is_integer(mult) ->
+          value * mult
+
+        _ ->
+          raise ArgumentError,
+                "invalid size for #{env_name}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
+      end
+
+    _ ->
+      raise ArgumentError,
+            "invalid size for #{env_name}: #{inspect(raw)} (examples: 256MB, 4G, 1024M)"
+  end
+end
+
+if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
+  config :starcite,
+         :archive_flush_interval_ms,
+         parse_positive_integer!.("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS", archive_flush_interval)
+end
+
+if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
+  config :starcite,
+         :event_store_max_bytes,
+         parse_size_bytes!.("STARCITE_EVENT_STORE_MAX_SIZE", event_store_max_size)
+end
+
+if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do
+  config :starcite,
+         :archive_read_cache_max_bytes,
+         parse_size_bytes!.("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE", archive_read_cache_max_size)
+end
+
+if archive_read_cache_reclaim_fraction =
+     System.get_env("STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION") do
+  config :starcite,
+         :archive_read_cache_reclaim_fraction,
+         parse_fraction!.(
+           "STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION",
+           archive_read_cache_reclaim_fraction
+         )
+end
+
 db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")
 repo_url = db_url || Keyword.get(Application.get_env(:starcite, Starcite.Repo, []), :url)
 
