@@ -19,11 +19,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     assert {:ok, event} = EventStore.get_event(session_id, 1)
     assert event.payload == %{text: "one"}
@@ -36,14 +32,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {next_state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
         state
       )
 
     {_, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
         next_state
       )
 
@@ -57,25 +53,13 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {state, {:reply, {:ok, %{seq: 2}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
 
     {state, {:reply, {:ok, %{seq: 3}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("three", producer_seq: 3), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("three"), []}, state)
 
     assert {:ok, _} = EventStore.get_event(session_id, 1)
     assert {:ok, _} = EventStore.get_event(session_id, 2)
@@ -98,11 +82,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, effects} =
       RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
@@ -115,11 +95,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
 
     {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
       RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
@@ -138,11 +114,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
-        state
-      )
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
 
     assert next_state == state
     assert EventStore.session_size(session_id) == 1
@@ -163,9 +135,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     %{
       type: "content",
       payload: %{text: text},
-      actor: "agent:test",
-      producer_id: Keyword.get(opts, :producer_id, "writer:test"),
-      producer_seq: Keyword.get(opts, :producer_seq, 1)
+      actor: "agent:test"
     }
     |> Map.merge(Enum.into(opts, %{}))
   end

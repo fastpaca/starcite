@@ -28,18 +28,15 @@ defmodule Mix.Tasks.Bench.Routing do
       metadata: %{bench: true, scenario: "routing_attribution"}
     }
 
-    next_session = fn ->
+    next_session_id = fn ->
       index = :atomics.add_get(counter, 1, 1)
-      session_id = elem(sessions, rem(index - 1, session_count))
-      producer_seq = div(index - 1, session_count) + 1
-      {session_id, producer_seq}
+      elem(sessions, rem(index - 1, session_count))
     end
 
     append_public = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
+      session_id = next_session_id.()
 
-      case Runtime.append_event(session_id, event_with_producer) do
+      case Runtime.append_event(session_id, event) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append_public failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append_public timeout: #{inspect(leader)}"
@@ -47,10 +44,9 @@ defmodule Mix.Tasks.Bench.Routing do
     end
 
     append_local = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
+      session_id = next_session_id.()
 
-      case Runtime.append_event_local(session_id, event_with_producer, []) do
+      case Runtime.append_event_local(session_id, event, []) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append_local failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append_local timeout: #{inspect(leader)}"
@@ -58,14 +54,13 @@ defmodule Mix.Tasks.Bench.Routing do
     end
 
     append_rpc_self_local = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
+      session_id = next_session_id.()
 
       case :rpc.call(
              Node.self(),
              Runtime,
              :append_event_local,
-             [session_id, event_with_producer, []],
+             [session_id, event, []],
              @rpc_timeout
            ) do
         {:ok, _reply} -> :ok
@@ -76,14 +71,13 @@ defmodule Mix.Tasks.Bench.Routing do
     end
 
     append_ra_direct = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
+      session_id = next_session_id.()
       group = RaftManager.group_for_session(session_id)
       server_id = RaftManager.server_id(group)
 
       case :ra.process_command(
              {server_id, Node.self()},
-             {:append_event, session_id, event_with_producer, []},
+             {:append_event, session_id, event, []},
              @raft_timeout
            ) do
         {:ok, {:reply, {:ok, _reply}}, _leader} ->
@@ -200,14 +194,6 @@ defmodule Mix.Tasks.Bench.Routing do
 
   defp payload_text(payload_bytes) when is_integer(payload_bytes) and payload_bytes > 0 do
     String.duplicate("x", payload_bytes)
-  end
-
-  defp with_bench_producer(event, producer_id, producer_seq)
-       when is_map(event) and is_binary(producer_id) and producer_id != "" and
-              is_integer(producer_seq) and producer_seq > 0 do
-    event
-    |> Map.put(:producer_id, producer_id)
-    |> Map.put(:producer_seq, producer_seq)
   end
 
   defp env_integer(name, default) when is_binary(name) and is_integer(default) and default > 0 do

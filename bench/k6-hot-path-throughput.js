@@ -58,7 +58,7 @@ export function setup() {
     lib.ensureSession(id, {
       metadata: { bench: true, scenario: 'hot_path', vu: vuId, run_id: lib.config.runId },
     });
-    sessions[vuId] = { sessionId: id, lastSeq: 0, nextProducerSeq: 1 };
+    sessions[vuId] = { sessionId: id, lastSeq: 0 };
   }
 
   return {
@@ -76,19 +76,14 @@ export default function (data) {
 
   const { sessionId } = session;
   const pipelineDepth = data.pipelineDepth;
-  const producerId = `writer:vu:${vuId}`;
   let lastSeq = session.lastSeq || 0;
 
   for (let i = 0; i < pipelineDepth; i++) {
-    const producerSeq = session.nextProducerSeq;
     const text = `starcite hot-path run=${data.runId} vu=${vuId} iter=${__ITER} idx=${i}`;
-
     const { res, json } = lib.appendEvent(sessionId, {
       type: 'content',
       payload: { text },
       actor: `agent:vu:${vuId}`,
-      producer_id: producerId,
-      producer_seq: producerSeq,
       source: 'benchmark',
       metadata: {
         bench: true,
@@ -115,11 +110,6 @@ export default function (data) {
       if (json.seq <= lastSeq) {
         monotonicSeqViolations.add(1);
       }
-
-      if (json.deduped !== true) {
-        session.nextProducerSeq += 1;
-      }
-
       lastSeq = json.seq;
     }
   }

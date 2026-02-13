@@ -8,7 +8,6 @@ defmodule Starcite.ArchiveTest do
   setup do
     # Ensure clean raft data for isolation
     Starcite.Runtime.TestHelper.reset()
-    Process.put(:producer_seq_counters, %{})
     :ok
   end
 
@@ -25,7 +24,7 @@ defmodule Starcite.ArchiveTest do
 
     for i <- 1..5 do
       {:ok, _} =
-        append_event(session_id, %{
+        Runtime.append_event(session_id, %{
           type: "content",
           payload: %{text: "m#{i}"},
           actor: "agent:test"
@@ -59,7 +58,7 @@ defmodule Starcite.ArchiveTest do
 
       for i <- 1..3 do
         {:ok, _} =
-          append_event(session_id, %{
+          Runtime.append_event(session_id, %{
             type: "content",
             payload: %{text: "msg#{i}"},
             actor: "agent:test"
@@ -111,7 +110,7 @@ defmodule Starcite.ArchiveTest do
 
       # Append same logical event multiple times (simulating retry scenario)
       {:ok, _} =
-        append_event(session_id, %{
+        Runtime.append_event(session_id, %{
           type: "content",
           payload: %{text: "retry-msg"},
           actor: "agent:test"
@@ -149,7 +148,7 @@ defmodule Starcite.ArchiveTest do
       # Append events in order
       for i <- 1..5 do
         {:ok, _} =
-          append_event(session_id, %{
+          Runtime.append_event(session_id, %{
             type: "content",
             payload: %{text: "msg#{i}"},
             actor: "agent:test"
@@ -194,14 +193,14 @@ defmodule Starcite.ArchiveTest do
 
       for i <- 1..3 do
         {:ok, _} =
-          append_event(session_a, %{
+          Runtime.append_event(session_a, %{
             type: "content",
             payload: %{text: "a#{i}"},
             actor: "agent:test"
           })
 
         {:ok, _} =
-          append_event(session_b, %{
+          Runtime.append_event(session_b, %{
             type: "content",
             payload: %{text: "b#{i}"},
             actor: "agent:test"
@@ -254,7 +253,7 @@ defmodule Starcite.ArchiveTest do
 
       for i <- 1..5 do
         {:ok, _} =
-          append_event(session_id, %{
+          Runtime.append_event(session_id, %{
             type: "content",
             payload: %{text: "m#{i}"},
             actor: "agent:test"
@@ -305,7 +304,7 @@ defmodule Starcite.ArchiveTest do
 
       for i <- 1..3 do
         {:ok, _} =
-          append_event(session_id, %{
+          Runtime.append_event(session_id, %{
             type: "content",
             payload: %{text: "m#{i}"},
             actor: "agent:test"
@@ -324,7 +323,7 @@ defmodule Starcite.ArchiveTest do
       )
 
       {:ok, _} =
-        append_event(session_id, %{
+        Runtime.append_event(session_id, %{
           type: "content",
           payload: %{text: "m4"},
           actor: "agent:test"
@@ -350,27 +349,6 @@ defmodule Starcite.ArchiveTest do
         timeout: 2_000
       )
     end
-  end
-
-  defp append_event(id, event, opts \\ [])
-       when is_binary(id) and is_map(event) and is_list(opts) do
-    producer_id = Map.get(event, :producer_id, "writer:test")
-
-    enriched_event =
-      event
-      |> Map.put_new(:producer_id, producer_id)
-      |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
-
-    Runtime.append_event(id, enriched_event, opts)
-  end
-
-  defp next_producer_seq(session_id, producer_id)
-       when is_binary(session_id) and is_binary(producer_id) do
-    counters = Process.get(:producer_seq_counters, %{})
-    key = {session_id, producer_id}
-    seq = Map.get(counters, key, 0) + 1
-    Process.put(:producer_seq_counters, Map.put(counters, key, seq))
-    seq
   end
 
   # Helper to wait for condition

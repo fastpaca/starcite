@@ -13,8 +13,6 @@ defmodule Starcite.Archive.Event do
     field(:type, :string)
     field(:payload, :map)
     field(:actor, :string)
-    field(:producer_id, :string)
-    field(:producer_seq, :integer)
     field(:source, :string)
     field(:metadata, :map)
     field(:refs, :map)
@@ -30,8 +28,6 @@ defmodule Starcite.Archive.Event do
       :type,
       :payload,
       :actor,
-      :producer_id,
-      :producer_seq,
       :source,
       :metadata,
       :refs,

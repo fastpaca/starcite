@@ -23,18 +23,14 @@ defmodule Starcite.SessionTest do
         Session.append_event(session, %{
           type: "content",
           payload: %{"text" => "hello"},
-          actor: "agent:1",
-          producer_id: "writer-1",
-          producer_seq: 1
+          actor: "agent:1"
         })
 
       {:appended, session, event2} =
         Session.append_event(session, %{
           type: "content",
           payload: %{"text" => "world"},
-          actor: "agent:1",
-          producer_id: "writer-1",
-          producer_seq: 2
+          actor: "agent:1"
         })
 
       assert event1.seq == 1
@@ -42,15 +38,14 @@ defmodule Starcite.SessionTest do
       assert session.last_seq == 2
     end
 
-    test "dedupes same producer sequence and payload" do
+    test "dedupes same idempotency key and payload" do
       session = Session.new("ses-1")
 
       input = %{
         type: "state",
         payload: %{"state" => "running"},
         actor: "agent:1",
-        producer_id: "writer-1",
-        producer_seq: 1
+        idempotency_key: "k1"
       }
 
       {:appended, session, event} = Session.append_event(session, input)
@@ -60,7 +55,7 @@ defmodule Starcite.SessionTest do
       assert session_after_dedupe.last_seq == session.last_seq
     end
 
-    test "rejects producer sequence replay with different payload" do
+    test "rejects idempotency key reuse with different payload" do
       session = Session.new("ses-1")
 
       {:appended, session, _event} =
@@ -68,77 +63,16 @@ defmodule Starcite.SessionTest do
           type: "state",
           payload: %{"state" => "running"},
           actor: "agent:1",
-          producer_id: "writer-1",
-          producer_seq: 1
+          idempotency_key: "k1"
         })
 
-      assert {:error, :producer_replay_conflict} =
+      assert {:error, :idempotency_conflict} =
                Session.append_event(session, %{
                  type: "state",
                  payload: %{"state" => "completed"},
                  actor: "agent:1",
-                 producer_id: "writer-1",
-                 producer_seq: 1
+                 idempotency_key: "k1"
                })
-    end
-
-    test "rejects producer sequence gap" do
-      session = Session.new("ses-1")
-
-      assert {:error, {:producer_seq_conflict, "writer-1", 1, 2}} =
-               Session.append_event(session, %{
-                 type: "state",
-                 payload: %{"state" => "running"},
-                 actor: "agent:1",
-                 producer_id: "writer-1",
-                 producer_seq: 2
-               })
-    end
-
-    test "bounds producer cursor index size and allows seq reset after eviction" do
-      session = Session.new("ses-bounded-producers", producer_max_entries: 2)
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 1},
-          actor: "a",
-          producer_id: "p1",
-          producer_seq: 1
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 2},
-          actor: "a",
-          producer_id: "p2",
-          producer_seq: 1
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 3},
-          actor: "a",
-          producer_id: "p3",
-          producer_seq: 1
-        })
-
-      retained = session.producer_cursors |> Map.keys() |> Enum.sort()
-      assert retained == ["p2", "p3"]
-
-      assert {:appended, session, replayed} =
-               Session.append_event(session, %{
-                 type: "content",
-                 payload: %{"n" => 4},
-                 actor: "a",
-                 producer_id: "p1",
-                 producer_seq: 1
-               })
-
-      assert replayed.seq == 4
-      assert session.last_seq == 4
     end
   end
 
@@ -147,49 +81,19 @@ defmodule Starcite.SessionTest do
       session = Session.new("ses-arch", tail_keep: 2)
 
       {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 1},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 1
-        })
+        Session.append_event(session, %{type: "content", payload: %{"n" => 1}, actor: "a"})
 
       {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 2},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 2
-        })
+        Session.append_event(session, %{type: "content", payload: %{"n" => 2}, actor: "a"})
 
       {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 3},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 3
-        })
+        Session.append_event(session, %{type: "content", payload: %{"n" => 3}, actor: "a"})
 
       {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 4},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 4
-        })
+        Session.append_event(session, %{type: "content", payload: %{"n" => 4}, actor: "a"})
 
       {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 5},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 5
-        })
+        Session.append_event(session, %{type: "content", payload: %{"n" => 5}, actor: "a"})
 
       {session, trimmed} = Session.persist_ack(session, 3)
 
@@ -198,16 +102,15 @@ defmodule Starcite.SessionTest do
       assert Session.tail_size(session) == 2
     end
 
-    test "does not advance archived cursor beyond last sequence" do
-      session = Session.new("ses-arch-clamp", tail_keep: 2)
+    test "prunes idempotency keys below retained tail floor" do
+      session = Session.new("ses-arch-idem", tail_keep: 2)
 
       {:appended, session, _} =
         Session.append_event(session, %{
           type: "content",
           payload: %{"n" => 1},
           actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 1
+          idempotency_key: "k1"
         })
 
       {:appended, session, _} =
@@ -215,9 +118,58 @@ defmodule Starcite.SessionTest do
           type: "content",
           payload: %{"n" => 2},
           actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 2
+          idempotency_key: "k2"
         })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 3},
+          actor: "a",
+          idempotency_key: "k3"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 4},
+          actor: "a",
+          idempotency_key: "k4"
+        })
+
+      {:appended, session, _} =
+        Session.append_event(session, %{
+          type: "content",
+          payload: %{"n" => 5},
+          actor: "a",
+          idempotency_key: "k5"
+        })
+
+      {session, _trimmed} = Session.persist_ack(session, 3)
+      retained_keys = session.idempotency_index |> Map.keys() |> Enum.sort()
+
+      assert retained_keys == ["k2", "k3", "k4", "k5"]
+
+      assert {:appended, session, replayed} =
+               Session.append_event(session, %{
+                 type: "content",
+                 payload: %{"n" => 10},
+                 actor: "a",
+                 idempotency_key: "k1"
+               })
+
+      assert replayed.seq == 6
+      assert session.idempotency_index["k1"].seq == 6
+    end
+
+    test "does not advance archived cursor beyond last sequence" do
+      session = Session.new("ses-arch-clamp", tail_keep: 2)
+
+      {:appended, session, _} =
+        Session.append_event(session, %{type: "content", payload: %{"n" => 1}, actor: "a"})
+
+      {:appended, session, _} =
+        Session.append_event(session, %{type: "content", payload: %{"n" => 2}, actor: "a"})
 
       {session, _trimmed} = Session.persist_ack(session, 10)
 
