@@ -45,7 +45,7 @@ If the chosen `id` already exists, returns `409` with `error: "session_exists"`.
 
 ## GET `/v1/sessions`
 
-List sessions from the archive-backed catalog.
+List sessions through the configured archive adapter-backed catalog.
 
 Query params:
 
@@ -76,7 +76,6 @@ Response `200`:
 
 `next_cursor` is `null` when no more rows are available.
 
-
 ## POST `/v1/sessions/:id/append`
 
 Append one event.
@@ -88,6 +87,8 @@ Request body:
   "type": "state",
   "payload": { "state": "running" },
   "actor": "agent:researcher",
+  "producer_id": "writer_123",
+  "producer_seq": 8,
   "source": "agent",
   "metadata": {
     "role": "worker",
@@ -119,6 +120,8 @@ Validation:
 - `type`: required non-empty string
 - `payload`: required JSON object
 - `actor`: required non-empty string
+- `producer_id`: required non-empty string
+- `producer_seq`: required positive integer (`>= 1`)
 - `source`: optional non-empty string
 - `metadata`: optional object
 - `refs`: optional object
@@ -126,14 +129,14 @@ Validation:
 - `refs.request_id`: optional string
 - `refs.sequence_id`: optional string
 - `refs.step`: optional non-negative integer
-- `idempotency_key`: optional non-empty string
+- `idempotency_key`: optional non-empty string (stored with event)
 - `expected_seq`: optional non-negative integer
 
-Idempotency behavior:
+Producer dedupe behavior:
 
-- `idempotency_key` absent: no dedupe lookup
-- same key + same event: returns original `seq` and `deduped: true`
-- same key + different event: `409 idempotency_conflict`
+- same `producer_id` + same `producer_seq` + same event content: returns original `seq` and `deduped: true`
+- same `producer_id` + same `producer_seq` + different content: `409 producer_replay_conflict`
+- non-contiguous `producer_seq`: `409 producer_seq_conflict`
 
 Optimistic concurrency behavior:
 
@@ -164,5 +167,5 @@ Status codes:
 
 - `400` invalid payload
 - `404` session not found
-- `409` expected sequence or idempotency conflict
+- `409` expected sequence or producer conflict
 - `503` unavailable (quorum/routing failure)

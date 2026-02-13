@@ -26,6 +26,8 @@ Starcite emits one JSON event object per WebSocket text frame:
   "type": "state",
   "payload": { "state": "running" },
   "actor": "agent:researcher",
+  "producer_id": "writer_123",
+  "producer_seq": 8,
   "source": "agent",
   "metadata": { "role": "worker", "identity": { "provider": "codex" } },
   "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },

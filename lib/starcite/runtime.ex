@@ -297,7 +297,7 @@ defmodule Starcite.Runtime do
               :invalid_cursor,
               :session_not_found,
               :session_exists,
-              :idempotency_conflict,
+              :producer_replay_conflict,
               :event_store_backpressure
             ] do
     false
@@ -305,6 +305,7 @@ defmodule Starcite.Runtime do
 
   defp retriable_error?({:expected_seq_conflict, _current}), do: false
   defp retriable_error?({:expected_seq_conflict, _expected, _current}), do: false
+  defp retriable_error?({:producer_seq_conflict, _producer_id, _expected, _got}), do: false
   defp retriable_error?(_reason), do: true
 
   defp safe_rpc_call(node, fun, args) do

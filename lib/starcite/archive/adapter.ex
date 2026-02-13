@@ -11,6 +11,8 @@ defmodule Starcite.Archive.Adapter do
           required(:type) => String.t(),
           required(:payload) => map(),
           required(:actor) => String.t(),
+          required(:producer_id) => String.t(),
+          required(:producer_seq) => pos_integer(),
           optional(:source) => String.t() | nil,
           required(:metadata) => map(),
           required(:refs) => map(),

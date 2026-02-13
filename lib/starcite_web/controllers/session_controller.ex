@@ -44,7 +44,7 @@ defmodule StarciteWeb.SessionController do
   def append(_conn, _params), do: {:error, :invalid_event}
 
   @doc """
-  List sessions from the archive-backed catalog.
+  List known sessions from the configured archive adapter.
   """
   def index(conn, params) do
     with {:ok, opts} <- validate_list(params),
@@ -63,10 +63,20 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp validate_append(%{"type" => type, "payload" => payload, "actor" => actor} = params)
+  defp validate_append(
+         %{
+           "type" => type,
+           "payload" => payload,
+           "actor" => actor,
+           "producer_id" => producer_id,
+           "producer_seq" => producer_seq
+         } = params
+       )
        when is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and
               actor != "" do
-    with {:ok, source} <- optional_non_empty_string(Map.get(params, "source")),
+    with {:ok, validated_producer_id} <- required_non_empty_string(producer_id),
+         {:ok, validated_producer_seq} <- required_positive_integer(producer_seq),
+         {:ok, source} <- optional_non_empty_string(Map.get(params, "source")),
          {:ok, metadata} <- optional_object(Map.get(params, "metadata")),
          {:ok, refs} <- optional_refs(Map.get(params, "refs")),
          {:ok, idempotency_key} <- optional_non_empty_string(Map.get(params, "idempotency_key")),
@@ -78,7 +88,9 @@ defmodule StarciteWeb.SessionController do
         source: source,
         metadata: metadata,
         refs: refs,
-        idempotency_key: idempotency_key
+        idempotency_key: idempotency_key,
+        producer_id: validated_producer_id,
+        producer_seq: validated_producer_seq
       }
 
       {:ok, event, expected_seq}
@@ -96,6 +108,20 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
+
+  defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp required_non_empty_string(_value), do: {:error, :invalid_event}
+
+  defp required_positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
+
+  defp required_positive_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} when parsed > 0 -> {:ok, parsed}
+      _ -> {:error, :invalid_event}
+    end
+  end
+
+  defp required_positive_integer(_value), do: {:error, :invalid_event}
 
   defp optional_non_empty_string(nil), do: {:ok, nil}
   defp optional_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}

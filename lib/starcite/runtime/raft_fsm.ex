@@ -9,8 +9,16 @@ defmodule Starcite.Runtime.RaftFSM do
 
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Session
+  alias Starcite.Session.ProducerIndex
 
   defstruct [:group_id, :sessions]
+
+  @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
+
+  @type t :: %__MODULE__{
+          group_id: term(),
+          sessions: %{optional(String.t()) => session_state()}
+        }
 
   @impl true
   def init(%{group_id: group_id}) do
@@ -59,12 +67,19 @@ defmodule Starcite.Runtime.RaftFSM do
               {state, {:reply, {:error, :event_store_backpressure}}}
           end
 
-        {:deduped, _session, seq} ->
-          reply = %{seq: seq, last_seq: session.last_seq, deduped: true}
-          {state, {:reply, {:ok, reply}}}
+        {:deduped, updated_session, seq} ->
+          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+          reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+          {new_state, {:reply, {:ok, reply}}}
 
-        {:error, :idempotency_conflict} ->
-          {state, {:reply, {:error, :idempotency_conflict}}}
+        {:error, :producer_replay_conflict} ->
+          {state, {:reply, {:error, :producer_replay_conflict}}}
+
+        {:error, {:producer_seq_conflict, _producer_id, _expected, _got} = reason} ->
+          {state, {:reply, {:error, reason}}}
+
+        {:error, :invalid_event} ->
+          {state, {:reply, {:error, :invalid_event}}}
       end
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
@@ -113,6 +128,7 @@ defmodule Starcite.Runtime.RaftFSM do
   @doc """
   Query one session by ID.
   """
+  @spec query_session(t(), String.t()) :: {:ok, session_state()} | {:error, :session_not_found}
   def query_session(state, session_id) do
     with {:ok, session} <- fetch_session(state.sessions, session_id) do
       {:ok, session}
@@ -123,6 +139,8 @@ defmodule Starcite.Runtime.RaftFSM do
 
   # Helpers
 
+  @spec fetch_session(%{optional(String.t()) => session_state()}, String.t()) ::
+          {:ok, session_state()} | {:error, :session_not_found}
   defp fetch_session(sessions, session_id) when is_map(sessions) do
     case Map.get(sessions, session_id) do
       nil -> {:error, :session_not_found}

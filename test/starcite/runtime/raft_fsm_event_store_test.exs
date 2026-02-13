@@ -15,11 +15,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
 
   test "append_event mirrors appended events to ETS" do
     session_id = unique_session_id()
-
     state = seeded_state(session_id)
 
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
 
     assert {:ok, event} = EventStore.get_event(session_id, 1)
     assert event.payload == %{text: "one"}
@@ -32,14 +35,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {next_state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
         state
       )
 
     {_, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", idempotency_key: "idem-1"), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
         next_state
       )
 
@@ -48,18 +51,105 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert event.payload == %{text: "one"}
   end
 
+  test "append_event allows independent producers in the same session" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id,
+         event_payload("one", producer_id: "writer-a", producer_seq: 1), []},
+        state
+      )
+
+    {_, {:reply, {:ok, %{seq: 2, deduped: false}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id,
+         event_payload("two", producer_id: "writer-b", producer_seq: 1), []},
+        state
+      )
+
+    assert EventStore.session_size(session_id) == 2
+    assert {:ok, one} = EventStore.get_event(session_id, 1)
+    assert {:ok, two} = EventStore.get_event(session_id, 2)
+    assert one.payload == %{text: "one"}
+    assert two.payload == %{text: "two"}
+  end
+
+  test "append_event producer sequence conflict does not mutate state" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
+
+    {next_state, {:reply, {:error, {:producer_seq_conflict, "writer:test", 2, 3}}}} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("bad", producer_seq: 3), []},
+        state
+      )
+
+    assert next_state == state
+    assert EventStore.session_size(session_id) == 1
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
+    assert session.last_seq == 1
+  end
+
+  test "append_event producer replay conflict does not mutate state" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
+
+    {next_state, {:reply, {:error, :producer_replay_conflict}}} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("changed", producer_seq: 1), []},
+        state
+      )
+
+    assert next_state == state
+    assert EventStore.session_size(session_id) == 1
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
+    assert session.last_seq == 1
+  end
+
   test "ack_archived updates archived sequence and evicts archived ETS entries" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
 
     {state, {:reply, {:ok, %{seq: 2}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
+        state
+      )
 
     {state, {:reply, {:ok, %{seq: 3}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("three"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("three", producer_seq: 3), []},
+        state
+      )
 
     assert {:ok, _} = EventStore.get_event(session_id, 1)
     assert {:ok, _} = EventStore.get_event(session_id, 2)
@@ -82,7 +172,11 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
 
     {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, effects} =
       RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
@@ -95,7 +189,11 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        state
+      )
 
     {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
       RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
@@ -114,7 +212,11 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("two"), []}, state)
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
+        state
+      )
 
     assert next_state == state
     assert EventStore.session_size(session_id) == 1
@@ -135,7 +237,9 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     %{
       type: "content",
       payload: %{text: text},
-      actor: "agent:test"
+      actor: "agent:test",
+      producer_id: Keyword.get(opts, :producer_id, "writer:test"),
+      producer_seq: Keyword.get(opts, :producer_seq, 1)
     }
     |> Map.merge(Enum.into(opts, %{}))
   end

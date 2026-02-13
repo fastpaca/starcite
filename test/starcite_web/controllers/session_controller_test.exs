@@ -210,7 +210,9 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test"
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn.status == 201
@@ -228,7 +230,9 @@ defmodule StarciteWeb.SessionControllerTest do
         Runtime.append_event(id, %{
           type: "content",
           payload: %{text: "one"},
-          actor: "agent:test"
+          actor: "agent:test",
+          producer_id: "writer-1",
+          producer_seq: 1
         })
 
       conn =
@@ -236,6 +240,8 @@ defmodule StarciteWeb.SessionControllerTest do
           "type" => "content",
           "payload" => %{"text" => "two"},
           "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2,
           "expected_seq" => 0
         })
 
@@ -245,17 +251,19 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
-    test "idempotency conflict returns 409" do
+    test "producer replay conflict returns 409" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
-      conn1 =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "state",
-          "payload" => %{"state" => "running"},
-          "actor" => "agent:test",
-          "idempotency_key" => "k1"
-        })
+      body = %{
+        "type" => "state",
+        "payload" => %{"state" => "running"},
+        "actor" => "agent:test",
+        "producer_id" => "writer-1",
+        "producer_seq" => 1
+      }
+
+      conn1 = json_conn(:post, "/v1/sessions/#{id}/append", body)
 
       assert conn1.status == 201
 
@@ -264,16 +272,17 @@ defmodule StarciteWeb.SessionControllerTest do
           "type" => "state",
           "payload" => %{"state" => "completed"},
           "actor" => "agent:test",
-          "idempotency_key" => "k1"
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn2.status == 409
-      body = Jason.decode!(conn2.resp_body)
-      assert body["error"] == "idempotency_conflict"
-      assert is_binary(body["message"])
+      body2 = Jason.decode!(conn2.resp_body)
+      assert body2["error"] == "producer_replay_conflict"
+      assert is_binary(body2["message"])
     end
 
-    test "same idempotency key and payload dedupes" do
+    test "same producer sequence and payload dedupes" do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
@@ -281,7 +290,8 @@ defmodule StarciteWeb.SessionControllerTest do
         "type" => "state",
         "payload" => %{"state" => "running"},
         "actor" => "agent:test",
-        "idempotency_key" => "k1"
+        "producer_id" => "writer-1",
+        "producer_seq" => 1
       }
 
       conn1 = json_conn(:post, "/v1/sessions/#{id}/append", body)
@@ -295,6 +305,25 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert body2["seq"] == seq1
       assert body2["deduped"] == true
+    end
+
+    test "producer sequence conflict returns 409" do
+      id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: id)
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "state",
+          "payload" => %{"state" => "running"},
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2
+        })
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "producer_seq_conflict"
+      assert is_binary(body["message"])
     end
 
     test "missing required fields returns 400" do
@@ -316,7 +345,9 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test"
+          "actor" => "agent:test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
         })
 
       assert conn.status == 404

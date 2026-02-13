@@ -20,7 +20,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   @impl true
   def init(state), do: {:ok, state}
 
-  # Postgres parameter limit is 65535. With 10 fields per event,
+  # Postgres parameter limit is 65535. With 12 fields per event,
   # we can safely insert ~6000 rows per batch. Use 5000 to be safe.
   @chunk_size 5_000
 
@@ -54,6 +54,8 @@ defmodule Starcite.Archive.Adapter.Postgres do
           type: e.type,
           payload: e.payload,
           actor: e.actor,
+          producer_id: e.producer_id,
+          producer_seq: e.producer_seq,
           source: e.source,
           metadata: e.metadata,
           refs: e.refs,
@@ -153,6 +155,8 @@ defmodule Starcite.Archive.Adapter.Postgres do
           seq: row.seq,
           type: row.type,
           actor: row.actor,
+          producer_id: row.producer_id,
+          producer_seq: row.producer_seq,
           source: row.source,
           payload: row.payload,
           metadata: row.metadata,

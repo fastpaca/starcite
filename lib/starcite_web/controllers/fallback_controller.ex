@@ -25,12 +25,21 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :conflict, "expected_seq_conflict", "Current seq is #{current}")
   end
 
-  def call(conn, {:error, :idempotency_conflict}) do
+  def call(conn, {:error, {:producer_seq_conflict, producer_id, expected, current}}) do
     error(
       conn,
       :conflict,
-      "idempotency_conflict",
-      "Idempotency key was already used with different event content"
+      "producer_seq_conflict",
+      "Producer #{producer_id} expected seq #{expected}, got #{current}"
+    )
+  end
+
+  def call(conn, {:error, :producer_replay_conflict}) do
+    error(
+      conn,
+      :conflict,
+      "producer_replay_conflict",
+      "Producer sequence was already used with different event content"
     )
   end
 

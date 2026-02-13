@@ -130,6 +130,8 @@ defmodule Starcite.Archive.StoreTest do
         type: "content",
         payload: %{text: "m#{seq}"},
         actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: seq,
         source: nil,
         metadata: %{},
         refs: %{},
