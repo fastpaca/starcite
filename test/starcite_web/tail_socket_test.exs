@@ -24,7 +24,9 @@ defmodule StarciteWeb.TailSocketTest do
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
-      drain_scheduled: false
+      drain_scheduled: false,
+      auth_expires_at: nil,
+      auth_expiry_timer_ref: nil
     }
   end
 
@@ -163,6 +165,15 @@ defmodule StarciteWeb.TailSocketTest do
     seq = Map.get(counters, key, 0) + 1
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
+  end
+
+  describe "auth expiry" do
+    test "stops socket with custom close code when auth expires" do
+      state = base_state("ses-auth", 0)
+
+      assert {:stop, :token_expired, {4001, "token_expired"}, ^state} =
+               TailSocket.handle_info(:auth_expired, state)
+    end
   end
 
   defp cursor_update_for(session_id, seq) do

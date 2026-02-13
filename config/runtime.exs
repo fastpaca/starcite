@@ -59,6 +59,13 @@ parse_positive_integer! = fn env_name, raw ->
   end
 end
 
+parse_non_neg_integer! = fn env_name, raw ->
+  case Integer.parse(String.trim(raw)) do
+    {value, ""} when value >= 0 -> value
+    _ -> raise ArgumentError, "invalid integer for #{env_name}: #{inspect(raw)}"
+  end
+end
+
 parse_fraction! = fn env_name, raw ->
   case Float.parse(String.trim(raw)) do
     {value, ""} when value >= 0.01 and value <= 0.99 ->
@@ -109,6 +116,16 @@ parse_size_bytes! = fn env_name, raw ->
   end
 end
 
+required_non_empty_env! = fn env_name ->
+  case System.get_env(env_name) do
+    value when is_binary(value) and value != "" ->
+      value
+
+    _ ->
+      raise ArgumentError, "missing required environment variable #{env_name}"
+  end
+end
+
 if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
   config :starcite,
          :archive_flush_interval_ms,
@@ -136,6 +153,52 @@ if archive_read_cache_reclaim_fraction =
            archive_read_cache_reclaim_fraction
          )
 end
+
+auth_mode =
+  case System.get_env("STARCITE_AUTH_MODE", "none") |> String.downcase() |> String.trim() do
+    "none" ->
+      :none
+
+    "jwt" ->
+      :jwt
+
+    other ->
+      raise ArgumentError, "invalid STARCITE_AUTH_MODE: #{inspect(other)} (expected none|jwt)"
+  end
+
+jwt_leeway_seconds =
+  case System.get_env("STARCITE_AUTH_JWT_LEEWAY_SECONDS") do
+    nil -> 30
+    raw -> parse_non_neg_integer!.("STARCITE_AUTH_JWT_LEEWAY_SECONDS", raw)
+  end
+
+jwks_refresh_ms =
+  case System.get_env("STARCITE_AUTH_JWKS_REFRESH_MS") do
+    nil -> 300_000
+    raw -> parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
+  end
+
+auth_config =
+  case auth_mode do
+    :none ->
+      [
+        mode: :none,
+        jwt_leeway_seconds: jwt_leeway_seconds,
+        jwks_refresh_ms: jwks_refresh_ms
+      ]
+
+    :jwt ->
+      [
+        mode: :jwt,
+        issuer: required_non_empty_env!.("STARCITE_AUTH_JWT_ISSUER"),
+        audience: required_non_empty_env!.("STARCITE_AUTH_JWT_AUDIENCE"),
+        jwks_url: required_non_empty_env!.("STARCITE_AUTH_JWKS_URL"),
+        jwt_leeway_seconds: jwt_leeway_seconds,
+        jwks_refresh_ms: jwks_refresh_ms
+      ]
+  end
+
+config :starcite, StarciteWeb.Auth, auth_config
 
 db_url = System.get_env("DATABASE_URL") || System.get_env("STARCITE_POSTGRES_URL")
 repo_url = db_url || Keyword.get(Application.get_env(:starcite, Starcite.Repo, []), :url)
