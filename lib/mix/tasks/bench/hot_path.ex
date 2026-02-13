@@ -115,7 +115,7 @@ defmodule Mix.Tasks.Bench.HotPath do
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
-      parallel: env_integer("BENCH_PARALLEL", System.schedulers_online()),
+      parallel: 4,
       warmup_seconds: env_integer("BENCH_WARMUP_SECONDS", 5),
       time_seconds: env_integer("BENCH_TIME_SECONDS", 30)
     }
