@@ -56,8 +56,5 @@ config :phoenix, :stacktrace_depth, 20
 # Initialize plugs at runtime for faster development compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# Use local PubSub for development (change to :redis for testing horizontal scaling)
-config :starcite, :pubsub_adapter, :local
-
 # Slower flush interval in dev to keep events in disk log longer for testing hot path
 config :starcite, :storage_flush_interval_ms, 500

@@ -19,9 +19,6 @@ config :logger, level: :warning
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# Use local PubSub for tests to avoid Redis dependency
-config :starcite, :pubsub_adapter, :local
-
 # Raft test configuration
 config :starcite,
   raft_data_dir: "tmp/test_raft",

@@ -50,28 +50,11 @@ defmodule Starcite.Application do
         )
     ]
 
-    options =
-      case archive_read_cache_max_entries() do
-        nil -> options
-        max_entries -> Keyword.put(options, :limit, max_entries)
-      end
-
     {Cachex, options}
   end
 
   defp pubsub_spec do
-    case Application.get_env(:starcite, :pubsub_adapter, :local) do
-      :redis ->
-        {Phoenix.PubSub,
-         name: Starcite.PubSub,
-         adapter: Phoenix.PubSub.Redis,
-         host: System.get_env("REDIS_HOST", "localhost"),
-         port: String.to_integer(System.get_env("REDIS_PORT", "6379")),
-         node_name: System.get_env("NODE_NAME") || "starcite_#{:rand.uniform(1000)}"}
-
-      _ ->
-        {Phoenix.PubSub, name: Starcite.PubSub}
-    end
+    {Phoenix.PubSub, name: Starcite.PubSub}
   end
 
   defp cluster_children([]), do: []
@@ -116,14 +99,6 @@ defmodule Starcite.Application do
     )
   end
 
-  defp archive_read_cache_max_entries do
-    env_int_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_MAX_ENTRIES",
-      Application.get_env(:starcite, :archive_read_cache_max_entries),
-      1
-    )
-  end
-
   defp archive_read_cache_compressed? do
     env_bool_or_default(
       "STARCITE_ARCHIVE_READ_CACHE_COMPRESSED",
@@ -141,8 +116,6 @@ defmodule Starcite.Application do
       raw -> parse_int!(raw, env_key, min)
     end
   end
-
-  defp validate_int!(nil, _env_key, _min), do: nil
 
   defp validate_int!(value, _env_key, min) when is_integer(value) and value >= min,
     do: value

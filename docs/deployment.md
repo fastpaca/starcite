@@ -103,7 +103,6 @@ Prometheus metrics on `/metrics`.
 | `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |
 | `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Archive read cache cleanup interval in milliseconds |
 | `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_ENTRIES` | none | Optional hard entry cap for archive read cache |
 | `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache memory budget (accepts values like `256MB`, `2G`, `1048576K`; unsuffixed integers are treated as MB) |
 | `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
@@ -111,10 +110,3 @@ Prometheus metrics on `/metrics`.
 | `PHX_SERVER` | unset | Start endpoint in release mode |
 | `SECRET_KEY_BASE` | none | Phoenix secret (required in prod) |
 | `PHX_HOST` | `example.com` | Public host for endpoint URLs |
-
-Redis PubSub (when adapter is `:redis`):
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `REDIS_HOST` | `localhost` | Redis host |
-| `REDIS_PORT` | `6379` | Redis port |

@@ -72,11 +72,6 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, :force_snapshot, state) do
-    {state, {:reply, :ok}}
-  end
-
-  @impl true
   def apply(meta, {:ack_archived, session_id, upto_seq}, state) do
     with {:ok, session} <- fetch_session(state.sessions, session_id) do
       previous_archived_seq = session.archived_seq
