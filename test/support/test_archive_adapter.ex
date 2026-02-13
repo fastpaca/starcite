@@ -15,4 +15,13 @@ defmodule Starcite.Archive.TestAdapter do
 
   @impl true
   def read_events(_session_id, _from_seq, _to_seq), do: {:ok, []}
+
+  @impl true
+  def upsert_session(_session), do: :ok
+
+  @impl true
+  def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+
+  @impl true
+  def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
 end

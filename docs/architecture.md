@@ -10,6 +10,7 @@ node-local ETS and replayed from ETS/cold archive tiers.
 The public API surface is intentionally small:
 
 - `POST /v1/sessions`
+- `GET /v1/sessions`
 - `POST /v1/sessions/:id/append`
 - `GET /v1/sessions/:id/tail?cursor=N` (WebSocket upgrade)
 
@@ -25,10 +26,11 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | Snapshot manager | Raft snapshots for state recovery |
 | Archiver | Persists committed events to Postgres |
 | Event store (ETS) | Node-local payload mirror keyed by `{session_id, seq}` |
+| Session catalog (archive adapter) | Lists/filter sessions for API reads |
 
 ## Request flow
 
-1. **Create**: create session metadata in the shard owning that session id.
+1. **Create**: create session metadata in the shard owning that session id and project one catalog row.
 2. **Append**: append one event; after quorum commit, ack with `seq`.
 3. **Tail**: client connects with `cursor`; runtime replays `seq > cursor`, then streams live commits.
 4. **Archive**: committed events are persisted asynchronously; archive ack advances `archived_seq` and allows deterministic ETS release.
@@ -49,7 +51,7 @@ Everything else in this document exists to preserve one behavior chain: `create 
 | --- | --- |
 | Hot metadata (Raft) | Session metadata (`last_seq`, `archived_seq`, retention/idempotency state) |
 | Hot payloads (ETS) | Node-local event payloads keyed by `{session_id, seq}` |
-| Cold (Postgres) | Full event history in `events` table, keyed by `(session_id, seq)` |
+| Cold (archive adapter) | Full event history + session catalog projection |
 
 ## Replay behavior
 
