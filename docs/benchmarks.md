@@ -1,69 +1,23 @@
 # Benchmarks
 
-Starcite keeps benchmarks intentionally small and explicit:
+Use end-to-end k6 first, then mix benchmarks for component-level signals.
 
-- One end-to-end k6 benchmark for the API hot path.
-- Three Elixir Benchee benchmarks for internal attribution.
-
-## Benchmark Files
-
-- `bench/k6-hot-path-throughput.js`: external API hot-path throughput/latency benchmark.
-- `bench/k6-lib.js`: shared k6 helpers used by the hot-path benchmark.
-- `lib/mix/tasks/bench/hot_path.ex`: closed-loop `Runtime.append_event/3` benchmark.
-- `lib/mix/tasks/bench/routing.ex`: append-path attribution (`append_event`, local call, RPC self-hop, direct `:ra.process_command`).
-- `lib/mix/tasks/bench/internal.ex`: internal attribution across `Session`, `EventStore`, `RaftFSM.apply`, and full runtime append.
-
-## Local Quick Run (k6 Hot Path)
-
-Use the manual Compose workflow from `docs/local-testing.md`.
-
-1. Start cluster:
-   ```bash
-   PROJECT_NAME=starcite-it-a
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
-   ```
-2. Run k6 hot path:
-   ```bash
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
-     k6 run /bench/k6-hot-path-throughput.js
-   ```
-3. Tear down:
-   ```bash
-   docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
-   ```
-
-## Elixir Benchmarks
-
-Run from repo root:
+## End-to-end
 
 ```bash
-mix bench           # hot-path (default)
-mix bench routing
-mix bench internal
-mix bench k6        # runs k6 directly if installed locally
+PROJECT_NAME=starcite-it-a
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm \
+  k6 run /bench/k6-hot-path-throughput.js
+docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
 
-Useful env knobs (all Elixir benchmark scenarios):
+## Internal
 
-- `BENCH_LOG_LEVEL` (default: `error`)
-- `BENCH_RAFT_DATA_DIR`
-- `BENCH_CLEAN_RAFT_DATA_DIR` (`true`/`false`)
-- `BENCH_SESSION_COUNT`
-- `BENCH_PAYLOAD_BYTES`
-- `BENCH_PARALLEL`
-- `BENCH_WARMUP_SECONDS`
-- `BENCH_TIME_SECONDS`
-- `BENCH_ARCHIVE_FLUSH_INTERVAL_MS`
+```bash
+mix bench            # default
+mix bench routing
+mix bench internal
+```
 
-Additional knobs:
-
-- `mix bench` / `mix bench hot-path`:
-  - `BENCH_EVENT_STORE_MAX_SIZE`
-- `mix bench internal`:
-  - `BENCH_EVENT_STORE_MAX_SIZE`
-
-## Interpreting Results
-
-- Use k6 results as end-to-end truth (network + HTTP + runtime path).
-- Use Elixir benchmarks to attribute internal cost and compare implementation changes quickly.
-- Publish benchmark numbers with commit SHA and benchmark command/env.
+Keep a short note with commit SHA and the command/env used.
