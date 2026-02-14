@@ -109,6 +109,9 @@ defmodule StarciteWeb.Auth.JWKS do
   end
 
   defp parse_jwks(body) when is_binary(body) do
+    # Security policy: fail closed. If JWT auth is enabled, we require every JWKS key
+    # to match our RS256 signing contract and reject the entire JWKS on any invalid or
+    # duplicate key instead of accepting a partial set.
     with {:ok, parsed} <- Jason.decode(body),
          %{"keys" => keys} <- parsed,
          true <- is_list(keys),
