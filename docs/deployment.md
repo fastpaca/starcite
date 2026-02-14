@@ -1,49 +1,38 @@
 # Deployment
 
-Starcite is designed for self-hosted clustered deployment.
+Starcite needs durable Raft state plus a stable Postgres target to keep ordering guarantees.
 
-## Hardware guidance
+## Runtime patterns
 
-- CPU: 2+ vCPUs per node
-- Memory: 4+ GB RAM per node
-- Disk: fast SSD/NVMe for Raft logs
-- Network: low RTT between cluster nodes
-
-Set `STARCITE_RAFT_DATA_DIR` to persistent storage so Raft state survives restarts.
-
-## Single node
-
-```bash
-docker run -d \
-  -p 4000:4000 \
-  -v starcite_data:/data \
-  -e DATABASE_URL=postgres://user:password@host/db \
-  ghcr.io/fastpaca/starcite:latest
-```
-
-## Three-node cluster
+Single node:
 
 ```bash
 docker run -d \
   -p 4000:4000 \
   -v /var/lib/starcite:/data \
   -e DATABASE_URL=postgres://user:password@host/db \
-  -e CLUSTER_NODES=starcite-1@starcite.internal,starcite-2@starcite.internal,starcite-3@starcite.internal \
-  -e NODE_NAME=starcite-1 \
+  -e STARCITE_EVENT_STORE_MAX_SIZE=2GB \
   ghcr.io/fastpaca/starcite:latest
 ```
 
-Repeat with `NODE_NAME=starcite-2` and `NODE_NAME=starcite-3`.
+Clustered nodes:
 
-Use a load balancer in front of nodes for API traffic.
+```bash
+NODE_NAME=starcite-1
+CLUSTER_NODES=starcite-1@starcite-1.local,starcite-2@starcite-2.local,starcite-3@starcite-3.local
+docker run -d \
+  -p 4000:4000 \
+  -e DATABASE_URL=postgres://user:password@host/db \
+  -e NODE_NAME=$NODE_NAME \
+  -e CLUSTER_NODES=$CLUSTER_NODES \
+  ghcr.io/fastpaca/starcite:latest
+```
 
-For rolling updates, rely on infrastructure-level draining:
+Use the same pattern for `starcite-2` and `starcite-3`, and place a load balancer in front of them.
 
-1. Mark node/pod unready before termination so new traffic stops.
-2. Keep a graceful termination window so in-flight HTTP and WebSocket clients reconnect.
-3. Require clients to reconnect tails with cursor resume and retry appends idempotently.
+For rolling updates, prefer infrastructure draining and have clients resume tails with their last committed `seq`.
 
-## Local cluster (development)
+## Integration testing stack
 
 ```bash
 PROJECT_NAME=starcite-it-a
@@ -51,89 +40,61 @@ docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --buil
 docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
 ```
 
-## Postgres archive
+## Authentication behavior
 
-```bash
--e DATABASE_URL=postgres://user:password@host/db \
--e STARCITE_ARCHIVE_FLUSH_INTERVAL_MS=5000 \
--e DB_POOL_SIZE=10
-```
+Starcite can run with no API auth or with JWT validation at the boundary:
 
-Query archived events:
+- `STARCITE_AUTH_MODE=none` (default): API boundary is unauthenticated.
+- `STARCITE_AUTH_MODE=jwt`: `Authorization: Bearer <jwt>` required on `/v1/*` HTTP and WebSocket upgrades.
+- `Authorization` is optional for `/health/live` and `/health/ready`.
 
-```sql
-SELECT * FROM events WHERE session_id = $1 ORDER BY seq;
-```
+When JWT mode is enabled, Starcite validates:
+
+- signature (JWKS from `STARCITE_AUTH_JWKS_URL`)
+- `iss` (`STARCITE_AUTH_JWT_ISSUER`)
+- `aud` (`STARCITE_AUTH_JWT_AUDIENCE`)
+- `exp` with optional leeway (`STARCITE_AUTH_JWT_LEEWAY_SECONDS`)
+
+Missing or invalid token -> `401` (HTTP) or WebSocket close.
+
+## Key config
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `NODE_NAME` | random | Node identifier |
+| `CLUSTER_NODES` | none | Comma-separated cluster peers |
+| `DNS_CLUSTER_QUERY` | none | DNS discovery target for cluster |
+| `DNS_CLUSTER_NODE_BASENAME` | `starcite` | DNS node basename |
+| `DNS_POLL_INTERVAL_MS` | `5000` | DNS cluster poll interval |
+| `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft state directory |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hot memory cap for queued session events |
+| `DATABASE_URL` | none | Postgres URL |
+| `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
+| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
+| `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL |
+| `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Cache cleanup interval |
+| `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Compress archive read cache values |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache budget |
+| `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Cache reclaim fraction |
+| `STARCITE_AUTH_MODE` | `none` | API auth mode (`none` or `jwt`) |
+| `STARCITE_AUTH_JWKS_URL` | none | JWKS endpoint (`jwt` mode) |
+| `STARCITE_AUTH_JWT_ISSUER` | none | Required JWT issuer |
+| `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT audience |
+| `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Token clock-skew tolerance |
+| `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache refresh interval |
+| `DB_POOL_SIZE` | `10` | Postgres pool size |
+| `PORT` | `4000` | HTTP port |
+| `PHX_SERVER` | unset | Enable Phoenix endpoint in releases |
+| `SECRET_KEY_BASE` | none | Phoenix secret for production |
+| `PHX_HOST` | `example.com` | Endpoint host |
 
 ## Metrics
 
-Prometheus metrics on `/metrics`.
+Starcite exposes Prometheus metrics on `/metrics`.
 
-| Metric | Description |
+| Metric | Why it matters |
 | --- | --- |
-| `starcite_events_append_total` | Total appended events |
-| `starcite_events_payload_bytes` | Payload bytes appended |
-| `starcite_archive_pending_rows` | Estimated unarchived events after flush |
-| `starcite_archive_pending_sessions` | Sessions still pending archival after flush |
-| `starcite_archive_flush_duration_ms` | Flush cycle duration |
-| `starcite_archive_attempted_total` | Rows attempted |
-| `starcite_archive_inserted_total` | Rows inserted |
-| `starcite_archive_bytes_attempted_total` | Bytes attempted |
-| `starcite_archive_bytes_inserted_total` | Bytes inserted |
-| `starcite_archive_lag` | Archive lag |
-| `starcite_archive_tail_size` | Hot tail size |
-| `starcite_archive_trimmed_total` | Rows trimmed after archive |
-| `starcite_event_store_backpressure_total` | Total append rejections from ETS capacity limits |
-| `starcite_event_store_memory_bytes` | Current ETS memory usage for event store |
-
-## Authentication
-
-Starcite can enforce bearer JWT validation at the API boundary.
-
-- `STARCITE_AUTH_MODE=none` (default): no API auth enforcement.
-- `STARCITE_AUTH_MODE=jwt`: require valid JWT on `/v1/*` endpoints, including WebSocket upgrades.
-- Health probes (`/health/live`, `/health/ready`) remain unauthenticated.
-
-When `STARCITE_AUTH_MODE=jwt` is enabled, Starcite validates:
-
-- JWT signature using JWKS (`STARCITE_AUTH_JWKS_URL`)
-- `iss` claim (`STARCITE_AUTH_JWT_ISSUER`)
-- `aud` claim (`STARCITE_AUTH_JWT_AUDIENCE`)
-- `exp` claim (with optional leeway)
-
-Starcite does not issue tokens or manage OAuth clients/credential lifecycle.
-
-Response semantics in JWT mode:
-
-- `401` for missing/invalid/expired bearer tokens.
-
-## Configuration
-
-| Variable | Default | Description |
-| --- | --- | --- |
-| `NODE_NAME` | random | Node identifier |
-| `CLUSTER_NODES` | none | Comma-separated peer node names |
-| `DNS_CLUSTER_QUERY` | none | DNS name for libcluster discovery |
-| `DNS_CLUSTER_NODE_BASENAME` | `starcite` | Base name for DNS nodes |
-| `DNS_POLL_INTERVAL_MS` | `5000` | DNS poll interval |
-| `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft logs and snapshots path |
-| `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hard ETS memory cap for event-store payloads (accepts values like `512MB`, `4G`, `262144K`; unsuffixed integers are treated as MB) |
-| `DATABASE_URL` | none | Postgres URL (archive) |
-| `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
-| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
-| `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL in milliseconds |
-| `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Archive read cache cleanup interval in milliseconds |
-| `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache memory budget (accepts values like `256MB`, `2G`, `1048576K`; unsuffixed integers are treated as MB) |
-| `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
-| `STARCITE_AUTH_MODE` | `none` | API auth mode (`none` or `jwt`) |
-| `STARCITE_AUTH_JWKS_URL` | none | JWKS endpoint URL (required when mode is `jwt`) |
-| `STARCITE_AUTH_JWT_ISSUER` | none | Required JWT `iss` value (required when mode is `jwt`) |
-| `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT `aud` value (required when mode is `jwt`) |
-| `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Clock-skew tolerance for `exp`/`nbf`/`iat` checks |
-| `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache TTL before refresh |
-| `DB_POOL_SIZE` | `10` | Postgres pool size |
-| `PORT` | `4000` | HTTP server port |
-| `PHX_SERVER` | unset | Start endpoint in release mode |
-| `SECRET_KEY_BASE` | none | Phoenix secret (required in prod) |
-| `PHX_HOST` | `example.com` | Public host for endpoint URLs |
+| `starcite_events_append_total` | Append throughput |
+| `starcite_archive_pending_rows` | Backlog waiting for archival |
+| `starcite_archive_lag` | Archive delay |
+| `starcite_event_store_backpressure_total` | Append pressure at hot store |
