@@ -1,37 +1,22 @@
 defmodule Starcite.Runtime.EventStore do
   @moduledoc """
-  Unified local event store abstraction for write-path state, flush
-  coordination, and pressure-aware reads.
+  Top-level local event store for hot-path writes and tiered reads.
 
-  ## Write / Flush Flow
+  `EventStore` composes two focused submodules:
 
-  1. Raft `append_event` mirrors committed events into pending local state (`put_event/2`).
-  2. `Starcite.Archive` persists pending batches.
-  3. Successful flushes are promoted into local archived-read cache (`cache_archived_events/2`).
-  4. `ack_archived` advances archival progress and trims pending state.
+  - `EventQueue` for unarchived in-memory events
+  - `Starcite.Archive.Store` for archived reads and archived-read cache
 
-  ## Read Flow
-
-  1. `get_event/2` prefers local state.
-  2. `read_archived_events/3` serves archived ranges from local cache first, then fills misses from persistence.
-  3. `from_cursor/3` serves the pending tail.
-
-  ## Write Hot Path Constraints
-
-  `put_event/2` runs inside Raft FSM apply for every committed append and must
-  remain local-only and bounded.
-
-  ## Memory Policy
-
-  Memory pressure is evaluated against combined local usage. When usage crosses
-  `event_store_max_bytes`, the module reclaims archived-read cache first before
-  rejecting appends with `:event_store_backpressure`.
+  Memory pressure is enforced across both tiers. When local memory exceeds
+  `event_store_max_bytes`, cached archived reads are reclaimed before new
+  writes are rejected with `:event_store_backpressure`.
   """
 
   use GenServer
 
+  alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
-  alias Starcite.Runtime.EventStore.{ArchiveCache, Pending}
+  alias Starcite.Runtime.EventStore.EventQueue
   alias Starcite.Session.Event
 
   @default_max_memory_bytes 2_147_483_648
@@ -48,7 +33,7 @@ defmodule Starcite.Runtime.EventStore do
   @impl true
   @doc false
   def init(_opts) do
-    :ok = Pending.ensure_tables()
+    :ok = EventQueue.ensure_tables()
     {:ok, %{}}
   end
 
@@ -63,7 +48,7 @@ defmodule Starcite.Runtime.EventStore do
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     case ensure_capacity(session_id, event) do
       {:ok, _current_memory_bytes} ->
-        :ok = Pending.put_event(session_id, seq, event)
+        :ok = EventQueue.put_event(session_id, seq, event)
 
         total_entries = size()
         payload_bytes = payload_bytes(event)
@@ -93,14 +78,14 @@ defmodule Starcite.Runtime.EventStore do
   end
 
   @doc """
-  Fetch one event by `{session_id, seq}` from pending state, then archived cache.
+  Fetch one event by `{session_id, seq}` from local tiers.
   """
   @spec get_event(String.t(), pos_integer()) :: {:ok, Event.t()} | :error
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    case Pending.get_event(session_id, seq) do
+    case EventQueue.get_event(session_id, seq) do
       {:ok, event} -> {:ok, event}
-      :error -> ArchiveCache.get_event(session_id, seq)
+      :error -> Store.get_cached_event(session_id, seq)
     end
   end
 
@@ -111,33 +96,18 @@ defmodule Starcite.Runtime.EventStore do
   def from_cursor(session_id, cursor, limit)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 do
-    Pending.from_cursor(session_id, cursor, limit)
+    EventQueue.from_cursor(session_id, cursor, limit)
   end
 
   @doc """
-  Read an archived range (`from_seq..to_seq`) from local cache with persistence
-  fallback and write-through cache population.
-
-  Persistence failures are returned as-is from the configured archive adapter.
+  Read archived events for `from_seq..to_seq`.
   """
   @spec read_archived_events(String.t(), pos_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
   def read_archived_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    with {:ok, cached_by_seq, missing_ranges} <-
-           ArchiveCache.cached_events_and_missing_ranges(session_id, from_seq, to_seq),
-         {:ok, fetched_events} <- fetch_missing_ranges(session_id, missing_ranges) do
-      :ok = cache_archived_events(session_id, fetched_events)
-
-      merged =
-        cached_by_seq
-        |> Map.merge(Map.new(fetched_events, fn %{seq: seq} = event -> {seq, event} end))
-        |> Map.values()
-        |> Enum.sort_by(& &1.seq)
-
-      {:ok, merged}
-    end
+    Store.read_events(session_id, from_seq, to_seq)
   end
 
   @doc """
@@ -146,7 +116,7 @@ defmodule Starcite.Runtime.EventStore do
   @spec cache_archived_events(String.t(), [map()]) :: :ok
   def cache_archived_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
-    :ok = ArchiveCache.cache_events(session_id, events)
+    :ok = Store.cache_events(session_id, events)
     :ok = maybe_enforce_capacity()
     :ok
   end
@@ -157,7 +127,7 @@ defmodule Starcite.Runtime.EventStore do
   @spec delete_below(String.t(), pos_integer()) :: non_neg_integer()
   def delete_below(session_id, floor_seq)
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
-    Pending.delete_below(session_id, floor_seq)
+    EventQueue.delete_below(session_id, floor_seq)
   end
 
   @doc """
@@ -165,7 +135,7 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec size() :: non_neg_integer()
   def size do
-    Pending.size()
+    EventQueue.size()
   end
 
   @doc """
@@ -173,7 +143,7 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec session_size(String.t()) :: non_neg_integer()
   def session_size(session_id) when is_binary(session_id) and session_id != "" do
-    Pending.session_size(session_id)
+    EventQueue.session_size(session_id)
   end
 
   @doc """
@@ -181,7 +151,7 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec memory_bytes() :: non_neg_integer()
   def memory_bytes do
-    Pending.memory_bytes() + ArchiveCache.memory_bytes_or_zero()
+    EventQueue.memory_bytes() + Store.cache_memory_bytes_or_zero()
   end
 
   @doc """
@@ -189,7 +159,7 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec session_ids() :: [String.t()]
   def session_ids do
-    Pending.session_ids()
+    EventQueue.session_ids()
   end
 
   @doc """
@@ -197,14 +167,14 @@ defmodule Starcite.Runtime.EventStore do
   """
   @spec max_seq(String.t()) :: {:ok, pos_integer()} | :error
   def max_seq(session_id) when is_binary(session_id) and session_id != "" do
-    Pending.max_seq(session_id)
+    EventQueue.max_seq(session_id)
   end
 
   @doc false
   @spec clear() :: :ok
   def clear do
-    Pending.clear()
-    :ok = ArchiveCache.clear()
+    EventQueue.clear()
+    _ = Store.clear_cache()
     :ok
   end
 
@@ -258,10 +228,10 @@ defmodule Starcite.Runtime.EventStore do
 
   defp maybe_reclaim_cache(max_memory_bytes)
        when is_integer(max_memory_bytes) and max_memory_bytes > 0 do
-    pending_bytes = Pending.memory_bytes()
+    pending_bytes = EventQueue.memory_bytes()
     target_total_bytes = reclaim_target_total_bytes(max_memory_bytes)
     target_cache_bytes = max(target_total_bytes - pending_bytes, 0)
-    ArchiveCache.evict_to_target_memory(target_cache_bytes)
+    Store.evict_cache_to_target_memory(target_cache_bytes)
   end
 
   defp reclaim_target_total_bytes(max_memory_bytes)
@@ -282,17 +252,6 @@ defmodule Starcite.Runtime.EventStore do
 
       _ ->
         @default_cache_reclaim_fraction
-    end
-  end
-
-  defp fetch_missing_ranges(_session_id, []), do: {:ok, []}
-
-  defp fetch_missing_ranges(session_id, [{from_seq, to_seq} | rest])
-       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
-              is_integer(to_seq) and to_seq >= from_seq do
-    with {:ok, events} <- Starcite.Archive.adapter().read_events(session_id, from_seq, to_seq),
-         {:ok, tail} <- fetch_missing_ranges(session_id, rest) do
-      {:ok, events ++ tail}
     end
   end
 

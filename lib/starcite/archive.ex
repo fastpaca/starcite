@@ -4,7 +4,7 @@ defmodule Starcite.Archive do
 
   - periodically scans local `EventStore` session cursors
   - archives only sessions for groups led on this node
-  - persists batches through the configured adapter
+  - persists batches through `Starcite.Archive.Store`
   - acknowledges archived progress via local Raft command (`Runtime.ack_archived_local/2`)
 
   Archive persistence failures are treated as fatal for this worker: the process
@@ -13,15 +13,9 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  alias Starcite.Archive.Store
   alias Starcite.Runtime
   alias Starcite.Runtime.{EventStore, RaftManager}
-
-  @default_adapter Starcite.Archive.Adapter.Postgres
-
-  @spec adapter() :: module()
-  def adapter do
-    Application.get_env(:starcite, :archive_adapter, @default_adapter)
-  end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -32,7 +26,7 @@ defmodule Starcite.Archive do
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
-    adapter_mod = Keyword.fetch!(opts, :adapter)
+    adapter_mod = Keyword.get(opts, :adapter, Store.adapter())
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
@@ -136,7 +130,7 @@ defmodule Starcite.Archive do
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
-    case adapter.write_events(rows) do
+    case Store.write_events(adapter, rows) do
       {:ok, inserted} when is_integer(inserted) and inserted >= 0 ->
         :ok =
           EventStore.cache_archived_events(

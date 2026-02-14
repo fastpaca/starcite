@@ -47,7 +47,7 @@ defmodule StarciteWeb.SessionController do
   """
   def index(conn, params) do
     with {:ok, opts} <- validate_list(params),
-         {:ok, page} <- Starcite.Archive.adapter().list_sessions(opts) do
+         {:ok, page} <- Starcite.Archive.Store.list_sessions(opts) do
       json(conn, page)
     end
   end

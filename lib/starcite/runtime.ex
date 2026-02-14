@@ -373,7 +373,7 @@ defmodule Starcite.Runtime do
       created_at: parse_utc_datetime!(created_at)
     }
 
-    case Starcite.Archive.adapter().upsert_session(row) do
+    case Starcite.Archive.Store.upsert_session(row) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end

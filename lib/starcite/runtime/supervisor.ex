@@ -19,7 +19,7 @@ defmodule Starcite.Runtime.Supervisor do
          [
            name: archive_name(),
            flush_interval_ms: archive_interval(),
-           adapter: Starcite.Archive.adapter(),
+           adapter: Starcite.Archive.Store.adapter(),
            adapter_opts: archive_adapter_opts()
          ]}
       ]

@@ -1,9 +1,9 @@
-defmodule Starcite.Runtime.EventStore.Pending do
+defmodule Starcite.Runtime.EventStore.EventQueue do
   @moduledoc """
-  Pending-write tier for `Starcite.Runtime.EventStore`.
+  In-memory write queue for `Starcite.Runtime.EventStore`.
 
-  This module owns the unarchived tail of each session and exposes the minimal
-  operations needed by append, replay, and archive acknowledgement flows.
+  This module owns the unarchived session tail and exposes queue operations
+  used by append, replay, and archive acknowledgement flows.
   """
 
   @table :starcite_event_store_pending_events
