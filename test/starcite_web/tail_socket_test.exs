@@ -4,11 +4,22 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Repo
+  alias StarciteWeb.Auth
   alias StarciteWeb.TailSocket
 
   setup do
     Starcite.Runtime.TestHelper.reset()
     Process.put(:producer_seq_counters, %{})
+    previous_auth = Application.get_env(:starcite, Auth)
+
+    on_exit(fn ->
+      if is_nil(previous_auth) do
+        Application.delete_env(:starcite, Auth)
+      else
+        Application.put_env(:starcite, Auth, previous_auth)
+      end
+    end)
+
     :ok
   end
 
@@ -25,8 +36,7 @@ defmodule StarciteWeb.TailSocketTest do
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
-      auth_expires_at: nil,
-      auth_expiry_timer_ref: nil
+      auth_bearer_token: nil
     }
   end
 
@@ -167,12 +177,26 @@ defmodule StarciteWeb.TailSocketTest do
     seq
   end
 
-  describe "auth expiry" do
-    test "stops socket with custom close code when auth expires" do
-      state = base_state("ses-auth", 0)
+  describe "auth validation" do
+    test "stops socket when token validation fails on live updates" do
+      Application.put_env(
+        :starcite,
+        Auth,
+        mode: :jwt,
+        issuer: "https://issuer.example",
+        audience: "starcite-api",
+        jwks_url: "http://localhost:9999/.well-known/jwks.json",
+        jwt_leeway_seconds: 0,
+        jwks_refresh_ms: 1_000
+      )
 
-      assert {:stop, :token_expired, {4001, "token_expired"}, ^state} =
-               TailSocket.handle_info(:auth_expired, state)
+      state =
+        base_state("ses-auth", 0)
+        |> Map.put(:replay_done, true)
+        |> Map.put(:auth_bearer_token, "not-a-jwt")
+
+      assert {:stop, :token_invalid, {4001, "token_invalid"}, ^state} =
+               TailSocket.handle_info({:cursor_update, %{seq: 1}}, state)
     end
   end
 

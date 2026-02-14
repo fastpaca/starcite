@@ -9,6 +9,7 @@ defmodule StarciteWeb.TailSocket do
 
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias StarciteWeb.Auth
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
@@ -17,7 +18,7 @@ defmodule StarciteWeb.TailSocket do
   def init(%{session_id: session_id, cursor: cursor} = params) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
-    auth_expires_at = Map.get(params, :auth_expires_at)
+    auth_bearer_token = Map.get(params, :auth_bearer_token)
 
     state = %{
       session_id: session_id,
@@ -27,11 +28,10 @@ defmodule StarciteWeb.TailSocket do
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
-      auth_expires_at: auth_expires_at,
-      auth_expiry_timer_ref: nil
+      auth_bearer_token: auth_bearer_token
     }
 
-    {:ok, state |> schedule_auth_expiry() |> schedule_drain()}
+    {:ok, schedule_drain(state)}
   end
 
   @impl true
@@ -46,22 +46,17 @@ defmodule StarciteWeb.TailSocket do
     drain_replay(state)
   end
 
-  def handle_info(:auth_expired, state) do
-    {:stop, :token_expired, {4001, "token_expired"}, state}
-  end
-
   def handle_info({:cursor_update, update}, state) when is_map(update) do
-    handle_cursor_update(update, state)
+    with :ok <- ensure_tail_auth(state) do
+      handle_cursor_update(update, state)
+    else
+      {:error, reason} -> close_for_auth_error(reason, state)
+    end
   end
 
   def handle_info(_message, state), do: {:ok, state}
 
   @impl true
-  def terminate(_reason, %{auth_expiry_timer_ref: timer_ref}) when is_reference(timer_ref) do
-    _ = Process.cancel_timer(timer_ref)
-    :ok
-  end
-
   def terminate(_reason, _state), do: :ok
 
   defp handle_cursor_update(%{seq: seq} = update, state)
@@ -94,13 +89,17 @@ defmodule StarciteWeb.TailSocket do
   defp drain_replay(state) do
     case :queue.out(state.replay_queue) do
       {{:value, event}, replay_queue} ->
-        next_state =
-          state
-          |> Map.put(:replay_queue, replay_queue)
-          |> Map.put(:cursor, max(state.cursor, event.seq))
-          |> maybe_schedule_drain()
+        with :ok <- ensure_tail_auth(state) do
+          next_state =
+            state
+            |> Map.put(:replay_queue, replay_queue)
+            |> Map.put(:cursor, max(state.cursor, event.seq))
+            |> maybe_schedule_drain()
 
-        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+          {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+        else
+          {:error, reason} -> close_for_auth_error(reason, state)
+        end
 
       {:empty, _queue} ->
         if state.replay_done do
@@ -195,15 +194,24 @@ defmodule StarciteWeb.TailSocket do
     %{state | drain_scheduled: true}
   end
 
-  defp schedule_auth_expiry(%{auth_expires_at: expires_at} = state)
-       when is_integer(expires_at) and expires_at > 0 do
-    now = System.system_time(:second)
-    timeout_ms = max((expires_at - now) * 1_000, 0)
-    timer_ref = Process.send_after(self(), :auth_expired, timeout_ms)
-    %{state | auth_expiry_timer_ref: timer_ref}
+  defp ensure_tail_auth(%{auth_bearer_token: nil}) do
+    if Auth.mode() == :none, do: :ok, else: {:error, :missing_bearer_token}
   end
 
-  defp schedule_auth_expiry(state), do: state
+  defp ensure_tail_auth(%{auth_bearer_token: token}) when is_binary(token) do
+    case Auth.authenticate_token(token) do
+      {:ok, _auth_context} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp close_for_auth_error(:token_expired, state) do
+    {:stop, :token_expired, {4001, "token_expired"}, state}
+  end
+
+  defp close_for_auth_error(_reason, state) do
+    {:stop, :token_invalid, {4001, "token_invalid"}, state}
+  end
 
   defp render_event(event) when is_map(event) do
     Map.update(event, :inserted_at, nil, &iso8601_utc/1)

@@ -49,4 +49,4 @@ Notes:
 - No `tombstone` event in the primary contract.
 - No `tail_synced` event.
 - Tail is server-to-client only; inbound client frames are ignored.
-- In JWT mode, sockets are closed when token validity expires (close code `4001`, reason `token_expired`).
+- In JWT mode, token validity is re-checked during event delivery. If invalid, sockets close with code `4001` (`token_expired` or `token_invalid`).

@@ -15,7 +15,7 @@ defmodule StarciteWeb.TailController do
   action_fallback StarciteWeb.FallbackController
 
   def tail(conn, %{"id" => id} = params) do
-    auth_expires_at = auth_expires_at(conn)
+    auth_bearer_token = auth_bearer_token(conn)
 
     with :ok <- ensure_websocket_upgrade(conn),
          {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
@@ -23,7 +23,7 @@ defmodule StarciteWeb.TailController do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
-        %{session_id: id, cursor: cursor, auth_expires_at: auth_expires_at},
+        %{session_id: id, cursor: cursor, auth_bearer_token: auth_bearer_token},
         timeout: 120_000
       )
       |> halt()
@@ -53,10 +53,13 @@ defmodule StarciteWeb.TailController do
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
   end
 
-  defp auth_expires_at(conn) do
+  defp auth_bearer_token(conn) do
     case conn.assigns[:auth] do
-      %{expires_at: expires_at} when is_integer(expires_at) and expires_at > 0 -> expires_at
-      _ -> nil
+      %{bearer_token: bearer_token} when is_binary(bearer_token) and bearer_token != "" ->
+        bearer_token
+
+      _ ->
+        nil
     end
   end
 end

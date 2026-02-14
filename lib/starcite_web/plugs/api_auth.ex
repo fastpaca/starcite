@@ -20,8 +20,7 @@ defmodule StarciteWeb.Plugs.ApiAuth do
 
   @impl true
   def call(conn, _opts) do
-    with {:ok, auth_context} <- Auth.authenticate_conn(conn),
-         :ok <- Auth.authorize_scope(conn, auth_context) do
+    with {:ok, auth_context} <- Auth.authenticate_conn(conn) do
       assign(conn, :auth, auth_context)
     else
       {:error, reason} ->

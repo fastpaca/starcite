@@ -25,7 +25,11 @@ defmodule StarciteWeb.Auth do
           jwks_refresh_ms: pos_integer()
         }
 
-  @type auth_context :: %{claims: map(), expires_at: pos_integer() | nil}
+  @type auth_context :: %{
+          claims: map(),
+          expires_at: pos_integer() | nil,
+          bearer_token: String.t() | nil
+        }
 
   @spec mode() :: mode()
   def mode do
@@ -36,17 +40,25 @@ defmodule StarciteWeb.Auth do
   def authenticate_conn(%Conn{} = conn) do
     case config() do
       %{mode: :none} ->
-        {:ok, %{claims: %{}, expires_at: nil}}
+        {:ok, %{claims: %{}, expires_at: nil, bearer_token: nil}}
 
       %{mode: :jwt} = config ->
         authenticate_jwt(conn, config)
     end
   end
 
-  @spec authorize_scope(Conn.t(), auth_context()) :: :ok | {:error, atom()}
-  def authorize_scope(%Conn{}, %{claims: claims}) when is_map(claims), do: :ok
+  @spec authenticate_token(String.t()) :: {:ok, auth_context()} | {:error, atom()}
+  def authenticate_token(token) when is_binary(token) and token != "" do
+    case config() do
+      %{mode: :none} ->
+        {:ok, %{claims: %{}, expires_at: nil, bearer_token: nil}}
 
-  def authorize_scope(_conn, _auth_context), do: {:error, :invalid_jwt_claims}
+      %{mode: :jwt} = config ->
+        authenticate_jwt_token(token, config)
+    end
+  end
+
+  def authenticate_token(_token), do: {:error, :invalid_bearer_token}
 
   @spec config() :: config()
   def config do
@@ -56,9 +68,15 @@ defmodule StarciteWeb.Auth do
 
   defp authenticate_jwt(conn, config) do
     with {:ok, token} <- bearer_token(conn),
-         {:ok, claims} <- JWT.verify(token, config),
+         {:ok, auth_context} <- authenticate_jwt_token(token, config) do
+      {:ok, auth_context}
+    end
+  end
+
+  defp authenticate_jwt_token(token, config) when is_binary(token) and is_map(config) do
+    with {:ok, claims} <- JWT.verify(token, config),
          {:ok, exp} <- claim_exp(claims) do
-      {:ok, %{claims: claims, expires_at: exp}}
+      {:ok, %{claims: claims, expires_at: exp, bearer_token: token}}
     end
   end
 
@@ -79,7 +97,7 @@ defmodule StarciteWeb.Auth do
   end
 
   defp parse_bearer_token(header) when is_binary(header) do
-    with [scheme, token] <- String.split(String.trim(header), ~r/\s+/, parts: 2, trim: true),
+    with [scheme, token] <- String.split(String.trim(header), " ", parts: 2, trim: true),
          true <- String.downcase(scheme) == "bearer",
          true <- token != "",
          false <- String.contains?(token, " ") do
