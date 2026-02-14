@@ -7,6 +7,7 @@ defmodule StarciteWeb.TailSocket do
 
   @behaviour WebSock
 
+  alias Starcite.Observability.Telemetry
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Phoenix.PubSub
@@ -58,7 +59,7 @@ defmodule StarciteWeb.TailSocket do
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        case EventStore.get_event(state.session_id, seq) do
+        case read_event_for_tail(state.session_id, seq) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
             {:push, {:text, Jason.encode!(render_event(event))}, next_state}
@@ -150,13 +151,36 @@ defmodule StarciteWeb.TailSocket do
 
   defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq}})
        when is_integer(seq) and seq > 0 do
-    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
-      {:ok, [%{seq: ^seq} = event]} -> {:ok, event}
-      _ -> :error
-    end
+    read_event_for_tail(session_id, seq)
   end
 
   defp resolve_buffered_value(_state, _value), do: :error
+
+  defp read_event_for_tail(session_id, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    case EventStore.get_event(session_id, seq) do
+      {:ok, event} ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :hit)
+        {:ok, event}
+
+      :error ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :miss)
+        read_event_from_storage(session_id, seq)
+    end
+  end
+
+  defp read_event_from_storage(session_id, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
+      {:ok, [%{seq: ^seq} = event]} ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :hit)
+        {:ok, event}
+
+      _ ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :miss)
+        :error
+    end
+  end
 
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)
