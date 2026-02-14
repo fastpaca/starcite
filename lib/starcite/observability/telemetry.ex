@@ -140,6 +140,31 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for tail cursor event lookups.
+
+  Measurements:
+    - `:count` – fixed at 1 per lookup
+
+  Metadata:
+    - `:session_id`
+    - `:seq`
+    - `:source` (`:ets` or `:storage`)
+    - `:result` (`:hit` or `:miss`)
+  """
+  @spec tail_cursor_lookup(String.t(), pos_integer(), :ets | :storage, :hit | :miss) :: :ok
+  def tail_cursor_lookup(session_id, seq, source, result)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+             source in [:ets, :storage] and result in [:hit, :miss] do
+    :telemetry.execute(
+      [:starcite, :tail, :cursor_lookup],
+      %{count: 1},
+      %{session_id: session_id, seq: seq, source: source, result: result}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:

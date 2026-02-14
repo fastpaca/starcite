@@ -56,6 +56,8 @@ defmodule Starcite.MixProject do
       {:redix, "~> 1.5"},
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
+      {:req, "~> 0.5"},
+      {:joken, "~> 2.6"},
       {:ra, "~> 2.13"},
       {:benchee, "~> 1.5.0", only: :dev},
       {:bypass, "~> 2.1", only: :test},

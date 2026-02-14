@@ -3,6 +3,7 @@ defmodule StarciteWeb.Router do
 
   pipeline :api do
     plug :accepts, ["json"]
+    plug StarciteWeb.Plugs.ApiAuth
   end
 
   scope "/v1", StarciteWeb do

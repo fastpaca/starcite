@@ -7,16 +7,19 @@ defmodule StarciteWeb.TailSocket do
 
   @behaviour WebSock
 
+  alias Starcite.Observability.Telemetry
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias StarciteWeb.Auth
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
 
   @impl true
-  def init(%{session_id: session_id, cursor: cursor}) do
+  def init(%{session_id: session_id, cursor: cursor} = params) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
+    auth_bearer_token = Map.get(params, :auth_bearer_token)
 
     state = %{
       session_id: session_id,
@@ -25,7 +28,8 @@ defmodule StarciteWeb.TailSocket do
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
-      drain_scheduled: false
+      drain_scheduled: false,
+      auth_bearer_token: auth_bearer_token
     }
 
     {:ok, schedule_drain(state)}
@@ -44,10 +48,17 @@ defmodule StarciteWeb.TailSocket do
   end
 
   def handle_info({:cursor_update, update}, state) when is_map(update) do
-    handle_cursor_update(update, state)
+    with :ok <- ensure_tail_auth(state) do
+      handle_cursor_update(update, state)
+    else
+      {:error, reason} -> close_for_auth_error(reason, state)
+    end
   end
 
   def handle_info(_message, state), do: {:ok, state}
+
+  @impl true
+  def terminate(_reason, _state), do: :ok
 
   defp handle_cursor_update(%{seq: seq} = update, state)
        when is_integer(seq) and seq > 0 do
@@ -58,7 +69,7 @@ defmodule StarciteWeb.TailSocket do
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        case EventStore.get_event(state.session_id, seq) do
+        case read_event_for_tail(state.session_id, seq) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
             {:push, {:text, Jason.encode!(render_event(event))}, next_state}
@@ -79,13 +90,17 @@ defmodule StarciteWeb.TailSocket do
   defp drain_replay(state) do
     case :queue.out(state.replay_queue) do
       {{:value, event}, replay_queue} ->
-        next_state =
-          state
-          |> Map.put(:replay_queue, replay_queue)
-          |> Map.put(:cursor, max(state.cursor, event.seq))
-          |> maybe_schedule_drain()
+        with :ok <- ensure_tail_auth(state) do
+          next_state =
+            state
+            |> Map.put(:replay_queue, replay_queue)
+            |> Map.put(:cursor, max(state.cursor, event.seq))
+            |> maybe_schedule_drain()
 
-        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+          {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+        else
+          {:error, reason} -> close_for_auth_error(reason, state)
+        end
 
       {:empty, _queue} ->
         if state.replay_done do
@@ -150,13 +165,36 @@ defmodule StarciteWeb.TailSocket do
 
   defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq}})
        when is_integer(seq) and seq > 0 do
-    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
-      {:ok, [%{seq: ^seq} = event]} -> {:ok, event}
-      _ -> :error
-    end
+    read_event_for_tail(session_id, seq)
   end
 
   defp resolve_buffered_value(_state, _value), do: :error
+
+  defp read_event_for_tail(session_id, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    case EventStore.get_event(session_id, seq) do
+      {:ok, event} ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :hit)
+        {:ok, event}
+
+      :error ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :miss)
+        read_event_from_storage(session_id, seq)
+    end
+  end
+
+  defp read_event_from_storage(session_id, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
+      {:ok, [%{seq: ^seq} = event]} ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :hit)
+        {:ok, event}
+
+      _ ->
+        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :miss)
+        :error
+    end
+  end
 
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)
@@ -178,6 +216,25 @@ defmodule StarciteWeb.TailSocket do
   defp schedule_drain(state) do
     send(self(), :drain_replay)
     %{state | drain_scheduled: true}
+  end
+
+  defp ensure_tail_auth(%{auth_bearer_token: nil}) do
+    if Auth.mode() == :none, do: :ok, else: {:error, :missing_bearer_token}
+  end
+
+  defp ensure_tail_auth(%{auth_bearer_token: token}) when is_binary(token) do
+    case Auth.authenticate_token(token) do
+      {:ok, _auth_context} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp close_for_auth_error(:token_expired, state) do
+    {:stop, :token_expired, {4001, "token_expired"}, state}
+  end
+
+  defp close_for_auth_error(_reason, state) do
+    {:stop, :token_invalid, {4001, "token_invalid"}, state}
   end
 
   defp render_event(event) when is_map(event) do

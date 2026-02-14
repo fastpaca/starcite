@@ -1,8 +1,5 @@
 # Starcite
 
-> [!NOTE]
-> Starcite is a work in progress. Expect rapid iterations and future breaking changes. Always lock your dependencies to a release version.
-
 [![Tests](https://github.com/fastpaca/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/test.yml)
 [![Docker Build](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
@@ -14,13 +11,13 @@ https://starcite.ai
 
 ---
 
-Starcite sits between your AI and your users so the session stays correct — through refreshes, reconnects, and device switches. No sync logic on your side.
+Starcite sits between your AI and your users so each session stream stays complete and ordered across refreshes, reconnects, and device switches. No sync logic on your side.
 
-Three primitives:
+Model:
 
-1. **Create** a session
-2. **Append** ordered events to it
-3. **Tail** — catch up from a cursor, then follow live over WebSocket
+- Create sessions
+- Append ordered events
+- Resume tail from cursor
 
 ## Quick Start
 
@@ -62,21 +59,20 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 
 1. Replays committed events where `seq > cursor`.
 2. Streams new events live on the same socket.
-3. On reconnect, pass your last processed `seq` as the next cursor.
+3. On reconnect, pass your last processed `seq`.
 
 ## What you get
 
 - **Ordered** — monotonic `seq` per session, no gaps
-- **Durable** — ack only after quorum commit
+- **Durable** — sequence progresses only after persistence
 - **Replayable** — catch up from any cursor, then follow live
 - **Shared** — one append API for humans and agents
-- **Idempotent** — optional `idempotency_key` for safe retries
 - **Concurrent** — optional `expected_seq` for optimistic locking
-- **Archived** — Postgres cold storage for full history
+- **Retry-safe** — producer sequence handling avoids duplicate state
 
 ## What Starcite doesn't do
 
-- Auth (your layer, upstream)
+- Auth issuance or credential lifecycle (you can optionally enable JWT validation at the API boundary)
 - Prompt construction or token management
 - Agent orchestration
 - Webhooks
@@ -88,7 +84,6 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 - [Architecture](docs/architecture.md)
 - [Deployment](docs/deployment.md)
 - [Benchmarks](docs/benchmarks.md)
-- [Local Testing](docs/local-testing.md)
 
 ## Development
 
@@ -100,16 +95,6 @@ mix test
 mix precommit        # format + compile (warnings-as-errors) + test
 ```
 
-### Local Cluster (Manual Compose)
-
-```bash
-PROJECT_NAME=starcite-it-a
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
-```
-
-See `docs/local-testing.md` for failover drills and multi-cluster local runs.
 
 ## Contributing
 
