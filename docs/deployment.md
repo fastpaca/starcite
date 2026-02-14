@@ -131,7 +131,7 @@ Response semantics in JWT mode:
 | `STARCITE_AUTH_JWT_ISSUER` | none | Required JWT `iss` value (required when mode is `jwt`) |
 | `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT `aud` value (required when mode is `jwt`) |
 | `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Clock-skew tolerance for `exp`/`nbf`/`iat` checks |
-| `STARCITE_AUTH_JWKS_REFRESH_MS` | `300000` | JWKS cache TTL before refresh |
+| `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache TTL before refresh |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP server port |
 | `PHX_SERVER` | unset | Start endpoint in release mode |

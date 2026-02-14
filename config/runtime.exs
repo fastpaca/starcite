@@ -174,7 +174,7 @@ jwt_leeway_seconds =
 
 jwks_refresh_ms =
   case System.get_env("STARCITE_AUTH_JWKS_REFRESH_MS") do
-    nil -> 300_000
+    nil -> 60_000
     raw -> parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
   end
 

@@ -12,7 +12,7 @@ defmodule StarciteWeb.Auth do
   alias StarciteWeb.Auth.JWT
 
   @default_jwt_leeway_seconds 30
-  @default_jwks_refresh_ms :timer.minutes(5)
+  @default_jwks_refresh_ms :timer.seconds(60)
 
   @type mode :: :none | :jwt
 
