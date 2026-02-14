@@ -1,6 +1,7 @@
 defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Repo
@@ -168,9 +169,15 @@ defmodule StarciteWeb.TailSocketTest do
     end
 
     test "handles delayed cursor updates after archive compaction race" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+      with_archive_adapter(IdempotentTestAdapter)
+
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000, adapter: IdempotentTestAdapter, adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
 
       session_id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: session_id)
@@ -185,10 +192,13 @@ defmodule StarciteWeb.TailSocketTest do
 
       assert_receive {:cursor_update, %{session_id: ^session_id, seq: 1} = update}
 
-      cold_rows = EventStore.from_cursor(session_id, 0, 1)
-      insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 1, trimmed: 1}} = Runtime.ack_archived(session_id, 1)
-      assert :error = EventStore.get_event(session_id, 1)
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(fn ->
+        {:ok, session} = Runtime.get_session(session_id)
+        assert session.archived_seq == 1
+        assert :error = EventStore.get_event(session_id, 1)
+      end)
 
       state = %{base_state(session_id, 0) | replay_done: true}
 
@@ -246,6 +256,40 @@ defmodule StarciteWeb.TailSocketTest do
 
   defp detach_tail_lookup_handler(handler_id) when is_binary(handler_id) do
     :telemetry.detach(handler_id)
+  end
+
+  defp with_archive_adapter(adapter_mod) when is_atom(adapter_mod) do
+    previous = Application.get_env(:starcite, :archive_adapter)
+    Application.put_env(:starcite, :archive_adapter, adapter_mod)
+
+    on_exit(fn ->
+      if is_nil(previous) do
+        Application.delete_env(:starcite, :archive_adapter)
+      else
+        Application.put_env(:starcite, :archive_adapter, previous)
+      end
+    end)
+  end
+
+  defp eventually(fun, opts \\ []) when is_function(fun, 0) do
+    timeout = Keyword.get(opts, :timeout, 2_000)
+    interval = Keyword.get(opts, :interval, 50)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline, interval)
+  end
+
+  defp do_eventually(fun, deadline, interval) do
+    try do
+      fun.()
+    rescue
+      _ ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(interval)
+          do_eventually(fun, deadline, interval)
+        else
+          fun.()
+        end
+    end
   end
 
   defp append_event(id, event, opts \\ [])
