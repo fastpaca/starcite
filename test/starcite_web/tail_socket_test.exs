@@ -167,6 +167,39 @@ defmodule StarciteWeb.TailSocketTest do
                       %{session_id: ^session_id, seq: 1, source: :storage, result: :hit}}
     end
 
+    test "handles delayed cursor updates after archive compaction race" do
+      ensure_repo_started()
+      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+      session_id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: session_id)
+      :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "race"},
+          actor: "agent:test"
+        })
+
+      assert_receive {:cursor_update, %{session_id: ^session_id, seq: 1} = update}
+
+      cold_rows = EventStore.from_cursor(session_id, 0, 1)
+      insert_cold_rows(session_id, cold_rows)
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = Runtime.ack_archived(session_id, 1)
+      assert :error = EventStore.get_event(session_id, 1)
+
+      state = %{base_state(session_id, 0) | replay_done: true}
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      frame = Jason.decode!(payload)
+      assert frame["seq"] == 1
+      assert next_state.cursor == 1
+    end
+
     test "replays across Postgres cold + ETS hot boundary" do
       ensure_repo_started()
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
