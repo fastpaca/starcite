@@ -24,15 +24,6 @@ defmodule StarciteWeb.Plugs.ApiAuth do
          :ok <- Auth.authorize_scope(conn, auth_context) do
       assign(conn, :auth, auth_context)
     else
-      {:error, {:insufficient_scope, required_scope}} ->
-        Logger.debug("API auth rejected request: insufficient_scope #{required_scope}")
-
-        conn
-        |> put_resp_header("www-authenticate", insufficient_scope_header(required_scope))
-        |> put_status(:forbidden)
-        |> json(%{error: "forbidden", message: "Forbidden"})
-        |> halt()
-
       {:error, reason} ->
         Logger.debug("API auth rejected request: #{inspect(reason)}")
 
@@ -54,9 +45,5 @@ defmodule StarciteWeb.Plugs.ApiAuth do
 
   defp unauthorized_header(_reason) do
     ~s(Bearer realm="starcite", error="invalid_token")
-  end
-
-  defp insufficient_scope_header(required_scope) when is_binary(required_scope) do
-    ~s(Bearer realm="starcite", error="insufficient_scope", scope="#{required_scope}")
   end
 end

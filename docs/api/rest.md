@@ -19,20 +19,6 @@ Missing/invalid/expired tokens return `401`:
 }
 ```
 
-Missing required scope returns `403`:
-
-```json
-{
-  "error": "forbidden",
-  "message": "Forbidden"
-}
-```
-
-Required scopes:
-
-- `POST /v1/sessions` -> `sessions:create`
-- `POST /v1/sessions/:id/append` -> `sessions:append`
-
 ## POST `/v1/sessions`
 
 Create a session.
@@ -198,7 +184,6 @@ Status codes:
 
 - `400` invalid payload
 - `401` unauthorized (missing/invalid/expired token when JWT mode is enabled)
-- `403` forbidden (token lacks required scope when JWT mode is enabled)
 - `404` session not found
 - `409` expected sequence or producer conflict
 - `503` unavailable (quorum/routing failure)

@@ -100,17 +100,12 @@ When `STARCITE_AUTH_MODE=jwt` is enabled, Starcite validates:
 - `iss` claim (`STARCITE_AUTH_JWT_ISSUER`)
 - `aud` claim (`STARCITE_AUTH_JWT_AUDIENCE`)
 - `exp` claim (with optional leeway)
-- route scope claims (`scope` / `scp`):
-  - `sessions:create` for `POST /v1/sessions`
-  - `sessions:append` for `POST /v1/sessions/:id/append`
-  - `sessions:tail` for `GET /v1/sessions/:id/tail`
 
 Starcite does not issue tokens or manage OAuth clients/credential lifecycle.
 
 Response semantics in JWT mode:
 
 - `401` for missing/invalid/expired bearer tokens.
-- `403` for valid tokens that lack required route scope.
 
 ## Configuration
 

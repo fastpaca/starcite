@@ -43,26 +43,8 @@ defmodule StarciteWeb.Auth do
     end
   end
 
-  @spec authorize_scope(Conn.t(), auth_context()) ::
-          :ok | {:error, atom() | {:insufficient_scope, String.t()}}
-  def authorize_scope(%Conn{} = conn, %{claims: claims}) when is_map(claims) do
-    case {mode(), required_scope(conn)} do
-      {:none, _required_scope} ->
-        :ok
-
-      {:jwt, nil} ->
-        :ok
-
-      {:jwt, required_scope} when is_binary(required_scope) ->
-        with {:ok, scopes} <- parse_scopes(claims),
-             true <- Enum.member?(scopes, required_scope) do
-          :ok
-        else
-          false -> {:error, {:insufficient_scope, required_scope}}
-          {:error, _reason} = error -> error
-        end
-    end
-  end
+  @spec authorize_scope(Conn.t(), auth_context()) :: :ok | {:error, atom()}
+  def authorize_scope(%Conn{}, %{claims: claims}) when is_map(claims), do: :ok
 
   def authorize_scope(_conn, _auth_context), do: {:error, :invalid_jwt_claims}
 
@@ -106,44 +88,6 @@ defmodule StarciteWeb.Auth do
       _ -> {:error, :invalid_bearer_token}
     end
   end
-
-  defp required_scope(%Conn{method: "POST", path_info: ["v1", "sessions"]}),
-    do: "sessions:create"
-
-  defp required_scope(%Conn{method: "POST", path_info: ["v1", "sessions", _id, "append"]}),
-    do: "sessions:append"
-
-  defp required_scope(%Conn{method: "GET", path_info: ["v1", "sessions", _id, "tail"]}),
-    do: "sessions:tail"
-
-  defp required_scope(_conn), do: nil
-
-  defp parse_scopes(%{"scope" => scope}) when is_binary(scope) do
-    scopes =
-      scope
-      |> String.split(~r/\s+/, trim: true)
-      |> Enum.uniq()
-
-    if scopes == [], do: {:error, :invalid_jwt_claims}, else: {:ok, scopes}
-  end
-
-  defp parse_scopes(%{"scope" => scope}) when is_list(scope) do
-    if scope != [] and Enum.all?(scope, &is_binary/1) do
-      {:ok, Enum.uniq(scope)}
-    else
-      {:error, :invalid_jwt_claims}
-    end
-  end
-
-  defp parse_scopes(%{"scp" => scope}) when is_binary(scope) do
-    parse_scopes(%{"scope" => scope})
-  end
-
-  defp parse_scopes(%{"scp" => scope}) when is_list(scope) do
-    parse_scopes(%{"scope" => scope})
-  end
-
-  defp parse_scopes(_claims), do: {:error, :invalid_jwt_claims}
 
   defp normalize_config(raw) when is_map(raw) do
     raw

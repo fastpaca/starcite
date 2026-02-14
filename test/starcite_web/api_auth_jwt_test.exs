@@ -59,7 +59,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     token =
       AuthTestSupport.sign_rs256(
         private_key,
-        valid_claims(sub: "svc:customer-a", scope: "sessions:create sessions:append"),
+        valid_claims(sub: "svc:customer-a"),
         kid
       )
 
@@ -107,7 +107,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
           "iss" => @issuer,
           "aud" => "not-starcite-api",
           "sub" => "svc:customer-a",
-          "scope" => "sessions:create",
           "exp" => System.system_time(:second) + 300
         },
         kid
@@ -147,7 +146,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     token =
       AuthTestSupport.sign_rs256(
         private_key,
-        valid_claims(sub: "svc:customer-a", scope: "sessions:create"),
+        valid_claims(sub: "svc:customer-a"),
         kid
       )
 
@@ -162,47 +161,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert get_resp_header(conn, "www-authenticate") == [
              ~s(Bearer realm="starcite", error="invalid_token")
-           ]
-  end
-
-  test "returns 403 when token is missing required scope" do
-    bypass = Bypass.open()
-    private_key = AuthTestSupport.generate_rsa_private_key()
-    kid = "kid-scope"
-    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
-
-    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
-      conn
-      |> put_resp_content_type("application/json")
-      |> resp(200, Jason.encode!(jwks))
-    end)
-
-    configure_jwt_auth!(bypass)
-
-    token =
-      AuthTestSupport.sign_rs256(
-        private_key,
-        valid_claims(sub: "svc:customer-a", scope: "sessions:create"),
-        kid
-      )
-
-    session_id = unique_id("ses")
-    {:ok, _} = Runtime.create_session(id: session_id)
-
-    conn =
-      json_conn(
-        :post,
-        "/v1/sessions/#{session_id}/append",
-        %{"type" => "content", "payload" => %{"text" => "blocked"}, "actor" => "agent:test"},
-        [{"authorization", "Bearer #{token}"}]
-      )
-
-    assert conn.status == 403
-    body = Jason.decode!(conn.resp_body)
-    assert body["error"] == "forbidden"
-
-    assert get_resp_header(conn, "www-authenticate") == [
-             ~s(Bearer realm="starcite", error="insufficient_scope", scope="sessions:append")
            ]
   end
 
@@ -232,7 +190,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     token =
       AuthTestSupport.sign_rs256(
         private_key,
-        valid_claims(sub: "svc:customer-a", scope: "sessions:tail"),
+        valid_claims(sub: "svc:customer-a"),
         kid
       )
 
@@ -265,7 +223,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
       "iss" => @issuer,
       "aud" => @audience,
       "sub" => Keyword.fetch!(opts, :sub),
-      "scope" => Keyword.fetch!(opts, :scope),
       "exp" => System.system_time(:second) + 300
     }
   end
