@@ -6,6 +6,9 @@ defmodule Starcite.Archive do
   - archives only sessions for groups led on this node
   - persists batches through the configured adapter
   - acknowledges archived progress via local Raft command (`Runtime.ack_archived_local/2`)
+
+  Archive persistence failures are treated as fatal for this worker: the process
+  crashes and relies on supervisor restart rather than masking write failures.
   """
 
   use GenServer
@@ -128,7 +131,7 @@ defmodule Starcite.Archive do
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
     case Store.write_events(adapter, rows) do
-      {:ok, inserted} ->
+      {:ok, inserted} when is_integer(inserted) and inserted >= 0 ->
         :ok =
           EventStore.cache_archived_events(
             session_id,
@@ -183,18 +186,11 @@ defmodule Starcite.Archive do
             }
         end
 
-      {:error, _reason} ->
-        {
-          %{
-            attempted: attempted,
-            inserted: 0,
-            bytes_attempted: bytes_attempted,
-            bytes_inserted: 0,
-            pending_after: pending_before,
-            pending_sessions: 1
-          },
-          nil
-        }
+      {:ok, other} ->
+        raise "archive adapter returned invalid insert count for #{session_id}: #{inspect(other)}"
+
+      {:error, reason} ->
+        raise "archive write failed for #{session_id}: #{inspect(reason)}"
     end
   end
 

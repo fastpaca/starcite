@@ -74,10 +74,10 @@ defmodule Starcite.Archive.StoreTest do
     assert {:ok, []} = Store.read_events(TestAdapter, session_id, 1, 1)
   end
 
-  test "normalizes persistence read failures" do
+  test "returns persistence read failures without normalization" do
     session_id = "ses-store-fail-#{System.unique_integer([:positive, :monotonic])}"
 
-    assert {:error, :archive_read_unavailable} =
+    assert {:error, :db_down} =
              Store.read_events(FailingReadAdapter, session_id, 1, 10)
   end
 

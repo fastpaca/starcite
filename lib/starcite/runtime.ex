@@ -376,7 +376,7 @@ defmodule Starcite.Runtime do
 
     case ArchiveStore.upsert_session(row) do
       :ok -> :ok
-      {:error, :archive_write_unavailable} -> :ok
+      {:error, _reason} -> :ok
     end
   end
 

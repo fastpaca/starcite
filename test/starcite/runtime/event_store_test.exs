@@ -1,6 +1,33 @@
 defmodule Starcite.Runtime.EventStoreTest do
   use ExUnit.Case, async: false
 
+  defmodule FailingReadAdapter do
+    @behaviour Starcite.Archive.Adapter
+
+    use GenServer
+
+    @impl true
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{})
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
+
+    @impl true
+    def read_events(_session_id, _from_seq, _to_seq), do: {:error, :db_down}
+
+    @impl true
+    def upsert_session(_session), do: :ok
+
+    @impl true
+    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+
+    @impl true
+    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+  end
+
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Runtime.EventStore
 
@@ -98,6 +125,13 @@ defmodule Starcite.Runtime.EventStoreTest do
     assert {:ok, again} = EventStore.read_archived_events(session_id, 1, 6)
     assert Enum.map(again, & &1.seq) == [1, 2, 3, 4, 5, 6]
     assert IdempotentTestAdapter.get_reads() == [{session_id, 3, 4}, {session_id, 6, 6}]
+  end
+
+  test "read_archived_events returns adapter read failures without normalization" do
+    setup_archive_adapter(FailingReadAdapter)
+    session_id = "ses-archive-read-fail-#{System.unique_integer([:positive, :monotonic])}"
+
+    assert {:error, :db_down} = EventStore.read_archived_events(session_id, 1, 3)
   end
 
   test "reclaims archived cache before applying write backpressure" do
@@ -357,15 +391,19 @@ defmodule Starcite.Runtime.EventStoreTest do
   end
 
   defp setup_idempotent_archive_adapter do
+    setup_archive_adapter(IdempotentTestAdapter)
+
     if pid = Process.whereis(IdempotentTestAdapter) do
       GenServer.stop(pid)
     end
 
     start_supervised!({IdempotentTestAdapter, []})
     :ok = IdempotentTestAdapter.clear_writes()
+  end
 
+  defp setup_archive_adapter(adapter_mod) when is_atom(adapter_mod) do
     previous_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
+    Application.put_env(:starcite, :archive_adapter, adapter_mod)
 
     on_exit(fn ->
       if previous_adapter do

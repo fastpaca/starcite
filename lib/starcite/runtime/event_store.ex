@@ -198,11 +198,10 @@ defmodule Starcite.Runtime.EventStore do
   4. populate cache with fetched events
   5. return a single ordered list
 
-  Any persistence/cache failure is normalized to
-  `{:error, :archive_read_unavailable}`.
+  Persistence failures are returned as-is from the configured archive adapter.
   """
   @spec read_archived_events(String.t(), pos_integer(), pos_integer()) ::
-          {:ok, [map()]} | {:error, :archive_read_unavailable}
+          {:ok, [map()]} | {:error, term()}
   def read_archived_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
@@ -218,11 +217,7 @@ defmodule Starcite.Runtime.EventStore do
         |> Enum.sort_by(& &1.seq)
 
       {:ok, merged}
-    else
-      _ -> {:error, :archive_read_unavailable}
     end
-  rescue
-    _ -> {:error, :archive_read_unavailable}
   end
 
   @doc """
@@ -591,8 +586,6 @@ defmodule Starcite.Runtime.EventStore do
     with {:ok, events} <- ArchiveStore.read_events(session_id, from_seq, to_seq),
          {:ok, tail} <- fetch_missing_ranges(session_id, rest) do
       {:ok, events ++ tail}
-    else
-      _ -> {:error, :archive_read_unavailable}
     end
   end
 
