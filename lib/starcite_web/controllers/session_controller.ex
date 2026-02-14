@@ -9,7 +9,6 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Runtime
 
   action_fallback StarciteWeb.FallbackController
@@ -48,7 +47,7 @@ defmodule StarciteWeb.SessionController do
   """
   def index(conn, params) do
     with {:ok, opts} <- validate_list(params),
-         {:ok, page} <- ArchiveStore.list_sessions(opts) do
+         {:ok, page} <- Starcite.Archive.adapter().list_sessions(opts) do
       json(conn, page)
     end
   end

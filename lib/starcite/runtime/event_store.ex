@@ -54,7 +54,6 @@ defmodule Starcite.Runtime.EventStore do
 
   use GenServer
 
-  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Observability.Telemetry
   alias Starcite.Session.Event
 
@@ -583,7 +582,7 @@ defmodule Starcite.Runtime.EventStore do
   defp fetch_missing_ranges(session_id, [{from_seq, to_seq} | rest])
        when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
               is_integer(to_seq) and to_seq >= from_seq do
-    with {:ok, events} <- ArchiveStore.read_events(session_id, from_seq, to_seq),
+    with {:ok, events} <- Starcite.Archive.adapter().read_events(session_id, from_seq, to_seq),
          {:ok, tail} <- fetch_missing_ranges(session_id, rest) do
       {:ok, events ++ tail}
     end

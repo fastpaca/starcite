@@ -1,8 +1,6 @@
 defmodule Starcite.Runtime.Supervisor do
   use Supervisor
 
-  alias Starcite.Archive.Store
-
   def start_link(arg) do
     Supervisor.start_link(__MODULE__, arg, name: __MODULE__)
   end
@@ -21,7 +19,7 @@ defmodule Starcite.Runtime.Supervisor do
          [
            name: archive_name(),
            flush_interval_ms: archive_interval(),
-           adapter: Store.adapter(),
+           adapter: Starcite.Archive.adapter(),
            adapter_opts: archive_adapter_opts()
          ]}
       ]

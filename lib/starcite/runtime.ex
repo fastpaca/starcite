@@ -11,7 +11,6 @@ defmodule Starcite.Runtime do
 
   require Logger
 
-  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Runtime.{EventStore, RaftFSM, RaftManager, RaftTopology}
   alias Starcite.Session
 
@@ -374,7 +373,7 @@ defmodule Starcite.Runtime do
       created_at: parse_utc_datetime!(created_at)
     }
 
-    case ArchiveStore.upsert_session(row) do
+    case Starcite.Archive.adapter().upsert_session(row) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end

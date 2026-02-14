@@ -13,9 +13,15 @@ defmodule Starcite.Archive do
 
   use GenServer
 
-  alias Starcite.Archive.Store
   alias Starcite.Runtime
   alias Starcite.Runtime.{EventStore, RaftManager}
+
+  @default_adapter Starcite.Archive.Adapter.Postgres
+
+  @spec adapter() :: module()
+  def adapter do
+    Application.get_env(:starcite, :archive_adapter, @default_adapter)
+  end
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -130,7 +136,7 @@ defmodule Starcite.Archive do
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
-    case Store.write_events(adapter, rows) do
+    case adapter.write_events(rows) do
       {:ok, inserted} when is_integer(inserted) and inserted >= 0 ->
         :ok =
           EventStore.cache_archived_events(
