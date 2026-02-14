@@ -48,7 +48,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     kid = "kid-valid"
     jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
 
-    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
       conn
       |> put_resp_content_type("application/json")
       |> resp(200, Jason.encode!(jwks))
