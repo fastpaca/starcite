@@ -86,6 +86,27 @@ Prometheus metrics on `/metrics`.
 | `starcite_event_store_backpressure_total` | Total append rejections from ETS capacity limits |
 | `starcite_event_store_memory_bytes` | Current ETS memory usage for event store |
 
+## Authentication
+
+Starcite can enforce bearer JWT validation at the API boundary.
+
+- `STARCITE_AUTH_MODE=none` (default): no API auth enforcement.
+- `STARCITE_AUTH_MODE=jwt`: require valid JWT on `/v1/*` endpoints, including WebSocket upgrades.
+- Health probes (`/health/live`, `/health/ready`) remain unauthenticated.
+
+When `STARCITE_AUTH_MODE=jwt` is enabled, Starcite validates:
+
+- JWT signature using JWKS (`STARCITE_AUTH_JWKS_URL`)
+- `iss` claim (`STARCITE_AUTH_JWT_ISSUER`)
+- `aud` claim (`STARCITE_AUTH_JWT_AUDIENCE`)
+- `exp` claim (with optional leeway)
+
+Starcite does not issue tokens or manage OAuth clients/credential lifecycle.
+
+Response semantics in JWT mode:
+
+- `401` for missing/invalid/expired bearer tokens.
+
 ## Configuration
 
 | Variable | Default | Description |
@@ -105,6 +126,12 @@ Prometheus metrics on `/metrics`.
 | `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Enable ETS compression for archive read cache |
 | `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache memory budget (accepts values like `256MB`, `2G`, `1048576K`; unsuffixed integers are treated as MB) |
 | `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Fraction to reclaim when cache exceeds byte budget |
+| `STARCITE_AUTH_MODE` | `none` | API auth mode (`none` or `jwt`) |
+| `STARCITE_AUTH_JWKS_URL` | none | JWKS endpoint URL (required when mode is `jwt`) |
+| `STARCITE_AUTH_JWT_ISSUER` | none | Required JWT `iss` value (required when mode is `jwt`) |
+| `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT `aud` value (required when mode is `jwt`) |
+| `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Clock-skew tolerance for `exp`/`nbf`/`iat` checks |
+| `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache TTL before refresh |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP server port |
 | `PHX_SERVER` | unset | Start endpoint in release mode |

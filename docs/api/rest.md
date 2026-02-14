@@ -2,6 +2,23 @@
 
 All endpoints are under `/v1`.
 
+## Authentication
+
+If `STARCITE_AUTH_MODE=jwt` is enabled, requests must include:
+
+```
+Authorization: Bearer <jwt>
+```
+
+Missing/invalid/expired tokens return `401`:
+
+```json
+{
+  "error": "unauthorized",
+  "message": "Unauthorized"
+}
+```
+
 ## POST `/v1/sessions`
 
 Create a session.
@@ -166,6 +183,7 @@ All API errors return:
 Status codes:
 
 - `400` invalid payload
+- `401` unauthorized (missing/invalid/expired token when JWT mode is enabled)
 - `404` session not found
 - `409` expected sequence or producer conflict
 - `503` unavailable (quorum/routing failure)

@@ -15,11 +15,15 @@ defmodule StarciteWeb.TailController do
   action_fallback StarciteWeb.FallbackController
 
   def tail(conn, %{"id" => id} = params) do
+    auth_bearer_token = auth_bearer_token(conn)
+
     with :ok <- ensure_websocket_upgrade(conn),
          {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
          {:ok, _session} <- Runtime.get_session(id) do
       conn
-      |> WebSockAdapter.upgrade(StarciteWeb.TailSocket, %{session_id: id, cursor: cursor},
+      |> WebSockAdapter.upgrade(
+        StarciteWeb.TailSocket,
+        %{session_id: id, cursor: cursor, auth_bearer_token: auth_bearer_token},
         timeout: 120_000
       )
       |> halt()
@@ -47,5 +51,15 @@ defmodule StarciteWeb.TailController do
       |> Enum.any?(fn value -> String.downcase(value) == "websocket" end)
 
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
+  end
+
+  defp auth_bearer_token(conn) do
+    case conn.assigns[:auth] do
+      %{bearer_token: bearer_token} when is_binary(bearer_token) and bearer_token != "" ->
+        bearer_token
+
+      _ ->
+        nil
+    end
   end
 end

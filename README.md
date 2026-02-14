@@ -76,7 +76,7 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 
 ## What Starcite doesn't do
 
-- Auth (your layer, upstream)
+- Auth issuance or credential lifecycle (you can optionally enable JWT validation at the API boundary)
 - Prompt construction or token management
 - Agent orchestration
 - Webhooks
