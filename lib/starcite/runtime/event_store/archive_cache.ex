@@ -1,10 +1,18 @@
 defmodule Starcite.Runtime.EventStore.ArchiveCache do
-  @moduledoc false
+  @moduledoc """
+  Archived-read cache tier for `Starcite.Runtime.EventStore`.
+
+  This module serves archived reads from local cache, computes missing archived
+  ranges, and handles cache memory accounting/eviction for pressure control.
+  """
 
   @cache :starcite_archive_read_cache
   @default_cache_chunk_size 256
 
   @spec get_event(String.t(), pos_integer()) :: {:ok, map()} | :error
+  @doc """
+  Fetch one archived event by session and sequence from cache.
+  """
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     chunk_start = chunk_start_for(seq, cache_chunk_size())
@@ -17,6 +25,10 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
 
   @spec cached_events_and_missing_ranges(String.t(), pos_integer(), pos_integer()) ::
           {:ok, %{required(pos_integer()) => map()}, [{pos_integer(), pos_integer()}]}
+  @doc """
+  Return cached events in `[from_seq, to_seq]` and the minimal missing ranges
+  required to complete that interval.
+  """
   def cached_events_and_missing_ranges(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
@@ -45,6 +57,9 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
   end
 
   @spec cache_events(String.t(), [map()]) :: :ok
+  @doc """
+  Insert archived events into cache for one session.
+  """
   def cache_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
     chunk_size = cache_chunk_size()
@@ -64,6 +79,9 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
   end
 
   @spec clear() :: :ok
+  @doc """
+  Clear all archived-read cache entries.
+  """
   def clear do
     case Cachex.clear(@cache) do
       {:ok, _} -> :ok
@@ -74,6 +92,9 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
   end
 
   @spec memory_bytes() :: {:ok, non_neg_integer()} | :error
+  @doc """
+  Return cache memory usage in bytes.
+  """
   def memory_bytes do
     case Cachex.inspect(@cache, {:memory, :bytes}) do
       {:ok, bytes} when is_integer(bytes) and bytes >= 0 -> {:ok, bytes}
@@ -84,6 +105,9 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
   end
 
   @spec memory_bytes_or_zero() :: non_neg_integer()
+  @doc """
+  Return cache memory usage in bytes, falling back to `0` on inspection errors.
+  """
   def memory_bytes_or_zero do
     case memory_bytes() do
       {:ok, bytes} -> bytes
@@ -92,6 +116,9 @@ defmodule Starcite.Runtime.EventStore.ArchiveCache do
   end
 
   @spec evict_to_target_memory(non_neg_integer()) :: :ok
+  @doc """
+  Evict cached archived entries until usage is at or below `target_cache_bytes`.
+  """
   def evict_to_target_memory(target_cache_bytes)
       when is_integer(target_cache_bytes) and target_cache_bytes >= 0 do
     cache_entries =

@@ -1,10 +1,18 @@
 defmodule Starcite.Runtime.EventStore.Pending do
-  @moduledoc false
+  @moduledoc """
+  Pending-write tier for `Starcite.Runtime.EventStore`.
+
+  This module owns the unarchived tail of each session and exposes the minimal
+  operations needed by append, replay, and archive acknowledgement flows.
+  """
 
   @table :starcite_event_store_pending_events
   @index_table :starcite_event_store_pending_session_max_seq
 
   @spec ensure_tables() :: :ok
+  @doc """
+  Ensure pending tier storage is ready.
+  """
   def ensure_tables do
     _ = ensure_named_table(@table)
     _ = ensure_named_table(@index_table)
@@ -12,6 +20,10 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec put_event(String.t(), pos_integer(), map()) :: :ok
+  @doc """
+  Persist one committed event into pending state and advance the per-session max
+  sequence index.
+  """
   def put_event(session_id, seq, event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
              is_map(event) do
@@ -24,6 +36,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec get_event(String.t(), pos_integer()) :: {:ok, map()} | :error
+  @doc """
+  Fetch one pending event by session and sequence.
+  """
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     table = ensure_named_table(@table)
@@ -35,6 +50,10 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec from_cursor(String.t(), non_neg_integer(), pos_integer()) :: [map()]
+  @doc """
+  Return pending events strictly after `cursor`, ordered by sequence, up to
+  `limit`.
+  """
   def from_cursor(session_id, cursor, limit)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 do
@@ -54,6 +73,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec delete_below(String.t(), pos_integer()) :: non_neg_integer()
+  @doc """
+  Delete pending events with sequence lower than `floor_seq` for one session.
+  """
   def delete_below(session_id, floor_seq)
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
     table = ensure_named_table(@table)
@@ -78,12 +100,18 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec size() :: non_neg_integer()
+  @doc """
+  Return total pending event count.
+  """
   def size do
     table = ensure_named_table(@table)
     :ets.info(table, :size) || 0
   end
 
   @spec session_size(String.t()) :: non_neg_integer()
+  @doc """
+  Return pending event count for one session.
+  """
   def session_size(session_id) when is_binary(session_id) and session_id != "" do
     table = ensure_named_table(@table)
 
@@ -99,6 +127,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec session_ids() :: [String.t()]
+  @doc """
+  Return session IDs currently represented in pending state.
+  """
   def session_ids do
     index_table = ensure_named_table(@index_table)
 
@@ -114,6 +145,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec max_seq(String.t()) :: {:ok, pos_integer()} | :error
+  @doc """
+  Return the highest pending sequence for one session.
+  """
   def max_seq(session_id) when is_binary(session_id) and session_id != "" do
     index_table = ensure_named_table(@index_table)
 
@@ -124,6 +158,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec clear() :: :ok
+  @doc """
+  Clear all pending state.
+  """
   def clear do
     clear_table(@table)
     clear_table(@index_table)
@@ -131,6 +168,9 @@ defmodule Starcite.Runtime.EventStore.Pending do
   end
 
   @spec memory_bytes() :: non_neg_integer()
+  @doc """
+  Return approximate memory consumed by pending state.
+  """
   def memory_bytes do
     table = ensure_named_table(@table)
     words = :ets.info(table, :memory) || 0
