@@ -117,6 +117,56 @@ defmodule StarciteWeb.TailSocketTest do
       assert next_state.cursor == 1
     end
 
+    test "falls back to storage when a live cursor update misses ETS" do
+      ensure_repo_started()
+      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+      session_id = unique_id("ses")
+      {:ok, _} = Runtime.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      cold_rows = EventStore.from_cursor(session_id, 0, 1)
+      insert_cold_rows(session_id, cold_rows)
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = Runtime.ack_archived(session_id, 1)
+      assert :error = EventStore.get_event(session_id, 1)
+
+      handler_id = attach_tail_lookup_handler()
+      on_exit(fn -> detach_tail_lookup_handler(handler_id) end)
+
+      update = %{
+        version: 1,
+        session_id: session_id,
+        seq: 1,
+        last_seq: 1,
+        type: "content",
+        actor: "agent:test",
+        source: nil,
+        inserted_at: NaiveDateTime.utc_now()
+      }
+
+      state = %{base_state(session_id, 0) | replay_done: true}
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      frame = Jason.decode!(payload)
+      assert frame["seq"] == 1
+      assert next_state.cursor == 1
+
+      assert_receive {:tail_lookup,
+                      %{session_id: ^session_id, seq: 1, source: :ets, result: :miss}}
+
+      assert_receive {:tail_lookup,
+                      %{session_id: ^session_id, seq: 1, source: :storage, result: :hit}}
+    end
+
     test "replays across Postgres cold + ETS hot boundary" do
       ensure_repo_started()
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
@@ -142,6 +192,27 @@ defmodule StarciteWeb.TailSocketTest do
       assert frames == [1, 2, 3, 4]
       assert final_state.cursor == 4
     end
+  end
+
+  defp attach_tail_lookup_handler do
+    handler_id = "tail-lookup-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :tail, :cursor_lookup],
+        fn _event, _measurements, metadata, pid ->
+          send(pid, {:tail_lookup, metadata})
+        end,
+        test_pid
+      )
+
+    handler_id
+  end
+
+  defp detach_tail_lookup_handler(handler_id) when is_binary(handler_id) do
+    :telemetry.detach(handler_id)
   end
 
   defp append_event(id, event, opts \\ [])

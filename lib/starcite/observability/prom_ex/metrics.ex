@@ -161,6 +161,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
           event_name: [:starcite, :cursor, :update],
           measurement: :lag,
           description: "Cursor update lag (last_seq - seq)"
+        ),
+        counter("starcite_tail_cursor_lookup_total",
+          event_name: [:starcite, :tail, :cursor_lookup],
+          measurement: :count,
+          description: "Tail cursor lookups by source and result",
+          tags: [:source, :result]
         )
       ]
     )
