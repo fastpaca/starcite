@@ -19,9 +19,12 @@ defmodule Mix.Tasks.Bench.Internal do
     session_count = tuple_size(sessions)
     input_event_template = input_event_template(config.payload_bytes)
     stored_event_template = stored_event_template(input_event_template)
+    archived_cached_events_template = archived_cached_events_template(config.archived_read_window)
 
     runtime_sessions = prepare_runtime_sessions(sessions)
     fsm_initial_state = build_fsm_state(runtime_sessions)
+    archived_session_id = "internal-cache-benchee-#{System.system_time(:millisecond)}"
+    :ok = EventStore.cache_archived_events(archived_session_id, archived_cached_events_template)
 
     put_counter = :atomics.new(1, [])
     :atomics.put(put_counter, 1, 0)
@@ -37,6 +40,9 @@ defmodule Mix.Tasks.Bench.Internal do
 
     session_counter = :atomics.new(1, [])
     :atomics.put(session_counter, 1, 0)
+
+    cache_get_counter = :atomics.new(1, [])
+    :atomics.put(cache_get_counter, 1, 0)
 
     base_session =
       Session.new("bench-session", metadata: %{bench: true, scenario: "internal_attribution"})
@@ -74,8 +80,8 @@ defmodule Mix.Tasks.Bench.Internal do
       session_id = elem(sessions, rem(seq - 1, session_count))
       event = Map.put(stored_event_template, :seq, seq)
 
-      event_table = :ets.whereis(:starcite_event_store_events)
-      index_table = :ets.whereis(:starcite_event_store_session_max_seq)
+      event_table = :ets.whereis(:starcite_event_store_pending_events)
+      index_table = :ets.whereis(:starcite_event_store_pending_session_max_seq)
 
       true = :ets.insert(event_table, {{session_id, seq}, event})
       true = :ets.insert(index_table, {session_id, seq})
@@ -85,8 +91,8 @@ defmodule Mix.Tasks.Bench.Internal do
     fsm_apply_append = fn ->
       seq = :atomics.add_get(fsm_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
-      producer_seq = div(seq - 1, session_count) + 1
-      event_with_producer = with_bench_producer(input_event_template, session_id, producer_seq)
+      producer_id = "bench-fsm-#{session_id}-#{seq}"
+      event_with_producer = with_bench_producer(input_event_template, producer_id, 1)
       fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
       meta = %{index: seq}
 
@@ -107,8 +113,8 @@ defmodule Mix.Tasks.Bench.Internal do
     runtime_append = fn ->
       seq = :atomics.add_get(runtime_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
-      producer_seq = div(seq - 1, session_count) + 1
-      event_with_producer = with_bench_producer(input_event_template, session_id, producer_seq)
+      producer_id = "bench-runtime-#{session_id}-#{seq}"
+      event_with_producer = with_bench_producer(input_event_template, producer_id, 1)
 
       case Runtime.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
@@ -117,11 +123,36 @@ defmodule Mix.Tasks.Bench.Internal do
       end
     end
 
+    cached_get_event = fn ->
+      seq = :atomics.add_get(cache_get_counter, 1, 1)
+      target_seq = rem(seq - 1, config.archived_read_window) + 1
+
+      case EventStore.get_event(archived_session_id, target_seq) do
+        {:ok, _event} -> :ok
+        :error -> raise "event_store.get_event cache miss for seq=#{target_seq}"
+      end
+    end
+
+    cached_archived_read = fn ->
+      case EventStore.read_archived_events(archived_session_id, 1, config.archived_read_window) do
+        {:ok, events} when length(events) == config.archived_read_window -> :ok
+        {:ok, events} -> raise "unexpected archived read length: #{length(events)}"
+        {:error, reason} -> raise "event_store.read_archived_events failed: #{inspect(reason)}"
+      end
+    end
+
+    cache_promote_archived = fn ->
+      :ok = EventStore.cache_archived_events(archived_session_id, archived_cached_events_template)
+    end
+
     run_benchee(
       %{
         "session.append_event" => session_append,
         "event_store.memory_bytes" => fn -> EventStore.memory_bytes() end,
         "event_store.put_event" => put_event,
+        "event_store.get_event_cached" => cached_get_event,
+        "event_store.read_archived_events_cached" => cached_archived_read,
+        "event_store.cache_archived_events" => cache_promote_archived,
         "event_store.raw_ets_insert" => raw_ets_insert,
         "raft_fsm.apply_append" => fsm_apply_append,
         "runtime.append_event" => runtime_append
@@ -186,6 +217,7 @@ defmodule Mix.Tasks.Bench.Internal do
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
+      archived_read_window: env_integer("BENCH_ARCHIVED_READ_WINDOW", 256),
       parallel: env_integer("BENCH_PARALLEL", 8),
       warmup_seconds: env_integer("BENCH_WARMUP_SECONDS", 3),
       time_seconds: env_integer("BENCH_TIME_SECONDS", 10)
@@ -199,6 +231,7 @@ defmodule Mix.Tasks.Bench.Internal do
     IO.puts("  log_level: #{config.log_level}")
     IO.puts("  sessions: #{config.session_count}")
     IO.puts("  payload_bytes: #{config.payload_bytes}")
+    IO.puts("  archived_read_window: #{config.archived_read_window}")
     IO.puts("  parallel: #{config.parallel}")
     IO.puts("  warmup_seconds: #{config.warmup_seconds}")
     IO.puts("  time_seconds: #{config.time_seconds}")
@@ -268,6 +301,28 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp stored_event_template(input_event_template) when is_map(input_event_template) do
     Map.put(input_event_template, :inserted_at, NaiveDateTime.utc_now())
+  end
+
+  defp archived_cached_events_template(window_size)
+       when is_integer(window_size) and window_size > 0 do
+    inserted_at = NaiveDateTime.utc_now()
+
+    1..window_size
+    |> Enum.map(fn seq ->
+      %{
+        seq: seq,
+        type: "content",
+        payload: %{text: "cache-#{seq}"},
+        actor: "agent:benchee",
+        source: "benchmark",
+        metadata: %{bench: true, scenario: "internal_cached_read"},
+        refs: %{},
+        idempotency_key: nil,
+        producer_id: "bench-cache-producer",
+        producer_seq: seq,
+        inserted_at: inserted_at
+      }
+    end)
   end
 
   defp payload_text(payload_bytes) when is_integer(payload_bytes) and payload_bytes > 0 do

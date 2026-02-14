@@ -1,6 +1,33 @@
 defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
+  defmodule FailingWriteAdapter do
+    @behaviour Starcite.Archive.Adapter
+
+    use GenServer
+
+    @impl true
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{})
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def write_events(_rows), do: {:error, :db_down}
+
+    @impl true
+    def read_events(_session_id, _from_seq, _to_seq), do: {:ok, []}
+
+    @impl true
+    def upsert_session(_session), do: :ok
+
+    @impl true
+    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+
+    @impl true
+    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+  end
+
   alias Starcite.Runtime
   alias Starcite.Runtime.EventStore
   alias Starcite.Archive.IdempotentTestAdapter
@@ -41,6 +68,30 @@ defmodule Starcite.ArchiveTest do
       end,
       timeout: 2_000
     )
+  end
+
+  test "archive process fails loud on persistence write errors" do
+    {:ok, pid} =
+      start_supervised(
+        {Starcite.Archive,
+         flush_interval_ms: 10_000, adapter: FailingWriteAdapter, adapter_opts: []}
+      )
+
+    ref = Process.monitor(pid)
+
+    session_id = "ses-arch-fail-#{System.unique_integer([:positive, :monotonic])}"
+    {:ok, _} = Runtime.create_session(id: session_id)
+
+    {:ok, _} =
+      append_event(session_id, %{
+        type: "content",
+        payload: %{text: "m1"},
+        actor: "agent:test"
+      })
+
+    send(pid, :flush_tick)
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, {%RuntimeError{}, _}}, 2_000
   end
 
   describe "archive idempotency" do

@@ -4,8 +4,11 @@ defmodule Starcite.Archive do
 
   - periodically scans local `EventStore` session cursors
   - archives only sessions for groups led on this node
-  - persists batches through the configured adapter
+  - persists batches through `Starcite.Archive.Store`
   - acknowledges archived progress via local Raft command (`Runtime.ack_archived_local/2`)
+
+  Archive persistence failures are treated as fatal for this worker: the process
+  crashes and relies on supervisor restart rather than masking write failures.
   """
 
   use GenServer
@@ -23,7 +26,7 @@ defmodule Starcite.Archive do
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
-    adapter_mod = Keyword.fetch!(opts, :adapter)
+    adapter_mod = Keyword.get(opts, :adapter, Store.adapter())
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
@@ -128,7 +131,13 @@ defmodule Starcite.Archive do
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
     case Store.write_events(adapter, rows) do
-      {:ok, inserted} ->
+      {:ok, inserted} when is_integer(inserted) and inserted >= 0 ->
+        :ok =
+          EventStore.cache_archived_events(
+            session_id,
+            Enum.map(rows, &Map.delete(&1, :session_id))
+          )
+
         upto_seq = contiguous_upto(rows)
 
         case Runtime.ack_archived_local(session_id, upto_seq) do
@@ -177,18 +186,11 @@ defmodule Starcite.Archive do
             }
         end
 
-      {:error, _reason} ->
-        {
-          %{
-            attempted: attempted,
-            inserted: 0,
-            bytes_attempted: bytes_attempted,
-            bytes_inserted: 0,
-            pending_after: pending_before,
-            pending_sessions: 1
-          },
-          nil
-        }
+      {:ok, other} ->
+        raise "archive adapter returned invalid insert count for #{session_id}: #{inspect(other)}"
+
+      {:error, reason} ->
+        raise "archive write failed for #{session_id}: #{inspect(reason)}"
     end
   end
 

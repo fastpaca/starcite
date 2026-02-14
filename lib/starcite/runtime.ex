@@ -11,7 +11,6 @@ defmodule Starcite.Runtime do
 
   require Logger
 
-  alias Starcite.Archive.Store, as: ArchiveStore
   alias Starcite.Runtime.{EventStore, RaftFSM, RaftManager, RaftTopology}
   alias Starcite.Session
 
@@ -374,9 +373,9 @@ defmodule Starcite.Runtime do
       created_at: parse_utc_datetime!(created_at)
     }
 
-    case ArchiveStore.upsert_session(row) do
+    case Starcite.Archive.Store.upsert_session(row) do
       :ok -> :ok
-      {:error, :archive_write_unavailable} -> :ok
+      {:error, _reason} -> :ok
     end
   end
 
@@ -407,7 +406,7 @@ defmodule Starcite.Runtime do
     if archived_seq > cursor do
       from_seq = cursor + 1
       to_seq = min(archived_seq, cursor + limit)
-      ArchiveStore.read_events(id, from_seq, to_seq)
+      EventStore.read_archived_events(id, from_seq, to_seq)
     else
       {:ok, []}
     end
