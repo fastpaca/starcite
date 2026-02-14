@@ -209,7 +209,7 @@ defmodule StarciteWeb.TailSocketTest do
       eventually(fn ->
         {:ok, session} = Runtime.get_session(session_id)
         assert session.archived_seq == 1
-        assert :error = EventStore.get_event(session_id, 1)
+        assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)
 
       state = %{base_state(session_id, 0) | replay_done: true}
