@@ -1,28 +1,15 @@
 defmodule StarciteWeb.Auth.JWT do
   @moduledoc false
 
+  alias Joken.Signer
   alias StarciteWeb.Auth.JWKS
-
-  @supported_algs %{
-    "RS256" => :sha256
-  }
 
   @spec verify(String.t(), map()) :: {:ok, map()} | {:error, atom()}
   def verify(token, config) when is_binary(token) and token != "" and is_map(config) do
-    with {:ok, header_segment, claims_segment, signature_segment} <- split_jwt(token),
-         {:ok, header} <- decode_json_segment(header_segment),
-         {:ok, claims} <- decode_json_segment(claims_segment),
-         {:ok, digest_type} <- digest_type_for_header(header),
+    with {:ok, header} <- peek_header(token),
          {:ok, kid} <- kid_from_header(header),
-         {:ok, signing_key} <- JWKS.fetch_signing_key(config, kid),
-         {:ok, signature} <- decode_base64url(signature_segment),
-         :ok <-
-           verify_signature(
-             header_segment <> "." <> claims_segment,
-             signature,
-             signing_key,
-             digest_type
-           ),
+         {:ok, signer} <- JWKS.fetch_signing_key(config, kid),
+         {:ok, claims} <- verify_signature(token, signer),
          :ok <- validate_claims(claims, config) do
       {:ok, claims}
     end
@@ -30,52 +17,21 @@ defmodule StarciteWeb.Auth.JWT do
 
   def verify(_token, _config), do: {:error, :invalid_jwt}
 
-  defp split_jwt(token) when is_binary(token) do
-    case String.split(token, ".") do
-      [header_segment, claims_segment, signature_segment]
-      when header_segment != "" and claims_segment != "" and signature_segment != "" ->
-        {:ok, header_segment, claims_segment, signature_segment}
-
-      _ ->
-        {:error, :invalid_jwt}
+  defp peek_header(token) when is_binary(token) do
+    case Joken.peek_header(token) do
+      {:ok, header} when is_map(header) -> {:ok, header}
+      {:error, _reason} -> {:error, :invalid_jwt_header}
     end
   end
-
-  defp decode_json_segment(segment) when is_binary(segment) do
-    with {:ok, decoded} <- decode_base64url(segment),
-         {:ok, parsed} <- Jason.decode(decoded),
-         true <- is_map(parsed) do
-      {:ok, parsed}
-    else
-      _ -> {:error, :invalid_jwt}
-    end
-  end
-
-  defp decode_base64url(value) when is_binary(value) and value != "" do
-    case Base.url_decode64(value, padding: false) do
-      {:ok, decoded} -> {:ok, decoded}
-      :error -> {:error, :invalid_jwt}
-    end
-  end
-
-  defp digest_type_for_header(%{"alg" => alg}) when is_binary(alg) do
-    case Map.fetch(@supported_algs, alg) do
-      {:ok, digest_type} -> {:ok, digest_type}
-      :error -> {:error, :unsupported_jwt_alg}
-    end
-  end
-
-  defp digest_type_for_header(_header), do: {:error, :invalid_jwt_header}
 
   defp kid_from_header(%{"kid" => kid}) when is_binary(kid) and kid != "", do: {:ok, kid}
   defp kid_from_header(_header), do: {:error, :invalid_jwt_header}
 
-  defp verify_signature(signing_input, signature, signing_key, digest_type)
-       when is_binary(signing_input) and is_binary(signature) do
-    if :public_key.verify(signing_input, digest_type, signature, signing_key) do
-      :ok
-    else
-      {:error, :invalid_jwt_signature}
+  defp verify_signature(token, %Signer{} = signer) when is_binary(token) do
+    case Joken.verify(token, signer) do
+      {:ok, claims} when is_map(claims) -> {:ok, claims}
+      {:error, :signature_error} -> {:error, :invalid_jwt_signature}
+      {:error, _reason} -> {:error, :invalid_jwt}
     end
   end
 

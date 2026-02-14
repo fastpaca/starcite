@@ -1,12 +1,14 @@
 defmodule StarciteWeb.Auth.JWKS do
   @moduledoc false
 
+  alias Joken.Signer
+
   require Logger
 
   @cache_table :starcite_auth_jwks_cache
   @request_headers [{"accept", "application/json"}]
 
-  @type signing_key :: tuple()
+  @type signing_key :: Signer.t()
 
   @spec fetch_signing_key(map(), String.t()) :: {:ok, signing_key()} | {:error, atom()}
   def fetch_signing_key(config, kid)
@@ -109,63 +111,59 @@ defmodule StarciteWeb.Auth.JWKS do
   defp parse_jwks(body) when is_binary(body) do
     with {:ok, parsed} <- Jason.decode(body),
          %{"keys" => keys} <- parsed,
-         true <- is_list(keys) do
-      keys_by_kid =
-        Enum.reduce(keys, %{}, fn key, acc ->
-          case parse_jwk(key) do
-            {:ok, kid, signing_key} -> Map.put(acc, kid, signing_key)
-            :skip -> acc
-            {:error, _reason} -> acc
-          end
-        end)
-
-      if map_size(keys_by_kid) > 0 do
-        {:ok, keys_by_kid}
-      else
-        {:error, :invalid_jwks}
-      end
+         true <- is_list(keys),
+         true <- keys != [],
+         {:ok, keys_by_kid} <- keys_to_map(keys) do
+      {:ok, keys_by_kid}
     else
       _ -> {:error, :invalid_jwks}
     end
   end
 
-  defp parse_jwk(%{"kty" => "RSA", "kid" => kid, "n" => n, "e" => e} = key)
-       when is_binary(kid) and kid != "" and is_binary(n) and n != "" and is_binary(e) and e != "" do
-    with :ok <- validate_key_use(key),
-         :ok <- validate_key_alg(key),
-         {:ok, modulus} <- decode_jwk_integer(n),
-         {:ok, exponent} <- decode_jwk_integer(e) do
-      {:ok, kid, {:RSAPublicKey, modulus, exponent}}
+  defp keys_to_map(keys) when is_list(keys) do
+    Enum.reduce_while(keys, {:ok, %{}}, fn key, {:ok, acc} ->
+      with {:ok, kid, signing_key} <- parse_jwk(key),
+           :ok <- ensure_unique_kid(acc, kid) do
+        {:cont, {:ok, Map.put(acc, kid, signing_key)}}
+      else
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+  end
+
+  defp ensure_unique_kid(keys_by_kid, kid) when is_map(keys_by_kid) and is_binary(kid) do
+    if Map.has_key?(keys_by_kid, kid) do
+      {:error, :duplicate_jwt_kid}
     else
-      :skip -> :skip
-      {:error, _reason} = error -> error
+      :ok
     end
   end
 
-  defp parse_jwk(_key), do: :skip
-
-  defp validate_key_use(%{} = key) do
-    case Map.get(key, "use") do
-      nil -> :ok
-      "sig" -> :ok
-      _other -> :skip
-    end
+  defp parse_jwk(
+         %{
+           "kty" => "RSA",
+           "kid" => kid,
+           "use" => "sig",
+           "alg" => "RS256",
+           "n" => n,
+           "e" => e
+         } = key
+       )
+       when is_binary(kid) and kid != "" and is_binary(n) and n != "" and is_binary(e) and e != "" do
+    build_signer(kid, key)
   end
 
-  defp validate_key_alg(%{} = key) do
-    case Map.get(key, "alg") do
-      nil -> :ok
-      "RS256" -> :ok
-      _other -> :skip
-    end
-  end
+  defp parse_jwk(_key), do: {:error, :invalid_jwks}
 
-  defp decode_jwk_integer(value) when is_binary(value) and value != "" do
-    case Base.url_decode64(value, padding: false) do
-      {:ok, decoded} when byte_size(decoded) > 0 ->
-        {:ok, :binary.decode_unsigned(decoded)}
-
-      _ ->
+  defp build_signer(kid, jwk_map) when is_binary(kid) and is_map(jwk_map) do
+    try do
+      {:ok, kid, Signer.create("RS256", jwk_map)}
+    rescue
+      _error ->
+        {:error, :invalid_jwks}
+    catch
+      _class, _reason ->
         {:error, :invalid_jwks}
     end
   end

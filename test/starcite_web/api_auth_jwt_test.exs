@@ -127,6 +127,44 @@ defmodule StarciteWeb.ApiAuthJwtTest do
            ]
   end
 
+  test "returns 401 when JWKS is structurally invalid in jwt mode" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-invalid-jwks"
+
+    invalid_jwks =
+      AuthTestSupport.jwks_for_private_key(private_key, kid)
+      |> Map.update!("keys", fn [key] -> [Map.delete(key, "use")] end)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(invalid_jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    token =
+      AuthTestSupport.sign_rs256(
+        private_key,
+        valid_claims(sub: "svc:customer-a", scope: "sessions:create"),
+        kid
+      )
+
+    conn =
+      json_conn(:post, "/v1/sessions", %{"id" => unique_id("ses")}, [
+        {"authorization", "Bearer #{token}"}
+      ])
+
+    assert conn.status == 401
+    body = Jason.decode!(conn.resp_body)
+    assert body["error"] == "unauthorized"
+
+    assert get_resp_header(conn, "www-authenticate") == [
+             ~s(Bearer realm="starcite", error="invalid_token")
+           ]
+  end
+
   test "returns 403 when token is missing required scope" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
