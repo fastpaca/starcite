@@ -73,7 +73,13 @@ defmodule StarciteWeb.ApiAuthJwtTest do
       json_conn(
         :post,
         "/v1/sessions/#{session_id}/append",
-        %{"type" => "content", "payload" => %{"text" => "ok"}, "actor" => "agent:test"},
+        %{
+          "type" => "content",
+          "payload" => %{"text" => "ok"},
+          "actor" => "agent:test",
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        },
         [auth_header]
       )
 
