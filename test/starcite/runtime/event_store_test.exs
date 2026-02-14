@@ -1,6 +1,7 @@
 defmodule Starcite.Runtime.EventStoreTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Runtime.EventStore
 
   setup do
@@ -11,6 +12,122 @@ defmodule Starcite.Runtime.EventStoreTest do
     end)
 
     :ok
+  end
+
+  test "get_event reads archived cache entries when pending ETS is empty" do
+    session_id = "ses-cache-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    :ok =
+      EventStore.cache_archived_events(session_id, [
+        %{
+          seq: 1,
+          type: "content",
+          payload: %{text: "from-cache"},
+          actor: "agent:test",
+          producer_id: "writer:test",
+          producer_seq: 1,
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: inserted_at
+        }
+      ])
+
+    assert {:ok, event} = EventStore.get_event(session_id, 1)
+    assert event.payload == %{text: "from-cache"}
+    assert :error = EventStore.get_event(session_id, 2)
+  end
+
+  test "read_archived_events caches persistence reads and avoids repeated adapter calls" do
+    setup_idempotent_archive_adapter()
+
+    session_id = "ses-archive-cache-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    rows =
+      for seq <- 1..3 do
+        %{
+          session_id: session_id,
+          seq: seq,
+          type: "content",
+          payload: %{n: seq},
+          actor: "agent:test",
+          producer_id: "writer:test",
+          producer_seq: seq,
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: inserted_at
+        }
+      end
+
+    assert {:ok, 3} = IdempotentTestAdapter.write_events(rows)
+
+    assert {:ok, first} = EventStore.read_archived_events(session_id, 1, 3)
+    assert Enum.map(first, & &1.seq) == [1, 2, 3]
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 3}]
+
+    assert {:ok, second} = EventStore.read_archived_events(session_id, 1, 3)
+    assert second == first
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 3}]
+  end
+
+  test "read_archived_events fills only missing cache gaps from persistence" do
+    setup_idempotent_archive_adapter()
+
+    session_id = "ses-archive-gaps-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    rows = archived_rows(session_id, inserted_at, 1..6)
+    assert {:ok, 6} = IdempotentTestAdapter.write_events(rows)
+
+    cached_subset =
+      rows
+      |> Enum.filter(&(&1.seq in [1, 2, 5]))
+      |> Enum.map(&Map.delete(&1, :session_id))
+
+    :ok = EventStore.cache_archived_events(session_id, cached_subset)
+
+    assert {:ok, events} = EventStore.read_archived_events(session_id, 1, 6)
+    assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5, 6]
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 3, 4}, {session_id, 6, 6}]
+
+    assert {:ok, again} = EventStore.read_archived_events(session_id, 1, 6)
+    assert Enum.map(again, & &1.seq) == [1, 2, 3, 4, 5, 6]
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 3, 4}, {session_id, 6, 6}]
+  end
+
+  test "reclaims archived cache before applying write backpressure" do
+    cache_session_id = "ses-cache-pressure-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+
+    :ok =
+      EventStore.cache_archived_events(
+        cache_session_id,
+        archived_events_only(inserted_at, 1..256)
+      )
+
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
+
+    pending_session_id = "ses-pending-pressure-#{System.unique_integer([:positive, :monotonic])}"
+
+    assert :ok =
+             EventStore.put_event(pending_session_id, %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               producer_id: "writer:test",
+               producer_seq: 1,
+               source: nil,
+               metadata: %{},
+               refs: %{},
+               idempotency_key: nil,
+               inserted_at: inserted_at
+             })
   end
 
   test "stores and fetches events by {session_id, seq}" do
@@ -236,6 +353,63 @@ defmodule Starcite.Runtime.EventStoreTest do
       else
         Application.put_env(app, key, previous)
       end
+    end)
+  end
+
+  defp setup_idempotent_archive_adapter do
+    if pid = Process.whereis(IdempotentTestAdapter) do
+      GenServer.stop(pid)
+    end
+
+    start_supervised!({IdempotentTestAdapter, []})
+    :ok = IdempotentTestAdapter.clear_writes()
+
+    previous_adapter = Application.get_env(:starcite, :archive_adapter)
+    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
+
+    on_exit(fn ->
+      if previous_adapter do
+        Application.put_env(:starcite, :archive_adapter, previous_adapter)
+      else
+        Application.delete_env(:starcite, :archive_adapter)
+      end
+    end)
+  end
+
+  defp archived_rows(session_id, inserted_at, seqs) do
+    Enum.map(seqs, fn seq ->
+      %{
+        session_id: session_id,
+        seq: seq,
+        type: "content",
+        payload: %{n: seq},
+        actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: seq,
+        source: nil,
+        metadata: %{},
+        refs: %{},
+        idempotency_key: nil,
+        inserted_at: inserted_at
+      }
+    end)
+  end
+
+  defp archived_events_only(inserted_at, seqs) do
+    Enum.map(seqs, fn seq ->
+      %{
+        seq: seq,
+        type: "content",
+        payload: %{n: seq},
+        actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: seq,
+        source: nil,
+        metadata: %{},
+        refs: %{},
+        idempotency_key: nil,
+        inserted_at: inserted_at
+      }
     end)
   end
 end

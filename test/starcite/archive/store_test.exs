@@ -3,6 +3,28 @@ defmodule Starcite.Archive.StoreTest do
 
   alias Starcite.Archive.{IdempotentTestAdapter, Store, TestAdapter}
 
+  defmodule FailingReadAdapter do
+    @behaviour Starcite.Archive.Adapter
+
+    @impl true
+    def start_link(_opts), do: {:ok, self()}
+
+    @impl true
+    def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
+
+    @impl true
+    def read_events(_session_id, _from_seq, _to_seq), do: {:error, :db_down}
+
+    @impl true
+    def upsert_session(_session), do: :ok
+
+    @impl true
+    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+
+    @impl true
+    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+  end
+
   setup do
     if pid = Process.whereis(IdempotentTestAdapter) do
       GenServer.stop(pid)
@@ -10,46 +32,22 @@ defmodule Starcite.Archive.StoreTest do
 
     start_supervised!({IdempotentTestAdapter, []})
     :ok = IdempotentTestAdapter.clear_writes()
-    _ = Cachex.clear(:starcite_archive_read_cache)
 
     previous_adapter = Application.get_env(:starcite, :archive_adapter)
-    previous_cache_max_bytes = Application.get_env(:starcite, :archive_read_cache_max_bytes)
-
-    previous_cache_reclaim_fraction =
-      Application.get_env(:starcite, :archive_read_cache_reclaim_fraction)
-
     Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
 
     on_exit(fn ->
-      _ = Cachex.clear(:starcite_archive_read_cache)
-
       if previous_adapter do
         Application.put_env(:starcite, :archive_adapter, previous_adapter)
       else
         Application.delete_env(:starcite, :archive_adapter)
-      end
-
-      if is_nil(previous_cache_max_bytes) do
-        Application.delete_env(:starcite, :archive_read_cache_max_bytes)
-      else
-        Application.put_env(:starcite, :archive_read_cache_max_bytes, previous_cache_max_bytes)
-      end
-
-      if is_nil(previous_cache_reclaim_fraction) do
-        Application.delete_env(:starcite, :archive_read_cache_reclaim_fraction)
-      else
-        Application.put_env(
-          :starcite,
-          :archive_read_cache_reclaim_fraction,
-          previous_cache_reclaim_fraction
-        )
       end
     end)
 
     :ok
   end
 
-  test "reads through adapter and caches repeated archive ranges" do
+  test "reads through adapter each time" do
     session_id = "ses-store-#{System.unique_integer([:positive, :monotonic])}"
     rows = build_rows(session_id, 1..3)
 
@@ -61,10 +59,10 @@ defmodule Starcite.Archive.StoreTest do
     assert {:ok, second} = Store.read_events(session_id, 1, 2)
     assert second == first
 
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 2}]
+    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 2}, {session_id, 1, 2}]
   end
 
-  test "cache keys are adapter-specific" do
+  test "adapter selection is explicit per read call" do
     session_id = "ses-store-adapter-#{System.unique_integer([:positive, :monotonic])}"
     rows = build_rows(session_id, 1..1)
 
@@ -76,18 +74,11 @@ defmodule Starcite.Archive.StoreTest do
     assert {:ok, []} = Store.read_events(TestAdapter, session_id, 1, 1)
   end
 
-  test "cache enforcement evicts when max bytes budget is exceeded" do
-    Application.put_env(:starcite, :archive_read_cache_max_bytes, 1)
-    Application.put_env(:starcite, :archive_read_cache_reclaim_fraction, 0.5)
+  test "normalizes persistence read failures" do
+    session_id = "ses-store-fail-#{System.unique_integer([:positive, :monotonic])}"
 
-    session_id = "ses-store-budget-#{System.unique_integer([:positive, :monotonic])}"
-    rows = build_rows(session_id, 1..1)
-    assert {:ok, 1} = Store.write_events(rows)
-
-    assert {:ok, [%{seq: 1}]} = Store.read_events(session_id, 1, 1)
-    assert {:ok, [%{seq: 1}]} = Store.read_events(session_id, 1, 1)
-
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 1}, {session_id, 1, 1}]
+    assert {:error, :archive_read_unavailable} =
+             Store.read_events(FailingReadAdapter, session_id, 1, 10)
   end
 
   test "upserts and lists session catalog rows" do

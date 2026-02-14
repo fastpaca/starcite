@@ -407,7 +407,7 @@ defmodule Starcite.Runtime do
     if archived_seq > cursor do
       from_seq = cursor + 1
       to_seq = min(archived_seq, cursor + limit)
-      ArchiveStore.read_events(id, from_seq, to_seq)
+      EventStore.read_archived_events(id, from_seq, to_seq)
     else
       {:ok, []}
     end

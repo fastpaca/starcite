@@ -129,6 +129,12 @@ defmodule Starcite.Archive do
 
     case Store.write_events(adapter, rows) do
       {:ok, inserted} ->
+        :ok =
+          EventStore.cache_archived_events(
+            session_id,
+            Enum.map(rows, &Map.delete(&1, :session_id))
+          )
+
         upto_seq = contiguous_upto(rows)
 
         case Runtime.ack_archived_local(session_id, upto_seq) do

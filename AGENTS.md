@@ -8,6 +8,7 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - Use the built-in [`Req`](https://hexdocs.pm/req/Req.html) client for HTTP. Do not add `:httpoison`, `:tesla`, or `:httpc`.
 - Never introduce new dependencies or services without explicit approval.
 - Keep the default Tailwind v4 imports in `assets/css/app.css`; extend styling with Tailwind utility classes, not `@apply`.
+- Do not add decorative separator/banner comments (for example `# -----`); keep comments meaningful and specific.
 
 ## Golden Patterns
 
