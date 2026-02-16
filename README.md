@@ -10,9 +10,7 @@ starcite is the session log underneath: every message, tool call, and status upd
 
 It makes the hard operational work explicit so your app can focus on product behavior, not stream recovery.
 
-## Three API calls. A hundred edge cases
-
-Most AI systems face the same reliability gaps:
+**Most AI systems face the same reliability gaps**:
 
 - Response lost on page refresh
 - Tab switch kills the stream
