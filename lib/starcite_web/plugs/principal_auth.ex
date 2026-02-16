@@ -44,9 +44,17 @@ defmodule StarciteWeb.Plugs.PrincipalAuth do
 
       :jwt ->
         with {:ok, token} <- ServiceAuth.bearer_token(conn),
-             auth_result <- authenticate_principal_token(token) do
-          service_reason = conn.assigns[:service_auth_error]
-          merge_auth_result(token, service_reason, auth_result)
+             {:ok, principal_context} <- authenticate_principal_token(token) do
+          {:ok, %{principal_context | bearer_token: token}}
+        else
+          {:error, principal_reason} ->
+            case conn.assigns do
+              %{service_auth_error: service_reason} ->
+                {:error, auth_error(service_reason, principal_reason)}
+
+              _ ->
+                {:error, principal_reason}
+            end
         end
     end
   end
@@ -68,8 +76,7 @@ defmodule StarciteWeb.Plugs.PrincipalAuth do
                bearer_token: nil,
                principal: principal_context.principal,
                scopes: principal_context.scopes,
-               session_ids: principal_context.session_ids,
-               owner_principal_ids: principal_context.owner_principal_ids
+               session_ids: principal_context.session_ids
              }}
 
           {:error, reason} ->
@@ -92,12 +99,11 @@ defmodule StarciteWeb.Plugs.PrincipalAuth do
             {:ok, auth_context}
 
           {:error, service_reason} ->
-            case authenticate_principal_token(token) do
-              {:ok, principal_context} ->
-                {:ok, %{principal_context | bearer_token: token}}
-
+            with {:ok, principal_context} <- authenticate_principal_token(token) do
+              {:ok, %{principal_context | bearer_token: token}}
+            else
               {:error, principal_reason} ->
-                {:error, choose_auth_error(service_reason, principal_reason)}
+                {:error, auth_error(service_reason, principal_reason)}
             end
         end
     end
@@ -125,22 +131,7 @@ defmodule StarciteWeb.Plugs.PrincipalAuth do
     ~s(Bearer realm="starcite", error="invalid_token")
   end
 
-  defp choose_auth_error(:token_expired, _principal_reason), do: :token_expired
-  defp choose_auth_error(_jwt_reason, :token_expired), do: :token_expired
-  defp choose_auth_error(jwt_reason, _principal_reason), do: jwt_reason
-
-  defp merge_auth_result(_token, _service_reason, {:error, :token_expired}),
-    do: {:error, :token_expired}
-
-  defp merge_auth_result(token, _service_reason, {:ok, principal_context}) do
-    {:ok, %{principal_context | bearer_token: token}}
-  end
-
-  defp merge_auth_result(_token, nil, {:error, principal_reason}),
-    do: {:error, principal_reason}
-
-  defp merge_auth_result(_token, service_reason, {:error, principal_reason})
-       when is_atom(service_reason) and is_atom(principal_reason) do
-    {:error, choose_auth_error(service_reason, principal_reason)}
-  end
+  defp auth_error(:token_expired, _principal_reason), do: :token_expired
+  defp auth_error(_service_reason, :token_expired), do: :token_expired
+  defp auth_error(service_reason, _principal_reason), do: service_reason
 end

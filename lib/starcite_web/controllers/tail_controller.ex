@@ -21,10 +21,10 @@ defmodule StarciteWeb.TailController do
     auth_bearer_token = auth_bearer_token(conn)
     auth = conn.assigns[:auth] || %{kind: :none}
 
-    with {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
-         :ok <- Policy.authorize_session_reference(auth, id),
+    with {:ok, cursor} <- parse_cursor_param(params),
+         :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- Runtime.get_session(id),
-         :ok <- Policy.authorize_tail(auth, session) do
+         :ok <- Policy.allowed_to_read_session(auth, session) do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
@@ -36,6 +36,9 @@ defmodule StarciteWeb.TailController do
   end
 
   def tail(_conn, _params), do: {:error, :invalid_session_id}
+
+  defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
+  defp parse_cursor_param(%{}), do: {:ok, 0}
 
   defp parse_cursor(nil), do: {:ok, 0}
   defp parse_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: {:ok, cursor}
@@ -70,13 +73,9 @@ defmodule StarciteWeb.TailController do
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
   end
 
-  defp auth_bearer_token(conn) do
-    case conn.assigns[:auth] do
-      %{bearer_token: bearer_token} when is_binary(bearer_token) and bearer_token != "" ->
-        bearer_token
+  defp auth_bearer_token(%{assigns: %{auth: %{bearer_token: bearer_token}}})
+       when is_binary(bearer_token) and bearer_token != "",
+       do: bearer_token
 
-      _ ->
-        nil
-    end
-  end
+  defp auth_bearer_token(_conn), do: nil
 end

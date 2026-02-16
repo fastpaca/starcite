@@ -37,9 +37,9 @@ defmodule StarciteWeb.SessionController do
   def append(conn, %{"id" => id} = params) do
     auth = conn.assigns[:auth] || %{kind: :none}
 
-    with :ok <- Policy.authorize_session_reference(auth, id),
+    with :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- Runtime.get_session(id),
-         :ok <- Policy.authorize_append(auth, session),
+         :ok <- Policy.allowed_to_append_session(auth, session),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- Runtime.append_event(id, event, expected_seq: expected_seq) do
       conn
@@ -57,7 +57,7 @@ defmodule StarciteWeb.SessionController do
     auth = conn.assigns[:auth] || %{kind: :none}
 
     with {:ok, opts} <- validate_list(params),
-         {:ok, scope} <- Policy.authorize_list_sessions(auth),
+         {:ok, scope} <- Policy.can_list_sessions(auth),
          {:ok, page} <- list_sessions(scope, opts) do
       json(conn, page)
     end
@@ -66,7 +66,7 @@ defmodule StarciteWeb.SessionController do
   # Validation
 
   defp validate_create(params, auth) when is_map(params) and is_map(auth) do
-    with {:ok, creator_principal} <- Policy.authorize_create_session(auth, params),
+    with {:ok, creator_principal} <- Policy.can_create_session(auth, params),
          {:ok, id} <- optional_non_empty_string(params["id"]),
          {:ok, title} <- optional_string(params["title"]),
          {:ok, metadata} <- optional_object(params["metadata"]) do
@@ -94,13 +94,13 @@ defmodule StarciteWeb.SessionController do
        when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
     with {:ok, validated_producer_id} <- required_non_empty_string(producer_id),
          {:ok, validated_producer_seq} <- required_positive_integer(producer_seq),
-         {:ok, actor} <- Policy.resolve_actor(auth, params["actor"]),
+         {:ok, actor} <- Policy.resolve_event_actor(auth, params["actor"]),
          {:ok, source} <- optional_non_empty_string(params["source"]),
          {:ok, metadata} <- optional_object(params["metadata"]),
          {:ok, refs} <- optional_refs(params["refs"]),
          {:ok, idempotency_key} <- optional_non_empty_string(params["idempotency_key"]),
          {:ok, expected_seq} <- optional_non_neg_integer(params["expected_seq"]) do
-      metadata = Policy.stamp_event_metadata(auth, metadata)
+      metadata = Policy.attach_principal_metadata(auth, metadata)
 
       event = %{
         type: type,

@@ -26,7 +26,7 @@ defmodule StarciteWeb.AuthTokenController do
       ) do
     auth = conn.assigns[:auth] || %{kind: :none}
 
-    with :ok <- Policy.authorize_issue_token(auth),
+    with :ok <- Policy.can_issue_token(auth),
          {:ok, issued} <- PrincipalToken.issue(params, ServiceAuth.config()) do
       principal = issued.principal
 
@@ -41,8 +41,7 @@ defmodule StarciteWeb.AuthTokenController do
           type: Atom.to_string(principal.type)
         },
         scopes: issued.scopes,
-        session_ids: issued.session_ids,
-        owner_principal_ids: issued.owner_principal_ids
+        session_ids: issued.session_ids
       })
     end
   end
