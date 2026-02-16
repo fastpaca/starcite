@@ -23,6 +23,7 @@ defmodule Starcite.Archive.Adapter do
   @type session_row :: %{
           required(:id) => String.t(),
           optional(:title) => String.t() | nil,
+          required(:creator_principal) => Principal.t() | nil,
           optional(:metadata) => map(),
           required(:created_at) => DateTime.t()
         }
@@ -30,7 +31,9 @@ defmodule Starcite.Archive.Adapter do
   @type session_query :: %{
           optional(:limit) => pos_integer(),
           optional(:cursor) => String.t() | nil,
-          optional(:metadata) => map()
+          optional(:metadata) => map(),
+          optional(:owner_principal_ids) => [String.t()],
+          optional(:tenant_id) => String.t()
         }
 
   @type session_page :: %{
@@ -47,3 +50,5 @@ defmodule Starcite.Archive.Adapter do
   @callback list_sessions_by_ids([String.t()], session_query()) ::
               {:ok, session_page()} | {:error, term()}
 end
+
+alias Starcite.Auth.Principal

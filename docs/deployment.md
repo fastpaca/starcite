@@ -67,17 +67,25 @@ docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --re
 Starcite can run with no API auth or with JWT validation at the boundary:
 
 - `STARCITE_AUTH_MODE=none` (default): API boundary is unauthenticated.
-- `STARCITE_AUTH_MODE=jwt`: `Authorization: Bearer <jwt>` required on `/v1/*` HTTP and WebSocket upgrades.
+- `STARCITE_AUTH_MODE=jwt`: layered auth on `/v1/*` HTTP and WebSocket upgrades.
 - `Authorization` is optional for `/health/live` and `/health/ready`.
 
-When JWT mode is enabled, Starcite validates:
+When JWT mode is enabled:
+
+- Service JWTs are validated using JWKS (`iss`/`aud`/`exp`).
+- Service JWTs can call service-only endpoints (`/v1/auth/issue`, session create/list).
+- `/v1/auth/issue` mints short-lived scoped principal tokens signed by Starcite.
+- Principal tokens can access append/tail within scope/session/tenant limits.
+
+Service JWT validation:
 
 - signature (JWKS from `STARCITE_AUTH_JWKS_URL`)
 - `iss` (`STARCITE_AUTH_JWT_ISSUER`)
 - `aud` (`STARCITE_AUTH_JWT_AUDIENCE`)
 - `exp` with optional leeway (`STARCITE_AUTH_JWT_LEEWAY_SECONDS`)
 
-Missing or invalid token -> `401` (HTTP) or WebSocket close.
+Missing/invalid token -> `401` (HTTP) or WebSocket close.
+Policy denial (scope/session/tenant) -> `403` for HTTP/WebSocket upgrade.
 
 ## Key config
 
@@ -114,6 +122,9 @@ Missing or invalid token -> `401` (HTTP) or WebSocket close.
 | `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT audience |
 | `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Token clock-skew tolerance |
 | `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache refresh interval |
+| `STARCITE_AUTH_PRINCIPAL_TOKEN_SALT` | `principal-token-v1` | Phoenix.Token salt for principal token signing |
+| `STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS` | `600` | Default principal token TTL |
+| `STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS` | `900` | Maximum principal token TTL |
 | `DB_POOL_SIZE` | `10` | Postgres pool size |
 | `PORT` | `4000` | HTTP port |
 | `PHX_SERVER` | unset | Enable Phoenix endpoint in releases |

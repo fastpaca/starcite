@@ -10,16 +10,20 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Runtime
+  alias StarciteWeb.Auth.Context
+  alias StarciteWeb.Plugs.PrincipalAuth
 
   action_fallback StarciteWeb.FallbackController
 
+  plug :ensure_websocket_upgrade_plug when action in [:tail]
+
   def tail(conn, %{"id" => id} = params) do
     auth_bearer_token = auth_bearer_token(conn)
+    auth_context = conn.assigns[:auth] || %Context{}
 
-    with :ok <- ensure_websocket_upgrade(conn),
-         {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
-         {:ok, _session} <- Runtime.get_session(id) do
+    with {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
+         {:ok, _session} <-
+           PrincipalAuth.authorize_session_request(auth_context, id, "session:read") do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
@@ -43,6 +47,18 @@ defmodule StarciteWeb.TailController do
   end
 
   defp parse_cursor(_), do: {:error, :invalid_cursor}
+
+  defp ensure_websocket_upgrade_plug(conn, _opts) do
+    case ensure_websocket_upgrade(conn) do
+      :ok ->
+        conn
+
+      {:error, reason} ->
+        conn
+        |> StarciteWeb.FallbackController.call({:error, reason})
+        |> halt()
+    end
+  end
 
   defp ensure_websocket_upgrade(conn) do
     has_upgrade? =

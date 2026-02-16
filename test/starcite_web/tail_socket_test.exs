@@ -5,19 +5,20 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Repo
-  alias StarciteWeb.Auth
   alias StarciteWeb.TailSocket
+
+  @auth_env_key StarciteWeb.Auth
 
   setup do
     Starcite.Runtime.TestHelper.reset()
     Process.put(:producer_seq_counters, %{})
-    previous_auth = Application.get_env(:starcite, Auth)
+    previous_auth = Application.get_env(:starcite, @auth_env_key)
 
     on_exit(fn ->
       if is_nil(previous_auth) do
-        Application.delete_env(:starcite, Auth)
+        Application.delete_env(:starcite, @auth_env_key)
       else
-        Application.put_env(:starcite, Auth, previous_auth)
+        Application.put_env(:starcite, @auth_env_key, previous_auth)
       end
     end)
 
@@ -329,7 +330,7 @@ defmodule StarciteWeb.TailSocketTest do
     test "stops socket when token validation fails on live updates" do
       Application.put_env(
         :starcite,
-        Auth,
+        @auth_env_key,
         mode: :jwt,
         issuer: "https://issuer.example",
         audience: "starcite-api",

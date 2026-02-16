@@ -228,7 +228,12 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = RaftFSM.init(%{group_id: 0})
 
     {seeded, {:reply, {:ok, _session}}} =
-      RaftFSM.apply(nil, {:create_session, session_id, nil, %{}}, state)
+      RaftFSM.apply(
+        nil,
+        {:create_session, session_id, nil,
+         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, %{}},
+        state
+      )
 
     seeded
   end

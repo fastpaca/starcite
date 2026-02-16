@@ -248,13 +248,47 @@ jwks_refresh_ms =
     raw -> parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
   end
 
+principal_token_salt =
+  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_SALT") do
+    nil -> "principal-token-v1"
+    raw -> String.trim(raw)
+  end
+
+if principal_token_salt == "" do
+  raise ArgumentError, "invalid STARCITE_AUTH_PRINCIPAL_TOKEN_SALT: cannot be empty"
+end
+
+principal_token_default_ttl_seconds =
+  # Default expiry for issued principal tokens when request omits `ttl_seconds`.
+  # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS.
+  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS") do
+    nil -> 600
+    raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS", raw)
+  end
+
+principal_token_max_ttl_seconds =
+  # Hard upper bound for issued principal token expiry, even when caller supplies `ttl_seconds`.
+  # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS.
+  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS") do
+    nil -> 900
+    raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS", raw)
+  end
+
+if principal_token_default_ttl_seconds > principal_token_max_ttl_seconds do
+  raise ArgumentError,
+        "invalid principal token ttl settings: STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS exceeds STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS"
+end
+
 auth_config =
   case auth_mode do
     :none ->
       [
         mode: :none,
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms
+        jwks_refresh_ms: jwks_refresh_ms,
+        principal_token_salt: principal_token_salt,
+        principal_token_default_ttl_seconds: principal_token_default_ttl_seconds,
+        principal_token_max_ttl_seconds: principal_token_max_ttl_seconds
       ]
 
     :jwt ->
@@ -264,7 +298,10 @@ auth_config =
         audience: required_non_empty_env!.("STARCITE_AUTH_JWT_AUDIENCE"),
         jwks_url: required_non_empty_env!.("STARCITE_AUTH_JWKS_URL"),
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms
+        jwks_refresh_ms: jwks_refresh_ms,
+        principal_token_salt: principal_token_salt,
+        principal_token_default_ttl_seconds: principal_token_default_ttl_seconds,
+        principal_token_max_ttl_seconds: principal_token_max_ttl_seconds
       ]
   end
 

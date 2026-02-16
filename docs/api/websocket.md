@@ -11,9 +11,15 @@ ws://HOST/v1/sessions/:id/tail?cursor=41
 If `STARCITE_AUTH_MODE=jwt` is enabled, include an `Authorization: Bearer <jwt>` header
 during the WebSocket upgrade request.
 
-Auth behavior in JWT mode:
+In JWT mode Starcite accepts:
 
-- Missing/invalid/expired token: HTTP `401` during upgrade.
+- service JWT bearer token
+- Starcite-issued principal bearer token
+
+Auth behavior:
+
+- Missing/invalid/expired token: HTTP `401` during upgrade
+- Valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
 
 ## Semantics
 

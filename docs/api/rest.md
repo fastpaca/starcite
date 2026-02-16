@@ -4,27 +4,54 @@ All endpoints are under `/v1`.
 
 ## Authentication
 
-If `STARCITE_AUTH_MODE=jwt`, requests must include:
+In `STARCITE_AUTH_MODE=jwt`, Starcite accepts two bearer token types:
+
+- service JWTs (customer/backend credentials)
+- Starcite-issued principal tokens (short-lived, scoped)
+
+Service JWT format:
 
 ```
 Authorization: Bearer <jwt>
 ```
 
-Unauthorized requests fail with a 401-style error response.
+Principal token format:
+
+```
+Authorization: Bearer <starcite_principal_token>
+```
+
+Unauthorized requests fail with `401`.
 
 ## Endpoints
 
 - `POST /v1/sessions`
   - create a session
+  - service token or user principal token
+  - agent principal tokens are forbidden
+  - principal tokens require `session:create` scope
+  - required fields for service tokens: `creator_principal: {tenant_id, id, type}`
+  - principal tokens cannot override `creator_principal`; creator defaults to the authenticated principal
   - optional fields: `id`, `title`, `metadata`
+
+- `POST /v1/auth/issue`
+  - issue short-lived principal token from service auth
+  - service token only
+  - required: `principal: {tenant_id, id, type}`, `scopes`
+  - optional: `session_ids`, `owner_principal_ids`, `ttl_seconds`
 
 - `GET /v1/sessions`
   - list sessions
+  - service token: lists all sessions
+  - user principal token: requires `session:read` scope and is tenant-fenced to the authenticated principal tenant
+  - user principal token: lists sessions whose `creator_principal.id` is the authenticated principal id or one of `owner_principal_ids`
+  - agent principal token: forbidden
   - supports `limit`, `cursor`, and metadata filters (for exact matching)
 
 - `POST /v1/sessions/:id/append`
   - append one event to a session
-  - required: `type`, `payload`, `actor`, `producer_id`, `producer_seq`
+  - required: `type`, `payload`, `producer_id`, `producer_seq`
+  - `actor` required for service tokens; optional/derived for principal tokens
   - optional: `source`, `metadata`, `refs`, `idempotency_key`, `expected_seq`
   - response: `{"seq", "last_seq", "deduped"}`
 
@@ -57,7 +84,8 @@ Error bodies include:
 Common status outcomes:
 
 - `400` invalid payload
-- `401` unauthorized (JWT mode only)
+- `401` unauthorized
+- `403` forbidden by scope/session/tenant policy
 - `404` session not found
 - `409` expected sequence or producer conflicts
 - `503` unavailable (routing or quorum related)

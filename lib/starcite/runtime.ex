@@ -30,12 +30,23 @@ defmodule Starcite.Runtime do
       end
 
     title = Keyword.get(opts, :title)
+    creator_principal = Keyword.get(opts, :creator_principal)
     metadata = Keyword.get(opts, :metadata, %{})
     group = RaftManager.group_for_session(id)
 
-    case call_on_replica(group, :create_session_local, [id, title, metadata], fn ->
-           create_session_local(id, title, metadata)
-         end) do
+    case call_on_replica(
+           group,
+           :create_session_local,
+           [id, title, creator_principal, metadata],
+           fn ->
+             create_session_local(
+               id,
+               title,
+               creator_principal,
+               metadata
+             )
+           end
+         ) do
       {:ok, session} = ok ->
         _ = maybe_index_session(session)
         ok
@@ -46,13 +57,16 @@ defmodule Starcite.Runtime do
   end
 
   @doc false
-  def create_session_local(id, title, metadata)
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and is_map(metadata) do
+  def create_session_local(id, title, creator_principal, metadata)
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             (is_struct(creator_principal, Starcite.Auth.Principal) or
+                is_nil(creator_principal)) and
+             is_map(metadata) do
     with {:ok, server_id, group} <- locate(id),
          :ok <- ensure_group_started(group) do
       case :ra.process_command(
              {server_id, Node.self()},
-             {:create_session, id, title, metadata},
+             {:create_session, id, title, creator_principal, metadata},
              @timeout
            ) do
         {:ok, {:reply, {:ok, data}}, _leader} -> {:ok, data}
@@ -63,7 +77,8 @@ defmodule Starcite.Runtime do
     end
   end
 
-  def create_session_local(_id, _title, _metadata), do: {:error, :invalid_session}
+  def create_session_local(_id, _title, _creator_principal, _metadata),
+    do: {:error, :invalid_session}
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(id) when is_binary(id) and id != "" do
@@ -227,6 +242,8 @@ defmodule Starcite.Runtime do
   defp ensure_group_started(group_id) do
     case RaftManager.start_group(group_id) do
       :ok -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, {:shutdown, {:failed_to_start_child, _child, {:already_started, _pid}}}} -> :ok
       {:error, reason} -> {:error, reason}
     end
   end
@@ -363,12 +380,21 @@ defmodule Starcite.Runtime do
     Process.whereis(RaftManager.server_id(group_id)) != nil
   end
 
-  defp maybe_index_session(%{id: id, title: title, metadata: metadata, created_at: created_at})
+  defp maybe_index_session(%{
+         id: id,
+         title: title,
+         creator_principal: creator_principal,
+         metadata: metadata,
+         created_at: created_at
+       })
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              (is_struct(creator_principal, Starcite.Auth.Principal) or
+                 is_nil(creator_principal)) and
               is_map(metadata) do
     row = %{
       id: id,
       title: title,
+      creator_principal: creator_principal,
       metadata: metadata,
       created_at: parse_utc_datetime!(created_at)
     }

@@ -10,7 +10,7 @@ defmodule StarciteWeb.TailSocket do
   alias Starcite.Observability.Telemetry
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
-  alias StarciteWeb.Auth
+  alias StarciteWeb.Plugs.{PrincipalAuth, ServiceAuth}
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
@@ -219,11 +219,11 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp ensure_tail_auth(%{auth_bearer_token: nil}) do
-    if Auth.mode() == :none, do: :ok, else: {:error, :missing_bearer_token}
+    if ServiceAuth.mode() == :none, do: :ok, else: {:error, :missing_bearer_token}
   end
 
   defp ensure_tail_auth(%{auth_bearer_token: token}) when is_binary(token) do
-    case Auth.authenticate_token(token) do
+    case PrincipalAuth.authenticate_token(token) do
       {:ok, _auth_context} -> :ok
       {:error, reason} -> {:error, reason}
     end

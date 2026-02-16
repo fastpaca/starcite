@@ -157,10 +157,13 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
     }
   end
 
-  defp normalize_session(%{id: id, title: title, metadata: metadata, created_at: created_at}) do
+  defp normalize_session(
+         %{id: id, title: title, metadata: metadata, created_at: created_at} = session
+       ) do
     %{
       id: id,
       title: title,
+      creator_principal: Map.get(session, :creator_principal),
       metadata: metadata,
       created_at: created_at
     }
@@ -168,6 +171,13 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
 
   defp session_page(sessions, query_opts) do
     metadata_filters = query_opts |> Map.get(:metadata, %{}) |> normalize_metadata_filters()
+    tenant_id = query_opts |> Map.get(:tenant_id) |> normalize_tenant_id()
+
+    owner_principal_ids =
+      query_opts
+      |> Map.get(:owner_principal_ids)
+      |> normalize_owner_principal_ids()
+
     cursor = Map.get(query_opts, :cursor)
     limit = Map.get(query_opts, :limit, 100)
 
@@ -177,7 +187,9 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       sorted
       |> Enum.filter(fn session ->
         (is_nil(cursor) or session.id > cursor) and
-          metadata_match?(session.metadata || %{}, metadata_filters)
+          tenant_match?(session.creator_principal, tenant_id) and
+          metadata_match?(session.metadata || %{}, metadata_filters) and
+          owner_principal_match?(session.creator_principal, owner_principal_ids)
       end)
 
     page = Enum.take(filtered, limit)
@@ -206,4 +218,37 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       Map.get(metadata, key) == expected
     end)
   end
+
+  defp normalize_owner_principal_ids(nil), do: :all
+
+  defp normalize_owner_principal_ids(ids) when is_list(ids) do
+    ids
+    |> Enum.uniq()
+    |> Enum.reject(&(&1 == ""))
+  end
+
+  defp normalize_owner_principal_ids(_invalid), do: []
+
+  defp owner_principal_match?(_creator_principal, :all), do: true
+
+  defp owner_principal_match?(creator_principal, owner_ids)
+       when is_map(creator_principal) and is_list(owner_ids) do
+    Enum.member?(owner_ids, creator_principal["id"] || creator_principal[:id])
+  end
+
+  defp owner_principal_match?(_creator_principal, _owner_ids), do: false
+
+  defp normalize_tenant_id(nil), do: :all
+  defp normalize_tenant_id(tenant_id) when is_binary(tenant_id) and tenant_id != "", do: tenant_id
+  defp normalize_tenant_id(_invalid), do: :none
+
+  defp tenant_match?(_creator_principal, :all), do: true
+  defp tenant_match?(_creator_principal, :none), do: false
+
+  defp tenant_match?(creator_principal, tenant_id)
+       when is_map(creator_principal) and is_binary(tenant_id) do
+    (creator_principal["tenant_id"] || creator_principal[:tenant_id]) == tenant_id
+  end
+
+  defp tenant_match?(_creator_principal, _tenant_id), do: false
 end
