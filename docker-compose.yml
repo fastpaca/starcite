@@ -9,6 +9,7 @@ services:
       PHX_HOST: ${PHX_HOST:-localhost}
       PORT: 4000
       DATABASE_URL: ${DATABASE_URL:-ecto://postgres:postgres@db:5432/starcite_dev}
+      STARCITE_ARCHIVE_ADAPTER: ${STARCITE_ARCHIVE_ADAPTER:-postgres}
       MIGRATE_ON_BOOT: ${MIGRATE_ON_BOOT:-true}
       # DNS clustering is disabled locally; set DNS_CLUSTER_QUERY in deployments
       DNS_CLUSTER_QUERY: ${DNS_CLUSTER_QUERY:-}

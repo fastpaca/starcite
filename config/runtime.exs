@@ -77,6 +77,22 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
+parse_bool! = fn env_name, raw ->
+  normalized = raw |> String.trim() |> String.downcase()
+
+  case normalized do
+    "1" -> true
+    "true" -> true
+    "yes" -> true
+    "on" -> true
+    "0" -> false
+    "false" -> false
+    "no" -> false
+    "off" -> false
+    _ -> raise ArgumentError, "invalid boolean for #{env_name}: #{inspect(raw)}"
+  end
+end
+
 parse_size_bytes! = fn env_name, raw ->
   case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
     [_, amount_raw, unit_raw] ->
@@ -125,6 +141,82 @@ required_non_empty_env! = fn env_name ->
       raise ArgumentError, "missing required environment variable #{env_name}"
   end
 end
+
+put_env_opt = fn opts, key, env_name, parser ->
+  case System.get_env(env_name) do
+    nil ->
+      opts
+
+    raw ->
+      value = String.trim(raw)
+
+      if value == "" do
+        opts
+      else
+        Keyword.put(opts, key, parser.(value))
+      end
+  end
+end
+
+archive_adapter =
+  case System.get_env("STARCITE_ARCHIVE_ADAPTER") do
+    nil ->
+      Application.get_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3)
+
+    raw ->
+      case raw |> String.trim() |> String.downcase() do
+        "s3" ->
+          Starcite.Archive.Adapter.S3
+
+        "postgres" ->
+          Starcite.Archive.Adapter.Postgres
+
+        other ->
+          raise ArgumentError,
+                "invalid STARCITE_ARCHIVE_ADAPTER: #{inspect(other)} (expected s3|postgres)"
+      end
+  end
+
+config :starcite, :archive_adapter, archive_adapter
+
+archive_adapter_opts =
+  case archive_adapter do
+    Starcite.Archive.Adapter.S3 ->
+      base_opts =
+        Application.get_env(:starcite, :archive_adapter_opts, [])
+        |> Keyword.new()
+
+      s3_opts =
+        []
+        |> put_env_opt.(:bucket, "STARCITE_S3_BUCKET", & &1)
+        |> put_env_opt.(:prefix, "STARCITE_S3_PREFIX", & &1)
+        |> put_env_opt.(:region, "STARCITE_S3_REGION", & &1)
+        |> put_env_opt.(:access_key_id, "STARCITE_S3_ACCESS_KEY_ID", & &1)
+        |> put_env_opt.(:secret_access_key, "STARCITE_S3_SECRET_ACCESS_KEY", & &1)
+        |> put_env_opt.(:security_token, "STARCITE_S3_SESSION_TOKEN", & &1)
+        |> put_env_opt.(:endpoint, "STARCITE_S3_ENDPOINT", & &1)
+        |> put_env_opt.(:chunk_size, "STARCITE_S3_CHUNK_SIZE", fn value ->
+          parse_positive_integer!.("STARCITE_S3_CHUNK_SIZE", value)
+        end)
+        |> put_env_opt.(:max_write_retries, "STARCITE_S3_MAX_WRITE_RETRIES", fn value ->
+          parse_positive_integer!.("STARCITE_S3_MAX_WRITE_RETRIES", value)
+        end)
+        |> put_env_opt.(:compressed, "STARCITE_S3_COMPRESSED", fn value ->
+          parse_bool!.("STARCITE_S3_COMPRESSED", value)
+        end)
+        |> put_env_opt.(:path_style, "STARCITE_S3_PATH_STYLE", fn value ->
+          parse_bool!.("STARCITE_S3_PATH_STYLE", value)
+        end)
+
+      resolved = Keyword.merge(base_opts, s3_opts)
+      config :starcite, :archive_adapter_opts, resolved
+      resolved
+
+    Starcite.Archive.Adapter.Postgres ->
+      opts = Application.get_env(:starcite, :archive_adapter_opts, [])
+      config :starcite, :archive_adapter_opts, opts
+      opts
+  end
 
 if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
   config :starcite,
@@ -216,11 +308,22 @@ if db_url && db_url != "" do
 end
 
 if config_env() == :prod do
-  if repo_url in [nil, ""] do
+  if archive_adapter == Starcite.Archive.Adapter.Postgres and repo_url in [nil, ""] do
     raise """
     environment variable DATABASE_URL or STARCITE_POSTGRES_URL is missing.
-    Starcite requires a configured archive database.
+    Starcite requires a configured Postgres archive database in postgres mode.
     """
+  end
+
+  if archive_adapter == Starcite.Archive.Adapter.S3 do
+    bucket = Keyword.get(archive_adapter_opts, :bucket)
+
+    if bucket in [nil, ""] do
+      raise """
+      environment variable STARCITE_S3_BUCKET is missing.
+      Starcite requires a configured S3 bucket in s3 mode.
+      """
+    end
   end
 
   # Optional: Override slot log directory (for mounting NVMe, etc)

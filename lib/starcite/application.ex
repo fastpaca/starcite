@@ -15,8 +15,8 @@ defmodule Starcite.Application do
         Starcite.Observability.PromEx,
         # Cache used by Runtime.EventStore for flushed event reads
         archive_read_cache_spec(),
-        # Ecto Repo for archive storage
-        Starcite.Repo,
+        # Ecto Repo for Postgres archive mode
+        repo_spec(),
         # PubSub before runtime
         pubsub_spec(),
         # DNS / clustering
@@ -33,6 +33,14 @@ defmodule Starcite.Application do
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp repo_spec do
+    if Starcite.Archive.Store.adapter() == Starcite.Archive.Adapter.Postgres do
+      Starcite.Repo
+    else
+      nil
+    end
   end
 
   defp archive_read_cache_spec do

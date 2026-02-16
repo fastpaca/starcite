@@ -57,6 +57,8 @@ defmodule Starcite.MixProject do
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
       {:req, "~> 0.5"},
+      {:ex_aws, "~> 2.5"},
+      {:ex_aws_s3, "~> 2.5"},
       {:joken, "~> 2.6"},
       {:ra, "~> 2.13"},
       {:benchee, "~> 1.5.0", only: :dev},

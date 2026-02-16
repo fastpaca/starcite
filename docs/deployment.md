@@ -1,6 +1,8 @@
 # Deployment
 
-Starcite needs durable Raft state plus a stable Postgres target to keep ordering guarantees.
+Starcite needs durable Raft state plus a durable archive backend to keep ordering guarantees.
+
+Default archive backend is `s3` (S3-compatible object storage). Postgres remains available via `STARCITE_ARCHIVE_ADAPTER=postgres`.
 
 ## Runtime patterns
 
@@ -10,7 +12,12 @@ Single node:
 docker run -d \
   -p 4000:4000 \
   -v /var/lib/starcite:/data \
-  -e DATABASE_URL=postgres://user:password@host/db \
+  -e STARCITE_ARCHIVE_ADAPTER=s3 \
+  -e STARCITE_S3_BUCKET=starcite-archive \
+  -e STARCITE_S3_REGION=auto \
+  -e STARCITE_S3_ENDPOINT=https://fly.storage.tigris.dev \
+  -e STARCITE_S3_ACCESS_KEY_ID=... \
+  -e STARCITE_S3_SECRET_ACCESS_KEY=... \
   -e STARCITE_EVENT_STORE_MAX_SIZE=2GB \
   ghcr.io/fastpaca/starcite:latest
 ```
@@ -22,7 +29,12 @@ NODE_NAME=starcite-1
 CLUSTER_NODES=starcite-1@starcite-1.local,starcite-2@starcite-2.local,starcite-3@starcite-3.local
 docker run -d \
   -p 4000:4000 \
-  -e DATABASE_URL=postgres://user:password@host/db \
+  -e STARCITE_ARCHIVE_ADAPTER=s3 \
+  -e STARCITE_S3_BUCKET=starcite-archive \
+  -e STARCITE_S3_REGION=auto \
+  -e STARCITE_S3_ENDPOINT=https://fly.storage.tigris.dev \
+  -e STARCITE_S3_ACCESS_KEY_ID=... \
+  -e STARCITE_S3_SECRET_ACCESS_KEY=... \
   -e NODE_NAME=$NODE_NAME \
   -e CLUSTER_NODES=$CLUSTER_NODES \
   ghcr.io/fastpaca/starcite:latest
@@ -31,6 +43,16 @@ docker run -d \
 Use the same pattern for `starcite-2` and `starcite-3`, and place a load balancer in front of them.
 
 For rolling updates, prefer infrastructure draining and have clients resume tails with their last committed `seq`.
+
+To run Postgres archive mode instead:
+
+```bash
+docker run -d \
+  -p 4000:4000 \
+  -e STARCITE_ARCHIVE_ADAPTER=postgres \
+  -e DATABASE_URL=postgres://user:password@host/db \
+  ghcr.io/fastpaca/starcite:latest
+```
 
 ## Integration testing stack
 
@@ -68,8 +90,20 @@ Missing or invalid token -> `401` (HTTP) or WebSocket close.
 | `DNS_POLL_INTERVAL_MS` | `5000` | DNS cluster poll interval |
 | `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft state directory |
 | `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hot memory cap for queued session events |
-| `DATABASE_URL` | none | Postgres URL |
-| `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL |
+| `STARCITE_ARCHIVE_ADAPTER` | `s3` | Archive backend (`s3` or `postgres`) |
+| `STARCITE_S3_BUCKET` | none | S3 bucket name (required in `s3` mode) |
+| `STARCITE_S3_REGION` | `AWS_REGION` or `us-east-1` | S3 region for signing |
+| `STARCITE_S3_ENDPOINT` | none | Custom S3-compatible endpoint (for Tigris/MinIO/etc.) |
+| `STARCITE_S3_ACCESS_KEY_ID` | none | S3 access key (falls back to `AWS_ACCESS_KEY_ID`) |
+| `STARCITE_S3_SECRET_ACCESS_KEY` | none | S3 secret key (falls back to `AWS_SECRET_ACCESS_KEY`) |
+| `STARCITE_S3_SESSION_TOKEN` | none | Optional S3 session token (falls back to `AWS_SESSION_TOKEN`) |
+| `STARCITE_S3_PREFIX` | `starcite` | Object key prefix |
+| `STARCITE_S3_PATH_STYLE` | `true` | Use path-style S3 URLs for compatibility |
+| `STARCITE_S3_CHUNK_SIZE` | `256` | Events per archive blob chunk (must align with cache chunking) |
+| `STARCITE_S3_COMPRESSED` | `true` | Gzip-compress chunk blobs |
+| `STARCITE_S3_MAX_WRITE_RETRIES` | `4` | Retry budget for conditional-write conflicts |
+| `DATABASE_URL` | none | Postgres URL (required in `postgres` mode) |
+| `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL (required in `postgres` mode if `DATABASE_URL` unset) |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
 | `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL |
 | `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Cache cleanup interval |

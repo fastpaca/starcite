@@ -3,6 +3,7 @@ x-node-env: &node-env
   PHX_HOST: localhost
   PORT: 4000
   DATABASE_URL: ecto://postgres:postgres@db:5432/${STARCITE_IT_DB_NAME:-starcite_it}
+  STARCITE_ARCHIVE_ADAPTER: ${STARCITE_ARCHIVE_ADAPTER:-postgres}
   CLUSTER_NODES: node1@node1,node2@node2,node3@node3
   RELEASE_DISTRIBUTION: sname
   RELEASE_COOKIE: ${RELEASE_COOKIE:-starcite_it_cookie}

@@ -19,6 +19,8 @@ Model:
 - Append ordered events
 - Resume tail from cursor
 
+Archive persistence defaults to S3-compatible object storage (`STARCITE_ARCHIVE_ADAPTER=s3`), with optional Postgres mode (`STARCITE_ARCHIVE_ADAPTER=postgres`).
+
 ## Quick Start
 
 ```bash
