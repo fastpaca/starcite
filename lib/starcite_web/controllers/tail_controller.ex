@@ -10,8 +10,8 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
-  alias StarciteWeb.Auth.Context
-  alias StarciteWeb.Plugs.PrincipalAuth
+  alias Starcite.Runtime
+  alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
 
@@ -19,11 +19,12 @@ defmodule StarciteWeb.TailController do
 
   def tail(conn, %{"id" => id} = params) do
     auth_bearer_token = auth_bearer_token(conn)
-    auth_context = conn.assigns[:auth] || %Context{}
+    auth = conn.assigns[:auth] || %{kind: :none}
 
     with {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
-         {:ok, _session} <-
-           PrincipalAuth.authorize_session_request(auth_context, id, "session:read") do
+         :ok <- Policy.authorize_session_reference(auth, id),
+         {:ok, session} <- Runtime.get_session(id),
+         :ok <- Policy.authorize_tail(auth, session) do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,

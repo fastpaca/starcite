@@ -5,6 +5,8 @@ defmodule Starcite.Archive.Adapter do
   An adapter must be idempotent on (session_id, seq) to support at-least-once.
   """
 
+  alias Starcite.Auth.Principal
+
   @type event_row :: %{
           required(:session_id) => String.t(),
           required(:seq) => non_neg_integer(),
@@ -50,5 +52,3 @@ defmodule Starcite.Archive.Adapter do
   @callback list_sessions_by_ids([String.t()], session_query()) ::
               {:ok, session_page()} | {:error, term()}
 end
-
-alias Starcite.Auth.Principal

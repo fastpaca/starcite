@@ -48,7 +48,7 @@ defmodule Starcite.Runtime do
            end
          ) do
       {:ok, session} = ok ->
-        _ = maybe_index_session(session)
+        _ = maybe_index_session(session, creator_principal)
         ok
 
       other ->
@@ -380,13 +380,15 @@ defmodule Starcite.Runtime do
     Process.whereis(RaftManager.server_id(group_id)) != nil
   end
 
-  defp maybe_index_session(%{
-         id: id,
-         title: title,
-         creator_principal: creator_principal,
-         metadata: metadata,
-         created_at: created_at
-       })
+  defp maybe_index_session(
+         %{
+           id: id,
+           title: title,
+           metadata: metadata,
+           created_at: created_at
+         },
+         creator_principal
+       )
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               (is_struct(creator_principal, Starcite.Auth.Principal) or
                  is_nil(creator_principal)) and
@@ -405,7 +407,7 @@ defmodule Starcite.Runtime do
     end
   end
 
-  defp maybe_index_session(_session), do: :ok
+  defp maybe_index_session(_session, _creator_principal), do: :ok
 
   defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
 

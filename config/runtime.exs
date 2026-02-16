@@ -258,17 +258,17 @@ if principal_token_salt == "" do
   raise ArgumentError, "invalid STARCITE_AUTH_PRINCIPAL_TOKEN_SALT: cannot be empty"
 end
 
+# Default expiry for issued principal tokens when request omits `ttl_seconds`.
+# Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS.
 principal_token_default_ttl_seconds =
-  # Default expiry for issued principal tokens when request omits `ttl_seconds`.
-  # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS.
   case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS") do
     nil -> 600
     raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS", raw)
   end
 
+# Hard upper bound for issued principal token expiry, even when caller supplies `ttl_seconds`.
+# Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS.
 principal_token_max_ttl_seconds =
-  # Hard upper bound for issued principal token expiry, even when caller supplies `ttl_seconds`.
-  # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS.
   case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS") do
     nil -> 900
     raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS", raw)

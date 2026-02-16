@@ -33,7 +33,7 @@ defmodule StarciteWeb.SessionControllerTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
   end
 
-  defp service_create_body(attrs \\ %{}) do
+  defp service_create_body(attrs) when is_map(attrs) do
     Map.merge(
       %{
         "creator_principal" => %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"}

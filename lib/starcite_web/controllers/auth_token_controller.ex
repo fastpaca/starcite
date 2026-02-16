@@ -5,8 +5,8 @@ defmodule StarciteWeb.AuthTokenController do
 
   use StarciteWeb, :controller
 
-  alias StarciteWeb.Auth.Context
-  alias StarciteWeb.Plugs.{PrincipalAuth, ServiceAuth}
+  alias StarciteWeb.Auth.{Policy, PrincipalToken}
+  alias StarciteWeb.Plugs.ServiceAuth
 
   action_fallback StarciteWeb.FallbackController
 
@@ -24,12 +24,26 @@ defmodule StarciteWeb.AuthTokenController do
           "scopes" => _scopes
         } = params
       ) do
-    auth_context = conn.assigns[:auth] || %Context{}
+    auth = conn.assigns[:auth] || %{kind: :none}
 
-    # Token issuance is service-only. Principals are not allowed to mint other principals.
-    with :ok <- ServiceAuth.require_service(auth_context),
-         {:ok, token} <- PrincipalAuth.issue_principal_token(auth_context, params) do
-      json(conn, token)
+    with :ok <- Policy.authorize_issue_token(auth),
+         {:ok, issued} <- PrincipalToken.issue(params, ServiceAuth.config()) do
+      principal = issued.principal
+
+      json(conn, %{
+        token: issued.token,
+        token_type: "Bearer",
+        expires_at: issued.expires_at,
+        expires_in: issued.expires_in,
+        principal: %{
+          tenant_id: principal.tenant_id,
+          id: principal.id,
+          type: Atom.to_string(principal.type)
+        },
+        scopes: issued.scopes,
+        session_ids: issued.session_ids,
+        owner_principal_ids: issued.owner_principal_ids
+      })
     end
   end
 

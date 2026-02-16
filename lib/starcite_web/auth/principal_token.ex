@@ -29,17 +29,7 @@ defmodule StarciteWeb.Auth.PrincipalToken do
         }
 
   # Keep a single, opinionated issue payload shape to minimize auth surface area.
-  @type issue_attrs :: %{
-          required("principal") => %{
-            required("tenant_id") => String.t(),
-            required("id") => String.t(),
-            required("type") => String.t()
-          },
-          required("scopes") => [String.t()],
-          optional("session_ids") => [String.t()],
-          optional("owner_principal_ids") => [String.t()],
-          optional("ttl_seconds") => pos_integer()
-        }
+  @type issue_attrs :: map()
 
   @spec issue(issue_attrs(), map()) :: {:ok, issued()} | {:error, atom()}
   def issue(

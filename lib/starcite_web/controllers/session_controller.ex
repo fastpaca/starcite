@@ -9,10 +9,8 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Auth.Principal
   alias Starcite.Runtime
-  alias StarciteWeb.Auth.Context
-  alias StarciteWeb.Plugs.PrincipalAuth
+  alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
 
@@ -23,9 +21,9 @@ defmodule StarciteWeb.SessionController do
   Create a session.
   """
   def create(conn, params) do
-    auth_context = conn.assigns[:auth] || %Context{}
+    auth = conn.assigns[:auth] || %{kind: :none}
 
-    with {:ok, opts} <- validate_create(params, auth_context),
+    with {:ok, opts} <- validate_create(params, auth),
          {:ok, session} <- Runtime.create_session(opts) do
       conn
       |> put_status(:created)
@@ -37,11 +35,12 @@ defmodule StarciteWeb.SessionController do
   Append one event to a session.
   """
   def append(conn, %{"id" => id} = params) do
-    auth_context = conn.assigns[:auth] || %Context{}
+    auth = conn.assigns[:auth] || %{kind: :none}
 
-    with {:ok, _session} <-
-           PrincipalAuth.authorize_session_request(auth_context, id, "session:append"),
-         {:ok, event, expected_seq} <- validate_append(params, auth_context),
+    with :ok <- Policy.authorize_session_reference(auth, id),
+         {:ok, session} <- Runtime.get_session(id),
+         :ok <- Policy.authorize_append(auth, session),
+         {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- Runtime.append_event(id, event, expected_seq: expected_seq) do
       conn
       |> put_status(:created)
@@ -55,64 +54,21 @@ defmodule StarciteWeb.SessionController do
   List known sessions from the configured archive adapter.
   """
   def index(conn, params) do
-    auth_context = conn.assigns[:auth] || %Context{}
+    auth = conn.assigns[:auth] || %{kind: :none}
 
     with {:ok, opts} <- validate_list(params),
-         :ok <- PrincipalAuth.authorize_scope(auth_context, "session:read"),
-         {:ok, scope} <- PrincipalAuth.list_sessions_scope(auth_context),
-         {:ok, page} <- list_sessions(scope, auth_context, opts) do
+         {:ok, scope} <- Policy.authorize_list_sessions(auth),
+         {:ok, page} <- list_sessions(scope, opts) do
       json(conn, page)
     end
   end
 
   # Validation
 
-  defp validate_create(params, %Context{token_kind: token_kind})
-       when token_kind in [:none, :service] do
-    validate_service_create(params)
-  end
-
-  defp validate_create(
-         params,
-         %Context{token_kind: :principal, principal: %Principal{type: :user} = principal} =
-           auth_context
-       )
-       when is_map(params) do
-    with :ok <- PrincipalAuth.authorize_scope(auth_context, "session:create"),
+  defp validate_create(params, auth) when is_map(params) and is_map(auth) do
+    with {:ok, creator_principal} <- Policy.authorize_create_session(auth, params),
          {:ok, id} <- optional_non_empty_string(params["id"]),
          {:ok, title} <- optional_string(params["title"]),
-         :ok <- reject_creator_override(params["creator_principal"]),
-         {:ok, metadata} <- optional_object(params["metadata"]) do
-      {:ok,
-       [
-         id: id,
-         title: title,
-         creator_principal: principal,
-         metadata: metadata
-       ]}
-    end
-  end
-
-  defp validate_create(
-         _params,
-         %Context{token_kind: :principal, principal: %Principal{type: :agent}}
-       ),
-       do: {:error, :forbidden}
-
-  defp validate_create(_params, _auth_context), do: {:error, :invalid_session}
-
-  defp validate_service_create(
-         %{
-           "creator_principal" => %{
-             "tenant_id" => _tenant_id,
-             "id" => _principal_id,
-             "type" => _principal_type
-           }
-         } = params
-       ) do
-    with {:ok, id} <- optional_non_empty_string(params["id"]),
-         {:ok, title} <- optional_string(params["title"]),
-         {:ok, creator_principal} <- principal_from_payload(params["creator_principal"]),
          {:ok, metadata} <- optional_object(params["metadata"]) do
       {:ok,
        [
@@ -124,7 +80,7 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp validate_service_create(_params), do: {:error, :invalid_session}
+  defp validate_create(_params, _auth), do: {:error, :invalid_session}
 
   defp validate_append(
          %{
@@ -133,18 +89,18 @@ defmodule StarciteWeb.SessionController do
            "producer_id" => producer_id,
            "producer_seq" => producer_seq
          } = params,
-         auth_context
+         auth
        )
-       when is_binary(type) and type != "" and is_map(payload) and is_map(auth_context) do
+       when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
     with {:ok, validated_producer_id} <- required_non_empty_string(producer_id),
          {:ok, validated_producer_seq} <- required_positive_integer(producer_seq),
-         {:ok, actor} <- PrincipalAuth.resolve_actor(auth_context, params["actor"]),
+         {:ok, actor} <- Policy.resolve_actor(auth, params["actor"]),
          {:ok, source} <- optional_non_empty_string(params["source"]),
          {:ok, metadata} <- optional_object(params["metadata"]),
          {:ok, refs} <- optional_refs(params["refs"]),
          {:ok, idempotency_key} <- optional_non_empty_string(params["idempotency_key"]),
          {:ok, expected_seq} <- optional_non_neg_integer(params["expected_seq"]) do
-      metadata = PrincipalAuth.stamp_event_metadata(auth_context, metadata)
+      metadata = Policy.stamp_event_metadata(auth, metadata)
 
       event = %{
         type: type,
@@ -162,7 +118,7 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp validate_append(_params, _auth_context), do: {:error, :invalid_event}
+  defp validate_append(_params, _auth), do: {:error, :invalid_event}
 
   defp validate_list(params) when is_map(params) do
     with {:ok, limit} <- optional_limit(params["limit"]),
@@ -174,53 +130,27 @@ defmodule StarciteWeb.SessionController do
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
 
-  defp list_sessions(:all, _auth_context, opts) when is_map(opts) do
+  defp list_sessions(:all, opts) when is_map(opts) do
     Starcite.Archive.Store.list_sessions(opts)
   end
 
   defp list_sessions(
-         owner_principal_ids,
-         %Context{token_kind: :principal, principal: %Principal{tenant_id: tenant_id}},
+         %{tenant_id: tenant_id, owner_principal_ids: owner_principal_ids},
          opts
        )
-       when is_list(owner_principal_ids) and is_binary(tenant_id) and tenant_id != "" and
+       when is_binary(tenant_id) and tenant_id != "" and is_list(owner_principal_ids) and
               is_map(opts) do
     Starcite.Archive.Store.list_sessions(
       opts
-      |> Map.put(:owner_principal_ids, owner_principal_ids)
       |> Map.put(:tenant_id, tenant_id)
+      |> Map.put(:owner_principal_ids, owner_principal_ids)
     )
   end
 
-  defp list_sessions(_scope, _auth_context, _opts), do: {:error, :forbidden}
-
-  defp principal_from_payload(%{
-         "tenant_id" => tenant_id,
-         "id" => principal_id,
-         "type" => principal_type
-       }) do
-    with {:ok, tenant_id} <- required_non_empty_string(tenant_id, :invalid_session),
-         {:ok, principal_id} <- required_non_empty_string(principal_id, :invalid_session),
-         {:ok, principal_type} <- principal_type(principal_type, :invalid_session),
-         {:ok, principal} <- Principal.new(tenant_id, principal_id, principal_type) do
-      {:ok, principal}
-    else
-      {:error, _reason} -> {:error, :invalid_session}
-    end
-  end
-
-  defp principal_from_payload(_payload), do: {:error, :invalid_session}
-
-  defp reject_creator_override(nil), do: :ok
-  defp reject_creator_override(_creator_override), do: {:error, :invalid_session}
+  defp list_sessions(_scope, _opts), do: {:error, :forbidden}
 
   defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp required_non_empty_string(_value), do: {:error, :invalid_event}
-
-  defp required_non_empty_string(value, _error_reason) when is_binary(value) and value != "",
-    do: {:ok, value}
-
-  defp required_non_empty_string(_value, error_reason), do: {:error, error_reason}
 
   defp required_positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
 
@@ -240,12 +170,6 @@ defmodule StarciteWeb.SessionController do
   defp optional_object(nil), do: {:ok, %{}}
   defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
   defp optional_object(_value), do: {:error, :invalid_metadata}
-
-  defp principal_type("user", _error_reason), do: {:ok, :user}
-  defp principal_type("agent", _error_reason), do: {:ok, :agent}
-  defp principal_type(:user, _error_reason), do: {:ok, :user}
-  defp principal_type(:agent, _error_reason), do: {:ok, :agent}
-  defp principal_type(_value, error_reason), do: {:error, error_reason}
 
   defp optional_refs(nil), do: {:ok, %{}}
 
