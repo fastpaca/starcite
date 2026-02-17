@@ -3,35 +3,88 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
   alias Starcite.Archive.Adapter.S3
 
-  setup do
-    bypass = Bypass.open()
-    {:ok, store} = Agent.start_link(fn -> %{} end)
+  defmodule FakeClient do
+    @store __MODULE__.Store
 
-    Bypass.expect(bypass, fn conn ->
-      handle_request(conn, store)
-    end)
+    def store_name, do: @store
+
+    def get_object(%{bucket: bucket}, key) do
+      case Agent.get(@store, fn state -> state |> Map.get(bucket, %{}) |> Map.get(key) end) do
+        nil -> {:ok, :not_found}
+        %{body: body, etag: etag} -> {:ok, {body, etag}}
+      end
+    end
+
+    def put_object(%{bucket: bucket}, key, body, opts \\ []) do
+      Agent.get_and_update(@store, fn state ->
+        existing = state |> Map.get(bucket, %{}) |> Map.get(key)
+
+        if precondition_failed?(existing, opts) do
+          {{:error, :precondition_failed}, state}
+        else
+          bucket_state = Map.get(state, bucket, %{})
+          etag = etag_for(body)
+
+          next_state =
+            Map.put(state, bucket, Map.put(bucket_state, key, %{body: body, etag: etag}))
+
+          {:ok, next_state}
+        end
+      end)
+    end
+
+    def list_keys(%{bucket: bucket}, prefix) do
+      keys =
+        Agent.get(@store, fn state ->
+          state
+          |> Map.get(bucket, %{})
+          |> Map.keys()
+          |> Enum.filter(&String.starts_with?(&1, prefix))
+          |> Enum.sort()
+        end)
+
+      {:ok, keys}
+    end
+
+    defp precondition_failed?(existing, opts) do
+      if_none_match = Keyword.get(opts, :if_none_match)
+      if_match = Keyword.get(opts, :if_match)
+
+      cond do
+        if_none_match == "*" and existing != nil -> true
+        is_binary(if_match) and existing == nil -> true
+        is_binary(if_match) and existing.etag != if_match -> true
+        true -> false
+      end
+    end
+
+    defp etag_for(body) when is_binary(body) do
+      digest =
+        :crypto.hash(:md5, body)
+        |> Base.encode16(case: :lower)
+
+      ~s("#{digest}")
+    end
+  end
+
+  setup do
+    start_supervised!(%{
+      id: FakeClient.store_name(),
+      start: {Agent, :start_link, [fn -> %{} end, [name: FakeClient.store_name()]]}
+    })
 
     session_prefix = "s3-test-#{System.unique_integer([:positive, :monotonic])}"
 
-    {:ok, _pid} =
-      start_supervised(
-        {S3,
-         bucket: "archive-test",
-         prefix: session_prefix,
-         endpoint: "http://localhost:#{bypass.port}",
-         region: "auto",
-         access_key_id: "test-access-key",
-         secret_access_key: "test-secret-key",
-         path_style: true}
-      )
+    start_supervised!(
+      {S3, bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient}
+    )
 
-    {:ok, store: store}
+    :ok
   end
 
   test "write_events is idempotent and reads across chunk boundaries" do
     session_id = "ses-s3-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
-
     rows = event_rows(session_id, inserted_at, 1..260)
 
     assert {:ok, 260} = S3.write_events(rows)
@@ -130,165 +183,5 @@ defmodule Starcite.Archive.Adapter.S3Test do
         inserted_at: inserted_at
       }
     end)
-  end
-
-  defp handle_request(conn, store) do
-    conn = Plug.Conn.fetch_query_params(conn)
-
-    case {conn.method, conn.path_info} do
-      {"GET", [bucket]} ->
-        handle_list_objects(conn, store, bucket)
-
-      {"PUT", [bucket | key_parts]} ->
-        handle_put_object(conn, store, bucket, Enum.join(key_parts, "/"))
-
-      {"GET", [bucket | key_parts]} ->
-        handle_get_object(conn, store, bucket, Enum.join(key_parts, "/"))
-
-      {"HEAD", [bucket | key_parts]} ->
-        handle_head_object(conn, store, bucket, Enum.join(key_parts, "/"))
-
-      _ ->
-        Plug.Conn.send_resp(conn, 400, "unsupported request")
-    end
-  end
-
-  defp handle_put_object(conn, store, bucket, key)
-       when is_binary(bucket) and bucket != "" and is_binary(key) and key != "" do
-    {:ok, body, conn} = read_body(conn, "")
-    existing = get_object(store, bucket, key)
-    if_none_match = get_header(conn, "if-none-match")
-    if_match = get_header(conn, "if-match")
-
-    cond do
-      if_none_match == "*" and existing != nil ->
-        Plug.Conn.send_resp(conn, 412, "precondition failed")
-
-      is_binary(if_match) and existing != nil and existing.etag != if_match ->
-        Plug.Conn.send_resp(conn, 412, "precondition failed")
-
-      is_binary(if_match) and existing == nil ->
-        Plug.Conn.send_resp(conn, 412, "precondition failed")
-
-      true ->
-        etag = etag_for(body)
-        put_object(store, bucket, key, body, etag)
-
-        conn
-        |> Plug.Conn.put_resp_header("etag", etag)
-        |> Plug.Conn.send_resp(200, "")
-    end
-  end
-
-  defp handle_get_object(conn, store, bucket, key)
-       when is_binary(bucket) and bucket != "" and is_binary(key) and key != "" do
-    case get_object(store, bucket, key) do
-      nil ->
-        Plug.Conn.send_resp(conn, 404, "not found")
-
-      %{body: body, etag: etag} ->
-        conn
-        |> Plug.Conn.put_resp_header("etag", etag)
-        |> Plug.Conn.send_resp(200, body)
-    end
-  end
-
-  defp handle_head_object(conn, store, bucket, key)
-       when is_binary(bucket) and bucket != "" and is_binary(key) and key != "" do
-    case get_object(store, bucket, key) do
-      nil ->
-        Plug.Conn.send_resp(conn, 404, "")
-
-      %{etag: etag} ->
-        conn
-        |> Plug.Conn.put_resp_header("etag", etag)
-        |> Plug.Conn.send_resp(200, "")
-    end
-  end
-
-  defp handle_list_objects(conn, store, bucket) when is_binary(bucket) and bucket != "" do
-    prefix = Map.get(conn.query_params, "prefix", "")
-
-    keys =
-      list_keys(store, bucket)
-      |> Enum.filter(&String.starts_with?(&1, prefix))
-      |> Enum.sort()
-
-    contents =
-      Enum.map_join(keys, "", fn key ->
-        "<Contents><Key>#{xml_escape(key)}</Key></Contents>"
-      end)
-
-    body = """
-    <?xml version="1.0" encoding="UTF-8"?>
-    <ListBucketResult>
-      <IsTruncated>false</IsTruncated>
-      #{contents}
-    </ListBucketResult>
-    """
-
-    conn
-    |> Plug.Conn.put_resp_content_type("application/xml")
-    |> Plug.Conn.send_resp(200, body)
-  end
-
-  defp get_header(conn, key) when is_binary(key) do
-    conn
-    |> Plug.Conn.get_req_header(key)
-    |> List.first()
-  end
-
-  defp read_body(conn, acc) do
-    case Plug.Conn.read_body(conn) do
-      {:ok, chunk, conn} ->
-        {:ok, acc <> chunk, conn}
-
-      {:more, chunk, conn} ->
-        read_body(conn, acc <> chunk)
-    end
-  end
-
-  defp get_object(store, bucket, key)
-       when is_pid(store) and is_binary(bucket) and is_binary(key) do
-    Agent.get(store, fn state ->
-      state
-      |> Map.get(bucket, %{})
-      |> Map.get(key)
-    end)
-  end
-
-  defp put_object(store, bucket, key, body, etag)
-       when is_pid(store) and is_binary(bucket) and is_binary(key) and is_binary(body) and
-              is_binary(etag) do
-    Agent.update(store, fn state ->
-      bucket_state = Map.get(state, bucket, %{})
-      next_bucket = Map.put(bucket_state, key, %{body: body, etag: etag})
-      Map.put(state, bucket, next_bucket)
-    end)
-  end
-
-  defp list_keys(store, bucket) when is_pid(store) and is_binary(bucket) do
-    Agent.get(store, fn state ->
-      state
-      |> Map.get(bucket, %{})
-      |> Map.keys()
-    end)
-  end
-
-  defp etag_for(body) when is_binary(body) do
-    digest =
-      :crypto.hash(:md5, body)
-      |> Base.encode16(case: :lower)
-
-    ~s("#{digest}")
-  end
-
-  defp xml_escape(value) when is_binary(value) do
-    value
-    |> String.replace("&", "&amp;")
-    |> String.replace("<", "&lt;")
-    |> String.replace(">", "&gt;")
-    |> String.replace("\"", "&quot;")
-    |> String.replace("'", "&apos;")
   end
 end

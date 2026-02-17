@@ -18,6 +18,18 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - Honour immutability: produce new assigns/state rather than mutating in place, and prefer small pure helpers for transformations.
 - Design for back-pressure. The runtime assumes at-least-once delivery and sequence numbers; handle drains and retries with clear status signaling.
 
+## Simplify First
+
+- Start with the simplest readable implementation that works, then add complexity only when a measured requirement demands it.
+- Do not duplicate parsing/validation across layers. Parse and coerce at system boundaries (for example `runtime.exs`), then trust internal types.
+- Prefer direct data flow over defensive transformation pipelines. Avoid re-shaping maps multiple times when one representation already fits.
+- For storage formats, prefer off-the-shelf encoding/decoding (`Jason` for JSON/JSONL) over custom codecs unless there is a concrete performance or compatibility need.
+- Keep adapters thin: isolate transport/client calls from layout/serialization concerns, but avoid fragmenting logic into many tiny helper modules without clear payoff.
+- Remove generic “just in case” guards in internal paths. Crash loudly on impossible states rather than silently normalizing them.
+- Minimize bespoke parsing (regexes, hand-rolled XML/date parsing, etc.) unless required by an unavoidable external protocol.
+- Optimize for fewer lines and clearer control flow. Deleting code is preferred to adding abstraction when behavior stays correct.
+- For prototype work, bias toward readability and explicitness over hardening.
+
 ## Domain Assumptions
 
 - Messages are append-only and replayable with deterministic sequence numbers.

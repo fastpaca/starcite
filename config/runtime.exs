@@ -179,9 +179,6 @@ archive_adapter_opts =
         |> put_env_opt.(:secret_access_key, "STARCITE_S3_SECRET_ACCESS_KEY", & &1)
         |> put_env_opt.(:security_token, "STARCITE_S3_SESSION_TOKEN", & &1)
         |> put_env_opt.(:endpoint, "STARCITE_S3_ENDPOINT", & &1)
-        |> put_env_opt.(:chunk_size, "STARCITE_S3_CHUNK_SIZE", fn value ->
-          parse_positive_integer!.("STARCITE_S3_CHUNK_SIZE", value)
-        end)
         |> put_env_opt.(:max_write_retries, "STARCITE_S3_MAX_WRITE_RETRIES", fn value ->
           parse_positive_integer!.("STARCITE_S3_MAX_WRITE_RETRIES", value)
         end)

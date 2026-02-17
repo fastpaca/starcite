@@ -1,5 +1,10 @@
 defmodule Starcite.Archive.Adapter.S3.Client do
-  @moduledoc false
+  @moduledoc """
+  Thin typed wrapper around ExAws S3 operations used by the archive adapter.
+
+  This module only translates ExAws HTTP responses into small result tuples so
+  the adapter can stay focused on archive semantics.
+  """
 
   alias ExAws.S3
 
@@ -13,7 +18,7 @@ defmodule Starcite.Archive.Adapter.S3.Client do
     case request(config, S3.get_object(config.bucket, key)) do
       {:ok, %{status_code: status, body: body, headers: headers}}
       when status in 200..299 and is_binary(body) ->
-        {:ok, {body, header(headers, "etag")}}
+        {:ok, {body, etag(headers)}}
 
       {:error, {:http_error, 404, _error}} ->
         {:ok, :not_found}
@@ -54,13 +59,10 @@ defmodule Starcite.Archive.Adapter.S3.Client do
 
   defp request(config, operation), do: ExAws.request(operation, config.request_opts)
 
-  defp header(headers, target) do
+  defp etag(headers) do
     Enum.find_value(headers, fn
-      {name, value} when is_binary(name) and is_binary(value) ->
-        if String.downcase(name) == target, do: value, else: nil
-
-      _other ->
-        nil
+      {name, value} when is_binary(name) -> if String.downcase(name) == "etag", do: value
+      _ -> nil
     end)
   end
 end

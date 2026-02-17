@@ -99,8 +99,6 @@ Missing or invalid token -> `401` (HTTP) or WebSocket close.
 | `STARCITE_S3_SESSION_TOKEN` | none | Optional S3 session token (falls back to `AWS_SESSION_TOKEN`) |
 | `STARCITE_S3_PREFIX` | `starcite` | Object key prefix |
 | `STARCITE_S3_PATH_STYLE` | `true` | Use path-style S3 URLs for compatibility |
-| `STARCITE_S3_CHUNK_SIZE` | `256` | Events per archive blob chunk (must align with cache chunking) |
-| `STARCITE_S3_COMPRESSED` | `true` | Gzip-compress chunk blobs |
 | `STARCITE_S3_MAX_WRITE_RETRIES` | `4` | Retry budget for conditional-write conflicts |
 | `DATABASE_URL` | none | Postgres URL (required in `postgres` mode) |
 | `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL (required in `postgres` mode if `DATABASE_URL` unset) |

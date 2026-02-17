@@ -2,18 +2,37 @@ defmodule Starcite.Archive.Adapter.S3 do
   @moduledoc """
   S3-backed archive adapter.
 
-  Events are stored as chunked NDJSON blobs and merged idempotently on
-  `(session_id, seq)`. Sessions are stored as per-session JSON documents.
+  Storage layout:
+  - Events: `<prefix>/events/v1/<base64url(session_id)>/<chunk_start>.ndjson`
+  - Sessions: `<prefix>/sessions/v1/<base64url(session_id)>.json`
+
+  Event objects are newline-delimited JSON (NDJSON), one event per line, with
+  one object per cache-line chunk. Session objects are plain JSON maps.
+
+  Writes are idempotent by `(session_id, seq)` via read/merge/conditional-write
+  using ETag preconditions.
   """
 
   @behaviour Starcite.Archive.Adapter
 
   use GenServer
 
-  alias __MODULE__.{Client, Config, Layout}
+  alias __MODULE__.{Config, Layout}
 
   @config_key {__MODULE__, :config}
-  @stored_event_fields Starcite.Archive.Event.__schema__(:fields) -- [:session_id]
+  @event_key_map [
+    {"seq", :seq},
+    {"type", :type},
+    {"payload", :payload},
+    {"actor", :actor},
+    {"producer_id", :producer_id},
+    {"producer_seq", :producer_seq},
+    {"source", :source},
+    {"metadata", :metadata},
+    {"refs", :refs},
+    {"idempotency_key", :idempotency_key},
+    {"inserted_at", :inserted_at}
+  ]
 
   @impl true
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -33,45 +52,39 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   @impl true
-  def write_events(rows), do: with_config(:write, fn config -> write_events(rows, config) end)
+  def write_events(rows), do: write_events(rows, config!())
 
   @impl true
-  def read_events(session_id, from_seq, to_seq) do
-    with_config(:read, fn config -> read_events(session_id, from_seq, to_seq, config) end)
-  end
+  def read_events(session_id, from_seq, to_seq),
+    do: read_events(session_id, from_seq, to_seq, config!())
 
   @impl true
   def upsert_session(%{id: id, title: title, metadata: metadata, created_at: created_at}) do
-    with_config(:write, fn config ->
-      session = %{id: id, title: title, metadata: metadata, created_at: created_at}
+    config = config!()
+    session = %{id: id, title: title, metadata: metadata, created_at: created_at}
 
-      case put_session(config, id, session) do
-        :ok -> :ok
-        {:error, :precondition_failed} -> :ok
-        {:error, :unavailable} -> {:error, :archive_write_unavailable}
-      end
-    end)
+    case put_session(config, id, session) do
+      :ok -> :ok
+      {:error, :precondition_failed} -> :ok
+      {:error, :unavailable} -> {:error, :archive_write_unavailable}
+    end
   end
 
   @impl true
   def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata}) do
-    with_config(:read, fn config ->
-      with {:ok, keys} <- list_session_keys(config),
-           {:ok, sessions} <- load_sessions(keys, config) do
-        {:ok, session_page(sessions, limit, cursor, metadata)}
-      end
-    end)
+    config = config!()
+
+    with {:ok, keys} <- list_session_keys(config) do
+      list_sessions_for_keys(keys, limit, cursor, metadata, config)
+    end
   end
 
   @impl true
   def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata}) do
-    with_config(:read, fn config ->
-      keys = ids |> Enum.uniq() |> Enum.map(&Layout.session_key(config, &1))
+    config = config!()
+    keys = ids |> Enum.uniq() |> Enum.map(&Layout.session_key(config, &1))
 
-      with {:ok, sessions} <- load_sessions(keys, config) do
-        {:ok, session_page(sessions, limit, cursor, metadata)}
-      end
-    end)
+    list_sessions_for_keys(keys, limit, cursor, metadata, config)
   end
 
   defp write_events([], _config), do: {:ok, 0}
@@ -96,13 +109,7 @@ defmodule Starcite.Archive.Adapter.S3 do
       {:error, :precondition_failed} when attempt <= config.max_write_retries ->
         write_chunk(session_id, chunk_start, rows, config, attempt + 1)
 
-      {:error, :precondition_failed} ->
-        {:error, :archive_write_unavailable}
-
-      {:error, :archive_read_unavailable} ->
-        {:error, :archive_write_unavailable}
-
-      {:error, :archive_write_unavailable} ->
+      {:error, _reason} ->
         {:error, :archive_write_unavailable}
     end
   end
@@ -135,7 +142,7 @@ defmodule Starcite.Archive.Adapter.S3 do
     key = Layout.event_chunk_key(config, session_id, chunk_start)
     body = encode_chunk(events)
 
-    case Client.put_object(config, key, body, event_put_opts(etag)) do
+    case client(config).put_object(config, key, body, event_put_opts(etag)) do
       :ok -> {:ok, inserted}
       {:error, :precondition_failed} -> {:error, :precondition_failed}
       {:error, :unavailable} -> {:error, :archive_write_unavailable}
@@ -150,8 +157,6 @@ defmodule Starcite.Archive.Adapter.S3 do
         chunks
         |> List.flatten()
         |> Enum.filter(fn event -> event.seq >= from_seq and event.seq <= to_seq end)
-        |> Enum.sort_by(& &1.seq)
-        |> Enum.uniq_by(& &1.seq)
 
       {:ok, events}
     end
@@ -172,7 +177,10 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   defp fetch_chunk(session_id, chunk_start, config) do
-    case Client.get_object(config, Layout.event_chunk_key(config, session_id, chunk_start)) do
+    case client(config).get_object(
+           config,
+           Layout.event_chunk_key(config, session_id, chunk_start)
+         ) do
       {:ok, :not_found} ->
         {:ok, [], nil}
 
@@ -190,16 +198,22 @@ defmodule Starcite.Archive.Adapter.S3 do
     key = Layout.session_key(config, session_id)
     body = Jason.encode!(session)
 
-    Client.put_object(config, key, body,
+    client(config).put_object(config, key, body,
       content_type: "application/json",
       if_none_match: "*"
     )
   end
 
   defp list_session_keys(config) do
-    case Client.list_keys(config, Layout.session_prefix(config)) do
+    case client(config).list_keys(config, Layout.session_prefix(config)) do
       {:ok, keys} -> {:ok, keys}
       {:error, :unavailable} -> {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp list_sessions_for_keys(keys, limit, cursor, metadata, config) do
+    with {:ok, sessions} <- load_sessions(keys, config) do
+      {:ok, session_page(sessions, limit, cursor, metadata)}
     end
   end
 
@@ -215,7 +229,7 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   defp load_session(key, config) do
-    case Client.get_object(config, key) do
+    case client(config).get_object(config, key) do
       {:ok, :not_found} ->
         {:ok, nil}
 
@@ -243,31 +257,21 @@ defmodule Starcite.Archive.Adapter.S3 do
           Enum.all?(metadata_filters, fn {key, expected} -> session.metadata[key] == expected end)
       end)
 
-    page_sessions = Enum.take(filtered, limit)
+    {page_sessions, rest} = Enum.split(filtered, limit)
 
     %{
       sessions: page_sessions,
       next_cursor:
-        if(length(filtered) > limit and page_sessions != [],
-          do: List.last(page_sessions).id,
-          else: nil
-        )
+        if(rest == [] or page_sessions == [], do: nil, else: List.last(page_sessions).id)
     }
   end
 
   defp event_put_opts(nil), do: [content_type: "application/x-ndjson", if_none_match: "*"]
   defp event_put_opts(etag), do: [content_type: "application/x-ndjson", if_match: etag]
 
-  defp event_from_row(row), do: Map.take(row, @stored_event_fields)
+  defp event_from_row(row), do: Map.delete(row, :session_id)
 
-  defp encode_chunk(events) do
-    events
-    |> Enum.map_join("\n", fn event ->
-      event
-      |> Map.take(@stored_event_fields)
-      |> Jason.encode!()
-    end)
-  end
+  defp encode_chunk(events), do: Enum.map_join(events, "\n", &Jason.encode!/1)
 
   defp decode_chunk(body) when is_binary(body) do
     events =
@@ -283,29 +287,11 @@ defmodule Starcite.Archive.Adapter.S3 do
   defp decode_chunk_event!(line) do
     decoded = Jason.decode!(line)
 
-    Enum.reduce(@stored_event_fields, %{}, fn field, acc ->
-      Map.put(acc, field, decoded[Atom.to_string(field)])
-    end)
-  end
-
-  defp with_config(kind, fun) when kind in [:read, :write] and is_function(fun, 1) do
-    with {:ok, config} <- fetch_config() do
-      case fun.(config) do
-        {:error, _reason} -> unavailable_error(kind)
-        result -> result
-      end
-    else
-      {:error, :missing_config} -> unavailable_error(kind)
+    for {json_key, atom_key} <- @event_key_map, into: %{} do
+      {atom_key, Map.fetch!(decoded, json_key)}
     end
   end
 
-  defp unavailable_error(:read), do: {:error, :archive_read_unavailable}
-  defp unavailable_error(:write), do: {:error, :archive_write_unavailable}
-
-  defp fetch_config do
-    case :persistent_term.get(@config_key, :undefined) do
-      :undefined -> {:error, :missing_config}
-      config when is_map(config) -> {:ok, config}
-    end
-  end
+  defp config!, do: :persistent_term.get(@config_key)
+  defp client(%{client_mod: client_mod}), do: client_mod
 end
