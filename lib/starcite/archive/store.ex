@@ -12,7 +12,7 @@ defmodule Starcite.Archive.Store do
 
   alias Starcite.Archive.Adapter
 
-  @default_adapter Starcite.Archive.Adapter.Postgres
+  @default_adapter Starcite.Archive.Adapter.S3
   @cache :starcite_archive_read_cache
   @default_cache_chunk_size 256
 

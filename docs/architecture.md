@@ -11,7 +11,7 @@ Starcite intentionally supports one behavioral chain:
 1. Create a session.
 2. Append one event at a time to that session.
 3. Tail from a cursor for replay and live stream.
-4. Persist committed history to Postgres for durable replay.
+4. Persist committed history to the configured archive adapter for durable replay (`s3` by default, with optional Postgres mode).
 
 ## Core behavior
 
@@ -27,7 +27,7 @@ Starcite intentionally supports one behavioral chain:
 - API receives and validates traffic, then forwards commands to runtime.
 - Runtime owns sequence assignment, conflict detection, and session state transitions.
 - Sharded state machine provides session locality for ordered progression and replication.
-- Archiver flushes committed records to Postgres and signals safe hot-state reclamation.
+- Archiver flushes committed records to S3-compatible object storage (or Postgres when configured) and signals safe hot-state reclamation.
 - Session listing and historical reads can come from the same durable adapter-backed catalog/history.
 
 ## Intentional boundaries

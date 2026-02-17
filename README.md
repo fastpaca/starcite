@@ -68,6 +68,8 @@ Session readbacks are canonical and replayable. The same session can be opened o
 - No client-specific sync layer required
 - Same `seq` contract applies across consumers
 
+Archive persistence defaults to S3-compatible object storage (`STARCITE_ARCHIVE_ADAPTER=s3`), with optional Postgres mode (`STARCITE_ARCHIVE_ADAPTER=postgres`).
+
 ## Quick Start
 
 ```bash

@@ -13,8 +13,9 @@ config :starcite,
   raft_flush_interval_ms: 5000,
   archive_flush_interval_ms: 5_000,
   archive_name: Starcite.Archive,
-  archive_adapter: Starcite.Archive.Adapter.Postgres,
+  archive_adapter: Starcite.Archive.Adapter.S3,
   archive_adapter_opts: [],
+  event_store_cache_chunk_size: 256,
   event_store_max_bytes: 2_147_483_648,
   archive_read_cache_max_bytes: 536_870_912,
   archive_read_cache_reclaim_fraction: 0.25
@@ -41,6 +42,12 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+
+config :ex_aws,
+  http_client: ExAws.Request.Req,
+  json_codec: Jason
+
+config :ex_aws, :req_opts, receive_timeout: 30_000
 
 config :libcluster, topologies: []
 
