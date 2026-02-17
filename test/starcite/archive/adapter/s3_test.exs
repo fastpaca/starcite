@@ -22,8 +22,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
          region: "auto",
          access_key_id: "test-access-key",
          secret_access_key: "test-secret-key",
-         path_style: true,
-         compressed: true}
+         path_style: true}
       )
 
     {:ok, store: store}
@@ -40,7 +39,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     assert {:ok, events} = S3.read_events(session_id, 255, 258)
     assert Enum.map(events, & &1.seq) == [255, 256, 257, 258]
-    assert Enum.all?(events, &match?(%DateTime{}, &1.inserted_at))
+    assert Enum.all?(events, &is_binary(&1.inserted_at))
   end
 
   test "upserts and lists sessions with metadata filtering and cursor paging" do

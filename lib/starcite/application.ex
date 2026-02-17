@@ -88,7 +88,7 @@ defmodule Starcite.Application do
   defp env_bool_or_default(env_key, default) when is_binary(env_key) do
     case System.get_env(env_key) do
       nil -> validate_bool!(default, env_key)
-      raw -> parse_bool!(raw, env_key)
+      raw -> Starcite.Env.parse_bool!(raw, env_key)
     end
   end
 
@@ -97,21 +97,5 @@ defmodule Starcite.Application do
   defp validate_bool!(value, env_key) do
     raise ArgumentError,
           "invalid default boolean for #{env_key}: #{inspect(value)} (expected true/false)"
-  end
-
-  defp parse_bool!(raw, env_key) when is_binary(raw) do
-    normalized = String.downcase(String.trim(raw))
-
-    case normalized do
-      "1" -> true
-      "true" -> true
-      "yes" -> true
-      "on" -> true
-      "0" -> false
-      "false" -> false
-      "no" -> false
-      "off" -> false
-      _ -> raise ArgumentError, "invalid boolean for #{env_key}: #{inspect(raw)}"
-    end
   end
 end

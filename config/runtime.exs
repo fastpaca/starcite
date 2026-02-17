@@ -77,22 +77,6 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
-parse_bool! = fn env_name, raw ->
-  normalized = raw |> String.trim() |> String.downcase()
-
-  case normalized do
-    "1" -> true
-    "true" -> true
-    "yes" -> true
-    "on" -> true
-    "0" -> false
-    "false" -> false
-    "no" -> false
-    "off" -> false
-    _ -> raise ArgumentError, "invalid boolean for #{env_name}: #{inspect(raw)}"
-  end
-end
-
 parse_size_bytes! = fn env_name, raw ->
   case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
     [_, amount_raw, unit_raw] ->
@@ -201,11 +185,8 @@ archive_adapter_opts =
         |> put_env_opt.(:max_write_retries, "STARCITE_S3_MAX_WRITE_RETRIES", fn value ->
           parse_positive_integer!.("STARCITE_S3_MAX_WRITE_RETRIES", value)
         end)
-        |> put_env_opt.(:compressed, "STARCITE_S3_COMPRESSED", fn value ->
-          parse_bool!.("STARCITE_S3_COMPRESSED", value)
-        end)
         |> put_env_opt.(:path_style, "STARCITE_S3_PATH_STYLE", fn value ->
-          parse_bool!.("STARCITE_S3_PATH_STYLE", value)
+          Starcite.Env.parse_bool!(value, "STARCITE_S3_PATH_STYLE")
         end)
 
       resolved = Keyword.merge(base_opts, s3_opts)

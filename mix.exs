@@ -59,6 +59,7 @@ defmodule Starcite.MixProject do
       {:req, "~> 0.5"},
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
+      {:sweet_xml, "~> 0.7"},
       {:joken, "~> 2.6"},
       {:ra, "~> 2.13"},
       {:benchee, "~> 1.5.0", only: :dev},
