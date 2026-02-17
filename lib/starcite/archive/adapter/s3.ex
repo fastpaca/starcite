@@ -20,19 +20,6 @@ defmodule Starcite.Archive.Adapter.S3 do
   alias __MODULE__.{Config, Layout}
 
   @config_key {__MODULE__, :config}
-  @event_key_map [
-    {"seq", :seq},
-    {"type", :type},
-    {"payload", :payload},
-    {"actor", :actor},
-    {"producer_id", :producer_id},
-    {"producer_seq", :producer_seq},
-    {"source", :source},
-    {"metadata", :metadata},
-    {"refs", :refs},
-    {"idempotency_key", :idempotency_key},
-    {"inserted_at", :inserted_at}
-  ]
 
   @impl true
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -285,11 +272,33 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   defp decode_chunk_event!(line) do
-    decoded = Jason.decode!(line)
+    %{
+      "seq" => seq,
+      "type" => type,
+      "payload" => payload,
+      "actor" => actor,
+      "producer_id" => producer_id,
+      "producer_seq" => producer_seq,
+      "source" => source,
+      "metadata" => metadata,
+      "refs" => refs,
+      "idempotency_key" => idempotency_key,
+      "inserted_at" => inserted_at
+    } = Jason.decode!(line)
 
-    for {json_key, atom_key} <- @event_key_map, into: %{} do
-      {atom_key, Map.fetch!(decoded, json_key)}
-    end
+    %{
+      seq: seq,
+      type: type,
+      payload: payload,
+      actor: actor,
+      producer_id: producer_id,
+      producer_seq: producer_seq,
+      source: source,
+      metadata: metadata,
+      refs: refs,
+      idempotency_key: idempotency_key,
+      inserted_at: inserted_at
+    }
   end
 
   defp config!, do: :persistent_term.get(@config_key)

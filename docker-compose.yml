@@ -4,12 +4,20 @@ services:
     depends_on:
       db:
         condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
     environment:
       SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
       PHX_HOST: ${PHX_HOST:-localhost}
       PORT: 4000
       DATABASE_URL: ${DATABASE_URL:-ecto://postgres:postgres@db:5432/starcite_dev}
-      STARCITE_ARCHIVE_ADAPTER: ${STARCITE_ARCHIVE_ADAPTER:-postgres}
+      STARCITE_ARCHIVE_ADAPTER: ${STARCITE_ARCHIVE_ADAPTER:-s3}
+      STARCITE_S3_BUCKET: ${STARCITE_S3_BUCKET:-starcite-archive}
+      STARCITE_S3_REGION: ${STARCITE_S3_REGION:-us-east-1}
+      STARCITE_S3_ENDPOINT: ${STARCITE_S3_ENDPOINT:-http://minio:9000}
+      STARCITE_S3_ACCESS_KEY_ID: ${STARCITE_S3_ACCESS_KEY_ID:-minioadmin}
+      STARCITE_S3_SECRET_ACCESS_KEY: ${STARCITE_S3_SECRET_ACCESS_KEY:-minioadmin}
+      STARCITE_S3_PATH_STYLE: ${STARCITE_S3_PATH_STYLE:-true}
       MIGRATE_ON_BOOT: ${MIGRATE_ON_BOOT:-true}
       # DNS clustering is disabled locally; set DNS_CLUSTER_QUERY in deployments
       DNS_CLUSTER_QUERY: ${DNS_CLUSTER_QUERY:-}
@@ -36,5 +44,31 @@ services:
       - db-data:/var/lib/postgresql/data
     restart: unless-stopped
 
+  minio:
+    image: minio/minio:RELEASE.2025-01-20T14-49-07Z
+    command: server /data --console-address :9001
+    environment:
+      MINIO_ROOT_USER: ${STARCITE_S3_ACCESS_KEY_ID:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${STARCITE_S3_SECRET_ACCESS_KEY:-minioadmin}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc
+    depends_on:
+      minio:
+        condition: service_started
+    entrypoint: ["/bin/sh", "-ec"]
+    command:
+      [
+        "until mc alias set local http://minio:9000 ${STARCITE_S3_ACCESS_KEY_ID:-minioadmin} ${STARCITE_S3_SECRET_ACCESS_KEY:-minioadmin}; do sleep 1; done; mc mb --ignore-existing local/${STARCITE_S3_BUCKET:-starcite-archive}",
+      ]
+    restart: "no"
+
 volumes:
   db-data:
+  minio-data:
