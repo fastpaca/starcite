@@ -1,12 +1,6 @@
 defmodule StarciteWeb.Auth.Policy do
   @moduledoc """
   Action-oriented authorization policy for web endpoints.
-
-  Keep this module lean and fail-closed:
-
-  - match required shapes in function heads
-  - reject unknown/missing shapes
-  - keep only current product rules
   """
 
   alias Starcite.Auth.Principal
@@ -30,20 +24,19 @@ defmodule StarciteWeb.Auth.Policy do
     do: {:error, :forbidden}
 
   def can_create_session(
-        %{kind: :principal, principal: %Principal{type: :user}, scopes: _scopes},
-        %{"creator_principal" => _creator_override}
-      ),
-      do: {:error, :invalid_session}
-
-  def can_create_session(
-        %{kind: :principal, principal: %Principal{type: :user} = principal, scopes: scopes} = auth,
-        _params
+        %{kind: :principal, principal: %Principal{type: :user} = principal, scopes: scopes} =
+          auth,
+        params
       )
-      when is_list(scopes) do
-    with :ok <- has_scope(auth, "session:create") do
+      when is_map(params) and is_list(scopes) do
+    with :ok <- reject_creator_override(params),
+         :ok <- has_scope(auth, "session:create") do
       {:ok, principal}
     end
   end
+
+  def can_create_session(%{kind: :principal, principal: %Principal{type: :user}}, _params),
+    do: {:error, :invalid_session}
 
   def can_create_session(_auth, _params), do: {:error, :invalid_session}
 
@@ -56,16 +49,13 @@ defmodule StarciteWeb.Auth.Policy do
     do: {:error, :forbidden}
 
   def can_list_sessions(
-        %{
-          kind: :principal,
-          principal: %Principal{type: :user, tenant_id: tenant_id, id: principal_id},
-          scopes: scopes
-        } = auth
+        %{kind: :principal, principal: %Principal{type: :user} = principal, scopes: scopes} =
+          auth
       )
-      when is_binary(tenant_id) and tenant_id != "" and is_binary(principal_id) and
-             principal_id != "" and is_list(scopes) do
-    with :ok <- has_scope(auth, "session:read") do
-      {:ok, %{tenant_id: tenant_id, owner_principal_ids: [principal_id]}}
+      when is_list(scopes) do
+    with :ok <- has_scope(auth, "session:read"),
+         {:ok, scope} <- user_list_scope(principal) do
+      {:ok, scope}
     end
   end
 
@@ -86,33 +76,24 @@ defmodule StarciteWeb.Auth.Policy do
     do: :ok
 
   def allowed_to_access_session(
-        %{kind: :principal, principal: %Principal{type: :agent}, session_ids: session_ids},
+        %{kind: :principal, principal: %Principal{} = principal} = auth,
         session_id
       )
-      when is_binary(session_id) and session_id != "" and is_list(session_ids) do
-    if Enum.member?(session_ids, session_id), do: :ok, else: {:error, :forbidden_session}
+      when is_binary(session_id) and session_id != "" do
+    case {principal.type, Map.get(auth, :session_ids)} do
+      {_type, session_ids} when is_list(session_ids) ->
+        if Enum.member?(session_ids, session_id), do: :ok, else: {:error, :forbidden_session}
+
+      {:user, nil} ->
+        :ok
+
+      {:agent, nil} ->
+        {:error, :forbidden_session}
+
+      _other ->
+        {:error, :forbidden_session}
+    end
   end
-
-  def allowed_to_access_session(
-        %{kind: :principal, principal: %Principal{type: :agent}},
-        _session_id
-      ),
-      do: {:error, :forbidden_session}
-
-  def allowed_to_access_session(
-        %{kind: :principal, principal: %Principal{type: :user}, session_ids: session_ids},
-        session_id
-      )
-      when is_binary(session_id) and session_id != "" and is_list(session_ids) do
-    if Enum.member?(session_ids, session_id), do: :ok, else: {:error, :forbidden_session}
-  end
-
-  def allowed_to_access_session(
-        %{kind: :principal, principal: %Principal{type: :user}},
-        session_id
-      )
-      when is_binary(session_id) and session_id != "",
-      do: :ok
 
   def allowed_to_access_session(_auth, _session_id), do: {:error, :forbidden_session}
 
@@ -176,7 +157,13 @@ defmodule StarciteWeb.Auth.Policy do
        when is_binary(session_id) and session_id != "" and is_binary(scope) and scope != "" do
     with :ok <- has_scope(auth, scope),
          :ok <- same_tenant(principal, creator_principal),
-         :ok <- session_binding(auth, session_id, creator_principal) do
+         :ok <-
+           principal_session_binding(
+             principal,
+             Map.get(auth, :session_ids),
+             session_id,
+             creator_principal
+           ) do
       :ok
     end
   end
@@ -186,8 +173,9 @@ defmodule StarciteWeb.Auth.Policy do
   defp same_tenant(%Principal{tenant_id: tenant_id}, %Principal{tenant_id: tenant_id}), do: :ok
   defp same_tenant(_principal, _creator_principal), do: {:error, :forbidden_tenant}
 
-  defp session_binding(
-         %{principal: %Principal{type: :agent}, session_ids: session_ids},
+  defp principal_session_binding(
+         %Principal{type: :agent},
+         session_ids,
          session_id,
          _creator_principal
        )
@@ -195,19 +183,21 @@ defmodule StarciteWeb.Auth.Policy do
     if Enum.member?(session_ids, session_id), do: :ok, else: {:error, :forbidden_session}
   end
 
-  defp session_binding(%{principal: %Principal{type: :agent}}, _session_id, _creator_principal),
+  defp principal_session_binding(%Principal{type: :agent}, _session_ids, _session_id, _creator),
     do: {:error, :forbidden_session}
 
-  defp session_binding(
-         %{principal: %Principal{type: :user, id: principal_id}},
+  defp principal_session_binding(
+         %Principal{type: :user, id: principal_id},
+         _session_ids,
          _session_id,
          %Principal{id: principal_id}
        )
        when is_binary(principal_id) and principal_id != "",
        do: :ok
 
-  defp session_binding(
-         %{principal: %Principal{type: :user}, session_ids: session_ids},
+  defp principal_session_binding(
+         %Principal{type: :user},
+         session_ids,
          session_id,
          _creator_principal
        )
@@ -215,25 +205,39 @@ defmodule StarciteWeb.Auth.Policy do
     if Enum.member?(session_ids, session_id), do: :ok, else: {:error, :forbidden_session}
   end
 
-  defp session_binding(%{principal: %Principal{type: :user}}, _session_id, _creator_principal),
+  defp principal_session_binding(
+         %Principal{type: :user},
+         _session_ids,
+         _session_id,
+         _creator_principal
+       ),
+       do: {:error, :forbidden_session}
+
+  defp principal_session_binding(_principal, _session_ids, _session_id, _creator_principal),
     do: {:error, :forbidden_session}
 
-  defp session_binding(_auth, _session_id, _creator_principal), do: {:error, :forbidden_session}
+  defp reject_creator_override(%{"creator_principal" => _override}),
+    do: {:error, :invalid_session}
 
-  defp principal_from_payload(%{"tenant_id" => tenant_id, "id" => principal_id, "type" => "user"})
+  defp reject_creator_override(_params), do: :ok
+
+  defp user_list_scope(%Principal{tenant_id: tenant_id, id: principal_id})
        when is_binary(tenant_id) and tenant_id != "" and is_binary(principal_id) and
               principal_id != "" do
-    Principal.new(tenant_id, principal_id, :user)
+    {:ok, %{tenant_id: tenant_id, owner_principal_ids: [principal_id]}}
   end
+
+  defp user_list_scope(_principal), do: {:error, :forbidden}
 
   defp principal_from_payload(%{
          "tenant_id" => tenant_id,
          "id" => principal_id,
-         "type" => "agent"
+         "type" => principal_type
        })
        when is_binary(tenant_id) and tenant_id != "" and is_binary(principal_id) and
-              principal_id != "" do
-    Principal.new(tenant_id, principal_id, :agent)
+              principal_id != "" and principal_type in ["user", "agent"] do
+    type = if(principal_type == "user", do: :user, else: :agent)
+    Principal.new(tenant_id, principal_id, type)
   end
 
   defp principal_from_payload(_creator_principal), do: {:error, :invalid_session}
