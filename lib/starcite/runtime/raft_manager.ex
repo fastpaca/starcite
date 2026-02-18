@@ -41,6 +41,12 @@ defmodule Starcite.Runtime.RaftManager do
     String.to_atom("raft_cluster_#{group_id}")
   end
 
+  @doc "Stable Ra member UID for a specific group/node pair."
+  def member_uid(group_id, node \\ Node.self())
+      when is_integer(group_id) and is_atom(node) do
+    "raft_group_#{group_id}_#{safe_node_name(node)}"
+  end
+
   @doc """
   Determine which nodes should host replicas for a group.
 
@@ -184,7 +190,7 @@ defmodule Starcite.Runtime.RaftManager do
 
   defp join_cluster(group_id, server_id, cluster_name, machine) do
     my_node = Node.self()
-    node_name = my_node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
+    node_name = safe_node_name(my_node)
 
     initial_members =
       for node <- replicas_for_group(group_id), is_atom(node), do: {server_id, node}
@@ -199,7 +205,7 @@ defmodule Starcite.Runtime.RaftManager do
     # No cluster token enforcement
     server_conf = %{
       id: {server_id, my_node},
-      uid: "raft_group_#{group_id}_#{node_name}",
+      uid: member_uid(group_id, my_node),
       cluster_name: cluster_name,
       initial_members: initial_members,
       log_init_args: %{
@@ -231,6 +237,10 @@ defmodule Starcite.Runtime.RaftManager do
   @doc false
   def machine(group_id) do
     {:module, RaftFSM, %{group_id: group_id}}
+  end
+
+  defp safe_node_name(node) when is_atom(node) do
+    node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
   end
 
   # (cluster token helpers removed)

@@ -28,6 +28,9 @@ defmodule Starcite.Runtime.RaftTopology do
   @reconcile_interval_ms 10_000
   @rebalance_debounce_ms 2_000
   @ready_call_timeout_ms 1_000
+  @group_task_max_concurrency 32
+  @group_bootstrap_poll_ms 100
+  @group_bootstrap_max_attempts 300
 
   # Client API
 
@@ -223,7 +226,11 @@ defmodule Starcite.Runtime.RaftTopology do
   defp maybe_start_sync(%{sync_ref: nil} = state, cluster, trigger) do
     task =
       Task.Supervisor.async_nolink(Starcite.RaftTaskSupervisor, fn ->
-        Enum.each(0..(RaftManager.num_groups() - 1), &reconcile_group(&1, cluster))
+        run_groups_parallel(
+          0..(RaftManager.num_groups() - 1),
+          "#{trigger} sync",
+          &reconcile_group(&1, cluster)
+        )
       end)
 
     Logger.debug("RaftTopology: started #{trigger} sync task")
@@ -250,9 +257,11 @@ defmodule Starcite.Runtime.RaftTopology do
   defp bootstrap_all_groups_async(cluster, owner) do
     # Bootstrap async to avoid blocking GenServer
     Task.Supervisor.start_child(Starcite.RaftTaskSupervisor, fn ->
-      Enum.each(0..(RaftManager.num_groups() - 1), fn group_id ->
-        ensure_group_exists(group_id, cluster)
-      end)
+      run_groups_parallel(
+        0..(RaftManager.num_groups() - 1),
+        "bootstrap",
+        &ensure_group_exists(&1, cluster)
+      )
 
       send(owner, {:startup_complete, :coordinator})
     end)
@@ -265,9 +274,7 @@ defmodule Starcite.Runtime.RaftTopology do
       await_cluster_min_size()
       my_groups = compute_my_groups()
 
-      Enum.each(my_groups, fn group_id ->
-        wait_and_join_group(group_id)
-      end)
+      run_groups_parallel(my_groups, "join", &wait_and_join_group/1)
 
       Logger.info("RaftTopology: joined #{length(my_groups)} groups")
       send(owner, {:startup_complete, :follower})
@@ -278,15 +285,18 @@ defmodule Starcite.Runtime.RaftTopology do
     server_id = RaftManager.server_id(group_id)
 
     # Poll until group exists somewhere in cluster (coordinator bootstrapping)
-    case wait_for_group_exists(group_id, server_id, max_attempts: 60) do
+    case wait_for_group_exists(group_id, server_id) do
       :ok ->
         # Group exists, start locally if not running
-        unless group_running?(group_id) do
+        if group_running?(group_id) do
+          :ok
+        else
           RaftManager.start_group(group_id)
         end
 
       :timeout ->
         Logger.warning("RaftTopology: timeout waiting for group #{group_id} to be bootstrapped")
+        {:error, :bootstrap_timeout}
     end
   end
 
@@ -311,8 +321,8 @@ defmodule Starcite.Runtime.RaftTopology do
     end
   end
 
-  defp wait_for_group_exists(group_id, server_id, max_attempts: max) do
-    wait_for_group_exists(group_id, server_id, 0, max)
+  defp wait_for_group_exists(group_id, server_id) do
+    wait_for_group_exists(group_id, server_id, 0, @group_bootstrap_max_attempts)
   end
 
   defp wait_for_group_exists(_group_id, _server_id, attempt, max) when attempt >= max do
@@ -327,7 +337,7 @@ defmodule Starcite.Runtime.RaftTopology do
         :ok
 
       :missing ->
-        Process.sleep(500)
+        Process.sleep(@group_bootstrap_poll_ms)
         wait_for_group_exists(group_id, server_id, attempt + 1, max)
     end
   end
@@ -343,10 +353,12 @@ defmodule Starcite.Runtime.RaftTopology do
 
   defp ensure_group_exists(group_id, cluster) do
     server_id = RaftManager.server_id(group_id)
+    should_host_group? = Node.self() in replicas_for_group(group_id, cluster)
 
     case cluster_members(server_id, cluster) do
       {:ok, _members, _leader} ->
-        # Group exists
+        # Group exists; ensure local server is running when this node is a replica.
+        maybe_start_local_group(group_id, should_host_group?)
         :ok
 
       :missing ->
@@ -355,11 +367,18 @@ defmodule Starcite.Runtime.RaftTopology do
 
       :timeout ->
         # Might exist, start locally if we're a replica
-        if Node.self() in replicas_for_group(group_id, cluster) do
-          RaftManager.start_group(group_id)
-        end
-
+        maybe_start_local_group(group_id, should_host_group?)
         :ok
+    end
+  end
+
+  defp maybe_start_local_group(_group_id, false), do: :ok
+
+  defp maybe_start_local_group(group_id, true) do
+    if group_running?(group_id) do
+      :ok
+    else
+      RaftManager.start_group(group_id)
     end
   end
 
@@ -371,25 +390,14 @@ defmodule Starcite.Runtime.RaftTopology do
 
     server_ids = for node <- replica_nodes, do: {server_id, node}
 
-    # Use global lock to ensure only one node across cluster bootstraps each group
-    :global.trans(
-      {:raft_bootstrap, group_id},
-      fn ->
-        case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-          {:ok, _started, _not_started} ->
-            :ok
+    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
+      {:ok, _started, _not_started} ->
+        :ok
 
-          {:error, reason} ->
-            Logger.warning(
-              "RaftTopology: failed to bootstrap group #{group_id}: #{inspect(reason)}"
-            )
-
-            {:error, reason}
-        end
-      end,
-      [Node.self() | Node.list()],
-      10_000
-    )
+      {:error, reason} ->
+        Logger.warning("RaftTopology: failed to bootstrap group #{group_id}: #{inspect(reason)}")
+        {:error, reason}
+    end
   end
 
   defp reconcile_group(group_id, cluster) do
@@ -422,14 +430,18 @@ defmodule Starcite.Runtime.RaftTopology do
 
         if leader_ref do
           # Add first
-          Enum.each(to_add, fn member ->
-            add_member(group_id, leader_ref, member)
-          end)
+          Enum.each(to_add, &add_member(group_id, leader_ref, &1))
 
-          # Then remove
-          Enum.each(to_remove, fn member ->
-            remove_member(group_id, leader_ref, member)
-          end)
+          case pending_promotions(server_id, cluster, leader_ref, to_add) do
+            [] ->
+              # Remove only after added peers are promoted to voters.
+              Enum.each(to_remove, &remove_member(group_id, leader_ref, &1))
+
+            pending ->
+              Logger.debug(
+                "RaftTopology: group #{group_id} waiting for #{length(pending)} promotable members before removals"
+              )
+          end
         end
 
       :missing ->
@@ -457,12 +469,68 @@ defmodule Starcite.Runtime.RaftTopology do
     end
   end
 
+  defp cluster_members_info(server_id, cluster, leader_ref) do
+    targets =
+      [leader_ref | Enum.map(cluster, &{server_id, &1})]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.uniq()
+
+    {result, saw_timeout} =
+      Enum.reduce_while(targets, {:missing, false}, fn server_ref, {_acc, timed_out} ->
+        case :ra.members_info(server_ref) do
+          {:ok, members_info, _responder} when is_map(members_info) ->
+            {:halt, {{:ok, members_info}, timed_out}}
+
+          {:timeout, _} ->
+            {:cont, {:missing, true}}
+
+          _ ->
+            {:cont, {:missing, timed_out}}
+        end
+      end)
+
+    case result do
+      {:ok, _members_info} = ok -> ok
+      :missing when saw_timeout -> :timeout
+      :missing -> :missing
+    end
+  end
+
+  defp pending_promotions(_server_id, _cluster, _leader_ref, []), do: []
+
+  defp pending_promotions(server_id, cluster, leader_ref, to_add) do
+    case cluster_members_info(server_id, cluster, leader_ref) do
+      {:ok, members_info} ->
+        Enum.filter(to_add, fn member ->
+          membership =
+            members_info
+            |> Map.get(member, %{})
+            |> Map.get(:voter_status, %{})
+            |> Map.get(:membership)
+
+          membership != :voter
+        end)
+
+      :missing ->
+        to_add
+
+      :timeout ->
+        to_add
+    end
+  end
+
   defp add_member(group_id, leader_ref, {_server_id, node} = member) do
     # Ensure group started on target
     :rpc.call(node, RaftManager, :start_group, [group_id])
 
-    case :ra.add_member(leader_ref, member) do
-      {:ok, _members, _leader} ->
+    member_conf = %{
+      id: member,
+      membership: :promotable,
+      uid: RaftManager.member_uid(group_id, node)
+    }
+
+    case :ra.add_member(leader_ref, member_conf) do
+      {:ok, _index, _term} ->
         Logger.debug("RaftTopology: added #{inspect(node)} to group #{group_id}")
         :ok
 
@@ -483,7 +551,7 @@ defmodule Starcite.Runtime.RaftTopology do
 
   defp remove_member(group_id, leader_ref, {server_id, node} = member) do
     case :ra.remove_member(leader_ref, member) do
-      {:ok, _members, _leader} ->
+      {:ok, _index, _term} ->
         Logger.debug("RaftTopology: removed #{inspect(node)} from group #{group_id}")
         :rpc.call(node, :ra, :stop_server, [:default, {server_id, node}])
         :ok
@@ -501,6 +569,45 @@ defmodule Starcite.Runtime.RaftTopology do
       {:timeout, _} ->
         {:error, :timeout}
     end
+  end
+
+  defp run_groups_parallel(groups, label, fun) when is_function(fun, 1) do
+    total = Enum.count(groups)
+
+    if total == 0 do
+      :ok
+    else
+      max_concurrency = min(total, @group_task_max_concurrency)
+      started_at_ms = System.monotonic_time(:millisecond)
+
+      Task.Supervisor.async_stream_nolink(
+        Starcite.RaftTaskSupervisor,
+        groups,
+        fn group_id -> {group_id, fun.(group_id)} end,
+        max_concurrency: max_concurrency,
+        timeout: :infinity,
+        ordered: false
+      )
+      |> Enum.each(&handle_group_result(&1, label))
+
+      duration_ms = System.monotonic_time(:millisecond) - started_at_ms
+
+      Logger.info(
+        "RaftTopology: #{label} processed #{total} groups in #{duration_ms}ms (max_concurrency=#{max_concurrency})"
+      )
+    end
+  end
+
+  defp handle_group_result({:ok, {_group_id, :ok}}, _label), do: :ok
+
+  defp handle_group_result({:ok, {group_id, {:error, reason}}}, label) do
+    Logger.debug("RaftTopology: #{label} group #{group_id} failed: #{inspect(reason)}")
+  end
+
+  defp handle_group_result({:ok, {_group_id, _result}}, _label), do: :ok
+
+  defp handle_group_result({:exit, reason}, label) do
+    Logger.warning("RaftTopology: #{label} worker crashed: #{inspect(reason)}")
   end
 
   defp compute_my_groups(cluster \\ nil) do
