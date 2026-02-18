@@ -28,6 +28,7 @@ COPY config ./config
 RUN mix deps.get --only ${MIX_ENV} && \
     mix deps.compile
 COPY lib lib
+COPY rel rel
 
 RUN mix compile
 RUN mix release
