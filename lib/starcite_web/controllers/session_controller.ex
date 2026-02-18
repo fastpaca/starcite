@@ -10,6 +10,7 @@ defmodule StarciteWeb.SessionController do
   use StarciteWeb, :controller
 
   alias Starcite.Runtime
+  alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
 
@@ -20,7 +21,9 @@ defmodule StarciteWeb.SessionController do
   Create a session.
   """
   def create(conn, params) do
-    with {:ok, opts} <- validate_create(params),
+    auth = conn.assigns[:auth] || %{kind: :none}
+
+    with {:ok, opts} <- validate_create(params, auth),
          {:ok, session} <- Runtime.create_session(opts) do
       conn
       |> put_status(:created)
@@ -32,7 +35,12 @@ defmodule StarciteWeb.SessionController do
   Append one event to a session.
   """
   def append(conn, %{"id" => id} = params) do
-    with {:ok, event, expected_seq} <- validate_append(params),
+    auth = conn.assigns[:auth] || %{kind: :none}
+
+    with :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- Runtime.get_session(id),
+         :ok <- Policy.allowed_to_append_session(auth, session),
+         {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- Runtime.append_event(id, event, expected_seq: expected_seq) do
       conn
       |> put_status(:created)
@@ -46,40 +54,54 @@ defmodule StarciteWeb.SessionController do
   List known sessions from the configured archive adapter.
   """
   def index(conn, params) do
+    auth = conn.assigns[:auth] || %{kind: :none}
+
     with {:ok, opts} <- validate_list(params),
-         {:ok, page} <- Starcite.Archive.Store.list_sessions(opts) do
+         {:ok, scope} <- Policy.can_list_sessions(auth),
+         {:ok, page} <- list_sessions(scope, opts) do
       json(conn, page)
     end
   end
 
   # Validation
 
-  defp validate_create(params) when is_map(params) do
-    with {:ok, id} <- optional_non_empty_string(Map.get(params, "id")),
-         {:ok, title} <- optional_string(Map.get(params, "title")),
-         {:ok, metadata} <- optional_object(Map.get(params, "metadata")) do
-      {:ok, [id: id, title: title, metadata: metadata]}
+  defp validate_create(params, auth) when is_map(params) and is_map(auth) do
+    with {:ok, creator_principal} <- Policy.can_create_session(auth, params),
+         {:ok, id} <- optional_non_empty_string(params["id"]),
+         {:ok, title} <- optional_string(params["title"]),
+         {:ok, metadata} <- optional_object(params["metadata"]) do
+      {:ok,
+       [
+         id: id,
+         title: title,
+         creator_principal: creator_principal,
+         metadata: metadata
+       ]}
     end
   end
+
+  defp validate_create(_params, _auth), do: {:error, :invalid_session}
 
   defp validate_append(
          %{
            "type" => type,
            "payload" => payload,
-           "actor" => actor,
            "producer_id" => producer_id,
            "producer_seq" => producer_seq
-         } = params
+         } = params,
+         auth
        )
-       when is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and
-              actor != "" do
+       when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
     with {:ok, validated_producer_id} <- required_non_empty_string(producer_id),
          {:ok, validated_producer_seq} <- required_positive_integer(producer_seq),
-         {:ok, source} <- optional_non_empty_string(Map.get(params, "source")),
-         {:ok, metadata} <- optional_object(Map.get(params, "metadata")),
-         {:ok, refs} <- optional_refs(Map.get(params, "refs")),
-         {:ok, idempotency_key} <- optional_non_empty_string(Map.get(params, "idempotency_key")),
-         {:ok, expected_seq} <- optional_non_neg_integer(Map.get(params, "expected_seq")) do
+         {:ok, actor} <- Policy.resolve_event_actor(auth, params["actor"]),
+         {:ok, source} <- optional_non_empty_string(params["source"]),
+         {:ok, metadata} <- optional_object(params["metadata"]),
+         {:ok, refs} <- optional_refs(params["refs"]),
+         {:ok, idempotency_key} <- optional_non_empty_string(params["idempotency_key"]),
+         {:ok, expected_seq} <- optional_non_neg_integer(params["expected_seq"]) do
+      metadata = Policy.attach_principal_metadata(auth, metadata)
+
       event = %{
         type: type,
         payload: payload,
@@ -96,17 +118,36 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp validate_append(_params), do: {:error, :invalid_event}
+  defp validate_append(_params, _auth), do: {:error, :invalid_event}
 
   defp validate_list(params) when is_map(params) do
-    with {:ok, limit} <- optional_limit(Map.get(params, "limit")),
-         {:ok, cursor} <- optional_cursor(Map.get(params, "cursor")),
+    with {:ok, limit} <- optional_limit(params["limit"]),
+         {:ok, cursor} <- optional_cursor(params["cursor"]),
          {:ok, metadata} <- optional_metadata_filters(params) do
       {:ok, %{limit: limit, cursor: cursor, metadata: metadata}}
     end
   end
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
+
+  defp list_sessions(:all, opts) when is_map(opts) do
+    Starcite.Archive.Store.list_sessions(opts)
+  end
+
+  defp list_sessions(
+         %{tenant_id: tenant_id, owner_principal_ids: owner_principal_ids},
+         opts
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_list(owner_principal_ids) and
+              is_map(opts) do
+    Starcite.Archive.Store.list_sessions(
+      opts
+      |> Map.put(:tenant_id, tenant_id)
+      |> Map.put(:owner_principal_ids, owner_principal_ids)
+    )
+  end
+
+  defp list_sessions(_scope, _opts), do: {:error, :forbidden}
 
   defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp required_non_empty_string(_value), do: {:error, :invalid_event}
@@ -133,10 +174,10 @@ defmodule StarciteWeb.SessionController do
   defp optional_refs(nil), do: {:ok, %{}}
 
   defp optional_refs(refs) when is_map(refs) and not is_list(refs) do
-    with {:ok, _} <- optional_non_neg_integer(Map.get(refs, "to_seq")),
-         {:ok, _} <- optional_string(Map.get(refs, "request_id")),
-         {:ok, _} <- optional_string(Map.get(refs, "sequence_id")),
-         {:ok, _} <- optional_non_neg_integer(Map.get(refs, "step")) do
+    with {:ok, _} <- optional_non_neg_integer(refs["to_seq"]),
+         {:ok, _} <- optional_string(refs["request_id"]),
+         {:ok, _} <- optional_string(refs["sequence_id"]),
+         {:ok, _} <- optional_non_neg_integer(refs["step"]) do
       {:ok, refs}
     end
   end
@@ -178,7 +219,7 @@ defmodule StarciteWeb.SessionController do
   defp optional_cursor(_value), do: {:error, :invalid_cursor}
 
   defp optional_metadata_filters(params) when is_map(params) do
-    with {:ok, nested} <- optional_metadata_filter_map(Map.get(params, "metadata")) do
+    with {:ok, nested} <- optional_metadata_filter_map(params["metadata"]) do
       dotted =
         Enum.reduce(params, %{}, fn
           {<<"metadata.", key::binary>>, value}, acc when key != "" ->

@@ -8,6 +8,7 @@ defmodule Starcite.Session do
   """
 
   alias __MODULE__, as: Session
+  alias Starcite.Auth.Principal
   alias Starcite.Session.{Event, ProducerIndex}
 
   @type event_input :: Event.input()
@@ -24,6 +25,7 @@ defmodule Starcite.Session do
   defstruct [
     :id,
     :title,
+    :creator_principal,
     :metadata,
     :last_seq,
     :archived_seq,
@@ -35,6 +37,7 @@ defmodule Starcite.Session do
   @type t :: %Session{
           id: String.t(),
           title: String.t() | nil,
+          creator_principal: Principal.t() | nil,
           metadata: map(),
           last_seq: non_neg_integer(),
           archived_seq: non_neg_integer(),
@@ -70,6 +73,8 @@ defmodule Starcite.Session do
     %Session{
       id: id,
       title: Keyword.get(opts, :title),
+      creator_principal:
+        optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal),
       metadata: Keyword.get(opts, :metadata, %{}),
       last_seq: 0,
       archived_seq: 0,
@@ -181,6 +186,7 @@ defmodule Starcite.Session do
     %{
       id: session.id,
       title: session.title,
+      creator_principal: principal_to_map(session.creator_principal),
       metadata: session.metadata,
       last_seq: session.last_seq,
       created_at: created_at,
@@ -231,5 +237,20 @@ defmodule Starcite.Session do
     |> DateTime.to_iso8601()
   end
 
-  defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
+  defp optional_principal!(nil, _field), do: nil
+  defp optional_principal!(%Principal{} = principal, _field), do: principal
+
+  defp optional_principal!(value, field) do
+    raise ArgumentError, "invalid session #{field}: #{inspect(value)}"
+  end
+
+  defp principal_to_map(nil), do: nil
+
+  defp principal_to_map(%Principal{} = principal) do
+    %{
+      "tenant_id" => principal.tenant_id,
+      "id" => principal.id,
+      "type" => Atom.to_string(principal.type)
+    }
+  end
 end

@@ -2,7 +2,7 @@ defmodule Starcite.Runtime.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
 
-  Stores session metadata and applies ordered commands through Raft consensus.
+  Stores session state (including auth-critical fields) and applies ordered commands through Raft consensus.
   """
 
   @behaviour :ra_machine
@@ -26,10 +26,20 @@ defmodule Starcite.Runtime.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, {:create_session, session_id, title, metadata}, state) do
+  def apply(
+        _meta,
+        {:create_session, session_id, title, creator_principal, metadata},
+        state
+      ) do
     case Map.get(state.sessions, session_id) do
       nil ->
-        session = Session.new(session_id, title: title, metadata: metadata)
+        session =
+          Session.new(session_id,
+            title: title,
+            creator_principal: creator_principal,
+            metadata: metadata
+          )
+
         new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
         {new_state, {:reply, {:ok, Session.to_map(session)}}}
 

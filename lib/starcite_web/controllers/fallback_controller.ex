@@ -72,6 +72,22 @@ defmodule StarciteWeb.FallbackController do
     )
   end
 
+  def call(conn, {:error, :forbidden}) do
+    error(conn, :forbidden, "forbidden", "Forbidden")
+  end
+
+  def call(conn, {:error, :forbidden_scope}) do
+    error(conn, :forbidden, "forbidden_scope", "Token scope does not allow this operation")
+  end
+
+  def call(conn, {:error, :forbidden_session}) do
+    error(conn, :forbidden, "forbidden_session", "Token is not allowed to access this session")
+  end
+
+  def call(conn, {:error, :forbidden_tenant}) do
+    error(conn, :forbidden, "forbidden_tenant", "Token tenant does not match session tenant")
+  end
+
   def call(conn, {:error, reason})
       when reason in [
              :invalid_event,
@@ -80,6 +96,7 @@ defmodule StarciteWeb.FallbackController do
              :invalid_cursor,
              :invalid_limit,
              :invalid_list_query,
+             :invalid_issue_request,
              :invalid_websocket_upgrade,
              :invalid_session,
              :invalid_session_id
@@ -97,6 +114,7 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
   defp reason_message(:invalid_limit), do: "Invalid limit value"
   defp reason_message(:invalid_list_query), do: "Invalid list query"
+  defp reason_message(:invalid_issue_request), do: "Invalid token issue request payload"
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"

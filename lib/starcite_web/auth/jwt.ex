@@ -18,9 +18,14 @@ defmodule StarciteWeb.Auth.JWT do
   def verify(_token, _config), do: {:error, :invalid_jwt}
 
   defp peek_header(token) when is_binary(token) do
-    case Joken.peek_header(token) do
-      {:ok, header} when is_map(header) -> {:ok, header}
-      {:error, _reason} -> {:error, :invalid_jwt_header}
+    # Non-JWT bearer tokens must fail closed here so layered auth can fallback safely.
+    try do
+      case Joken.peek_header(token) do
+        {:ok, header} when is_map(header) -> {:ok, header}
+        {:error, _reason} -> {:error, :invalid_jwt_header}
+      end
+    rescue
+      _error -> {:error, :invalid_jwt_header}
     end
   end
 
@@ -28,10 +33,15 @@ defmodule StarciteWeb.Auth.JWT do
   defp kid_from_header(_header), do: {:error, :invalid_jwt_header}
 
   defp verify_signature(token, %Signer{} = signer) when is_binary(token) do
-    case Joken.verify(token, signer) do
-      {:ok, claims} when is_map(claims) -> {:ok, claims}
-      {:error, :signature_error} -> {:error, :invalid_jwt_signature}
-      {:error, _reason} -> {:error, :invalid_jwt}
+    # Defensive rescue prevents malformed tokens from bubbling as 500s.
+    try do
+      case Joken.verify(token, signer) do
+        {:ok, claims} when is_map(claims) -> {:ok, claims}
+        {:error, :signature_error} -> {:error, :invalid_jwt_signature}
+        {:error, _reason} -> {:error, :invalid_jwt}
+      end
+    rescue
+      _error -> {:error, :invalid_jwt}
     end
   end
 

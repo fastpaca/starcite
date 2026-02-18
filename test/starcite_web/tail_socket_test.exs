@@ -5,19 +5,20 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Runtime
   alias Starcite.Runtime.{CursorUpdate, EventStore}
   alias Starcite.Repo
-  alias StarciteWeb.Auth
   alias StarciteWeb.TailSocket
+
+  @auth_env_key StarciteWeb.Auth
 
   setup do
     Starcite.Runtime.TestHelper.reset()
     Process.put(:producer_seq_counters, %{})
-    previous_auth = Application.get_env(:starcite, Auth)
+    previous_auth = Application.get_env(:starcite, @auth_env_key)
 
     on_exit(fn ->
       if is_nil(previous_auth) do
-        Application.delete_env(:starcite, Auth)
+        Application.delete_env(:starcite, @auth_env_key)
       else
-        Application.put_env(:starcite, Auth, previous_auth)
+        Application.put_env(:starcite, @auth_env_key, previous_auth)
       end
     end)
 
@@ -37,7 +38,11 @@ defmodule StarciteWeb.TailSocketTest do
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
-      auth_bearer_token: nil
+      auth_bearer_token: nil,
+      auth_expires_at: nil,
+      auth_check_interval_ms: nil,
+      auth_check_timer_ref: nil,
+      auth_expiry_timer_ref: nil
     }
   end
 
@@ -325,11 +330,20 @@ defmodule StarciteWeb.TailSocketTest do
     seq
   end
 
-  describe "auth validation" do
-    test "stops socket when token validation fails on live updates" do
+  describe "auth lifetime" do
+    test "stops socket when auth lifetime expires" do
+      state =
+        base_state("ses-auth", 0)
+        |> Map.put(:replay_done, true)
+
+      assert {:stop, :token_expired, {4001, "token_expired"}, ^state} =
+               TailSocket.handle_info(:auth_expired, state)
+    end
+
+    test "stops socket when periodic auth check fails" do
       Application.put_env(
         :starcite,
-        Auth,
+        @auth_env_key,
         mode: :jwt,
         issuer: "https://issuer.example",
         audience: "starcite-api",
@@ -342,9 +356,10 @@ defmodule StarciteWeb.TailSocketTest do
         base_state("ses-auth", 0)
         |> Map.put(:replay_done, true)
         |> Map.put(:auth_bearer_token, "not-a-jwt")
+        |> Map.put(:auth_check_interval_ms, 1_000)
 
-      assert {:stop, :token_invalid, {4001, "token_invalid"}, ^state} =
-               TailSocket.handle_info({:cursor_update, %{seq: 1}}, state)
+      assert {:stop, :token_invalid, {4001, "token_invalid"}, %{auth_check_timer_ref: nil}} =
+               TailSocket.handle_info(:auth_check, state)
     end
   end
 

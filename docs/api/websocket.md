@@ -11,9 +11,15 @@ ws://HOST/v1/sessions/:id/tail?cursor=41
 If `STARCITE_AUTH_MODE=jwt` is enabled, include an `Authorization: Bearer <jwt>` header
 during the WebSocket upgrade request.
 
-Auth behavior in JWT mode:
+In JWT mode Starcite accepts:
 
-- Missing/invalid/expired token: HTTP `401` during upgrade.
+- service JWT bearer token
+- Starcite-issued principal bearer token
+
+Auth behavior:
+
+- Missing/invalid/expired token: HTTP `401` during upgrade
+- Valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
 
 ## Semantics
 
@@ -49,4 +55,4 @@ Notes:
 - No `tombstone` event in the primary contract.
 - No `tail_synced` event.
 - Tail is server-to-client only; inbound client frames are ignored.
-- In JWT mode, token validity is re-checked during event delivery. If invalid, sockets close with code `4001` (`token_expired` or `token_invalid`).
+- In JWT mode, bearer auth is enforced at WebSocket upgrade and re-checked periodically while connected. Invalid/revoked tokens close with `4001` (`token_invalid`), and expiry closes with `4001` (`token_expired`).

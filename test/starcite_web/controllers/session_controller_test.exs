@@ -33,6 +33,15 @@ defmodule StarciteWeb.SessionControllerTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
   end
 
+  defp service_create_body(attrs) when is_map(attrs) do
+    Map.merge(
+      %{
+        "creator_principal" => %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"}
+      },
+      attrs
+    )
+  end
+
   defp json_conn(method, path, body) do
     conn =
       conn(method, path)
@@ -51,10 +60,14 @@ defmodule StarciteWeb.SessionControllerTest do
   describe "POST /v1/sessions" do
     test "creates session with server-generated id" do
       conn =
-        json_conn(:post, "/v1/sessions", %{
-          "title" => "Draft",
-          "metadata" => %{"workflow" => "legal"}
-        })
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "title" => "Draft",
+            "metadata" => %{"workflow" => "legal"}
+          })
+        )
 
       assert conn.status == 201
       body = Jason.decode!(conn.resp_body)
@@ -70,10 +83,14 @@ defmodule StarciteWeb.SessionControllerTest do
       id = unique_id("ses")
 
       conn =
-        json_conn(:post, "/v1/sessions", %{
-          "id" => id,
-          "metadata" => %{"tenant_id" => "acme"}
-        })
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "id" => id,
+            "metadata" => %{"tenant_id" => "acme"}
+          })
+        )
 
       assert conn.status == 201
       body = Jason.decode!(conn.resp_body)
@@ -84,10 +101,14 @@ defmodule StarciteWeb.SessionControllerTest do
       id = unique_id("ses")
 
       conn =
-        json_conn(:post, "/v1/sessions", %{
-          "id" => id,
-          "title" => ""
-        })
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "id" => id,
+            "title" => ""
+          })
+        )
 
       assert conn.status == 201
       body = Jason.decode!(conn.resp_body)
@@ -99,7 +120,7 @@ defmodule StarciteWeb.SessionControllerTest do
       id = unique_id("ses")
       {:ok, _} = Runtime.create_session(id: id)
 
-      conn = json_conn(:post, "/v1/sessions", %{"id" => id})
+      conn = json_conn(:post, "/v1/sessions", service_create_body(%{"id" => id}))
 
       assert conn.status == 409
       body = Jason.decode!(conn.resp_body)
@@ -117,6 +138,11 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert 201 ==
                json_conn(:post, "/v1/sessions", %{
+                 "creator_principal" => %{
+                   "tenant_id" => "acme",
+                   "id" => "user-test",
+                   "type" => "user"
+                 },
                  "id" => id1,
                  "title" => "A",
                  "metadata" => %{"user_id" => "u1", "tenant_id" => "acme", "marker" => marker}
@@ -124,6 +150,11 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert 201 ==
                json_conn(:post, "/v1/sessions", %{
+                 "creator_principal" => %{
+                   "tenant_id" => "acme",
+                   "id" => "user-test",
+                   "type" => "user"
+                 },
                  "id" => id2,
                  "title" => "B",
                  "metadata" => %{"user_id" => "u2", "tenant_id" => "acme", "marker" => marker}
@@ -131,6 +162,11 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert 201 ==
                json_conn(:post, "/v1/sessions", %{
+                 "creator_principal" => %{
+                   "tenant_id" => "beta",
+                   "id" => "user-test",
+                   "type" => "user"
+                 },
                  "id" => id3,
                  "title" => "C",
                  "metadata" => %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
@@ -157,16 +193,24 @@ defmodule StarciteWeb.SessionControllerTest do
       id2 = "ses-b-#{System.unique_integer([:positive, :monotonic])}"
 
       assert 201 ==
-               json_conn(:post, "/v1/sessions", %{
-                 "id" => id1,
-                 "metadata" => %{"marker" => marker}
-               }).status
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => id1,
+                   "metadata" => %{"marker" => marker}
+                 })
+               ).status
 
       assert 201 ==
-               json_conn(:post, "/v1/sessions", %{
-                 "id" => id2,
-                 "metadata" => %{"marker" => marker}
-               }).status
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => id2,
+                   "metadata" => %{"marker" => marker}
+                 })
+               ).status
 
       conn1 = json_conn(:get, "/v1/sessions?limit=1&metadata[marker]=#{marker}", nil)
       assert conn1.status == 200

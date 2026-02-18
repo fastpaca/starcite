@@ -12,6 +12,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   import Ecto.Query
 
   alias Starcite.Archive.{Event, SessionRecord}
+  alias Starcite.Auth.Principal
   alias Starcite.Repo
 
   @impl true
@@ -71,11 +72,15 @@ defmodule Starcite.Archive.Adapter.Postgres do
   def upsert_session(%{
         id: id,
         title: title,
+        creator_principal: creator_principal,
         metadata: metadata,
         created_at: %DateTime{} = created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
              is_map(metadata) do
+    creator_principal_payload = principal_to_map(creator_principal)
+
     {_inserted, _} =
       Repo.insert_all(
         "sessions",
@@ -83,6 +88,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
           %{
             id: id,
             title: title,
+            creator_principal: creator_principal_payload,
             metadata: metadata,
             created_at: created_at
           }
@@ -97,12 +103,14 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata})
+  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata} = query_opts)
       when is_integer(limit) and limit > 0 and
              (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
     query =
       SessionRecord
       |> apply_cursor(cursor)
+      |> apply_tenant_filter(Map.get(query_opts, :tenant_id))
+      |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
       |> apply_metadata_filters(metadata)
       |> order_by([s], asc: s.id)
       |> limit(^limit)
@@ -119,7 +127,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata})
+  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata} = query_opts)
       when is_list(ids) and is_integer(limit) and limit > 0 and
              (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
     session_ids = ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
@@ -131,6 +139,8 @@ defmodule Starcite.Archive.Adapter.Postgres do
         SessionRecord
         |> where([s], s.id in ^session_ids)
         |> apply_cursor(cursor)
+        |> apply_tenant_filter(Map.get(query_opts, :tenant_id))
+        |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
         |> apply_metadata_filters(metadata)
         |> order_by([s], asc: s.id)
         |> limit(^limit)
@@ -188,6 +198,42 @@ defmodule Starcite.Archive.Adapter.Postgres do
     where(query, [s], s.id > ^cursor)
   end
 
+  defp apply_tenant_filter(query, nil), do: query
+
+  defp apply_tenant_filter(query, tenant_id) when is_binary(tenant_id) and tenant_id != "" do
+    where(query, [s], fragment("?->>'tenant_id' = ?", s.creator_principal, ^tenant_id))
+  end
+
+  defp apply_tenant_filter(query, _invalid_filter), do: where(query, [s], false)
+
+  defp apply_owner_principal_filters(query, nil), do: query
+
+  defp apply_owner_principal_filters(query, owner_principal_ids)
+       when is_list(owner_principal_ids) do
+    owner_principal_ids =
+      owner_principal_ids
+      |> Enum.uniq()
+      |> Enum.reject(&(&1 == ""))
+
+    case owner_principal_ids do
+      [] ->
+        where(query, [s], false)
+
+      _other ->
+        where(
+          query,
+          [s],
+          fragment(
+            "?->>'id' = ANY(?)",
+            s.creator_principal,
+            type(^owner_principal_ids, {:array, :string})
+          )
+        )
+    end
+  end
+
+  defp apply_owner_principal_filters(query, _invalid_filter), do: where(query, [s], false)
+
   defp apply_metadata_filters(query, metadata_filters) when map_size(metadata_filters) == 0,
     do: query
 
@@ -208,8 +254,19 @@ defmodule Starcite.Archive.Adapter.Postgres do
     %{
       id: session.id,
       title: session.title,
+      creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
       created_at: DateTime.to_iso8601(session.created_at)
+    }
+  end
+
+  defp principal_to_map(nil), do: nil
+
+  defp principal_to_map(%Principal{} = principal) do
+    %{
+      "tenant_id" => principal.tenant_id,
+      "id" => principal.id,
+      "type" => Atom.to_string(principal.type)
     }
   end
 end
