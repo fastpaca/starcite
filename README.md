@@ -1,86 +1,52 @@
-# [starcite](https://starcite.ai)
+<h1 align="center">Starcite</h1>
 
-[![Tests](https://github.com/fastpaca/starcite/actions/workflows/test.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/test.yml) [![Docker Build](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml/badge.svg)](https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml) [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE) [![Elixir](https://img.shields.io/badge/Elixir-1.18.4-purple.svg)](https://elixir-lang.org/)
+<p align="center">
+  Durable session event storage for multi-agent LLM systems.
+</p>
 
-**The session log for multi-agent AI**
+<p align="center">
+  <a href="https://github.com/fastpaca/starcite/actions/workflows/test.yml"><img src="https://github.com/fastpaca/starcite/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml"><img src="https://github.com/fastpaca/starcite/actions/workflows/docker-build.yml/badge.svg" alt="Docker Build"></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-Apache%202.0-blue.svg" alt="License"></a>
+  <a href="https://elixir-lang.org/"><img src="https://img.shields.io/badge/Elixir-1.18.4-blue.svg" alt="Elixir"></a>
+</p>
 
-Your AI product streams messages to users in real time. When they switch tabs, refresh, or drop WiFi, the stream dies — and the session can vanish.
+AI apps get fragile when streams break. Refresh a page, lose connectivity, or redeploy a server, and session state can diverge from what the model actually produced. Starcite removes that class of failure by making the session history explicit and durable.
 
-starcite is the session log underneath: every message, tool call, and status update is persisted before the write returns. Your UI reads from a cursor — catch-up and live streaming are the same operation.
+Every append is persisted before it is acknowledged to the client. Every consumer can resume from a cursor, and every consumer sees the same deterministic sequence.
 
-It makes the hard operational work explicit so your app can focus on product behavior, not stream recovery.
+## Why Starcite?
 
-**Most AI systems face the same reliability gaps**:
+Production LLM systems typically need three guarantees to feel “normal”:
 
-- Response lost on page refresh
-- Tab switch kills the stream
-- Partial message discarded on error
-- Stuck response after disconnect
-- Context lost on device switch
-- Token-by-token write storms
-- Message IDs shift mid-stream
-- Multi-step agent state corrupted
-- Agent streams tangled in one socket
-- Stream can’t resume mid-response
-- History gone after redeploy
-- Session state diverges across devices
-- Ordering breaks on reconnect
-- Mobile backgrounding breaks the stream
-- SSE/WebSocket reconnection logic complexity
-- Expired or moved connections dropping long sessions
+1. **Reliable stream recovery** — keep every event in order, even when sockets and tabs churn.
+2. **Low-latency append path** — sub-150ms p99 commit path with Raft-backed ordering.
+3. **Shared event model** — humans and agents operate against the same authoritative stream.
 
-Starcite’s contract is explicit and minimal:
+## What You Get
 
-1. `POST /v1/sessions` — create
-2. `POST /v1/sessions/:id/append` — append one event
-3. `GET /v1/sessions/:id/tail?cursor=N` — tail from cursor
-
-That is the full behavioral chain.
-
-## Reliability
-
-**Refresh. It’s all there.**
-
-Connections drop. Pages refresh. Servers redeploy. Messages remain in order with no gaps because every change is durably committed before it is acknowledged.
-
-- Monotonic `seq` per session
-- Durable commit on each append
-- Replay from any cursor and continue live from that point
-- Reconnect by sending your last processed `seq`
-
-## Visibility
-
-**Every agent, every step.**
-
-Tool calls, intermediate results, and handoffs all flow through one session stream. You can inspect all actors together or stream focused agent views as needed.
-
-- Shared event model for humans and agents
-- Per-event metadata for provenance and traceability
-- Deterministic ordering of interleaved workflows
-
-## Consistency
-
-**Open it anywhere.**
-
-Session readbacks are canonical and replayable. The same session can be opened on desktop, phone, or shared links with matching state.
-
-- Session state is independent of client-side history
-- No client-specific sync layer required
-- Same `seq` contract applies across consumers
-
-Archive persistence defaults to S3-compatible object storage (`STARCITE_ARCHIVE_ADAPTER=s3`), with optional Postgres mode (`STARCITE_ARCHIVE_ADAPTER=postgres`).
+| Capability | Description |
+| --- | --- |
+| Ordered session sequence | Strictly monotonic `seq` per session |
+| Durable writes | Appends are committed before client acknowledgement |
+| Replay and resume | Resume from any cursor via tail endpoint |
+| Concurrency safety | Optional `expected_seq` conflict checks |
+| Idempotency | `deduped` responses by `(producer_id, producer_seq)` |
+| Reconnect semantics | Same stream contract across clients, devices, and environments |
+| Scaled durability | Data lives in Raft-backed clusters and archive backends |
 
 ## Quick Start
 
 ```bash
+git clone https://github.com/fastpaca/starcite
+cd starcite
 docker compose up -d
 ```
 
-## Example API Flow
-
-1) **Create a session**
+## Core API
 
 ```bash
+# 1) Create a session
 curl -X POST http://localhost:4000/v1/sessions \
   -H "Content-Type: application/json" \
   -d '{
@@ -88,11 +54,8 @@ curl -X POST http://localhost:4000/v1/sessions \
     "title": "Draft contract",
     "metadata": {"tenant_id": "acme"}
   }'
-```
 
-1) **Append an event**
-
-```bash
+# 2) Append an event
 curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
   -H "Content-Type: application/json" \
   -d '{
@@ -103,41 +66,43 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
     "producer_seq": 42,
     "expected_seq": 1
   }'
-```
 
-```json
-{"seq": 42, "last_seq": 42, "deduped": false}
-```
+# Response
+# {"seq":42,"last_seq":42,"deduped":false}
 
-1) **Tail from a cursor**
-
-```text
+# 3) Tail from a cursor (WebSocket)
 ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 ```
 
-On reconnect, pass the last processed `seq` to resume.
+## Delivery Guarantees
 
-## What Starcite guarantees
+### Consistency
 
-- Ordered event stream: strictly increasing `seq` per session
-- Replay safety: no gaps between committed events
-- Concurrency control: optional `expected_seq` conflict detection
-- Retry safety: dedupe by `(producer_id, producer_seq)`
-- Consistent cursor semantics for human and agent flows
-- No outbound webhook side effects required
+- Deterministic, strictly increasing `seq` per session
+- Cursor-based reads return the complete, gap-free stream
+- Replay works after refreshes, disconnects, and redeploys
 
-## What Starcite does not do
+### Concurrency and safety
 
-- Prompt construction
-- Token budgeting or window management
-- Agent orchestration
-- OAuth or credential issuance
-- Webhook fan-out
-- Custom sync logic on the client
+- `expected_seq` enables optimistic concurrency checks on append
+- `producer_id` + `producer_seq` provide deterministic de-duplication
+- Archive backends include S3-compatible object storage and Postgres options
+
+### Client simplicity
+
+- No webhook fan-out required
+- No custom cursor sync layer in the client
+- No session reassembly logic outside the standard API
+
+## What Starcite Does Not Do
+
+- Prompt construction or completion orchestration
+- Token budgeting / window management
+- OAuth credential issuance
+- Client-side sync inference
+- Cross-system agent lifecycle orchestration
 
 ## API & Semantics
-
-See the API reference for full request/response contracts:
 
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
@@ -149,9 +114,10 @@ See the API reference for full request/response contracts:
 
 ```bash
 git clone https://github.com/fastpaca/starcite && cd starcite
-mix deps.get && mix compile
-mix phx.server       # http://localhost:4000
-mix precommit        # format + compile (warnings-as-errors) + test
+mix deps.get
+mix compile
+mix phx.server  # http://localhost:4000
+mix precommit   # format + compile (warnings-as-errors) + test
 ```
 
 ## Contributing
@@ -162,4 +128,4 @@ mix precommit        # format + compile (warnings-as-errors) + test
 
 ## License
 
-[Apache 2.0](LICENSE)
+Apache 2.0
