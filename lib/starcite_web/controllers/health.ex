@@ -2,7 +2,7 @@ defmodule StarciteWeb.HealthController do
   use StarciteWeb, :controller
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.WritePath.RaftTopology
+  alias Starcite.DataPlane.RaftBootstrap
 
   @doc """
   GET /health/live
@@ -21,7 +21,7 @@ defmodule StarciteWeb.HealthController do
   def ready(conn, _params) do
     mode = readiness_mode()
 
-    if RaftTopology.ready?() do
+    if RaftBootstrap.ready?() do
       json(conn, %{status: "ok", mode: mode})
     else
       reason =

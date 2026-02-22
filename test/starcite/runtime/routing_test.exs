@@ -1,7 +1,7 @@
 defmodule Starcite.Runtime.RoutingTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.WritePath.ReplicaRouter
+  alias Starcite.DataPlane.ReplicaRouter
 
   defmodule RoutingProbe do
     def local_ok, do: {:ok, :local}

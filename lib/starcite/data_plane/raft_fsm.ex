@@ -1,4 +1,4 @@
-defmodule Starcite.WritePath.RaftFSM do
+defmodule Starcite.DataPlane.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
 

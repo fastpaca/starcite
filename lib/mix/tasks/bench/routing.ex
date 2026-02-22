@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Bench.Routing do
   require Logger
 
   alias Starcite.WritePath
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   @raft_timeout 2_000
   @rpc_timeout 5_000

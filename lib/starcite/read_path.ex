@@ -4,16 +4,15 @@ defmodule Starcite.ReadPath do
   """
 
   alias Starcite.DataPlane.EventStore
+  alias Starcite.DataPlane.RaftAccess
+  alias Starcite.DataPlane.ReplicaRouter
   alias Starcite.Session
-  alias Starcite.WritePath.RaftFSM
-  alias Starcite.WritePath.RaftManager
-  alias Starcite.WritePath.ReplicaRouter
 
   @default_tail_batch_size 1_000
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(id) when is_binary(id) and id != "" do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
     ReplicaRouter.call_on_replica(
       group,
@@ -31,29 +30,8 @@ defmodule Starcite.ReadPath do
 
   @doc false
   def get_session_local(id) when is_binary(id) and id != "" do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
-      case :ra.consistent_query({server_id, Node.self()}, fn state ->
-             RaftFSM.query_session(state, id)
-           end) do
-        {:ok, {:ok, session}, _leader} ->
-          {:ok, session}
-
-        {:ok, {:error, reason}, _leader} ->
-          {:error, reason}
-
-        {:ok, {{_term, _index}, {:ok, session}}, _leader} ->
-          {:ok, session}
-
-        {:ok, {{_term, _index}, {:error, reason}}, _leader} ->
-          {:error, reason}
-
-        {:timeout, leader} ->
-          {:error, {:timeout, leader}}
-
-        other ->
-          other
-      end
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
+      RaftAccess.query_session(server_id, id)
     end
   end
 
@@ -64,7 +42,7 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
     ReplicaRouter.call_on_replica(
       group,
@@ -84,53 +62,9 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor_local(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
-      case :ra.consistent_query({server_id, Node.self()}, fn state ->
-             RaftFSM.query_session(state, id)
-           end) do
-        {:ok, {:ok, session}, _leader} ->
-          read_events_across_tiers(id, cursor, limit, session)
-
-        {:ok, {{_term, _index}, {:ok, session}}, _leader} ->
-          read_events_across_tiers(id, cursor, limit, session)
-
-        {:ok, {:error, reason}, _leader} ->
-          {:error, reason}
-
-        {:ok, {{_term, _index}, {:error, reason}}, _leader} ->
-          {:error, reason}
-
-        {:timeout, leader} ->
-          {:error, {:timeout, leader}}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
-  end
-
-  defp locate(id) do
-    group = RaftManager.group_for_session(id)
-    server_id = RaftManager.server_id(group)
-    {:ok, server_id, group}
-  end
-
-  defp ensure_group_started(server_id, group_id)
-       when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
-    if Process.whereis(server_id) do
-      :ok
-    else
-      ensure_group_started_slow(group_id)
-    end
-  end
-
-  defp ensure_group_started_slow(group_id) do
-    case RaftManager.start_group(group_id) do
-      :ok -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, {:shutdown, {:failed_to_start_child, _child, {:already_started, _pid}}}} -> :ok
-      {:error, reason} -> {:error, reason}
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id),
+         {:ok, session} <- RaftAccess.query_session(server_id, id) do
+      read_events_across_tiers(id, cursor, limit, session)
     end
   end
 

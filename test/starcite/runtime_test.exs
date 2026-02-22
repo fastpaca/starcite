@@ -5,7 +5,7 @@ defmodule Starcite.RuntimeTest do
 
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.DataPlane.EventStore
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
   alias Starcite.Repo
 
   setup do

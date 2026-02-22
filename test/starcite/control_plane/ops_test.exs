@@ -74,6 +74,14 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert {:error, :invalid_group_id} = Ops.parse_group_id("not-a-number")
   end
 
+  test "drain rejects nodes outside static write-node set" do
+    non_write_node = :"router-1@starcite.internal"
+
+    refute non_write_node in WriteNodes.nodes()
+    assert {:error, :invalid_write_node} = Ops.drain_node(non_write_node)
+    assert {:error, :invalid_write_node} = Ops.undrain_node(non_write_node)
+  end
+
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 1_000)
     interval = Keyword.get(opts, :interval, 25)

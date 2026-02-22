@@ -3,8 +3,7 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
-  alias Starcite.WritePath.RaftManager
-  alias Starcite.WritePath.ReplicaRouter
+  alias Starcite.DataPlane.{RaftAccess, ReplicaRouter}
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -19,10 +18,10 @@ defmodule Starcite.WritePath do
     title = Keyword.get(opts, :title)
     creator_principal = Keyword.get(opts, :creator_principal)
     metadata = Keyword.get(opts, :metadata, %{})
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
     result =
-      case local_server_for_group(group) do
+      case RaftAccess.local_server_for_group(group) do
         {:ok, server_id} ->
           process_command(server_id, {:create_session, id, title, creator_principal, metadata})
 
@@ -46,8 +45,7 @@ defmodule Starcite.WritePath do
              (is_struct(creator_principal, Starcite.Auth.Principal) or
                 is_nil(creator_principal)) and
              is_map(metadata) do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
       process_command(server_id, {:create_session, id, title, creator_principal, metadata})
     end
   end
@@ -60,9 +58,9 @@ defmodule Starcite.WritePath do
           | {:error, term()}
           | {:timeout, term()}
   def append_event(id, event) when is_binary(id) and id != "" and is_map(event) do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
-    case local_server_for_group(group) do
+    case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
         process_command(server_id, {:append_event, id, event, nil})
 
@@ -78,10 +76,10 @@ defmodule Starcite.WritePath do
           | {:error, term()}
           | {:timeout, term()}
   def append_event(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
     expected_seq = expected_seq_from_opts(opts)
 
-    case local_server_for_group(group) do
+    case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
         process_command(server_id, {:append_event, id, event, expected_seq})
 
@@ -95,8 +93,7 @@ defmodule Starcite.WritePath do
   @doc false
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
       process_command(server_id, {:append_event, id, event, nil})
     end
   end
@@ -105,8 +102,7 @@ defmodule Starcite.WritePath do
   def append_event_local(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
     expected_seq = expected_seq_from_opts(opts)
 
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
       process_command(server_id, {:append_event, id, event, expected_seq})
     end
   end
@@ -123,9 +119,9 @@ defmodule Starcite.WritePath do
 
   def append_events(id, events, opts)
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
-    case local_server_for_group(group) do
+    case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
         process_command(server_id, {:append_events, id, events, opts})
 
@@ -139,8 +135,7 @@ defmodule Starcite.WritePath do
   @doc false
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
       process_command(server_id, {:append_events, id, events, opts})
     end
   end
@@ -148,9 +143,9 @@ defmodule Starcite.WritePath do
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    group = RaftManager.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
-    case local_server_for_group(group) do
+    case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
         process_command(server_id, {:ack_archived, id, upto_seq})
 
@@ -162,33 +157,8 @@ defmodule Starcite.WritePath do
   @doc false
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(server_id, group) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
       process_command(server_id, {:ack_archived, id, upto_seq})
-    end
-  end
-
-  defp locate(id) do
-    group = RaftManager.group_for_session(id)
-    server_id = RaftManager.server_id(group)
-    {:ok, server_id, group}
-  end
-
-  defp ensure_group_started(server_id, group_id)
-       when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
-    if Process.whereis(server_id) do
-      :ok
-    else
-      ensure_group_started_slow(group_id)
-    end
-  end
-
-  defp ensure_group_started_slow(group_id) do
-    case RaftManager.start_group(group_id) do
-      :ok -> :ok
-      {:error, {:already_started, _pid}} -> :ok
-      {:error, {:shutdown, {:failed_to_start_child, _child, {:already_started, _pid}}}} -> :ok
-      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -233,16 +203,6 @@ defmodule Starcite.WritePath do
       args,
       prefer_leader: false
     )
-  end
-
-  defp local_server_for_group(group_id) when is_integer(group_id) and group_id >= 0 do
-    server_id = RaftManager.server_id(group_id)
-
-    if Process.whereis(server_id) != nil do
-      {:ok, server_id}
-    else
-      :error
-    end
   end
 
   defp process_command(server_id, command) when is_atom(server_id) do

@@ -13,10 +13,8 @@ defmodule Starcite.DataPlane.Supervisor do
         {Starcite.DataPlane.EventStore, []},
         # Task.Supervisor for async Raft group startup
         {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
-        # Liveness observer used by routing decisions
-        Starcite.ControlPlane.Observer,
-        # Topology coordinator (uses Erlang distribution, not Presence)
-        Starcite.WritePath.RaftTopology,
+        # Raft bootstrap/lifecycle coordinator
+        Starcite.DataPlane.RaftBootstrap,
         {Starcite.Archive,
          [
            name: archive_name(),

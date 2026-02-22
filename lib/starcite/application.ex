@@ -21,7 +21,9 @@ defmodule Starcite.Application do
         pubsub_spec(),
         # DNS / clustering
         dns_cluster_spec(),
-        # Data plane (Raft, observer, archive)
+        # Control-plane liveness and routing intent
+        Starcite.ControlPlane.Supervisor,
+        # Data-plane runtime (Raft bootstrap, archive, event store)
         Starcite.DataPlane.Supervisor
       ]
       |> Enum.concat(cluster_children(topologies))

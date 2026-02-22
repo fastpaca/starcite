@@ -40,7 +40,11 @@ defmodule Mix.Tasks.Starcite.Ops do
         print_nodes("ready_nodes", Ops.ready_nodes())
 
       ["drain"] ->
-        drain(Node.self())
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          drain(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
 
       ["drain", raw_node] ->
         with {:ok, node} <- parse_node(raw_node) do
@@ -50,7 +54,11 @@ defmodule Mix.Tasks.Starcite.Ops do
         end
 
       ["undrain"] ->
-        undrain(Node.self())
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          undrain(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
 
       ["undrain", raw_node] ->
         with {:ok, node} <- parse_node(raw_node) do

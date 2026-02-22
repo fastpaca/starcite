@@ -8,7 +8,7 @@ defmodule Starcite.ControlPlane.Ops do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.WritePath.{RaftManager, RaftTopology}
+  alias Starcite.DataPlane.{RaftBootstrap, RaftManager}
 
   @default_wait_interval_ms 200
 
@@ -46,7 +46,7 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_ready() :: boolean()
   def local_ready do
-    topology_ready = RaftTopology.ready?()
+    topology_ready = RaftBootstrap.ready?()
 
     case local_mode() do
       :write_node ->
@@ -74,16 +74,18 @@ defmodule Starcite.ControlPlane.Ops do
     wait_until(&local_drained/0, timeout_ms)
   end
 
-  @spec drain_node(node()) :: :ok
+  @spec drain_node(node()) :: :ok | {:error, :invalid_write_node}
   def drain_node(node \\ Node.self()) when is_atom(node) do
-    Observer.mark_node_draining(node)
-    :ok
+    with :ok <- ensure_write_node(node) do
+      Observer.mark_node_draining(node)
+    end
   end
 
-  @spec undrain_node(node()) :: :ok
+  @spec undrain_node(node()) :: :ok | {:error, :invalid_write_node}
   def undrain_node(node \\ Node.self()) when is_atom(node) do
-    Observer.mark_node_ready(node)
-    :ok
+    with :ok <- ensure_write_node(node) do
+      Observer.mark_node_ready(node)
+    end
   end
 
   @spec local_write_groups() :: [non_neg_integer()]
@@ -100,9 +102,7 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec known_nodes() :: [node()]
   def known_nodes do
-    ([Node.self()] ++ Node.list() ++ WriteNodes.nodes())
-    |> Enum.uniq()
-    |> Enum.sort()
+    WriteNodes.nodes()
   end
 
   @spec parse_known_node(term()) :: {:ok, node()} | {:error, :invalid_write_node}
@@ -138,6 +138,14 @@ defmodule Starcite.ControlPlane.Ops do
   end
 
   def parse_group_id(_raw_group_id), do: {:error, :invalid_group_id}
+
+  defp ensure_write_node(node) when is_atom(node) do
+    if WriteNodes.write_node?(node) do
+      :ok
+    else
+      {:error, :invalid_write_node}
+    end
+  end
 
   defp wait_until(predicate, timeout_ms)
        when is_function(predicate, 0) and is_integer(timeout_ms) and timeout_ms > 0 do

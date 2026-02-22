@@ -22,7 +22,7 @@ end
 
 # Suppress Ra (Raft library) verbose logs
 # Call :logger.set_application_level(:ra, :error) at runtime to filter Ra logs
-# This is set in RaftTopology.init/1
+# This is set in RaftBootstrap.init/1
 
 # Cluster configuration (works in all environments, not just prod)
 cluster_nodes = System.get_env("CLUSTER_NODES")

@@ -1,4 +1,4 @@
-defmodule Starcite.WritePath.RaftTopology do
+defmodule Starcite.DataPlane.RaftBootstrap do
   @moduledoc """
   Topology bootstrap for static write-node Raft groups.
 
@@ -15,7 +15,7 @@ defmodule Starcite.WritePath.RaftTopology do
   require Logger
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
@@ -35,26 +35,13 @@ defmodule Starcite.WritePath.RaftTopology do
     end
   end
 
-  @doc "Returns all currently visible distributed nodes."
-  def all_nodes do
-    [Node.self() | Node.list()] |> Enum.uniq() |> Enum.sort()
-  end
-
-  @doc "Returns visible write nodes (used as routing readiness input)."
-  def ready_nodes do
-    visible = all_nodes()
-
-    WriteNodes.nodes()
-    |> Enum.filter(&(&1 in visible))
-  end
-
   @impl true
   def init(_opts) do
     :ok = :ra.start()
     :logger.set_application_level(:ra, :error)
 
     Logger.info(
-      "RaftTopology: starting on #{Node.self()} (write_node=#{WriteNodes.write_node?(Node.self())})"
+      "RaftBootstrap: starting on #{Node.self()} (write_node=#{WriteNodes.write_node?(Node.self())})"
     )
 
     send(self(), :bootstrap)
@@ -82,7 +69,7 @@ defmodule Starcite.WritePath.RaftTopology do
   @impl true
   def handle_info({:startup_complete, mode}, state)
       when mode in [:coordinator, :follower, :router] do
-    Logger.info("RaftTopology: startup complete (mode=#{mode})")
+    Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
     {:noreply, %{state | startup_complete?: true}}
   end
 
@@ -94,7 +81,7 @@ defmodule Starcite.WritePath.RaftTopology do
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{sync_ref: ref} = state) do
-    Logger.warning("RaftTopology: bootstrap task failed: #{inspect(reason)}")
+    Logger.warning("RaftBootstrap: bootstrap task failed: #{inspect(reason)}")
     {:noreply, %{state | sync_ref: nil}}
   end
 
@@ -130,7 +117,7 @@ defmodule Starcite.WritePath.RaftTopology do
 
           bootstrap_coordinator?() ->
             Logger.info(
-              "RaftTopology: write coordinator bootstrapping #{WriteNodes.num_groups()} groups"
+              "RaftBootstrap: write coordinator bootstrapping #{WriteNodes.num_groups()} groups"
             )
 
             run_groups_parallel(
@@ -149,13 +136,13 @@ defmodule Starcite.WritePath.RaftTopology do
             run_groups_parallel(my_groups, "join", &wait_and_join_group/1)
             run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
 
-            Logger.info("RaftTopology: write follower joined #{length(my_groups)} groups")
+            Logger.info("RaftBootstrap: write follower joined #{length(my_groups)} groups")
             send(owner, {:startup_complete, :follower})
         end
 
       {:error, reason} ->
         raise ArgumentError,
-              "RaftTopology bootstrap aborted due to invalid write-node config: #{reason}"
+              "RaftBootstrap bootstrap aborted due to invalid write-node config: #{reason}"
     end
   end
 
@@ -173,7 +160,7 @@ defmodule Starcite.WritePath.RaftTopology do
         ensure_local_group_running(group_id)
 
       :timeout ->
-        Logger.warning("RaftTopology: timeout waiting for group #{group_id} bootstrap")
+        Logger.warning("RaftBootstrap: timeout waiting for group #{group_id} bootstrap")
         ensure_local_group_running(group_id)
         {:error, :bootstrap_timeout}
     end
@@ -299,7 +286,7 @@ defmodule Starcite.WritePath.RaftTopology do
       duration_ms = System.monotonic_time(:millisecond) - started_at_ms
 
       Logger.info(
-        "RaftTopology: #{label} processed #{total} groups in #{duration_ms}ms (max_concurrency=#{max_concurrency})"
+        "RaftBootstrap: #{label} processed #{total} groups in #{duration_ms}ms (max_concurrency=#{max_concurrency})"
       )
     end
   end
@@ -307,13 +294,13 @@ defmodule Starcite.WritePath.RaftTopology do
   defp handle_group_result({:ok, {_group_id, :ok}}, _label), do: :ok
 
   defp handle_group_result({:ok, {group_id, {:error, reason}}}, label) do
-    Logger.debug("RaftTopology: #{label} group #{group_id} failed: #{inspect(reason)}")
+    Logger.debug("RaftBootstrap: #{label} group #{group_id} failed: #{inspect(reason)}")
   end
 
   defp handle_group_result({:ok, {_group_id, _result}}, _label), do: :ok
 
   defp handle_group_result({:exit, reason}, label) do
-    Logger.warning("RaftTopology: #{label} worker crashed: #{inspect(reason)}")
+    Logger.warning("RaftBootstrap: #{label} worker crashed: #{inspect(reason)}")
   end
 
   defp ensure_all_local_groups_running do

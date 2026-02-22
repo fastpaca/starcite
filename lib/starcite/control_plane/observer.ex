@@ -50,12 +50,19 @@ defmodule Starcite.ControlPlane.Observer do
 
   @doc "Marks a node as draining (excluded from ready routing set)."
   def mark_node_draining(node \\ Node.self()) when is_atom(node) do
-    GenServer.cast(__MODULE__, {:mark_node_draining, node})
+    propagate_node_status(node, :draining)
   end
 
   @doc "Marks a node as ready (eligible for routing)."
   def mark_node_ready(node \\ Node.self()) when is_atom(node) do
-    GenServer.cast(__MODULE__, {:mark_node_ready, node})
+    propagate_node_status(node, :ready)
+  end
+
+  @doc false
+  def apply_node_status(node, status)
+      when is_atom(node) and status in [:ready, :draining] do
+    GenServer.cast(__MODULE__, {:set_node_status, node, status})
+    :ok
   end
 
   @impl true
@@ -63,11 +70,15 @@ defmodule Starcite.ControlPlane.Observer do
     :ok = :net_kernel.monitor_nodes(true, node_type: :visible)
 
     now_ms = System.monotonic_time(:millisecond)
-    state = ObserverState.new(all_nodes(), now_ms)
+
+    observer =
+      all_nodes()
+      |> ObserverState.new(now_ms)
+      |> recover_draining_nodes(now_ms)
 
     schedule_maintenance()
 
-    {:ok, %{observer: state}}
+    {:ok, %{observer: observer}}
   end
 
   @impl true
@@ -96,14 +107,24 @@ defmodule Starcite.ControlPlane.Observer do
   end
 
   @impl true
-  def handle_cast({:mark_node_draining, node}, %{observer: observer} = state) do
+  def handle_cast({:mark_node_draining, node}, state) do
+    handle_cast({:set_node_status, node, :draining}, state)
+  end
+
+  @impl true
+  def handle_cast({:mark_node_ready, node}, state) do
+    handle_cast({:set_node_status, node, :ready}, state)
+  end
+
+  @impl true
+  def handle_cast({:set_node_status, node, :draining}, %{observer: observer} = state) do
     now_ms = System.monotonic_time(:millisecond)
     next = ObserverState.mark_draining(observer, node, now_ms)
     {:noreply, %{state | observer: next}}
   end
 
   @impl true
-  def handle_cast({:mark_node_ready, node}, %{observer: observer} = state) do
+  def handle_cast({:set_node_status, node, :ready}, %{observer: observer} = state) do
     now_ms = System.monotonic_time(:millisecond)
     next = ObserverState.mark_ready(observer, node, now_ms)
     {:noreply, %{state | observer: next}}
@@ -115,7 +136,16 @@ defmodule Starcite.ControlPlane.Observer do
   @impl true
   def handle_info({:nodeup, node, _info}, %{observer: observer} = state) do
     now_ms = System.monotonic_time(:millisecond)
-    next = ObserverState.mark_ready(observer, node, now_ms)
+
+    next =
+      case observer.nodes[node] do
+        %{status: :draining} ->
+          observer
+
+        _ ->
+          ObserverState.mark_ready(observer, node, now_ms)
+      end
+
     {:noreply, %{state | observer: next}}
   end
 
@@ -142,6 +172,36 @@ defmodule Starcite.ControlPlane.Observer do
 
   defp schedule_maintenance do
     Process.send_after(self(), :maintenance, @maintenance_interval_ms)
+  end
+
+  defp propagate_node_status(node, status)
+       when is_atom(node) and status in [:ready, :draining] do
+    :ok = apply_node_status(node, status)
+
+    Enum.each(Node.list(), fn remote ->
+      :rpc.cast(remote, __MODULE__, :apply_node_status, [node, status])
+    end)
+
+    :ok
+  end
+
+  defp recover_draining_nodes(observer, now_ms)
+       when is_struct(observer, ObserverState) and is_integer(now_ms) do
+    Enum.reduce(Node.list(), observer, fn remote, acc ->
+      case :rpc.call(remote, __MODULE__, :status, [], @status_call_timeout_ms) do
+        %{status: :ok, node_statuses: node_statuses} when is_map(node_statuses) ->
+          Enum.reduce(node_statuses, acc, fn
+            {node, %{status: :draining}}, next when is_atom(node) ->
+              ObserverState.mark_draining(next, node, now_ms)
+
+            {_node, _meta}, next ->
+              next
+          end)
+
+        _other ->
+          acc
+      end
+    end)
   end
 
   defp safe_call(pid, message, fallback) do

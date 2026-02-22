@@ -1,7 +1,7 @@
-defmodule Starcite.WritePath.RaftManagerTest do
+defmodule Starcite.DataPlane.RaftManagerTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   @config_keys [:num_groups, :write_replication_factor, :write_node_ids]
 

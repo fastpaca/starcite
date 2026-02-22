@@ -5,7 +5,7 @@ defmodule Mix.Tasks.Bench.Internal do
   alias Starcite.DataPlane.EventStore
   alias Starcite.Session
   alias Starcite.WritePath
-  alias Starcite.WritePath.RaftFSM
+  alias Starcite.DataPlane.RaftFSM
 
   def run do
     ensure_apps_stopped()

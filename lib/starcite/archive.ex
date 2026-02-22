@@ -16,7 +16,7 @@ defmodule Starcite.Archive do
   alias Starcite.Archive.Store
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.DataPlane.EventStore
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do

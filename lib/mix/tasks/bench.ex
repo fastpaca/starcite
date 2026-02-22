@@ -52,18 +52,23 @@ defmodule Mix.Tasks.Bench do
   end
 
   defp run_scenario(:hot_path) do
+    configure_local_archive_adapter()
     Mix.Tasks.Bench.HotPath.run()
   end
 
   defp run_scenario(:routing) do
+    configure_local_archive_adapter()
     Mix.Tasks.Bench.Routing.run()
   end
 
   defp run_scenario(:internal) do
+    configure_local_archive_adapter()
     Mix.Tasks.Bench.Internal.run()
   end
 
   defp run_scenario(:k6) do
+    configure_local_archive_adapter()
+
     case System.find_executable("k6") do
       nil ->
         Mix.raise("""
@@ -90,5 +95,25 @@ defmodule Mix.Tasks.Bench do
     invalid
     |> Enum.map(fn {name, value} -> "#{name}=#{inspect(value)}" end)
     |> Enum.join(", ")
+  end
+
+  defp configure_local_archive_adapter do
+    if Application.get_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3) ==
+         Starcite.Archive.Adapter.S3 do
+      default_opts = [
+        bucket: "starcite-archive",
+        region: "us-east-1",
+        endpoint: "http://127.0.0.1:9000",
+        access_key_id: "minioadmin",
+        secret_access_key: "minioadmin",
+        path_style: true
+      ]
+
+      Application.put_env(
+        :starcite,
+        :archive_adapter_opts,
+        Keyword.merge(default_opts, Application.get_env(:starcite, :archive_adapter_opts, []))
+      )
+    end
   end
 end

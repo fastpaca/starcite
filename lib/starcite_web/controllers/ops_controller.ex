@@ -64,7 +64,7 @@ defmodule StarciteWeb.OpsController do
   def group_replicas(_conn, _params), do: {:error, :invalid_group_id}
 
   defp parse_node_param(%{"node" => raw_node}), do: Ops.parse_known_node(raw_node)
-  defp parse_node_param(_params), do: {:ok, Node.self()}
+  defp parse_node_param(_params), do: Ops.parse_known_node(Atom.to_string(Node.self()))
 
   defp render_observer(%{
          status: status,

@@ -1,4 +1,4 @@
-defmodule Starcite.WritePath.ReplicaRouter do
+defmodule Starcite.DataPlane.ReplicaRouter do
   @moduledoc """
   Replica-aware request routing for write/read path operations.
 
@@ -10,7 +10,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.Observability.Telemetry
-  alias Starcite.WritePath.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache

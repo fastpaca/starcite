@@ -1,4 +1,4 @@
-defmodule Starcite.WritePath.RaftManager do
+defmodule Starcite.DataPlane.RaftManager do
   @moduledoc """
   Utility module for static Raft write-group placement and lifecycle.
 
@@ -12,7 +12,7 @@ defmodule Starcite.WritePath.RaftManager do
   require Logger
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.WritePath.RaftFSM
+  alias Starcite.DataPlane.RaftFSM
 
   @doc false
   @spec validate_config!() :: :ok
