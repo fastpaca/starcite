@@ -3,8 +3,9 @@ defmodule Starcite.RuntimeTest do
 
   import ExUnit.CaptureLog
 
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{EventStore, RaftManager}
+  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.DataPlane.EventStore
+  alias Starcite.WritePath.RaftManager
   alias Starcite.Repo
 
   setup do
@@ -19,7 +20,7 @@ defmodule Starcite.RuntimeTest do
 
   describe "create/get session" do
     test "creates a new session with generated id" do
-      {:ok, session} = Runtime.create_session(title: "Draft", metadata: %{workflow: "legal"})
+      {:ok, session} = WritePath.create_session(title: "Draft", metadata: %{workflow: "legal"})
 
       assert is_binary(session.id)
       assert String.starts_with?(session.id, "ses_")
@@ -31,30 +32,30 @@ defmodule Starcite.RuntimeTest do
     test "creates with caller-provided id and rejects duplicates" do
       id = unique_id("ses")
 
-      {:ok, session} = Runtime.create_session(id: id, title: "Draft")
+      {:ok, session} = WritePath.create_session(id: id, title: "Draft")
       assert session.id == id
 
-      assert {:error, :session_exists} = Runtime.create_session(id: id)
+      assert {:error, :session_exists} = WritePath.create_session(id: id)
     end
 
     test "gets existing session" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
-      {:ok, session} = Runtime.get_session(id)
+      {:ok, session} = ReadPath.get_session(id)
       assert session.id == id
       assert session.last_seq == 0
     end
 
     test "returns not found for missing session" do
-      assert {:error, :session_not_found} = Runtime.get_session("missing")
+      assert {:error, :session_not_found} = ReadPath.get_session("missing")
     end
   end
 
   describe "append_event/3" do
     test "appends events with monotonic seq" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       {:ok, r1} =
         append_event(id, %{
@@ -78,7 +79,7 @@ defmodule Starcite.RuntimeTest do
 
     test "guards on expected_seq" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       {:ok, _} =
         append_event(id, %{
@@ -97,7 +98,7 @@ defmodule Starcite.RuntimeTest do
 
     test "dedupes when producer sequence repeats with same payload" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       event = %{
         type: "state",
@@ -117,7 +118,7 @@ defmodule Starcite.RuntimeTest do
 
     test "errors on producer replay conflict" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       {:ok, _} =
         append_event(id, %{
@@ -142,7 +143,7 @@ defmodule Starcite.RuntimeTest do
   describe "get_events_from_cursor/3" do
     test "returns events strictly after cursor" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..5 do
         {:ok, _} =
@@ -153,13 +154,13 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      {:ok, events} = Runtime.get_events_from_cursor(id, 2, 100)
+      {:ok, events} = ReadPath.get_events_from_cursor(id, 2, 100)
       assert Enum.map(events, & &1.seq) == [3, 4, 5]
     end
 
     test "returns only unarchived events after archive cutover compacts ETS" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..5 do
         {:ok, _} =
@@ -170,9 +171,9 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
-      {:ok, events} = Runtime.get_events_from_cursor(id, 3, 100)
+      {:ok, events} = ReadPath.get_events_from_cursor(id, 3, 100)
       assert Enum.map(events, & &1.seq) == [4, 5]
     end
 
@@ -194,7 +195,7 @@ defmodule Starcite.RuntimeTest do
           inserted_at: NaiveDateTime.utc_now()
         })
 
-      assert {:error, :session_not_found} = Runtime.get_events_from_cursor(missing_id, 0, 100)
+      assert {:error, :session_not_found} = ReadPath.get_events_from_cursor(missing_id, 0, 100)
     end
 
     test "returns ordered events across Postgres cold + ETS hot boundary" do
@@ -203,7 +204,7 @@ defmodule Starcite.RuntimeTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..5 do
         {:ok, _} =
@@ -217,9 +218,9 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
-      {:ok, events} = Runtime.get_events_from_cursor(id, 0, 100)
+      {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
     end
 
@@ -229,7 +230,7 @@ defmodule Starcite.RuntimeTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..5 do
         {:ok, _} =
@@ -243,9 +244,9 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
-      {:ok, events} = Runtime.get_events_from_cursor(id, 2, 2)
+      {:ok, events} = ReadPath.get_events_from_cursor(id, 2, 2)
       assert Enum.map(events, & &1.seq) == [3, 4]
     end
   end
@@ -253,7 +254,7 @@ defmodule Starcite.RuntimeTest do
   describe "ack_archived/2" do
     test "is idempotent for the same archive cursor" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..4 do
         {:ok, _} =
@@ -264,16 +265,16 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 2, trimmed: 2}} = Runtime.ack_archived(id, 2)
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(id, 2)
       assert EventStore.session_size(id) == 2
 
-      assert {:ok, %{archived_seq: 2, trimmed: 0}} = Runtime.ack_archived(id, 2)
+      assert {:ok, %{archived_seq: 2, trimmed: 0}} = WritePath.ack_archived(id, 2)
       assert EventStore.session_size(id) == 2
     end
 
     test "clamps archive cursor to last_seq and compacts the full hot tail" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       for n <- 1..3 do
         {:ok, _} =
@@ -284,7 +285,7 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = Runtime.ack_archived(id, 10_000)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 10_000)
       assert EventStore.session_size(id) == 0
     end
   end
@@ -294,7 +295,7 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses-failover")
 
       capture_log(fn ->
-        {:ok, _} = Runtime.create_session(id: id)
+        {:ok, _} = WritePath.create_session(id: id)
 
         {:ok, first} =
           append_event(id, %{
@@ -336,7 +337,7 @@ defmodule Starcite.RuntimeTest do
 
         assert second.seq >= 2
 
-        {:ok, events} = Runtime.get_events_from_cursor(id, 0, 100)
+        {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
         texts = Enum.map(events, &Map.get(&1.payload, :text))
 
         assert "before crash" in texts
@@ -350,7 +351,7 @@ defmodule Starcite.RuntimeTest do
       ids =
         for i <- 1..10 do
           id = "ses-concurrent-#{i}"
-          {:ok, _} = Runtime.create_session(id: id)
+          {:ok, _} = WritePath.create_session(id: id)
           id
         end
 
@@ -383,7 +384,7 @@ defmodule Starcite.RuntimeTest do
       |> Map.put_new(:producer_id, producer_id)
       |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
 
-    Runtime.append_event(id, enriched_event, opts)
+    WritePath.append_event(id, enriched_event, opts)
   end
 
   defp next_producer_seq(session_id, producer_id)

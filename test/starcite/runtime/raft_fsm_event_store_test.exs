@@ -1,7 +1,8 @@
-defmodule Starcite.Runtime.RaftFSMEventStoreTest do
+defmodule Starcite.WritePath.RaftFSMEventStoreTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Runtime.{EventStore, RaftFSM}
+  alias Starcite.DataPlane.EventStore
+  alias Starcite.WritePath.RaftFSM
 
   setup do
     EventStore.clear()

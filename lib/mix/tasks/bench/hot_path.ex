@@ -2,7 +2,7 @@ defmodule Mix.Tasks.Bench.HotPath do
   require Logger
 
   alias Starcite.Config.Size
-  alias Starcite.Runtime
+  alias Starcite.WritePath
 
   def run do
     ensure_apps_stopped()
@@ -30,7 +30,7 @@ defmodule Mix.Tasks.Bench.HotPath do
       session_id = elem(sessions, rem(index - 1, session_count))
       event_with_producer = with_bench_producer(event, index)
 
-      case Runtime.append_event(session_id, event_with_producer) do
+      case WritePath.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append timeout: #{inspect(leader)}"
@@ -130,7 +130,10 @@ defmodule Mix.Tasks.Bench.HotPath do
     |> Enum.map(fn index ->
       id = "hot-benchee-#{run_id}-#{index}"
 
-      case Runtime.create_session(id: id, metadata: %{bench: true, scenario: "hot_path_benchee"}) do
+      case WritePath.create_session(
+             id: id,
+             metadata: %{bench: true, scenario: "hot_path_benchee"}
+           ) do
         {:ok, _session} -> id
         {:error, :session_exists} -> id
         {:error, reason} -> raise "create_session failed for #{id}: #{inspect(reason)}"

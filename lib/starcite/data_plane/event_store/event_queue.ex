@@ -1,6 +1,6 @@
-defmodule Starcite.Runtime.EventStore.EventQueue do
+defmodule Starcite.DataPlane.EventStore.EventQueue do
   @moduledoc """
-  In-memory write queue for `Starcite.Runtime.EventStore`.
+  In-memory write queue for `Starcite.DataPlane.EventStore`.
 
   This module owns the unarchived session tail and exposes queue operations
   used by append, replay, and archive acknowledgement flows.

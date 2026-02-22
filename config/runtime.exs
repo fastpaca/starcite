@@ -66,6 +66,25 @@ parse_non_neg_integer! = fn env_name, raw ->
   end
 end
 
+parse_node_ids! = fn env_name, raw ->
+  nodes =
+    raw
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.to_atom/1)
+    |> Enum.uniq()
+
+  case nodes do
+    [] ->
+      raise ArgumentError,
+            "invalid node list for #{env_name}: #{inspect(raw)} (expected comma-separated node ids)"
+
+    _ ->
+      nodes
+  end
+end
+
 parse_fraction! = fn env_name, raw ->
   case Float.parse(String.trim(raw)) do
     {value, ""} when value >= 0.01 and value <= 0.99 ->
@@ -75,6 +94,23 @@ parse_fraction! = fn env_name, raw ->
       raise ArgumentError,
             "invalid float for #{env_name}: #{inspect(raw)} (expected 0.01..0.99)"
   end
+end
+
+if write_node_ids = System.get_env("STARCITE_WRITE_NODE_IDS") do
+  config :starcite, :write_node_ids, parse_node_ids!.("STARCITE_WRITE_NODE_IDS", write_node_ids)
+end
+
+if num_groups = System.get_env("STARCITE_NUM_GROUPS") do
+  config :starcite, :num_groups, parse_positive_integer!.("STARCITE_NUM_GROUPS", num_groups)
+end
+
+if write_replication_factor = System.get_env("STARCITE_WRITE_REPLICATION_FACTOR") do
+  config :starcite,
+         :write_replication_factor,
+         parse_positive_integer!.(
+           "STARCITE_WRITE_REPLICATION_FACTOR",
+           write_replication_factor
+         )
 end
 
 parse_size_bytes! = fn env_name, raw ->

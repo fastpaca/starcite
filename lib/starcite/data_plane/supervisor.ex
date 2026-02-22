@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.Supervisor do
+defmodule Starcite.DataPlane.Supervisor do
   use Supervisor
 
   def start_link(arg) do
@@ -10,11 +10,13 @@ defmodule Starcite.Runtime.Supervisor do
     children =
       [
         # Stable owner for ETS event mirror table
-        {Starcite.Runtime.EventStore, []},
+        {Starcite.DataPlane.EventStore, []},
         # Task.Supervisor for async Raft group startup
         {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
+        # Liveness observer used by routing decisions
+        Starcite.ControlPlane.Observer,
         # Topology coordinator (uses Erlang distribution, not Presence)
-        Starcite.Runtime.RaftTopology,
+        Starcite.WritePath.RaftTopology,
         {Starcite.Archive,
          [
            name: archive_name(),

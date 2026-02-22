@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.EventStore do
+defmodule Starcite.DataPlane.EventStore do
   @moduledoc """
   Top-level local event store for hot-path writes and tiered reads.
 
@@ -16,7 +16,7 @@ defmodule Starcite.Runtime.EventStore do
 
   alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
-  alias Starcite.Runtime.EventStore.EventQueue
+  alias Starcite.DataPlane.EventStore.EventQueue
   alias Starcite.Session.Event
 
   @default_max_memory_bytes 2_147_483_648

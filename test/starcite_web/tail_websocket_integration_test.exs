@@ -3,7 +3,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
 
   import Bitwise
 
-  alias Starcite.Runtime
+  alias Starcite.WritePath
 
   @host ~c"127.0.0.1"
   @port 4105
@@ -30,12 +30,13 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   defp unique_id(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
   test "tail websocket replays from cursor and streams live committed events" do
     session_id = unique_id("ses")
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     {:ok, _reply} =
       append_event(session_id, %{
@@ -82,7 +83,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       |> Map.put_new(:producer_id, producer_id)
       |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
 
-    Runtime.append_event(id, enriched_event, opts)
+    WritePath.append_event(id, enriched_event, opts)
   end
 
   defp next_producer_seq(session_id, producer_id)

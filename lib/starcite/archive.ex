@@ -5,7 +5,7 @@ defmodule Starcite.Archive do
   - periodically scans local `EventStore` session cursors
   - archives only sessions for groups led on this node
   - persists batches through `Starcite.Archive.Store`
-  - acknowledges archived progress via local Raft command (`Runtime.ack_archived_local/2`)
+  - acknowledges archived progress via local Raft command (`WritePath.ack_archived_local/2`)
 
   Archive persistence failures are treated as fatal for this worker: the process
   crashes and relies on supervisor restart rather than masking write failures.
@@ -14,8 +14,9 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{EventStore, RaftManager}
+  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.DataPlane.EventStore
+  alias Starcite.WritePath.RaftManager
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -140,7 +141,7 @@ defmodule Starcite.Archive do
 
         upto_seq = contiguous_upto(rows)
 
-        case Runtime.ack_archived_local(session_id, upto_seq) do
+        case WritePath.ack_archived_local(session_id, upto_seq) do
           {:ok, %{archived_seq: acked_seq}} ->
             pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
@@ -236,7 +237,7 @@ defmodule Starcite.Archive do
         {:ok, archived_seq, archived_seq_cache}
 
       _ ->
-        case Runtime.get_session_local(session_id) do
+        case ReadPath.get_session_local(session_id) do
           {:ok, %{archived_seq: archived_seq}}
           when is_integer(archived_seq) and archived_seq >= 0 ->
             {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}

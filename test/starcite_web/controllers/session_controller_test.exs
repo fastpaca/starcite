@@ -4,7 +4,7 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.{Repo, Runtime}
+  alias Starcite.{Repo, WritePath}
 
   @endpoint StarciteWeb.Endpoint
 
@@ -30,7 +30,8 @@ defmodule StarciteWeb.SessionControllerTest do
   end
 
   defp unique_id(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
   defp service_create_body(attrs) when is_map(attrs) do
@@ -118,7 +119,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "duplicate id returns 409" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn = json_conn(:post, "/v1/sessions", service_create_body(%{"id" => id}))
 
@@ -189,8 +190,8 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "supports cursor pagination" do
       marker = unique_id("marker")
-      id1 = "ses-a-#{System.unique_integer([:positive, :monotonic])}"
-      id2 = "ses-b-#{System.unique_integer([:positive, :monotonic])}"
+      id1 = unique_id("ses-a")
+      id2 = unique_id("ses-b")
 
       assert 201 ==
                json_conn(
@@ -248,7 +249,7 @@ defmodule StarciteWeb.SessionControllerTest do
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -268,10 +269,10 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "expected_seq conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       {:ok, _} =
-        Runtime.append_event(id, %{
+        WritePath.append_event(id, %{
           type: "content",
           payload: %{text: "one"},
           actor: "agent:test",
@@ -297,7 +298,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer replay conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       body = %{
         "type" => "state",
@@ -328,7 +329,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "same producer sequence and payload dedupes" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       body = %{
         "type" => "state",
@@ -353,7 +354,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer sequence conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -372,7 +373,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "missing required fields returns 400" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn = json_conn(:post, "/v1/sessions/#{id}/append", %{"payload" => %{"text" => "hi"}})
 

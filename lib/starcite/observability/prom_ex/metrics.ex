@@ -10,7 +10,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
     [
       events_metrics(),
       archive_metrics(),
-      event_store_metrics()
+      event_store_metrics(),
+      routing_metrics()
     ]
   end
 
@@ -167,6 +168,55 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Tail cursor lookups by source and result",
           tags: [:source, :result]
+        )
+      ]
+    )
+  end
+
+  defp routing_metrics do
+    Event.build(
+      :starcite_routing_metrics,
+      [
+        counter("starcite_routing_decision_total",
+          event_name: [:starcite, :routing, :decision],
+          measurement: :count,
+          description: "Routing decisions by target and leader-hint usage",
+          tags: [:target, :leader_hint]
+        ),
+        distribution("starcite_routing_replica_count",
+          event_name: [:starcite, :routing, :decision],
+          measurement: :replica_count,
+          description: "Replica count observed at routing decision time",
+          reporter_options: [buckets: [1, 2, 3, 5, 7]]
+        ),
+        distribution("starcite_routing_ready_count",
+          event_name: [:starcite, :routing, :decision],
+          measurement: :ready_count,
+          description: "Ready replica count observed at routing decision time",
+          reporter_options: [buckets: [0, 1, 2, 3, 5, 7]]
+        ),
+        counter("starcite_routing_result_total",
+          event_name: [:starcite, :routing, :result],
+          measurement: :count,
+          description: "Routing execution outcomes by path and outcome",
+          tags: [:path, :outcome]
+        ),
+        distribution("starcite_routing_attempts",
+          event_name: [:starcite, :routing, :result],
+          measurement: :attempts,
+          description: "Replica attempts per routed request",
+          reporter_options: [buckets: [0, 1, 2, 3, 5, 8]]
+        ),
+        distribution("starcite_routing_retries",
+          event_name: [:starcite, :routing, :result],
+          measurement: :retries,
+          description: "Retries per routed request (attempts-1)",
+          reporter_options: [buckets: [0, 1, 2, 3, 5, 8]]
+        ),
+        counter("starcite_routing_leader_redirects_total",
+          event_name: [:starcite, :routing, :result],
+          measurement: :leader_redirects,
+          description: "Leader redirect hints observed while routing"
         )
       ]
     )

@@ -96,6 +96,8 @@ defmodule StarciteWeb.FallbackController do
              :invalid_cursor,
              :invalid_limit,
              :invalid_list_query,
+             :invalid_write_node,
+             :invalid_group_id,
              :invalid_issue_request,
              :invalid_websocket_upgrade,
              :invalid_session,
@@ -114,6 +116,8 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
   defp reason_message(:invalid_limit), do: "Invalid limit value"
   defp reason_message(:invalid_list_query), do: "Invalid list query"
+  defp reason_message(:invalid_write_node), do: "Invalid write node"
+  defp reason_message(:invalid_group_id), do: "Invalid write group id"
   defp reason_message(:invalid_issue_request), do: "Invalid token issue request payload"
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"

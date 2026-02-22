@@ -23,6 +23,8 @@ config :phoenix, :plug_init_mode, :runtime
 config :starcite,
   raft_data_dir: "tmp/test_raft",
   raft_flush_interval_ms: 100,
+  write_replication_factor: 1,
+  write_node_ids: [:nonode@nohost],
   archive_name: Starcite.Runtime.Archive,
   archive_adapter: Starcite.Archive.Adapter.Postgres,
   archive_adapter_opts: [],

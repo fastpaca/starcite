@@ -1,110 +1,113 @@
-defmodule Starcite.Runtime.RaftManager do
+defmodule Starcite.WritePath.RaftManager do
   @moduledoc """
-  Pure utility module for Raft group placement and lifecycle.
+  Utility module for static Raft write-group placement and lifecycle.
 
-  ## Responsibilities
+  Responsibilities:
 
-  - Compute replica placement via rendezvous hashing
-  - Bootstrap or join Raft clusters
-  - Query Presence for cluster membership (single source of truth)
-
-  ## NOT Responsible For
-
-  - Rebalancing (RaftTopology handles this)
-  - Tracking started groups (stateless)
-  - Monitoring cluster changes (RaftTopology handles this)
+  - Map sessions to write groups.
+  - Compute static replica sets from configured write nodes.
+  - Bootstrap or join Raft groups hosted by this node.
   """
 
   require Logger
 
-  alias Starcite.Runtime.{RaftFSM, RaftTopology}
-
-  # TODO: make these configurable
-  @num_groups 256
-  @replication_factor 3
+  alias Starcite.ControlPlane.WriteNodes
+  alias Starcite.WritePath.RaftFSM
 
   @doc false
-  def num_groups, do: @num_groups
+  @spec validate_config!() :: :ok
+  def validate_config! do
+    WriteNodes.validate!()
+  end
 
-  @doc "Map session_id → group_id (0..#{@num_groups - 1})"
-  def group_for_session(session_id) do
-    :erlang.phash2(session_id, @num_groups)
+  @doc false
+  @spec num_groups() :: pos_integer()
+  def num_groups do
+    WriteNodes.num_groups()
+  end
+
+  @doc false
+  @spec replication_factor() :: pos_integer()
+  def replication_factor do
+    WriteNodes.replication_factor()
+  end
+
+  @doc false
+  @spec write_nodes() :: [node()]
+  def write_nodes do
+    WriteNodes.nodes()
+  end
+
+  @doc false
+  @spec write_node?(node()) :: boolean()
+  def write_node?(node) when is_atom(node) do
+    WriteNodes.write_node?(node)
+  end
+
+  @doc "Map session_id -> group_id (0..num_groups-1)"
+  @spec group_for_session(binary()) :: non_neg_integer()
+  def group_for_session(session_id) when is_binary(session_id) do
+    :erlang.phash2(session_id, num_groups())
   end
 
   @doc "Get Ra server ID (process name) for a group"
-  def server_id(group_id) do
+  @spec server_id(non_neg_integer()) :: atom()
+  def server_id(group_id) when is_integer(group_id) and group_id >= 0 do
     String.to_atom("raft_group_#{group_id}")
   end
 
   @doc "Get cluster name for Ra API calls"
-  def cluster_name(group_id) do
+  @spec cluster_name(non_neg_integer()) :: atom()
+  def cluster_name(group_id) when is_integer(group_id) and group_id >= 0 do
     String.to_atom("raft_cluster_#{group_id}")
   end
 
   @doc "Stable Ra member UID for a specific group/node pair."
+  @spec member_uid(non_neg_integer(), node()) :: String.t()
   def member_uid(group_id, node \\ Node.self())
-      when is_integer(group_id) and is_atom(node) do
+      when is_integer(group_id) and group_id >= 0 and is_atom(node) do
     "raft_group_#{group_id}_#{safe_node_name(node)}"
   end
 
-  @doc """
-  Determine which nodes should host replicas for a group.
+  @doc "Determine the static write replicas for a group."
+  @spec replicas_for_group(non_neg_integer()) :: [node()]
+  def replicas_for_group(group_id) when is_integer(group_id) and group_id >= 0 do
+    nodes = write_nodes()
+    factor = replication_factor()
 
-  CRITICAL: Uses all_nodes() (joining + ready) for placement.
-  Ensures new nodes get scheduled as replicas during their join phase.
-
-  Falls back to current_nodes() if Presence empty (boot scenario).
-  """
-  def replicas_for_group(group_id) do
-    nodes =
-      case RaftTopology.all_nodes() do
-        [] ->
-          # Boot fallback before Presence syncs
-          [Node.self() | Node.list()] |> Enum.uniq() |> Enum.sort()
-
-        all_nodes ->
-          # Placement uses ALL nodes (joining + ready), not just ready!
-          all_nodes
-      end
-
-    # Rendezvous (HRW) hashing for deterministic placement
     nodes
     |> Enum.map(fn node ->
-      # TODO: don't use phash2 - use eg. xxhash for better
-      # distribution if this ever becomes a problem
       score = :erlang.phash2({group_id, node})
       {score, node}
     end)
     |> Enum.sort()
-    |> Enum.take(@replication_factor)
+    |> Enum.take(factor)
     |> Enum.map(fn {_score, node} -> node end)
   end
 
-  @doc "Check if this node should participate in a group"
-  def should_participate?(group_id) do
+  @doc "Check if this node should host the given group."
+  @spec should_participate?(non_neg_integer()) :: boolean()
+  def should_participate?(group_id) when is_integer(group_id) and group_id >= 0 do
     Node.self() in replicas_for_group(group_id)
   end
 
   @doc """
-  Start a Raft group on this node.
+  Start a Raft group on this node when this node is in the group's write replica set.
 
-  Called by RaftTopology's Task.Supervisor (async).
-
-  ## Process
-
-  1. Check if already running (idempotent)
-  2. Determine if bootstrap node (lowest in replica set)
-  3. Bootstrap: call :ra.start_cluster with all replicas
-  4. Join: call :ra.start_server to join existing cluster
-
-  Returns:
-  - :ok if started or already running
-  - {:error, reason} if failed
+  Returns `:ok` for non-participating nodes so callers can be idempotent.
   """
-  def start_group(group_id) do
+  @spec start_group(non_neg_integer()) :: :ok | {:error, term()}
+  def start_group(group_id) when is_integer(group_id) and group_id >= 0 do
+    if should_participate?(group_id) do
+      do_start_group(group_id)
+    else
+      :ok
+    end
+  end
+
+  defp do_start_group(group_id) do
     server_id = server_id(group_id)
 
-    # Already running?
     if Process.whereis(server_id) do
       :ok
     else
@@ -114,9 +117,6 @@ defmodule Starcite.Runtime.RaftManager do
 
       replica_nodes = replicas_for_group(group_id)
       server_ids = for node <- replica_nodes, do: {server_id, node}
-
-      # Deterministic coordinator = lowest node name
-      # .. poor mans leader election but gets the job done
       bootstrap_node = Enum.min(replica_nodes)
 
       Logger.debug(
@@ -124,7 +124,6 @@ defmodule Starcite.Runtime.RaftManager do
       )
 
       if my_node == bootstrap_node do
-        # Ensure only one node bootstraps this group across the cluster
         :global.trans(
           {:raft_bootstrap, group_id},
           fn ->
@@ -134,9 +133,6 @@ defmodule Starcite.Runtime.RaftManager do
           10_000
         )
       else
-        # Retry join until bootstrap node creates cluster, which will brute force
-        # until the bootstrap node is done but what can we do. It will only affect
-        # cold starts.
         join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
       end
     end
@@ -177,10 +173,7 @@ defmodule Starcite.Runtime.RaftManager do
         :ok
 
       {:error, :enoent} ->
-        # Cluster doesn't exist yet, retry with small backoff
-        # TODO: exponential backoff instead of hammering
         Process.sleep(100)
-
         join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
 
       {:error, reason} ->
@@ -195,14 +188,11 @@ defmodule Starcite.Runtime.RaftManager do
     initial_members =
       for node <- replicas_for_group(group_id), is_atom(node), do: {server_id, node}
 
-    # Per-node Ra data directory, which avoid conflicts in case we have
-    # multiple groups & nodes on the same host.
     data_dir_root = Application.get_env(:starcite, :raft_data_dir, "priv/raft")
     data_dir = Path.join([data_dir_root, "group_#{group_id}", node_name])
     File.mkdir_p!(data_dir)
     system_config = :ra_system.default_config() |> Map.put(:data_dir, data_dir)
 
-    # No cluster token enforcement
     server_conf = %{
       id: {server_id, my_node},
       uid: member_uid(group_id, my_node),
@@ -223,7 +213,6 @@ defmodule Starcite.Runtime.RaftManager do
       {:error, {:already_started, _}} ->
         :ok
 
-      # Handle supervisor shutdown when child already started
       {:error, {:shutdown, {:failed_to_start_child, _, {:already_started, _}}}} ->
         Logger.debug("RaftManager: Group #{group_id} already running locally")
         :ok
@@ -235,13 +224,12 @@ defmodule Starcite.Runtime.RaftManager do
   end
 
   @doc false
-  def machine(group_id) do
+  @spec machine(non_neg_integer()) :: {:module, module(), map()}
+  def machine(group_id) when is_integer(group_id) and group_id >= 0 do
     {:module, RaftFSM, %{group_id: group_id}}
   end
 
   defp safe_node_name(node) when is_atom(node) do
     node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
   end
-
-  # (cluster token helpers removed)
 end

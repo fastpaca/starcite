@@ -9,6 +9,9 @@ import Config
 
 config :starcite,
   ecto_repos: [Starcite.Repo],
+  num_groups: 256,
+  write_replication_factor: 3,
+  write_node_ids: [:nonode@nohost],
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000,
   archive_flush_interval_ms: 5_000,

@@ -7,13 +7,14 @@ defmodule Starcite.Application do
 
   @impl true
   def start(_type, _args) do
+    :ok = Starcite.ControlPlane.WriteNodes.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
     children =
       [
         # PromEx metrics
         Starcite.Observability.PromEx,
-        # Cache used by Runtime.EventStore for flushed event reads
+        # Cache used by DataPlane.EventStore for flushed event reads
         archive_read_cache_spec(),
         # Ecto Repo for Postgres archive mode
         repo_spec(),
@@ -21,8 +22,8 @@ defmodule Starcite.Application do
         pubsub_spec(),
         # DNS / clustering
         dns_cluster_spec(),
-        # Runtime (Raft etc.)
-        Starcite.Runtime.Supervisor
+        # Data plane (Raft, observer, archive)
+        Starcite.DataPlane.Supervisor
       ]
       |> Enum.concat(cluster_children(topologies))
       |> Enum.reject(&is_nil/1)

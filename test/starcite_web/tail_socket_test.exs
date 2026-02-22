@@ -2,8 +2,8 @@ defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.IdempotentTestAdapter
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Repo
   alias StarciteWeb.TailSocket
 
@@ -26,7 +26,8 @@ defmodule StarciteWeb.TailSocketTest do
   end
 
   defp unique_id(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
   defp base_state(session_id, cursor) do
@@ -72,7 +73,7 @@ defmodule StarciteWeb.TailSocketTest do
   describe "replay/live boundary" do
     test "replays first, then flushes buffered live events in order without duplicates" do
       session_id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       {:ok, _} =
         append_event(session_id, %{
@@ -113,7 +114,7 @@ defmodule StarciteWeb.TailSocketTest do
 
     test "pushes live events immediately after replay is complete" do
       session_id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       {[], drained_state} = drain_until_idle(base_state(session_id, 0))
 
@@ -141,7 +142,7 @@ defmodule StarciteWeb.TailSocketTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       session_id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       {:ok, _} =
         append_event(session_id, %{
@@ -152,7 +153,7 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 1)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 1, trimmed: 1}} = Runtime.ack_archived(session_id, 1)
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
       assert :error = EventStore.get_event(session_id, 1)
 
       handler_id = attach_tail_lookup_handler()
@@ -197,7 +198,7 @@ defmodule StarciteWeb.TailSocketTest do
       :ok = IdempotentTestAdapter.clear_writes()
 
       session_id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
       :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
 
       {:ok, _} =
@@ -212,7 +213,7 @@ defmodule StarciteWeb.TailSocketTest do
       send(Starcite.Archive, :flush_tick)
 
       eventually(fn ->
-        {:ok, session} = Runtime.get_session(session_id)
+        {:ok, session} = ReadPath.get_session(session_id)
         assert session.archived_seq == 1
         assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)
@@ -233,7 +234,7 @@ defmodule StarciteWeb.TailSocketTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       session_id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       for n <- 1..4 do
         {:ok, _} =
@@ -246,7 +247,7 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 2)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 2, trimmed: 2}} = Runtime.ack_archived(session_id, 2)
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
 
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]
@@ -318,7 +319,7 @@ defmodule StarciteWeb.TailSocketTest do
       |> Map.put_new(:producer_id, producer_id)
       |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
 
-    Runtime.append_event(id, enriched_event, opts)
+    WritePath.append_event(id, enriched_event, opts)
   end
 
   defp next_producer_seq(session_id, producer_id)

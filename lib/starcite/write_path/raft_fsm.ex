@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.RaftFSM do
+defmodule Starcite.WritePath.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
 
@@ -7,7 +7,7 @@ defmodule Starcite.Runtime.RaftFSM do
 
   @behaviour :ra_machine
 
-  alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
 

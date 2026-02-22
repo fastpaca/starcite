@@ -165,6 +165,95 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one write/read-path routing decision before execution.
+
+  Measurements:
+    - `:count` – fixed at 1 per routed request
+    - `:replica_count` – configured replicas for the group
+    - `:ready_count` – currently ready replicas for the group
+
+  Metadata:
+    - `:group_id`
+    - `:target` (`:local` or `:remote`)
+    - `:prefer_leader` (`true` or `false`)
+    - `:leader_hint` (`:disabled`, `:hit`, or `:miss`)
+  """
+  @spec routing_decision(
+          non_neg_integer(),
+          :local | :remote,
+          boolean(),
+          :disabled | :hit | :miss,
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def routing_decision(
+        group_id,
+        target,
+        prefer_leader,
+        leader_hint,
+        replica_count,
+        ready_count
+      )
+      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
+             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
+             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
+             ready_count >= 0 do
+    :telemetry.execute(
+      [:starcite, :routing, :decision],
+      %{count: 1, replica_count: replica_count, ready_count: ready_count},
+      %{
+        group_id: group_id,
+        target: target,
+        prefer_leader: prefer_leader,
+        leader_hint: leader_hint
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one routing execution result after request execution.
+
+  Measurements:
+    - `:count` – fixed at 1 per routed request
+    - `:attempts` – replica attempts performed for this request
+    - `:retries` – additional attempts beyond first (`max(attempts - 1, 0)`)
+    - `:leader_redirects` – number of leader redirect hints observed
+
+  Metadata:
+    - `:group_id`
+    - `:path` (`:local` or `:remote`)
+    - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)
+  """
+  @spec routing_result(
+          non_neg_integer(),
+          :local | :remote,
+          :ok | :error | :timeout | :badrpc | :no_candidates | :other,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
+      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
+             outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
+             is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
+             is_integer(leader_redirects) and leader_redirects >= 0 do
+    :telemetry.execute(
+      [:starcite, :routing, :result],
+      %{
+        count: 1,
+        attempts: attempts,
+        retries: retries,
+        leader_redirects: leader_redirects
+      },
+      %{group_id: group_id, path: path, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:

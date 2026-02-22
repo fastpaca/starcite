@@ -9,7 +9,7 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Runtime
+  alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
@@ -24,7 +24,7 @@ defmodule StarciteWeb.SessionController do
     auth = conn.assigns[:auth] || %{kind: :none}
 
     with {:ok, opts} <- validate_create(params, auth),
-         {:ok, session} <- Runtime.create_session(opts) do
+         {:ok, session} <- WritePath.create_session(opts) do
       conn
       |> put_status(:created)
       |> json(session)
@@ -38,10 +38,10 @@ defmodule StarciteWeb.SessionController do
     auth = conn.assigns[:auth] || %{kind: :none}
 
     with :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- Runtime.get_session(id),
+         {:ok, session} <- ReadPath.get_session(id),
          :ok <- Policy.allowed_to_append_session(auth, session),
          {:ok, event, expected_seq} <- validate_append(params, auth),
-         {:ok, reply} <- Runtime.append_event(id, event, expected_seq: expected_seq) do
+         {:ok, reply} <- WritePath.append_event(id, event, expected_seq: expected_seq) do
       conn
       |> put_status(:created)
       |> json(reply)
