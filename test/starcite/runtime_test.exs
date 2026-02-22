@@ -140,6 +140,67 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
+  describe "append_events/3" do
+    test "appends a batch with contiguous sequence numbers" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      {:ok, reply} =
+        WritePath.append_events(id, [
+          %{
+            type: "content",
+            payload: %{text: "one"},
+            actor: "agent:1",
+            producer_id: "writer:test",
+            producer_seq: 1
+          },
+          %{
+            type: "content",
+            payload: %{text: "two"},
+            actor: "agent:1",
+            producer_id: "writer:test",
+            producer_seq: 2
+          }
+        ])
+
+      assert reply.last_seq == 2
+      assert Enum.map(reply.results, & &1.seq) == [1, 2]
+      assert Enum.map(reply.results, & &1.last_seq) == [1, 2]
+      refute Enum.any?(reply.results, & &1.deduped)
+
+      {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert Enum.map(events, & &1.seq) == [1, 2]
+      assert Enum.map(events, & &1.payload) == [%{text: "one"}, %{text: "two"}]
+    end
+
+    test "guards on expected_seq for a batch append" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      {:ok, _} =
+        append_event(id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:1"
+        })
+
+      assert {:error, {:expected_seq_conflict, 0, 1}} =
+               WritePath.append_events(
+                 id,
+                 [
+                   %{
+                     type: "content",
+                     payload: %{text: "two"},
+                     actor: "agent:1",
+                     producer_id: "writer:test",
+                     producer_seq: 2
+                   }
+                 ],
+                 expected_seq: 0
+               )
+    end
+  end
+
   describe "get_events_from_cursor/3" do
     test "returns events strictly after cursor" do
       id = unique_id("ses")

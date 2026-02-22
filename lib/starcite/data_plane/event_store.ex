@@ -19,9 +19,18 @@ defmodule Starcite.DataPlane.EventStore do
   alias Starcite.DataPlane.EventStore.EventQueue
   alias Starcite.Session.Event
 
+  @emit_event_store_write_telemetry Application.compile_env(
+                                      :starcite,
+                                      :emit_event_store_write_telemetry,
+                                      false
+                                    )
+
   @default_max_memory_bytes 2_147_483_648
+  @default_capacity_check_interval 1
   @default_cache_reclaim_fraction 0.25
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
+  @capacity_check_interval_cache_key {__MODULE__, :capacity_check_interval}
+  @capacity_check_tick_key {__MODULE__, :capacity_check_tick}
 
   @doc """
   Start the event store owner process.
@@ -46,22 +55,22 @@ defmodule Starcite.DataPlane.EventStore do
   @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    case ensure_capacity(session_id, event) do
+    put_events(session_id, [event])
+  end
+
+  @doc """
+  Insert many committed events into pending local state.
+
+  Returns `{:error, :event_store_backpressure}` when memory cannot be reclaimed
+  enough to safely accept additional writes.
+  """
+  @spec put_events(String.t(), [Event.t()]) :: :ok | {:error, :event_store_backpressure}
+  def put_events(session_id, events)
+      when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
+    case ensure_capacity_for_puts(session_id, events) do
       {:ok, _current_memory_bytes} ->
-        :ok = EventQueue.put_event(session_id, seq, event)
-
-        total_entries = size()
-        payload_bytes = payload_bytes(event)
-        total_memory_bytes = memory_bytes()
-
-        :ok =
-          Telemetry.event_store_write(
-            session_id,
-            seq,
-            payload_bytes,
-            total_entries,
-            total_memory_bytes
-          )
+        :ok = EventQueue.put_events(session_id, events)
+        :ok = emit_event_store_write_telemetry(session_id, events)
 
         :ok
 
@@ -202,6 +211,15 @@ defmodule Starcite.DataPlane.EventStore do
     end
   end
 
+  defp ensure_capacity_for_puts(session_id, [first_event | _rest])
+       when is_binary(session_id) and session_id != "" and is_map(first_event) do
+    if capacity_check_due?() do
+      ensure_capacity(session_id, first_event)
+    else
+      {:ok, :capacity_check_skipped}
+    end
+  end
+
   defp max_memory_bytes_limit do
     raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)
 
@@ -213,6 +231,37 @@ defmodule Starcite.DataPlane.EventStore do
         bytes = normalize_max_memory_bytes!(raw)
         :persistent_term.put(@max_memory_limit_cache_key, {raw, bytes})
         bytes
+    end
+  end
+
+  defp capacity_check_interval do
+    raw =
+      Application.get_env(
+        :starcite,
+        :event_store_capacity_check_interval,
+        @default_capacity_check_interval
+      )
+
+    case :persistent_term.get(@capacity_check_interval_cache_key, :undefined) do
+      {^raw, interval} when is_integer(interval) and interval > 0 ->
+        interval
+
+      _ ->
+        interval = normalize_capacity_check_interval!(raw)
+        :persistent_term.put(@capacity_check_interval_cache_key, {raw, interval})
+        interval
+    end
+  end
+
+  defp capacity_check_due? do
+    interval = capacity_check_interval()
+
+    if interval == 1 do
+      true
+    else
+      counter = Process.get(@capacity_check_tick_key, 0) + 1
+      Process.put(@capacity_check_tick_key, counter)
+      rem(counter, interval) == 0
     end
   end
 
@@ -258,10 +307,28 @@ defmodule Starcite.DataPlane.EventStore do
   defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
   defp payload_bytes(_event), do: 0
 
+  defp emit_event_store_write_telemetry(session_id, events)
+       when is_binary(session_id) and is_list(events) do
+    if @emit_event_store_write_telemetry do
+      Enum.each(events, fn %{seq: seq} = event ->
+        :ok = Telemetry.event_store_write(session_id, seq, payload_bytes(event))
+      end)
+    end
+
+    :ok
+  end
+
   defp normalize_max_memory_bytes!(value) when is_integer(value) and value > 0, do: value
 
   defp normalize_max_memory_bytes!(value) do
     raise ArgumentError,
           "invalid value for event_store_max_bytes: #{inspect(value)} (expected positive integer bytes)"
+  end
+
+  defp normalize_capacity_check_interval!(value) when is_integer(value) and value > 0, do: value
+
+  defp normalize_capacity_check_interval!(value) do
+    raise ArgumentError,
+          "invalid value for event_store_capacity_check_interval: #{inspect(value)} (expected positive integer)"
   end
 end

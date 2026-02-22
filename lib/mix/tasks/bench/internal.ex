@@ -97,7 +97,7 @@ defmodule Mix.Tasks.Bench.Internal do
       fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
       meta = %{index: seq}
 
-      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, []}, fsm_state) do
+      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, nil}, fsm_state) do
         {updated_state, {:reply, {:ok, _reply}}, _effects} ->
           Process.put(:bench_fsm_state, updated_state)
           :ok

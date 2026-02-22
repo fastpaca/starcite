@@ -12,7 +12,7 @@ defmodule Starcite.Application do
     children =
       [
         # PromEx metrics
-        Starcite.Observability.PromEx,
+        prom_ex_spec(),
         # Cache used by DataPlane.EventStore for flushed event reads
         archive_read_cache_spec(),
         # Ecto Repo for Postgres archive mode
@@ -33,6 +33,18 @@ defmodule Starcite.Application do
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp prom_ex_spec do
+    prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
+    metrics_server = Keyword.get(prom_ex_opts, :metrics_server, :disabled)
+    grafana_agent = Keyword.get(prom_ex_opts, :grafana_agent, :disabled)
+
+    if metrics_server == :disabled and grafana_agent == :disabled do
+      nil
+    else
+      Starcite.Observability.PromEx
+    end
   end
 
   defp repo_spec do

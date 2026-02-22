@@ -32,7 +32,7 @@ defmodule Starcite.ReadPath do
   @doc false
   def get_session_local(id) when is_binary(id) and id != "" do
     with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(group) do
+         :ok <- ensure_group_started(server_id, group) do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
              RaftFSM.query_session(state, id)
            end) do
@@ -85,7 +85,7 @@ defmodule Starcite.ReadPath do
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
     with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(group) do
+         :ok <- ensure_group_started(server_id, group) do
       case :ra.consistent_query({server_id, Node.self()}, fn state ->
              RaftFSM.query_session(state, id)
            end) do
@@ -116,7 +116,16 @@ defmodule Starcite.ReadPath do
     {:ok, server_id, group}
   end
 
-  defp ensure_group_started(group_id) do
+  defp ensure_group_started(server_id, group_id)
+       when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
+    if Process.whereis(server_id) do
+      :ok
+    else
+      ensure_group_started_slow(group_id)
+    end
+  end
+
+  defp ensure_group_started_slow(group_id) do
     case RaftManager.start_group(group_id) do
       :ok -> :ok
       {:error, {:already_started, _pid}} -> :ok

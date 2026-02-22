@@ -113,6 +113,48 @@ if write_replication_factor = System.get_env("STARCITE_WRITE_REPLICATION_FACTOR"
          )
 end
 
+if emit_routing_telemetry = System.get_env("STARCITE_EMIT_ROUTING_TELEMETRY") do
+  config :starcite,
+         :emit_routing_telemetry,
+         Starcite.Env.parse_bool!(emit_routing_telemetry, "STARCITE_EMIT_ROUTING_TELEMETRY")
+end
+
+if emit_event_append_telemetry = System.get_env("STARCITE_EMIT_EVENT_APPEND_TELEMETRY") do
+  config :starcite,
+         :emit_event_append_telemetry,
+         Starcite.Env.parse_bool!(
+           emit_event_append_telemetry,
+           "STARCITE_EMIT_EVENT_APPEND_TELEMETRY"
+         )
+end
+
+if emit_event_store_write_telemetry = System.get_env("STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY") do
+  config :starcite,
+         :emit_event_store_write_telemetry,
+         Starcite.Env.parse_bool!(
+           emit_event_store_write_telemetry,
+           "STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY"
+         )
+end
+
+if route_leader_probe_on_miss = System.get_env("STARCITE_ROUTE_LEADER_PROBE_ON_MISS") do
+  config :starcite,
+         :route_leader_probe_on_miss,
+         Starcite.Env.parse_bool!(
+           route_leader_probe_on_miss,
+           "STARCITE_ROUTE_LEADER_PROBE_ON_MISS"
+         )
+end
+
+if route_leader_cache_ttl_ms = System.get_env("STARCITE_ROUTE_LEADER_CACHE_TTL_MS") do
+  config :starcite,
+         :route_leader_cache_ttl_ms,
+         parse_positive_integer!.(
+           "STARCITE_ROUTE_LEADER_CACHE_TTL_MS",
+           route_leader_cache_ttl_ms
+         )
+end
+
 parse_size_bytes! = fn env_name, raw ->
   case Regex.run(~r/^\s*(\d+)\s*([a-zA-Z]*)\s*$/, raw) do
     [_, amount_raw, unit_raw] ->
@@ -242,6 +284,16 @@ if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
   config :starcite,
          :event_store_max_bytes,
          parse_size_bytes!.("STARCITE_EVENT_STORE_MAX_SIZE", event_store_max_size)
+end
+
+if event_store_capacity_check_interval =
+     System.get_env("STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL") do
+  config :starcite,
+         :event_store_capacity_check_interval,
+         parse_positive_integer!.(
+           "STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL",
+           event_store_capacity_check_interval
+         )
 end
 
 if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do

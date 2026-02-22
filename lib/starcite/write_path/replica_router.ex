@@ -14,7 +14,8 @@ defmodule Starcite.WritePath.ReplicaRouter do
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache
-  @leader_cache_ttl_ms 1_000
+  @emit_routing_telemetry Application.compile_env(:starcite, :emit_routing_telemetry, false)
+  @leader_cache_ttl_ms Application.compile_env(:starcite, :route_leader_cache_ttl_ms, 10_000)
   @leader_probe_timeout_ms 50
 
   @spec call_on_replica(
@@ -43,7 +44,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
     {target, route_meta} = route_target_with_meta(group_id, route_opts)
 
     :ok =
-      Telemetry.routing_decision(
+      maybe_emit_routing_decision(
         group_id,
         route_meta.target,
         route_meta.prefer_leader,
@@ -57,7 +58,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
         result = apply(local_module, local_fun, local_args)
 
         :ok =
-          Telemetry.routing_result(
+          maybe_emit_routing_result(
             group_id,
             :local,
             result_outcome(result),
@@ -69,7 +70,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
         result
 
       {:remote, []} ->
-        :ok = Telemetry.routing_result(group_id, :remote, :no_candidates, 0, 0, 0)
+        :ok = maybe_emit_routing_result(group_id, :remote, :no_candidates, 0, 0, 0)
         {:error, {:no_available_replicas, []}}
 
       {:remote, nodes} ->
@@ -87,7 +88,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
         retries = max(stats.attempts - 1, 0)
 
         :ok =
-          Telemetry.routing_result(
+          maybe_emit_routing_result(
             group_id,
             :remote,
             result_outcome(result),
@@ -351,19 +352,31 @@ defmodule Starcite.WritePath.ReplicaRouter do
         if Enum.member?(replicas, node), do: node, else: nil
 
       _ ->
-        case probe_leader(group_id, self_node) do
-          node when is_atom(node) and not is_nil(node) ->
-            if Enum.member?(replicas, node) do
-              put_leader_hint(group_id, node, now_ms)
-              node
-            else
-              nil
-            end
-
-          _ ->
-            nil
-        end
+        maybe_probe_leader_hint(group_id, self_node, now_ms, replicas)
     end
+  end
+
+  defp maybe_probe_leader_hint(group_id, self_node, now_ms, replicas) do
+    if leader_probe_on_miss?() do
+      case probe_leader(group_id, self_node) do
+        node when is_atom(node) and not is_nil(node) ->
+          if Enum.member?(replicas, node) do
+            put_leader_hint(group_id, node, now_ms)
+            node
+          else
+            nil
+          end
+
+        _ ->
+          nil
+      end
+    else
+      nil
+    end
+  end
+
+  defp leader_probe_on_miss? do
+    Application.get_env(:starcite, :route_leader_probe_on_miss, false) == true
   end
 
   defp probe_leader(group_id, self_node) when is_integer(group_id) and is_atom(self_node) do
@@ -472,4 +485,41 @@ defmodule Starcite.WritePath.ReplicaRouter do
 
   defp node_hint?(value) when is_atom(value) and not is_nil(value), do: true
   defp node_hint?(_value), do: false
+
+  defp maybe_emit_routing_decision(
+         group_id,
+         target,
+         prefer_leader,
+         leader_hint,
+         replica_count,
+         ready_count
+       ) do
+    if @emit_routing_telemetry do
+      Telemetry.routing_decision(
+        group_id,
+        target,
+        prefer_leader,
+        leader_hint,
+        replica_count,
+        ready_count
+      )
+    else
+      :ok
+    end
+  end
+
+  defp maybe_emit_routing_result(
+         group_id,
+         path,
+         outcome,
+         attempts,
+         retries,
+         leader_redirects
+       ) do
+    if @emit_routing_telemetry do
+      Telemetry.routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
+    else
+      :ok
+    end
+  end
 end

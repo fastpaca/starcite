@@ -21,16 +21,16 @@ defmodule Starcite.WritePath do
     metadata = Keyword.get(opts, :metadata, %{})
     group = RaftManager.group_for_session(id)
 
-    case ReplicaRouter.call_on_replica(
-           group,
-           __MODULE__,
-           :create_session_local,
-           [id, title, creator_principal, metadata],
-           __MODULE__,
-           :create_session_local,
-           [id, title, creator_principal, metadata],
-           prefer_leader: true
-         ) do
+    result =
+      case local_server_for_group(group) do
+        {:ok, server_id} ->
+          process_command(server_id, {:create_session, id, title, creator_principal, metadata})
+
+        :error ->
+          call_remote(group, :create_session_local, [id, title, creator_principal, metadata])
+      end
+
+    case result do
       {:ok, session} = ok ->
         _ = maybe_index_session(session, creator_principal)
         ok
@@ -47,61 +47,101 @@ defmodule Starcite.WritePath do
                 is_nil(creator_principal)) and
              is_map(metadata) do
     with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(group) do
-      case :ra.process_command(
-             {server_id, Node.self()},
-             {:create_session, id, title, creator_principal, metadata},
-             @timeout
-           ) do
-        {:ok, {:reply, {:ok, data}}, _leader} -> {:ok, data}
-        {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
-        {:timeout, leader} -> {:timeout, leader}
-        {:error, reason} -> {:error, reason}
-      end
+         :ok <- ensure_group_started(server_id, group) do
+      process_command(server_id, {:create_session, id, title, creator_principal, metadata})
     end
   end
 
   def create_session_local(_id, _title, _creator_principal, _metadata),
     do: {:error, :invalid_session}
 
+  @spec append_event(String.t(), map()) ::
+          {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
+          | {:error, term()}
+          | {:timeout, term()}
+  def append_event(id, event) when is_binary(id) and id != "" and is_map(event) do
+    group = RaftManager.group_for_session(id)
+
+    case local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command(server_id, {:append_event, id, event, nil})
+
+      :error ->
+        call_remote(group, :append_event_local, [id, event])
+    end
+  end
+
+  def append_event(_id, _event), do: {:error, :invalid_event}
+
   @spec append_event(String.t(), map(), keyword()) ::
           {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
           | {:error, term()}
           | {:timeout, term()}
-  def append_event(id, event, opts \\ [])
-
   def append_event(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
     group = RaftManager.group_for_session(id)
+    expected_seq = expected_seq_from_opts(opts)
 
-    ReplicaRouter.call_on_replica(
-      group,
-      __MODULE__,
-      :append_event_local,
-      [id, event, opts],
-      __MODULE__,
-      :append_event_local,
-      [id, event, opts],
-      prefer_leader: true
-    )
+    case local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command(server_id, {:append_event, id, event, expected_seq})
+
+      :error ->
+        call_remote(group, :append_event_local, [id, event, opts])
+    end
   end
 
   def append_event(_id, _event, _opts), do: {:error, :invalid_event}
 
   @doc false
-  def append_event_local(id, event, opts \\ [])
+  def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
     with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(group) do
-      case :ra.process_command(
-             {server_id, Node.self()},
-             {:append_event, id, event, opts},
-             @timeout
-           ) do
-        {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
-        {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
-        {:timeout, leader} -> {:timeout, leader}
-        {:error, reason} -> {:error, reason}
-      end
+         :ok <- ensure_group_started(server_id, group) do
+      process_command(server_id, {:append_event, id, event, nil})
+    end
+  end
+
+  @doc false
+  def append_event_local(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
+    expected_seq = expected_seq_from_opts(opts)
+
+    with {:ok, server_id, group} <- locate(id),
+         :ok <- ensure_group_started(server_id, group) do
+      process_command(server_id, {:append_event, id, event, expected_seq})
+    end
+  end
+
+  @spec append_events(String.t(), [map()], keyword()) ::
+          {:ok,
+           %{
+             results: [%{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}],
+             last_seq: non_neg_integer()
+           }}
+          | {:error, term()}
+          | {:timeout, term()}
+  def append_events(id, events, opts \\ [])
+
+  def append_events(id, events, opts)
+      when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
+    group = RaftManager.group_for_session(id)
+
+    case local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command(server_id, {:append_events, id, events, opts})
+
+      :error ->
+        call_remote(group, :append_events_local, [id, events, opts])
+    end
+  end
+
+  def append_events(_id, _events, _opts), do: {:error, :invalid_event}
+
+  @doc false
+  def append_events_local(id, events, opts \\ [])
+      when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
+    with {:ok, server_id, group} <- locate(id),
+         :ok <- ensure_group_started(server_id, group) do
+      process_command(server_id, {:append_events, id, events, opts})
     end
   end
 
@@ -110,33 +150,21 @@ defmodule Starcite.WritePath do
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
     group = RaftManager.group_for_session(id)
 
-    ReplicaRouter.call_on_replica(
-      group,
-      __MODULE__,
-      :ack_archived_local,
-      [id, upto_seq],
-      __MODULE__,
-      :ack_archived_local,
-      [id, upto_seq],
-      prefer_leader: true
-    )
+    case local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command(server_id, {:ack_archived, id, upto_seq})
+
+      :error ->
+        call_remote(group, :ack_archived_local, [id, upto_seq])
+    end
   end
 
   @doc false
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
     with {:ok, server_id, group} <- locate(id),
-         :ok <- ensure_group_started(group) do
-      case :ra.process_command(
-             {server_id, Node.self()},
-             {:ack_archived, id, upto_seq},
-             @timeout
-           ) do
-        {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
-        {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
-        {:timeout, leader} -> {:timeout, leader}
-        {:error, reason} -> {:error, reason}
-      end
+         :ok <- ensure_group_started(server_id, group) do
+      process_command(server_id, {:ack_archived, id, upto_seq})
     end
   end
 
@@ -146,7 +174,16 @@ defmodule Starcite.WritePath do
     {:ok, server_id, group}
   end
 
-  defp ensure_group_started(group_id) do
+  defp ensure_group_started(server_id, group_id)
+       when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
+    if Process.whereis(server_id) do
+      :ok
+    else
+      ensure_group_started_slow(group_id)
+    end
+  end
+
+  defp ensure_group_started_slow(group_id) do
     case RaftManager.start_group(group_id) do
       :ok -> :ok
       {:error, {:already_started, _pid}} -> :ok
@@ -183,6 +220,43 @@ defmodule Starcite.WritePath do
   end
 
   defp maybe_index_session(_session, _creator_principal), do: :ok
+
+  defp call_remote(group_id, fun, args)
+       when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
+    ReplicaRouter.call_on_replica(
+      group_id,
+      __MODULE__,
+      fun,
+      args,
+      __MODULE__,
+      fun,
+      args,
+      prefer_leader: false
+    )
+  end
+
+  defp local_server_for_group(group_id) when is_integer(group_id) and group_id >= 0 do
+    server_id = RaftManager.server_id(group_id)
+
+    if Process.whereis(server_id) != nil do
+      {:ok, server_id}
+    else
+      :error
+    end
+  end
+
+  defp process_command(server_id, command) when is_atom(server_id) do
+    case :ra.process_command({server_id, Node.self()}, command, @timeout) do
+      {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
+      {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
+      {:timeout, leader} -> {:timeout, leader}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp expected_seq_from_opts(opts) when is_list(opts) do
+    Keyword.get(opts, :expected_seq)
+  end
 
   defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
 

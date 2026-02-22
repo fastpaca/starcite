@@ -40,8 +40,6 @@ defmodule Starcite.Observability.Telemetry do
   Measurements:
     - `:count` – fixed at 1 per write
     - `:payload_bytes` – payload size in bytes
-    - `:total_entries` – current ETS entry count after insert
-    - `:memory_bytes` – current ETS table memory usage in bytes
 
   Metadata:
     - `:session_id`
@@ -50,23 +48,14 @@ defmodule Starcite.Observability.Telemetry do
   @spec event_store_write(
           String.t(),
           pos_integer(),
-          non_neg_integer(),
-          non_neg_integer(),
           non_neg_integer()
-        ) ::
-          :ok
-  def event_store_write(session_id, seq, payload_bytes, total_entries, memory_bytes)
+        ) :: :ok
+  def event_store_write(session_id, seq, payload_bytes)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
-             total_entries >= 0 and is_integer(memory_bytes) and memory_bytes >= 0 do
+             is_integer(payload_bytes) and payload_bytes >= 0 do
     :telemetry.execute(
       [:starcite, :event_store, :write],
-      %{
-        count: 1,
-        payload_bytes: payload_bytes,
-        total_entries: total_entries,
-        memory_bytes: memory_bytes
-      },
+      %{count: 1, payload_bytes: payload_bytes},
       %{session_id: session_id, seq: seq}
     )
 

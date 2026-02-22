@@ -70,13 +70,34 @@ defmodule Starcite.Session.ProducerIndex do
     if map_size(index) <= max_entries do
       index
     else
-      index
-      |> Enum.sort_by(fn {producer_id, %{session_seq: session_seq}} ->
-        {-session_seq, producer_id}
+      overflow = map_size(index) - max_entries
+
+      Enum.reduce(1..overflow, index, fn _, acc ->
+        Map.delete(acc, oldest_producer_id(acc))
       end)
-      |> Enum.take(max_entries)
-      |> Map.new()
     end
+  end
+
+  defp oldest_producer_id(index) when is_map(index) do
+    {producer_id, _oldest_seq} =
+      Enum.reduce(index, nil, fn
+        {candidate_id, %{session_seq: candidate_seq}}, nil ->
+          {candidate_id, candidate_seq}
+
+        {candidate_id, %{session_seq: candidate_seq}}, {oldest_id, oldest_seq} ->
+          cond do
+            candidate_seq < oldest_seq ->
+              {candidate_id, candidate_seq}
+
+            candidate_seq == oldest_seq and candidate_id > oldest_id ->
+              {candidate_id, candidate_seq}
+
+            true ->
+              {oldest_id, oldest_seq}
+          end
+      end)
+
+    producer_id
   end
 
   defp put_cursor(index, producer_id, producer_seq, session_seq, hash) do

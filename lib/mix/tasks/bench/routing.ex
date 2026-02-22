@@ -83,7 +83,7 @@ defmodule Mix.Tasks.Bench.Routing do
 
       case :ra.process_command(
              {server_id, Node.self()},
-             {:append_event, session_id, event_with_producer, []},
+             {:append_event, session_id, event_with_producer, nil},
              @raft_timeout
            ) do
         {:ok, {:reply, {:ok, _reply}}, _leader} ->

@@ -102,18 +102,81 @@ defmodule Starcite.Session do
           | {:error, :invalid_event}
   def append_event(
         %Session{} = session,
+        %{
+          type: type,
+          payload: payload,
+          actor: actor,
+          source: source,
+          metadata: metadata,
+          refs: refs,
+          idempotency_key: idempotency_key,
+          producer_id: producer_id,
+          producer_seq: producer_seq
+        } = input
+      )
+      when is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and actor != "" and
+             (is_binary(source) or is_nil(source)) and is_map(metadata) and is_map(refs) and
+             (is_binary(idempotency_key) or is_nil(idempotency_key)) and is_binary(producer_id) and
+             producer_id != "" and is_integer(producer_seq) and producer_seq > 0 do
+    do_append_event(
+      session,
+      input,
+      producer_id,
+      producer_seq,
+      type,
+      payload,
+      actor,
+      source,
+      metadata,
+      refs,
+      idempotency_key
+    )
+  end
+
+  def append_event(
+        %Session{} = session,
         %{producer_id: producer_id, producer_seq: producer_seq} = input
       )
       when is_binary(producer_id) and producer_id != "" and is_integer(producer_seq) and
              producer_seq > 0 do
-    hash = event_hash(input)
+    do_append_event(
+      session,
+      input,
+      producer_id,
+      producer_seq,
+      input.type,
+      input.payload,
+      input.actor,
+      Map.get(input, :source),
+      Map.get(input, :metadata, %{}),
+      Map.get(input, :refs, %{}),
+      Map.get(input, :idempotency_key)
+    )
+  end
+
+  def append_event(%Session{}, _input), do: {:error, :invalid_event}
+
+  defp do_append_event(
+         %Session{} = session,
+         input,
+         producer_id,
+         producer_seq,
+         type,
+         payload,
+         actor,
+         source,
+         metadata,
+         refs,
+         idempotency_key
+       ) do
+    fingerprint = event_fingerprint(input)
     next_seq = session.last_seq + 1
 
     case ProducerIndex.decide(
            session.producer_cursors,
            producer_id,
            producer_seq,
-           hash,
+           fingerprint,
            next_seq,
            session.retention.producer_max_entries
          ) do
@@ -128,13 +191,13 @@ defmodule Starcite.Session do
 
         event = %{
           seq: next_seq,
-          type: input.type,
-          payload: input.payload,
-          actor: input.actor,
-          source: Map.get(input, :source),
-          metadata: Map.get(input, :metadata, %{}),
-          refs: Map.get(input, :refs, %{}),
-          idempotency_key: Map.get(input, :idempotency_key),
+          type: type,
+          payload: payload,
+          actor: actor,
+          source: source,
+          metadata: metadata,
+          refs: refs,
+          idempotency_key: idempotency_key,
           producer_id: producer_id,
           producer_seq: producer_seq,
           inserted_at: now
@@ -152,8 +215,6 @@ defmodule Starcite.Session do
         {:error, reason}
     end
   end
-
-  def append_event(%Session{}, _input), do: {:error, :invalid_event}
 
   @doc """
   Apply an archive acknowledgement up to `upto_seq` and update retention
@@ -214,21 +275,29 @@ defmodule Starcite.Session do
     |> max(1)
   end
 
-  defp event_hash(input) do
-    input
-    |> Map.take([
-      :type,
-      :payload,
-      :actor,
-      :source,
-      :metadata,
-      :refs,
-      :idempotency_key,
-      :producer_id,
-      :producer_seq
-    ])
-    |> :erlang.term_to_binary()
-    |> then(&:crypto.hash(:sha256, &1))
+  defp event_fingerprint(
+         %{
+           type: type,
+           payload: payload,
+           actor: actor,
+           producer_id: producer_id,
+           producer_seq: producer_seq
+         } = input
+       ) do
+    fingerprint_term = {
+      :event_fingerprint,
+      type,
+      payload,
+      actor,
+      Map.get(input, :source),
+      Map.get(input, :metadata, %{}),
+      Map.get(input, :refs, %{}),
+      Map.get(input, :idempotency_key),
+      producer_id,
+      producer_seq
+    }
+
+    <<:erlang.phash2(fingerprint_term)::32, :erlang.phash2({:v2, fingerprint_term})::32>>
   end
 
   defp iso8601_utc(%NaiveDateTime{} = datetime) do

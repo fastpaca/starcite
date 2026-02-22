@@ -11,6 +11,12 @@ defmodule Starcite.WritePath.RaftFSM do
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
 
+  @emit_event_append_telemetry Application.compile_env(
+                                 :starcite,
+                                 :emit_event_append_telemetry,
+                                 false
+                               )
+
   defstruct [:group_id, :sessions]
 
   @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
@@ -49,47 +55,45 @@ defmodule Starcite.WritePath.RaftFSM do
   end
 
   @impl true
-  def apply(_meta, {:append_event, session_id, input, opts}, state) do
+  def apply(_meta, {:append_event, session_id, input, expected_seq}, state) do
     with {:ok, session} <- fetch_session(state.sessions, session_id),
-         :ok <- guard_expected_seq(session, opts[:expected_seq]) do
-      case Session.append_event(session, input) do
-        {:appended, updated_session, event} ->
-          case EventStore.put_event(session_id, event) do
-            :ok ->
-              new_state = %{
-                state
-                | sessions: Map.put(state.sessions, session_id, updated_session)
-              }
+         :ok <- guard_expected_seq(session, expected_seq),
+         {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input),
+         :ok <- put_appended_event(session_id, event_to_store) do
+      new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+      emit_appended_event_telemetry(session_id, event_to_store)
+      effect = build_effect_for_event(session_id, event_to_store)
+      reply = {:reply, {:ok, reply}}
 
-              Starcite.Observability.Telemetry.event_appended(
-                session_id,
-                event.type,
-                event.actor,
-                event.source,
-                payload_bytes(event.payload)
-              )
+      case effect do
+        nil -> {new_state, reply}
+        value -> {new_state, reply, [value]}
+      end
+    else
+      {:error, reason} -> {state, {:reply, {:error, reason}}}
+    end
+  end
 
-              reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-              effects = build_effects(session_id, event, updated_session.last_seq)
-              {new_state, {:reply, {:ok, reply}}, effects}
+  @impl true
+  def apply(_meta, {:append_events, _session_id, [], _opts}, state) do
+    {state, {:reply, {:error, :invalid_event}}}
+  end
 
-            {:error, :event_store_backpressure} ->
-              {state, {:reply, {:error, :event_store_backpressure}}}
-          end
+  @impl true
+  def apply(_meta, {:append_events, session_id, inputs, opts}, state)
+      when is_list(inputs) and (is_list(opts) or is_nil(opts)) do
+    with {:ok, session} <- fetch_session(state.sessions, session_id),
+         :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
+         {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs),
+         :ok <- put_appended_events(session_id, events_to_store) do
+      new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+      emit_appended_telemetry(session_id, events_to_store)
+      effects = build_effects_for_events(session_id, events_to_store)
+      reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
 
-        {:deduped, updated_session, seq} ->
-          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-          reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-          {new_state, {:reply, {:ok, reply}}}
-
-        {:error, :producer_replay_conflict} ->
-          {state, {:reply, {:error, :producer_replay_conflict}}}
-
-        {:error, {:producer_seq_conflict, _producer_id, _expected, _got} = reason} ->
-          {state, {:reply, {:error, reason}}}
-
-        {:error, :invalid_event} ->
-          {state, {:reply, {:error, :invalid_event}}}
+      case effects do
+        [] -> {new_state, reply}
+        _ -> {new_state, reply, effects}
       end
     else
       {:error, reason} -> {state, {:reply, {:error, reason}}}
@@ -168,6 +172,9 @@ defmodule Starcite.WritePath.RaftFSM do
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
+  defp expected_seq_from_opts(nil), do: nil
+  defp expected_seq_from_opts(opts) when is_list(opts), do: opts[:expected_seq]
+
   defp evict_archived_events(_session_id, previous_archived_seq, updated_archived_seq)
        when updated_archived_seq <= previous_archived_seq do
     0
@@ -191,8 +198,106 @@ defmodule Starcite.WritePath.RaftFSM do
   defp release_cursor_effect(_meta, _previous_archived_seq, _updated_archived_seq, _state),
     do: nil
 
-  defp build_effects(session_id, event, last_seq) do
-    cursor_update =
+  defp append_to_session(%Session{} = session, inputs)
+       when is_list(inputs) and inputs != [] do
+    do_append_to_session(session, inputs, [], [])
+  end
+
+  defp append_to_session(%Session{}, []), do: {:error, :invalid_event}
+
+  defp append_one_to_session(%Session{} = session, input) when is_map(input) do
+    case Session.append_event(session, input) do
+      {:appended, updated_session, event} ->
+        reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+        {:ok, updated_session, reply, event}
+
+      {:deduped, updated_session, seq} ->
+        reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+        {:ok, updated_session, reply, nil}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp append_one_to_session(%Session{}, _input), do: {:error, :invalid_event}
+
+  defp do_append_to_session(%Session{} = session, [input | rest], replies, events) do
+    case Session.append_event(session, input) do
+      {:appended, updated_session, event} ->
+        reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+        do_append_to_session(updated_session, rest, [reply | replies], [event | events])
+
+      {:deduped, updated_session, seq} ->
+        reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+        do_append_to_session(updated_session, rest, [reply | replies], events)
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp do_append_to_session(%Session{} = session, [], replies, events) do
+    {:ok, session, Enum.reverse(replies), Enum.reverse(events)}
+  end
+
+  defp put_appended_events(_session_id, []), do: :ok
+
+  defp put_appended_events(session_id, events) when is_binary(session_id) and is_list(events) do
+    EventStore.put_events(session_id, events)
+  end
+
+  defp put_appended_event(_session_id, nil), do: :ok
+
+  defp put_appended_event(session_id, %{seq: seq} = event)
+       when is_binary(session_id) and is_integer(seq) and seq > 0 do
+    EventStore.put_event(session_id, event)
+  end
+
+  defp emit_appended_telemetry(_session_id, []), do: :ok
+
+  defp emit_appended_telemetry(session_id, events)
+       when is_binary(session_id) and is_list(events) do
+    if @emit_event_append_telemetry do
+      Enum.each(events, fn %{type: type, actor: actor, payload: payload} = event ->
+        Starcite.Observability.Telemetry.event_appended(
+          session_id,
+          type,
+          actor,
+          Map.get(event, :source),
+          payload_bytes(payload)
+        )
+      end)
+    end
+
+    :ok
+  end
+
+  defp emit_appended_event_telemetry(_session_id, nil), do: :ok
+
+  defp emit_appended_event_telemetry(
+         session_id,
+         %{type: type, actor: actor, payload: payload} = event
+       )
+       when is_binary(session_id) and is_binary(type) and is_binary(actor) do
+    if @emit_event_append_telemetry do
+      Starcite.Observability.Telemetry.event_appended(
+        session_id,
+        type,
+        actor,
+        Map.get(event, :source),
+        payload_bytes(payload)
+      )
+    end
+
+    :ok
+  end
+
+  defp build_effects_for_events(_session_id, []), do: []
+
+  defp build_effects_for_events(session_id, events)
+       when is_binary(session_id) and is_list(events) do
+    Enum.map(events, fn %{seq: seq} = event ->
       {
         :mod_call,
         Phoenix.PubSub,
@@ -200,11 +305,26 @@ defmodule Starcite.WritePath.RaftFSM do
         [
           Starcite.PubSub,
           CursorUpdate.topic(session_id),
-          CursorUpdate.message(session_id, event, last_seq)
+          CursorUpdate.message(session_id, event, seq)
         ]
       }
+    end)
+  end
 
-    [cursor_update]
+  defp build_effect_for_event(_session_id, nil), do: nil
+
+  defp build_effect_for_event(session_id, %{seq: seq} = event)
+       when is_binary(session_id) and is_integer(seq) and seq > 0 do
+    {
+      :mod_call,
+      Phoenix.PubSub,
+      :broadcast,
+      [
+        Starcite.PubSub,
+        CursorUpdate.topic(session_id),
+        CursorUpdate.message(session_id, event, seq)
+      ]
+    }
   end
 
   defp payload_bytes(payload), do: :erlang.external_size(payload)
