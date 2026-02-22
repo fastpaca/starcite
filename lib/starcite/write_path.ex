@@ -3,7 +3,7 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
-  alias Starcite.DataPlane.{RaftAccess, ReplicaRouter, SessionIndex}
+  alias Starcite.DataPlane.{RaftAccess, ReplicaRouter}
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -183,7 +183,10 @@ defmodule Starcite.WritePath do
       created_at: parse_utc_datetime!(created_at)
     }
 
-    SessionIndex.upsert_session(row)
+    case Starcite.Archive.Store.upsert_session(row) do
+      :ok -> :ok
+      {:error, _reason} -> :ok
+    end
   end
 
   defp maybe_index_session(_session, _creator_principal), do: :ok
