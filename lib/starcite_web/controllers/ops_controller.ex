@@ -80,10 +80,9 @@ defmodule StarciteWeb.OpsController do
     }
   end
 
-  defp render_node_statuses(node_statuses) when is_map(node_statuses) do
+  defp render_node_statuses(node_statuses) do
     Enum.into(node_statuses, %{}, fn
-      {node, %{status: status, changed_at_ms: changed_at_ms}}
-      when is_atom(node) and is_atom(status) and is_integer(changed_at_ms) ->
+      {node, %{status: status, changed_at_ms: changed_at_ms}} ->
         {
           node_to_string(node),
           %{status: Atom.to_string(status), changed_at_ms: changed_at_ms}
@@ -91,9 +90,9 @@ defmodule StarciteWeb.OpsController do
     end)
   end
 
-  defp render_nodes(nodes) when is_list(nodes) do
+  defp render_nodes(nodes) do
     Enum.map(nodes, &node_to_string/1)
   end
 
-  defp node_to_string(node) when is_atom(node), do: Atom.to_string(node)
+  defp node_to_string(node), do: Atom.to_string(node)
 end

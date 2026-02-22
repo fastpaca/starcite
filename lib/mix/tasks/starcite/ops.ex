@@ -131,14 +131,15 @@ defmodule Mix.Tasks.Starcite.Ops do
   end
 
   defp parse_node(raw_node) when is_binary(raw_node) do
-    node_name = String.trim(raw_node)
     known_nodes = Ops.known_nodes()
 
-    case Ops.parse_known_node(node_name) do
+    case Ops.parse_known_node(raw_node) do
       {:ok, node} ->
         {:ok, node}
 
       {:error, :invalid_write_node} ->
+        node_name = String.trim(raw_node)
+
         known =
           known_nodes
           |> Enum.map(&Atom.to_string/1)
