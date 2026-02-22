@@ -283,11 +283,8 @@ defmodule Starcite.WritePath.RaftTopology do
             try do
               fun.(group_id)
             rescue
-              error ->
-                {:error, {:exception, Exception.message(error)}}
-            catch
-              kind, reason ->
-                {:error, {kind, reason}}
+              error in [ArgumentError] ->
+                {:error, {:invalid_config, Exception.message(error)}}
             end
 
           {group_id, result}

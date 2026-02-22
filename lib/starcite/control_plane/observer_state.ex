@@ -35,7 +35,7 @@ defmodule Starcite.ControlPlane.ObserverState do
   @spec mark_suspect(t(), node(), integer()) :: t()
   def mark_suspect(%__MODULE__{} = state, node, now_ms)
       when is_atom(node) and is_integer(now_ms) do
-    case Map.get(state.nodes, node) do
+    case state.nodes[node] do
       %{status: :draining} -> state
       _ -> put_status(state, node, :suspect, now_ms)
     end

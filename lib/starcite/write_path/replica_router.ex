@@ -430,7 +430,7 @@ defmodule Starcite.WritePath.ReplicaRouter do
 
   defp cached_leader_hint(group_id, now_ms)
        when is_integer(group_id) and group_id >= 0 and is_integer(now_ms) do
-    case safe_leader_cache_lookup(group_id) do
+    case :ets.lookup(@leader_cache_table, group_id) do
       [{^group_id, leader_node, seen_at_ms}]
       when is_atom(leader_node) and is_integer(seen_at_ms) and
              now_ms - seen_at_ms <= @leader_cache_ttl_ms ->
@@ -443,32 +443,8 @@ defmodule Starcite.WritePath.ReplicaRouter do
 
   defp put_leader_hint(group_id, leader_node, now_ms)
        when is_integer(group_id) and group_id >= 0 and is_atom(leader_node) and is_integer(now_ms) do
-    safe_leader_cache_insert({group_id, leader_node, now_ms})
+    :ets.insert(@leader_cache_table, {group_id, leader_node, now_ms})
     :ok
-  end
-
-  defp safe_leader_cache_lookup(group_id) when is_integer(group_id) do
-    :ets.lookup(@leader_cache_table, group_id)
-  rescue
-    ArgumentError ->
-      ensure_leader_cache_table()
-      :ets.lookup(@leader_cache_table, group_id)
-  catch
-    :error, :badarg ->
-      ensure_leader_cache_table()
-      :ets.lookup(@leader_cache_table, group_id)
-  end
-
-  defp safe_leader_cache_insert(entry) do
-    :ets.insert(@leader_cache_table, entry)
-  rescue
-    ArgumentError ->
-      ensure_leader_cache_table()
-      :ets.insert(@leader_cache_table, entry)
-  catch
-    :error, :badarg ->
-      ensure_leader_cache_table()
-      :ets.insert(@leader_cache_table, entry)
   end
 
   defp target_to_atom({:local, _node}), do: :local

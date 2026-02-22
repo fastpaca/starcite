@@ -34,16 +34,6 @@ defmodule Starcite.DataPlane.Supervisor do
       val when is_integer(val) and val > 0 ->
         val
 
-      val when is_binary(val) ->
-        case Integer.parse(String.trim(val)) do
-          {parsed, ""} when parsed > 0 ->
-            parsed
-
-          _ ->
-            raise ArgumentError,
-                  "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
-        end
-
       val ->
         raise ArgumentError,
               "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
