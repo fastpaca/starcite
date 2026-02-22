@@ -5,7 +5,7 @@ defmodule StarciteWeb.OpsController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.ControlPlane.{Ops, WriteNodes}
+  alias Starcite.ControlPlane.Ops
 
   action_fallback StarciteWeb.FallbackController
 
@@ -56,49 +56,15 @@ defmodule StarciteWeb.OpsController do
   end
 
   def group_replicas(conn, %{"group_id" => raw_group_id}) do
-    with {:ok, group_id} <- parse_group_id(raw_group_id) do
+    with {:ok, group_id} <- Ops.parse_group_id(raw_group_id) do
       json(conn, %{group_id: group_id, replicas: render_nodes(Ops.group_replicas(group_id))})
     end
   end
 
   def group_replicas(_conn, _params), do: {:error, :invalid_group_id}
 
-  defp parse_node_param(%{"node" => raw_node}), do: parse_known_node(raw_node)
+  defp parse_node_param(%{"node" => raw_node}), do: Ops.parse_known_node(raw_node)
   defp parse_node_param(_params), do: {:ok, Node.self()}
-
-  defp parse_known_node(raw_node) when is_binary(raw_node) do
-    node_name = String.trim(raw_node)
-
-    case Enum.find(known_nodes(), fn node -> Atom.to_string(node) == node_name end) do
-      nil -> {:error, :invalid_write_node}
-      node -> {:ok, node}
-    end
-  end
-
-  defp parse_known_node(_raw_node), do: {:error, :invalid_write_node}
-
-  defp known_nodes do
-    ([Node.self()] ++ Node.list() ++ WriteNodes.nodes())
-    |> Enum.filter(&is_atom/1)
-    |> Enum.uniq()
-    |> Enum.sort()
-  end
-
-  defp parse_group_id(raw_group_id) when is_binary(raw_group_id) do
-    case Integer.parse(String.trim(raw_group_id)) do
-      {group_id, ""} when group_id >= 0 ->
-        if group_id < WriteNodes.num_groups() do
-          {:ok, group_id}
-        else
-          {:error, :invalid_group_id}
-        end
-
-      _ ->
-        {:error, :invalid_group_id}
-    end
-  end
-
-  defp parse_group_id(_raw_group_id), do: {:error, :invalid_group_id}
 
   defp render_observer(%{
          status: status,

@@ -22,7 +22,6 @@ defmodule Mix.Tasks.Starcite.Ops do
   use Mix.Task
 
   alias Starcite.ControlPlane.Ops
-  alias Starcite.ControlPlane.WriteNodes
 
   @default_wait_timeout_ms 30_000
   @shortdoc "Control-plane ops for static write-node routing state"
@@ -112,12 +111,12 @@ defmodule Mix.Tasks.Starcite.Ops do
   end
 
   defp parse_group_id(raw_group_id) when is_binary(raw_group_id) do
-    case Integer.parse(String.trim(raw_group_id)) do
-      {group_id, ""} when group_id >= 0 ->
+    case Ops.parse_group_id(raw_group_id) do
+      {:ok, group_id} ->
         {:ok, group_id}
 
-      _ ->
-        {:error, "invalid group id #{inspect(raw_group_id)} (expected non-negative integer)"}
+      {:error, :invalid_group_id} ->
+        {:error, "invalid group id #{inspect(raw_group_id)} (expected configured group range)"}
     end
   end
 
@@ -133,26 +132,20 @@ defmodule Mix.Tasks.Starcite.Ops do
 
   defp parse_node(raw_node) when is_binary(raw_node) do
     node_name = String.trim(raw_node)
+    known_nodes = Ops.known_nodes()
 
-    case Enum.find(known_nodes(), fn node -> Atom.to_string(node) == node_name end) do
-      nil ->
+    case Ops.parse_known_node(node_name) do
+      {:ok, node} ->
+        {:ok, node}
+
+      {:error, :invalid_write_node} ->
         known =
-          known_nodes()
+          known_nodes
           |> Enum.map(&Atom.to_string/1)
           |> Enum.join(", ")
 
         {:error, "unknown node #{inspect(node_name)} (known nodes: #{known})"}
-
-      node ->
-        {:ok, node}
     end
-  end
-
-  defp known_nodes do
-    ([Node.self()] ++ Node.list() ++ WriteNodes.nodes())
-    |> Enum.filter(&is_atom/1)
-    |> Enum.uniq()
-    |> Enum.sort()
   end
 
   defp wait_ready(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do

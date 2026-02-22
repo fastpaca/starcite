@@ -98,6 +98,47 @@ defmodule Starcite.ControlPlane.Ops do
     RaftManager.replicas_for_group(group_id)
   end
 
+  @spec known_nodes() :: [node()]
+  def known_nodes do
+    ([Node.self()] ++ Node.list() ++ WriteNodes.nodes())
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  @spec parse_known_node(term()) :: {:ok, node()} | {:error, :invalid_write_node}
+  def parse_known_node(raw_node) when is_binary(raw_node) do
+    node_name = String.trim(raw_node)
+    known_nodes = known_nodes()
+
+    case Enum.find(known_nodes, fn node -> Atom.to_string(node) == node_name end) do
+      nil -> {:error, :invalid_write_node}
+      node -> {:ok, node}
+    end
+  end
+
+  def parse_known_node(_raw_node), do: {:error, :invalid_write_node}
+
+  @spec parse_group_id(term()) :: {:ok, non_neg_integer()} | {:error, :invalid_group_id}
+  def parse_group_id(raw_group_id) when is_binary(raw_group_id) do
+    case Integer.parse(String.trim(raw_group_id)) do
+      {group_id, ""} when group_id >= 0 ->
+        parse_group_id(group_id)
+
+      _ ->
+        {:error, :invalid_group_id}
+    end
+  end
+
+  def parse_group_id(group_id) when is_integer(group_id) and group_id >= 0 do
+    if group_id < WriteNodes.num_groups() do
+      {:ok, group_id}
+    else
+      {:error, :invalid_group_id}
+    end
+  end
+
+  def parse_group_id(_raw_group_id), do: {:error, :invalid_group_id}
+
   defp wait_until(predicate, timeout_ms)
        when is_function(predicate, 0) and is_integer(timeout_ms) and timeout_ms > 0 do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms

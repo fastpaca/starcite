@@ -3,7 +3,6 @@ defmodule Starcite.Application do
 
   use Application
   @archive_read_cache :starcite_archive_read_cache
-  @archive_read_cache_default_compressed true
 
   @impl true
   def start(_type, _args) do
@@ -76,27 +75,13 @@ defmodule Starcite.Application do
   end
 
   defp archive_read_cache_compressed? do
-    env_bool_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_COMPRESSED",
-      Application.get_env(
-        :starcite,
-        :archive_read_cache_compressed,
-        @archive_read_cache_default_compressed
-      )
-    )
-  end
+    case Application.get_env(:starcite, :archive_read_cache_compressed) do
+      value when is_boolean(value) ->
+        value
 
-  defp env_bool_or_default(env_key, default) when is_binary(env_key) do
-    case System.get_env(env_key) do
-      nil -> validate_bool!(default, env_key)
-      raw -> Starcite.Env.parse_bool!(raw, env_key)
+      value ->
+        raise ArgumentError,
+              "invalid value for :archive_read_cache_compressed: #{inspect(value)} (expected true/false)"
     end
-  end
-
-  defp validate_bool!(value, _env_key) when is_boolean(value), do: value
-
-  defp validate_bool!(value, env_key) do
-    raise ArgumentError,
-          "invalid default boolean for #{env_key}: #{inspect(value)} (expected true/false)"
   end
 end

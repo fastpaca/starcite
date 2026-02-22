@@ -1,7 +1,7 @@
 defmodule Starcite.ControlPlane.OpsTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.{Observer, Ops}
+  alias Starcite.ControlPlane.{Observer, Ops, WriteNodes}
 
   setup do
     Ops.undrain_node(Node.self())
@@ -49,6 +49,29 @@ defmodule Starcite.ControlPlane.OpsTest do
     eventually(fn ->
       assert local in Observer.ready_nodes()
     end)
+  end
+
+  test "parse_known_node validates against known node set" do
+    node_name = Node.self() |> Atom.to_string()
+
+    assert {:ok, node} = Ops.parse_known_node(node_name)
+    assert node == Node.self()
+
+    assert {:error, :invalid_write_node} =
+             Ops.parse_known_node("missing@starcite.internal")
+  end
+
+  test "parse_group_id enforces configured group bounds" do
+    max_group_id = WriteNodes.num_groups() - 1
+
+    assert {:ok, 0} = Ops.parse_group_id("0")
+    assert {:ok, ^max_group_id} = Ops.parse_group_id(Integer.to_string(max_group_id))
+
+    assert {:error, :invalid_group_id} =
+             Ops.parse_group_id(Integer.to_string(max_group_id + 1))
+
+    assert {:error, :invalid_group_id} = Ops.parse_group_id("-1")
+    assert {:error, :invalid_group_id} = Ops.parse_group_id("not-a-number")
   end
 
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do

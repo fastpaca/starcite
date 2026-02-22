@@ -260,6 +260,15 @@ if archive_read_cache_reclaim_fraction =
          )
 end
 
+if archive_read_cache_compressed = System.get_env("STARCITE_ARCHIVE_READ_CACHE_COMPRESSED") do
+  config :starcite,
+         :archive_read_cache_compressed,
+         Starcite.Env.parse_bool!(
+           archive_read_cache_compressed,
+           "STARCITE_ARCHIVE_READ_CACHE_COMPRESSED"
+         )
+end
+
 auth_mode =
   case System.get_env("STARCITE_AUTH_MODE", "none") |> String.downcase() |> String.trim() do
     "none" ->

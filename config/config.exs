@@ -21,7 +21,8 @@ config :starcite,
   event_store_cache_chunk_size: 256,
   event_store_max_bytes: 2_147_483_648,
   archive_read_cache_max_bytes: 536_870_912,
-  archive_read_cache_reclaim_fraction: 0.25
+  archive_read_cache_reclaim_fraction: 0.25,
+  archive_read_cache_compressed: true
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,
