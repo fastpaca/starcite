@@ -4,7 +4,7 @@ defmodule Starcite.Runtime.TestHelper do
   require ExUnit.CaptureLog
   require Logger
 
-  alias Starcite.Runtime.RaftManager
+  alias Starcite.DataPlane.RaftManager
 
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->
@@ -16,6 +16,7 @@ defmodule Starcite.Runtime.TestHelper do
 
       # Cleanup Raft data directory (test mode only)
       cleanup_raft_test_data()
+      cleanup_ra_default_directory()
 
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
@@ -57,9 +58,17 @@ defmodule Starcite.Runtime.TestHelper do
     end
   end
 
+  defp cleanup_ra_default_directory do
+    ra_default_dir = Path.join(File.cwd!(), "nonode@nohost")
+
+    if File.dir?(ra_default_dir) and String.ends_with?(ra_default_dir, "nonode@nohost") do
+      File.rm_rf(ra_default_dir)
+    end
+  end
+
   defp clear_event_store do
-    if Code.ensure_loaded?(Starcite.Runtime.EventStore) do
-      Starcite.Runtime.EventStore.clear()
+    if Code.ensure_loaded?(Starcite.DataPlane.EventStore) do
+      Starcite.DataPlane.EventStore.clear()
     end
   end
 

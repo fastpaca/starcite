@@ -22,7 +22,7 @@ end
 
 # Suppress Ra (Raft library) verbose logs
 # Call :logger.set_application_level(:ra, :error) at runtime to filter Ra logs
-# This is set in RaftTopology.init/1
+# This is set in RaftBootstrap.init/1
 
 # Cluster configuration (works in all environments, not just prod)
 cluster_nodes = System.get_env("CLUSTER_NODES")
@@ -66,6 +66,25 @@ parse_non_neg_integer! = fn env_name, raw ->
   end
 end
 
+parse_node_ids! = fn env_name, raw ->
+  nodes =
+    raw
+    |> String.split(",")
+    |> Enum.map(&String.trim/1)
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.map(&String.to_atom/1)
+    |> Enum.uniq()
+
+  case nodes do
+    [] ->
+      raise ArgumentError,
+            "invalid node list for #{env_name}: #{inspect(raw)} (expected comma-separated node ids)"
+
+    _ ->
+      nodes
+  end
+end
+
 parse_fraction! = fn env_name, raw ->
   case Float.parse(String.trim(raw)) do
     {value, ""} when value >= 0.01 and value <= 0.99 ->
@@ -75,6 +94,65 @@ parse_fraction! = fn env_name, raw ->
       raise ArgumentError,
             "invalid float for #{env_name}: #{inspect(raw)} (expected 0.01..0.99)"
   end
+end
+
+if write_node_ids = System.get_env("STARCITE_WRITE_NODE_IDS") do
+  config :starcite, :write_node_ids, parse_node_ids!.("STARCITE_WRITE_NODE_IDS", write_node_ids)
+end
+
+if num_groups = System.get_env("STARCITE_NUM_GROUPS") do
+  config :starcite, :num_groups, parse_positive_integer!.("STARCITE_NUM_GROUPS", num_groups)
+end
+
+if write_replication_factor = System.get_env("STARCITE_WRITE_REPLICATION_FACTOR") do
+  config :starcite,
+         :write_replication_factor,
+         parse_positive_integer!.(
+           "STARCITE_WRITE_REPLICATION_FACTOR",
+           write_replication_factor
+         )
+end
+
+if emit_routing_telemetry = System.get_env("STARCITE_EMIT_ROUTING_TELEMETRY") do
+  config :starcite,
+         :emit_routing_telemetry,
+         Starcite.Env.parse_bool!(emit_routing_telemetry, "STARCITE_EMIT_ROUTING_TELEMETRY")
+end
+
+if emit_event_append_telemetry = System.get_env("STARCITE_EMIT_EVENT_APPEND_TELEMETRY") do
+  config :starcite,
+         :emit_event_append_telemetry,
+         Starcite.Env.parse_bool!(
+           emit_event_append_telemetry,
+           "STARCITE_EMIT_EVENT_APPEND_TELEMETRY"
+         )
+end
+
+if emit_event_store_write_telemetry = System.get_env("STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY") do
+  config :starcite,
+         :emit_event_store_write_telemetry,
+         Starcite.Env.parse_bool!(
+           emit_event_store_write_telemetry,
+           "STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY"
+         )
+end
+
+if route_leader_probe_on_miss = System.get_env("STARCITE_ROUTE_LEADER_PROBE_ON_MISS") do
+  config :starcite,
+         :route_leader_probe_on_miss,
+         Starcite.Env.parse_bool!(
+           route_leader_probe_on_miss,
+           "STARCITE_ROUTE_LEADER_PROBE_ON_MISS"
+         )
+end
+
+if route_leader_cache_ttl_ms = System.get_env("STARCITE_ROUTE_LEADER_CACHE_TTL_MS") do
+  config :starcite,
+         :route_leader_cache_ttl_ms,
+         parse_positive_integer!.(
+           "STARCITE_ROUTE_LEADER_CACHE_TTL_MS",
+           route_leader_cache_ttl_ms
+         )
 end
 
 parse_size_bytes! = fn env_name, raw ->
@@ -208,6 +286,16 @@ if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
          parse_size_bytes!.("STARCITE_EVENT_STORE_MAX_SIZE", event_store_max_size)
 end
 
+if event_store_capacity_check_interval =
+     System.get_env("STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL") do
+  config :starcite,
+         :event_store_capacity_check_interval,
+         parse_positive_integer!.(
+           "STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL",
+           event_store_capacity_check_interval
+         )
+end
+
 if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do
   config :starcite,
          :archive_read_cache_max_bytes,
@@ -221,6 +309,15 @@ if archive_read_cache_reclaim_fraction =
          parse_fraction!.(
            "STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION",
            archive_read_cache_reclaim_fraction
+         )
+end
+
+if archive_read_cache_compressed = System.get_env("STARCITE_ARCHIVE_READ_CACHE_COMPRESSED") do
+  config :starcite,
+         :archive_read_cache_compressed,
+         Starcite.Env.parse_bool!(
+           archive_read_cache_compressed,
+           "STARCITE_ARCHIVE_READ_CACHE_COMPRESSED"
          )
 end
 

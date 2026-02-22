@@ -1,7 +1,8 @@
-defmodule Starcite.Runtime.RaftFSMEventStoreTest do
+defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Runtime.{EventStore, RaftFSM}
+  alias Starcite.DataPlane.EventStore
+  alias Starcite.DataPlane.RaftFSM
 
   setup do
     EventStore.clear()
@@ -20,7 +21,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {_, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
@@ -35,14 +36,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {next_state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
     {_, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         next_state
       )
 
@@ -59,7 +60,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
       RaftFSM.apply(
         nil,
         {:append_event, session_id,
-         event_payload("one", producer_id: "writer-a", producer_seq: 1), []},
+         event_payload("one", producer_id: "writer-a", producer_seq: 1), nil},
         state
       )
 
@@ -67,7 +68,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
       RaftFSM.apply(
         nil,
         {:append_event, session_id,
-         event_payload("two", producer_id: "writer-b", producer_seq: 1), []},
+         event_payload("two", producer_id: "writer-b", producer_seq: 1), nil},
         state
       )
 
@@ -78,6 +79,53 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     assert two.payload == %{text: "two"}
   end
 
+  test "append_events mirrors appended events to ETS" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {_, {:reply, {:ok, %{results: [first, second], last_seq: 2}}}, effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_events, session_id,
+         [event_payload("one", producer_seq: 1), event_payload("two", producer_seq: 2)], nil},
+        state
+      )
+
+    assert first == %{seq: 1, last_seq: 1, deduped: false}
+    assert second == %{seq: 2, last_seq: 2, deduped: false}
+    assert length(effects) == 2
+
+    assert {:ok, one} = EventStore.get_event(session_id, 1)
+    assert {:ok, two} = EventStore.get_event(session_id, 2)
+    assert one.payload == %{text: "one"}
+    assert two.payload == %{text: "two"}
+  end
+
+  test "append_events is all-or-nothing on producer sequence conflict" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
+        state
+      )
+
+    {next_state, {:reply, {:error, {:producer_seq_conflict, "writer:test", 3, 4}}}} =
+      RaftFSM.apply(
+        nil,
+        {:append_events, session_id,
+         [event_payload("two", producer_seq: 2), event_payload("bad", producer_seq: 4)], nil},
+        state
+      )
+
+    assert next_state == state
+    assert EventStore.session_size(session_id) == 1
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
+    assert session.last_seq == 1
+  end
+
   test "append_event producer sequence conflict does not mutate state" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
@@ -85,14 +133,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
     {next_state, {:reply, {:error, {:producer_seq_conflict, "writer:test", 2, 3}}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("bad", producer_seq: 3), []},
+        {:append_event, session_id, event_payload("bad", producer_seq: 3), nil},
         state
       )
 
@@ -109,14 +157,14 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
     {next_state, {:reply, {:error, :producer_replay_conflict}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("changed", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("changed", producer_seq: 1), nil},
         state
       )
 
@@ -133,21 +181,21 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
     {state, {:reply, {:ok, %{seq: 2}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
+        {:append_event, session_id, event_payload("two", producer_seq: 2), nil},
         state
       )
 
     {state, {:reply, {:ok, %{seq: 3}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("three", producer_seq: 3), []},
+        {:append_event, session_id, event_payload("three", producer_seq: 3), nil},
         state
       )
 
@@ -174,7 +222,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
@@ -191,7 +239,7 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), []},
+        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
@@ -207,14 +255,37 @@ defmodule Starcite.Runtime.RaftFSMEventStoreTest do
     state = seeded_state(session_id)
 
     {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), []}, state)
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), nil}, state)
 
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     {next_state, {:reply, {:error, :event_store_backpressure}}} =
       RaftFSM.apply(
         nil,
-        {:append_event, session_id, event_payload("two", producer_seq: 2), []},
+        {:append_event, session_id, event_payload("two", producer_seq: 2), nil},
+        state
+      )
+
+    assert next_state == state
+    assert EventStore.session_size(session_id) == 1
+    assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
+    assert session.last_seq == 1
+  end
+
+  test "append_events rejects writes under event-store backpressure without partial writes" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(nil, {:append_event, session_id, event_payload("one"), nil}, state)
+
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
+
+    {next_state, {:reply, {:error, :event_store_backpressure}}} =
+      RaftFSM.apply(
+        nil,
+        {:append_events, session_id,
+         [event_payload("two", producer_seq: 2), event_payload("three", producer_seq: 3)], nil},
         state
       )
 

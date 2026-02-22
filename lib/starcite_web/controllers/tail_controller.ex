@@ -10,7 +10,7 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Runtime
+  alias Starcite.ReadPath
   alias StarciteWeb.Auth.Policy
   alias StarciteWeb.Plugs.ServiceAuth
 
@@ -23,7 +23,7 @@ defmodule StarciteWeb.TailController do
 
     with {:ok, cursor} <- parse_cursor_param(params),
          :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- Runtime.get_session(id),
+         {:ok, session} <- ReadPath.get_session(id),
          :ok <- Policy.allowed_to_read_session(auth, session) do
       conn
       |> WebSockAdapter.upgrade(

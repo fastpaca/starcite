@@ -8,8 +8,8 @@ defmodule StarciteWeb.TailSocket do
   @behaviour WebSock
 
   alias Starcite.Observability.Telemetry
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias Starcite.ReadPath
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias StarciteWeb.Plugs.PrincipalAuth
   alias Phoenix.PubSub
 
@@ -125,7 +125,7 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp fetch_replay_batch(state) do
-    case Runtime.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
+    case ReadPath.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
       {:ok, []} ->
         state
         |> Map.put(:replay_done, true)
@@ -198,7 +198,7 @@ defmodule StarciteWeb.TailSocket do
 
   defp read_event_from_storage(session_id, seq)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    case Runtime.get_events_from_cursor(session_id, seq - 1, 1) do
+    case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
         :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :hit)
         {:ok, event}

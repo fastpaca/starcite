@@ -1,9 +1,9 @@
-defmodule Starcite.Runtime.EventStoreMirrorTest do
+defmodule Starcite.DataPlane.EventStoreMirrorTest do
   use ExUnit.Case, async: false
 
   alias Phoenix.PubSub
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{CursorUpdate, EventStore}
+  alias Starcite.WritePath
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -18,10 +18,10 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
 
   test "mirrors committed payloads into ETS" do
     session_id = "ses-dual-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     {:ok, %{seq: 1, deduped: false}} =
-      Runtime.append_event(session_id, %{
+      WritePath.append_event(session_id, %{
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",
@@ -30,7 +30,7 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
       })
 
     {:ok, %{seq: 1, deduped: true}} =
-      Runtime.append_event(session_id, %{
+      WritePath.append_event(session_id, %{
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",
@@ -45,12 +45,12 @@ defmodule Starcite.Runtime.EventStoreMirrorTest do
 
   test "publishes payload-free cursor updates on the cursor topic" do
     session_id = "ses-cursor-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
 
     {:ok, %{seq: 1}} =
-      Runtime.append_event(session_id, %{
+      WritePath.append_event(session_id, %{
         type: "state",
         payload: %{state: "running"},
         actor: "agent:test",

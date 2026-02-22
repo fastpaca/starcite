@@ -25,6 +25,16 @@ defmodule StarciteWeb.Router do
     post "/auth/issue", AuthTokenController, :issue
   end
 
+  scope "/v1/ops", StarciteWeb do
+    pipe_through [:api, :service_auth]
+
+    get "/status", OpsController, :status
+    get "/ready-nodes", OpsController, :ready_nodes
+    post "/drain", OpsController, :drain
+    post "/undrain", OpsController, :undrain
+    get "/groups/:group_id/replicas", OpsController, :group_replicas
+  end
+
   scope "/v1", StarciteWeb do
     pipe_through [:api, :service_or_token_auth]
 

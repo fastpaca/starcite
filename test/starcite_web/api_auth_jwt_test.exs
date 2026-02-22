@@ -5,7 +5,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.{Repo, Runtime}
+  alias Starcite.{ReadPath, Repo, WritePath}
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
@@ -43,6 +43,39 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     body = Jason.decode!(conn.resp_body)
     assert body["error"] == "unauthorized"
     assert get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="starcite")]
+  end
+
+  test "requires service auth for ops endpoints in jwt mode" do
+    bypass = Bypass.open()
+    configure_jwt_auth!(bypass)
+
+    conn = json_conn(:get, "/v1/ops/status", nil)
+
+    assert conn.status == 401
+    body = Jason.decode!(conn.resp_body)
+    assert body["error"] == "unauthorized"
+    assert get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="starcite")]
+  end
+
+  test "accepts valid service JWT for ops status endpoint" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-ops-status"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    conn = json_conn(:get, "/v1/ops/status", nil, [service_auth_header(private_key, kid)])
+
+    assert conn.status == 200
+    body = Jason.decode!(conn.resp_body)
+    assert body["node"] == Atom.to_string(Node.self())
   end
 
   test "accepts valid JWT for session create and append" do
@@ -184,7 +217,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     configure_jwt_auth!(bypass)
 
     session_id = unique_id("ses")
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     without_auth =
       conn_get("/v1/sessions/#{session_id}/tail?cursor=0", websocket_headers())
@@ -281,7 +314,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert append_conn.status == 201
 
-    {:ok, [event]} = Runtime.get_events_from_cursor(session_id, 0, 10)
+    {:ok, [event]} = ReadPath.get_events_from_cursor(session_id, 0, 10)
     assert event.actor == "user:user-42"
     assert event.metadata["starcite_principal"]["tenant_id"] == "acme"
     assert event.metadata["starcite_principal"]["principal_type"] == "user"
@@ -891,7 +924,8 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   end
 
   defp unique_id(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
   defp service_create_session_body(id, tenant_id \\ "acme", creator_principal_id \\ "user-seed")

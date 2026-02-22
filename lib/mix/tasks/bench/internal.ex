@@ -2,9 +2,10 @@ defmodule Mix.Tasks.Bench.Internal do
   require Logger
 
   alias Starcite.Config.Size
-  alias Starcite.Runtime
-  alias Starcite.Runtime.{EventStore, RaftFSM}
+  alias Starcite.DataPlane.EventStore
   alias Starcite.Session
+  alias Starcite.WritePath
+  alias Starcite.DataPlane.RaftFSM
 
   def run do
     ensure_apps_stopped()
@@ -96,7 +97,7 @@ defmodule Mix.Tasks.Bench.Internal do
       fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
       meta = %{index: seq}
 
-      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, []}, fsm_state) do
+      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, nil}, fsm_state) do
         {updated_state, {:reply, {:ok, _reply}}, _effects} ->
           Process.put(:bench_fsm_state, updated_state)
           :ok
@@ -116,7 +117,7 @@ defmodule Mix.Tasks.Bench.Internal do
       producer_id = "bench-runtime-#{session_id}-#{seq}"
       event_with_producer = with_bench_producer(input_event_template, producer_id, 1)
 
-      case Runtime.append_event(session_id, event_with_producer) do
+      case WritePath.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "runtime.append_event failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "runtime.append_event timeout: #{inspect(leader)}"
@@ -258,7 +259,7 @@ defmodule Mix.Tasks.Bench.Internal do
   defp prepare_runtime_sessions(session_ids) when is_tuple(session_ids) do
     Tuple.to_list(session_ids)
     |> Enum.map(fn id ->
-      case Runtime.create_session(
+      case WritePath.create_session(
              id: id,
              metadata: %{bench: true, scenario: "internal_attribution_runtime"}
            ) do

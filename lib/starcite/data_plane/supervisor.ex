@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.Supervisor do
+defmodule Starcite.DataPlane.Supervisor do
   use Supervisor
 
   def start_link(arg) do
@@ -10,11 +10,11 @@ defmodule Starcite.Runtime.Supervisor do
     children =
       [
         # Stable owner for ETS event mirror table
-        {Starcite.Runtime.EventStore, []},
+        {Starcite.DataPlane.EventStore, []},
         # Task.Supervisor for async Raft group startup
         {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
-        # Topology coordinator (uses Erlang distribution, not Presence)
-        Starcite.Runtime.RaftTopology,
+        # Raft bootstrap/lifecycle coordinator
+        Starcite.DataPlane.RaftBootstrap,
         {Starcite.Archive,
          [
            name: archive_name(),
@@ -31,16 +31,6 @@ defmodule Starcite.Runtime.Supervisor do
     case Application.get_env(:starcite, :archive_flush_interval_ms, 5_000) do
       val when is_integer(val) and val > 0 ->
         val
-
-      val when is_binary(val) ->
-        case Integer.parse(String.trim(val)) do
-          {parsed, ""} when parsed > 0 ->
-            parsed
-
-          _ ->
-            raise ArgumentError,
-                  "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
-        end
 
       val ->
         raise ArgumentError,

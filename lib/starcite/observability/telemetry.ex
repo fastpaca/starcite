@@ -40,8 +40,6 @@ defmodule Starcite.Observability.Telemetry do
   Measurements:
     - `:count` – fixed at 1 per write
     - `:payload_bytes` – payload size in bytes
-    - `:total_entries` – current ETS entry count after insert
-    - `:memory_bytes` – current ETS table memory usage in bytes
 
   Metadata:
     - `:session_id`
@@ -50,23 +48,14 @@ defmodule Starcite.Observability.Telemetry do
   @spec event_store_write(
           String.t(),
           pos_integer(),
-          non_neg_integer(),
-          non_neg_integer(),
           non_neg_integer()
-        ) ::
-          :ok
-  def event_store_write(session_id, seq, payload_bytes, total_entries, memory_bytes)
+        ) :: :ok
+  def event_store_write(session_id, seq, payload_bytes)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_integer(payload_bytes) and payload_bytes >= 0 and is_integer(total_entries) and
-             total_entries >= 0 and is_integer(memory_bytes) and memory_bytes >= 0 do
+             is_integer(payload_bytes) and payload_bytes >= 0 do
     :telemetry.execute(
       [:starcite, :event_store, :write],
-      %{
-        count: 1,
-        payload_bytes: payload_bytes,
-        total_entries: total_entries,
-        memory_bytes: memory_bytes
-      },
+      %{count: 1, payload_bytes: payload_bytes},
       %{session_id: session_id, seq: seq}
     )
 
@@ -159,6 +148,95 @@ defmodule Starcite.Observability.Telemetry do
       [:starcite, :tail, :cursor_lookup],
       %{count: 1},
       %{session_id: session_id, seq: seq, source: source, result: result}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one write/read-path routing decision before execution.
+
+  Measurements:
+    - `:count` – fixed at 1 per routed request
+    - `:replica_count` – configured replicas for the group
+    - `:ready_count` – currently ready replicas for the group
+
+  Metadata:
+    - `:group_id`
+    - `:target` (`:local` or `:remote`)
+    - `:prefer_leader` (`true` or `false`)
+    - `:leader_hint` (`:disabled`, `:hit`, or `:miss`)
+  """
+  @spec routing_decision(
+          non_neg_integer(),
+          :local | :remote,
+          boolean(),
+          :disabled | :hit | :miss,
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def routing_decision(
+        group_id,
+        target,
+        prefer_leader,
+        leader_hint,
+        replica_count,
+        ready_count
+      )
+      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
+             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
+             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
+             ready_count >= 0 do
+    :telemetry.execute(
+      [:starcite, :routing, :decision],
+      %{count: 1, replica_count: replica_count, ready_count: ready_count},
+      %{
+        group_id: group_id,
+        target: target,
+        prefer_leader: prefer_leader,
+        leader_hint: leader_hint
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one routing execution result after request execution.
+
+  Measurements:
+    - `:count` – fixed at 1 per routed request
+    - `:attempts` – replica attempts performed for this request
+    - `:retries` – additional attempts beyond first (`max(attempts - 1, 0)`)
+    - `:leader_redirects` – number of leader redirect hints observed
+
+  Metadata:
+    - `:group_id`
+    - `:path` (`:local` or `:remote`)
+    - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)
+  """
+  @spec routing_result(
+          non_neg_integer(),
+          :local | :remote,
+          :ok | :error | :timeout | :badrpc | :no_candidates | :other,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
+      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
+             outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
+             is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
+             is_integer(leader_redirects) and leader_redirects >= 0 do
+    :telemetry.execute(
+      [:starcite, :routing, :result],
+      %{
+        count: 1,
+        attempts: attempts,
+        retries: retries,
+        leader_redirects: leader_redirects
+      },
+      %{group_id: group_id, path: path, outcome: outcome}
     )
 
     :ok

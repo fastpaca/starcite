@@ -3,17 +3,17 @@ defmodule Starcite.Application do
 
   use Application
   @archive_read_cache :starcite_archive_read_cache
-  @archive_read_cache_default_compressed true
 
   @impl true
   def start(_type, _args) do
+    :ok = Starcite.ControlPlane.WriteNodes.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
     children =
       [
         # PromEx metrics
-        Starcite.Observability.PromEx,
-        # Cache used by Runtime.EventStore for flushed event reads
+        prom_ex_spec(),
+        # Cache used by DataPlane.EventStore for flushed event reads
         archive_read_cache_spec(),
         # Ecto Repo for Postgres archive mode
         repo_spec(),
@@ -21,8 +21,10 @@ defmodule Starcite.Application do
         pubsub_spec(),
         # DNS / clustering
         dns_cluster_spec(),
-        # Runtime (Raft etc.)
-        Starcite.Runtime.Supervisor
+        # Control-plane liveness and routing intent
+        Starcite.ControlPlane.Supervisor,
+        # Data-plane runtime (Raft bootstrap, archive, event store)
+        Starcite.DataPlane.Supervisor
       ]
       |> Enum.concat(cluster_children(topologies))
       |> Enum.reject(&is_nil/1)
@@ -33,6 +35,18 @@ defmodule Starcite.Application do
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  defp prom_ex_spec do
+    prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
+    metrics_server = Keyword.get(prom_ex_opts, :metrics_server, :disabled)
+    grafana_agent = Keyword.get(prom_ex_opts, :grafana_agent, :disabled)
+
+    if metrics_server == :disabled and grafana_agent == :disabled do
+      nil
+    else
+      Starcite.Observability.PromEx
+    end
   end
 
   defp repo_spec do
@@ -75,27 +89,13 @@ defmodule Starcite.Application do
   end
 
   defp archive_read_cache_compressed? do
-    env_bool_or_default(
-      "STARCITE_ARCHIVE_READ_CACHE_COMPRESSED",
-      Application.get_env(
-        :starcite,
-        :archive_read_cache_compressed,
-        @archive_read_cache_default_compressed
-      )
-    )
-  end
+    case Application.get_env(:starcite, :archive_read_cache_compressed) do
+      value when is_boolean(value) ->
+        value
 
-  defp env_bool_or_default(env_key, default) when is_binary(env_key) do
-    case System.get_env(env_key) do
-      nil -> validate_bool!(default, env_key)
-      raw -> Starcite.Env.parse_bool!(raw, env_key)
+      value ->
+        raise ArgumentError,
+              "invalid value for :archive_read_cache_compressed: #{inspect(value)} (expected true/false)"
     end
-  end
-
-  defp validate_bool!(value, _env_key) when is_boolean(value), do: value
-
-  defp validate_bool!(value, env_key) do
-    raise ArgumentError,
-          "invalid default boolean for #{env_key}: #{inspect(value)} (expected true/false)"
   end
 end

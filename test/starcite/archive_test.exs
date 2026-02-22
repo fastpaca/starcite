@@ -28,8 +28,8 @@ defmodule Starcite.ArchiveTest do
     def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
   end
 
-  alias Starcite.Runtime
-  alias Starcite.Runtime.EventStore
+  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.DataPlane.EventStore
   alias Starcite.Archive.IdempotentTestAdapter
 
   setup do
@@ -48,7 +48,7 @@ defmodule Starcite.ArchiveTest do
       )
 
     session_id = "ses-arch-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     for i <- 1..5 do
       {:ok, _} =
@@ -62,7 +62,7 @@ defmodule Starcite.ArchiveTest do
     # Wait until archived_seq catches up
     eventually(
       fn ->
-        {:ok, session} = Runtime.get_session(session_id)
+        {:ok, session} = ReadPath.get_session(session_id)
         assert session.archived_seq == session.last_seq
         assert EventStore.session_size(session_id) == 0
       end,
@@ -80,7 +80,7 @@ defmodule Starcite.ArchiveTest do
     ref = Process.monitor(pid)
 
     session_id = "ses-arch-fail-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = Runtime.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id)
 
     {:ok, _} =
       append_event(session_id, %{
@@ -106,7 +106,7 @@ defmodule Starcite.ArchiveTest do
         )
 
       session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       for i <- 1..3 do
         {:ok, _} =
@@ -158,7 +158,7 @@ defmodule Starcite.ArchiveTest do
         )
 
       session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       # Append same logical event multiple times (simulating retry scenario)
       {:ok, _} =
@@ -195,7 +195,7 @@ defmodule Starcite.ArchiveTest do
         )
 
       session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       # Append events in order
       for i <- 1..5 do
@@ -240,8 +240,8 @@ defmodule Starcite.ArchiveTest do
       session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
       session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
 
-      {:ok, _} = Runtime.create_session(id: session_a)
-      {:ok, _} = Runtime.create_session(id: session_b)
+      {:ok, _} = WritePath.create_session(id: session_a)
+      {:ok, _} = WritePath.create_session(id: session_b)
 
       for i <- 1..3 do
         {:ok, _} =
@@ -263,8 +263,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session_a_state} = Runtime.get_session(session_a)
-          {:ok, session_b_state} = Runtime.get_session(session_b)
+          {:ok, session_a_state} = ReadPath.get_session(session_a)
+          {:ok, session_b_state} = ReadPath.get_session(session_b)
 
           assert session_a_state.archived_seq == session_a_state.last_seq
           assert session_b_state.archived_seq == session_b_state.last_seq
@@ -301,7 +301,7 @@ defmodule Starcite.ArchiveTest do
       :ok = IdempotentTestAdapter.clear_writes()
 
       session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       for i <- 1..5 do
         {:ok, _} =
@@ -327,7 +327,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = Runtime.get_session(session_id)
+          {:ok, session} = ReadPath.get_session(session_id)
           assert session.archived_seq == session.last_seq
 
           batch_sizes =
@@ -352,7 +352,7 @@ defmodule Starcite.ArchiveTest do
       :ok = IdempotentTestAdapter.clear_writes()
 
       session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = Runtime.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id)
 
       for i <- 1..3 do
         {:ok, _} =
@@ -367,7 +367,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = Runtime.get_session(session_id)
+          {:ok, session} = ReadPath.get_session(session_id)
           assert session.archived_seq == 3
           assert EventStore.session_size(session_id) == 0
         end,
@@ -385,7 +385,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = Runtime.get_session(session_id)
+          {:ok, session} = ReadPath.get_session(session_id)
           assert session.archived_seq == 4
           assert EventStore.session_size(session_id) == 0
 
@@ -412,7 +412,7 @@ defmodule Starcite.ArchiveTest do
       |> Map.put_new(:producer_id, producer_id)
       |> Map.put_new_lazy(:producer_seq, fn -> next_producer_seq(id, producer_id) end)
 
-    Runtime.append_event(id, enriched_event, opts)
+    WritePath.append_event(id, enriched_event, opts)
   end
 
   defp next_producer_seq(session_id, producer_id)

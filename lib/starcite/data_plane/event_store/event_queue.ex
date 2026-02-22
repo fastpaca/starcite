@@ -1,6 +1,6 @@
-defmodule Starcite.Runtime.EventStore.EventQueue do
+defmodule Starcite.DataPlane.EventStore.EventQueue do
   @moduledoc """
-  In-memory write queue for `Starcite.Runtime.EventStore`.
+  In-memory write queue for `Starcite.DataPlane.EventStore`.
 
   This module owns the unarchived session tail and exposes queue operations
   used by append, replay, and archive acknowledgement flows.
@@ -27,11 +27,33 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   def put_event(session_id, seq, event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
              is_map(event) do
-    table = ensure_named_table(@table)
-    index_table = ensure_named_table(@index_table)
+    true = :ets.insert(@table, {{session_id, seq}, event})
+    true = :ets.insert(@index_table, {session_id, seq})
+    :ok
+  end
 
-    true = :ets.insert(table, {{session_id, seq}, event})
-    true = :ets.insert(index_table, {session_id, seq})
+  @spec put_events(String.t(), [map()]) :: :ok
+  @doc """
+  Persist many committed events into pending state in one ETS write.
+  """
+  def put_events(session_id, [%{seq: seq} = event])
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+             is_map(event) do
+    put_event(session_id, seq, event)
+  end
+
+  def put_events(session_id, events)
+      when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
+    max_seq = max_seq_from_events!(events)
+
+    rows =
+      Enum.map(events, fn %{seq: seq} = event
+                          when is_integer(seq) and seq > 0 and is_map(event) ->
+        {{session_id, seq}, event}
+      end)
+
+    true = :ets.insert(@table, rows)
+    true = :ets.insert(@index_table, {session_id, max_seq})
     :ok
   end
 
@@ -41,9 +63,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   """
   def get_event(session_id, seq)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    table = ensure_named_table(@table)
-
-    case :ets.lookup(table, {session_id, seq}) do
+    case :ets.lookup(@table, {session_id, seq}) do
       [{{^session_id, ^seq}, event}] -> {:ok, event}
       [] -> :error
     end
@@ -57,8 +77,6 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   def from_cursor(session_id, cursor, limit)
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              is_integer(limit) and limit > 0 do
-    table = ensure_named_table(@table)
-
     ms = [
       {
         {{session_id, :"$1"}, :"$2"},
@@ -67,7 +85,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
       }
     ]
 
-    table
+    @table
     |> select_take(ms, limit)
     |> Enum.map(&elem(&1, 1))
   end
@@ -78,9 +96,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   """
   def delete_below(session_id, floor_seq)
       when is_binary(session_id) and session_id != "" and is_integer(floor_seq) and floor_seq > 0 do
-    table = ensure_named_table(@table)
-    index_table = ensure_named_table(@index_table)
-    max_seq_before_delete = max_seq_value(index_table, session_id)
+    max_seq_before_delete = max_seq_value(@index_table, session_id)
 
     ms = [
       {
@@ -90,10 +106,10 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
       }
     ]
 
-    deleted = :ets.select_delete(table, ms)
+    deleted = :ets.select_delete(@table, ms)
 
     if should_drop_index?(max_seq_before_delete, floor_seq) do
-      :ets.delete(index_table, session_id)
+      :ets.delete(@index_table, session_id)
     end
 
     deleted
@@ -104,8 +120,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   Return total pending event count.
   """
   def size do
-    table = ensure_named_table(@table)
-    :ets.info(table, :size) || 0
+    :ets.info(@table, :size) || 0
   end
 
   @spec session_size(String.t()) :: non_neg_integer()
@@ -113,8 +128,6 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   Return pending event count for one session.
   """
   def session_size(session_id) when is_binary(session_id) and session_id != "" do
-    table = ensure_named_table(@table)
-
     ms = [
       {
         {{session_id, :"$1"}, :"$2"},
@@ -123,7 +136,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
       }
     ]
 
-    :ets.select_count(table, ms)
+    :ets.select_count(@table, ms)
   end
 
   @spec session_ids() :: [String.t()]
@@ -131,8 +144,6 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   Return session IDs currently represented in pending state.
   """
   def session_ids do
-    index_table = ensure_named_table(@index_table)
-
     ms = [
       {
         {:"$1", :"$2"},
@@ -141,7 +152,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
       }
     ]
 
-    :ets.select(index_table, ms)
+    :ets.select(@index_table, ms)
   end
 
   @spec max_seq(String.t()) :: {:ok, pos_integer()} | :error
@@ -149,9 +160,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   Return the highest pending sequence for one session.
   """
   def max_seq(session_id) when is_binary(session_id) and session_id != "" do
-    index_table = ensure_named_table(@index_table)
-
-    case :ets.lookup(index_table, session_id) do
+    case :ets.lookup(@index_table, session_id) do
       [{^session_id, seq}] when is_integer(seq) and seq > 0 -> {:ok, seq}
       [] -> :error
     end
@@ -172,8 +181,7 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
   Return approximate memory consumed by pending state.
   """
   def memory_bytes do
-    table = ensure_named_table(@table)
-    words = :ets.info(table, :memory) || 0
+    words = :ets.info(@table, :memory) || 0
     words * :erlang.system_info(:wordsize)
   end
 
@@ -216,4 +224,10 @@ defmodule Starcite.Runtime.EventStore.EventQueue do
 
   defp should_drop_index?(nil, _floor_seq), do: true
   defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
+
+  defp max_seq_from_events!([%{seq: seq} | rest]) when is_integer(seq) and seq > 0 do
+    Enum.reduce(rest, seq, fn %{seq: value}, acc when is_integer(value) and value > 0 ->
+      max(acc, value)
+    end)
+  end
 end

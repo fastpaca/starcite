@@ -1,8 +1,8 @@
 defmodule Mix.Tasks.Bench.Routing do
   require Logger
 
-  alias Starcite.Runtime
-  alias Starcite.Runtime.RaftManager
+  alias Starcite.WritePath
+  alias Starcite.DataPlane.RaftManager
 
   @raft_timeout 2_000
   @rpc_timeout 5_000
@@ -39,7 +39,7 @@ defmodule Mix.Tasks.Bench.Routing do
       {session_id, producer_seq} = next_session.()
       event_with_producer = with_bench_producer(event, session_id, producer_seq)
 
-      case Runtime.append_event(session_id, event_with_producer) do
+      case WritePath.append_event(session_id, event_with_producer) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append_public failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append_public timeout: #{inspect(leader)}"
@@ -50,7 +50,7 @@ defmodule Mix.Tasks.Bench.Routing do
       {session_id, producer_seq} = next_session.()
       event_with_producer = with_bench_producer(event, session_id, producer_seq)
 
-      case Runtime.append_event_local(session_id, event_with_producer, []) do
+      case WritePath.append_event_local(session_id, event_with_producer, []) do
         {:ok, _reply} -> :ok
         {:error, reason} -> raise "append_local failed: #{inspect(reason)}"
         {:timeout, leader} -> raise "append_local timeout: #{inspect(leader)}"
@@ -63,7 +63,7 @@ defmodule Mix.Tasks.Bench.Routing do
 
       case :rpc.call(
              Node.self(),
-             Runtime,
+             WritePath,
              :append_event_local,
              [session_id, event_with_producer, []],
              @rpc_timeout
@@ -83,7 +83,7 @@ defmodule Mix.Tasks.Bench.Routing do
 
       case :ra.process_command(
              {server_id, Node.self()},
-             {:append_event, session_id, event_with_producer, []},
+             {:append_event, session_id, event_with_producer, nil},
              @raft_timeout
            ) do
         {:ok, {:reply, {:ok, _reply}}, _leader} ->
@@ -186,7 +186,7 @@ defmodule Mix.Tasks.Bench.Routing do
     |> Enum.map(fn index ->
       id = "route-benchee-#{run_id}-#{index}"
 
-      case Runtime.create_session(
+      case WritePath.create_session(
              id: id,
              metadata: %{bench: true, scenario: "routing_attribution"}
            ) do

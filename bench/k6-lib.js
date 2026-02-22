@@ -88,6 +88,11 @@ export function sessionId(prefix, vuId, extra = '') {
 export function ensureSession(id, overrides = {}) {
   const payload = {
     id,
+    creator_principal: overrides.creator_principal || {
+      tenant_id: __ENV.BENCH_TENANT_ID || 'bench',
+      id: __ENV.BENCH_PRINCIPAL_ID || 'bench-user',
+      type: __ENV.BENCH_PRINCIPAL_TYPE || 'user',
+    },
   };
 
   if (overrides.title) payload.title = overrides.title;

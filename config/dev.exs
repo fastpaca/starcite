@@ -58,3 +58,8 @@ config :phoenix, :plug_init_mode, :runtime
 
 # Slower flush interval in dev to keep events in disk log longer for testing hot path
 config :starcite, :storage_flush_interval_ms, 500
+
+# Single-node defaults for local development.
+config :starcite,
+  write_replication_factor: 1,
+  write_node_ids: [:nonode@nohost]

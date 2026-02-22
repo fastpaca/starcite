@@ -58,8 +58,32 @@ Unauthorized requests fail with `401`.
 - `GET /v1/sessions/:id/tail?cursor=N`
   - WebSocket channel for replay + live stream
 
+- `GET /v1/ops/status`
+  - control-plane and write-node diagnostics snapshot
+  - service token only in `jwt` mode
+
+- `GET /v1/ops/ready-nodes`
+  - observer-filtered write nodes currently eligible for routing
+  - service token only in `jwt` mode
+
+- `POST /v1/ops/drain`
+  - marks a write node as draining (routing exclusion only)
+  - body optional: `{"node":"write-2@starcite.internal"}`
+  - service token only in `jwt` mode
+
+- `POST /v1/ops/undrain`
+  - marks a write node as ready again
+  - body optional: `{"node":"write-2@starcite.internal"}`
+  - service token only in `jwt` mode
+
+- `GET /v1/ops/groups/:group_id/replicas`
+  - returns static replica nodes for one write group
+  - service token only in `jwt` mode
+
 - `GET /health/live`
 - `GET /health/ready`
+  - returns `{"status":"ok","mode":"write_node|router_node"}` when ready
+  - returns `{"status":"starting","mode":"...","reason":"raft_sync|router_sync"}` when not ready
 
 ## Behavioral rules
 

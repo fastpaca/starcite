@@ -9,7 +9,7 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Runtime
+  alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
@@ -24,7 +24,7 @@ defmodule StarciteWeb.SessionController do
     auth = conn.assigns[:auth] || %{kind: :none}
 
     with {:ok, opts} <- validate_create(params, auth),
-         {:ok, session} <- Runtime.create_session(opts) do
+         {:ok, session} <- WritePath.create_session(opts) do
       conn
       |> put_status(:created)
       |> json(session)
@@ -38,10 +38,9 @@ defmodule StarciteWeb.SessionController do
     auth = conn.assigns[:auth] || %{kind: :none}
 
     with :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- Runtime.get_session(id),
-         :ok <- Policy.allowed_to_append_session(auth, session),
+         :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
-         {:ok, reply} <- Runtime.append_event(id, event, expected_seq: expected_seq) do
+         {:ok, reply} <- append_event(id, event, expected_seq) do
       conn
       |> put_status(:created)
       |> json(reply)
@@ -49,6 +48,20 @@ defmodule StarciteWeb.SessionController do
   end
 
   def append(_conn, _params), do: {:error, :invalid_event}
+
+  defp append_event(id, event, nil), do: WritePath.append_event(id, event)
+
+  defp append_event(id, event, expected_seq),
+    do: WritePath.append_event(id, event, expected_seq: expected_seq)
+
+  defp authorize_append(%{kind: kind}, _id) when kind in [:none, :service], do: :ok
+
+  defp authorize_append(auth, id) when is_map(auth) and is_binary(id) and id != "" do
+    with {:ok, session} <- ReadPath.get_session(id),
+         :ok <- Policy.allowed_to_append_session(auth, session) do
+      :ok
+    end
+  end
 
   @doc """
   List known sessions from the configured archive adapter.
@@ -87,6 +100,57 @@ defmodule StarciteWeb.SessionController do
            "type" => type,
            "payload" => payload,
            "producer_id" => producer_id,
+           "producer_seq" => producer_seq,
+           "source" => source,
+           "metadata" => metadata
+         } = params,
+         auth
+       )
+       when is_binary(type) and type != "" and is_map(payload) and is_binary(producer_id) and
+              producer_id != "" and is_integer(producer_seq) and producer_seq > 0 and
+              is_binary(source) and source != "" and is_map(metadata) and is_map(auth) do
+    case {Map.get(params, "refs"), Map.get(params, "idempotency_key"),
+          Map.get(params, "expected_seq")} do
+      {nil, nil, nil} ->
+        with {:ok, actor} <- Policy.resolve_event_actor(auth, params["actor"]) do
+          event = %{
+            type: type,
+            payload: payload,
+            actor: actor,
+            source: source,
+            metadata: Policy.attach_principal_metadata(auth, metadata),
+            refs: %{},
+            idempotency_key: nil,
+            producer_id: producer_id,
+            producer_seq: producer_seq
+          }
+
+          {:ok, event, nil}
+        end
+
+      _other ->
+        validate_append_slow(params, auth)
+    end
+  end
+
+  defp validate_append(
+         %{
+           "type" => type,
+           "payload" => payload
+         } = params,
+         auth
+       )
+       when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
+    validate_append_slow(params, auth)
+  end
+
+  defp validate_append(_params, _auth), do: {:error, :invalid_event}
+
+  defp validate_append_slow(
+         %{
+           "type" => type,
+           "payload" => payload,
+           "producer_id" => producer_id,
            "producer_seq" => producer_seq
          } = params,
          auth
@@ -118,7 +182,7 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp validate_append(_params, _auth), do: {:error, :invalid_event}
+  defp validate_append_slow(_params, _auth), do: {:error, :invalid_event}
 
   defp validate_list(params) when is_map(params) do
     with {:ok, limit} <- optional_limit(params["limit"]),

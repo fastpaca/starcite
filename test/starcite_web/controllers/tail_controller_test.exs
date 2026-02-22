@@ -4,7 +4,7 @@ defmodule StarciteWeb.TailControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.Runtime
+  alias Starcite.WritePath
 
   @endpoint StarciteWeb.Endpoint
 
@@ -14,7 +14,8 @@ defmodule StarciteWeb.TailControllerTest do
   end
 
   defp unique_id(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
+    suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
+    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
   defp conn_get(path, headers \\ []) do
@@ -26,7 +27,7 @@ defmodule StarciteWeb.TailControllerTest do
   describe "GET /v1/sessions/:id/tail" do
     test "returns 400 without websocket upgrade headers" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn = conn_get("/v1/sessions/#{id}/tail?cursor=0")
 
@@ -53,7 +54,7 @@ defmodule StarciteWeb.TailControllerTest do
 
     test "returns 400 for invalid cursor" do
       id = unique_id("ses")
-      {:ok, _} = Runtime.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id)
 
       conn =
         conn_get("/v1/sessions/#{id}/tail?cursor=bad", [

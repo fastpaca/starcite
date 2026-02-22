@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.CursorUpdate do
+defmodule Starcite.DataPlane.CursorUpdate do
   @moduledoc """
   Payload-free cursor update contract for internal PubSub consumers.
 

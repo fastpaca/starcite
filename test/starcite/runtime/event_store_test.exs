@@ -1,4 +1,4 @@
-defmodule Starcite.Runtime.EventStoreTest do
+defmodule Starcite.DataPlane.EventStoreTest do
   use ExUnit.Case, async: false
 
   defmodule FailingReadAdapter do
@@ -29,7 +29,7 @@ defmodule Starcite.Runtime.EventStoreTest do
   end
 
   alias Starcite.Archive.IdempotentTestAdapter
-  alias Starcite.Runtime.EventStore
+  alias Starcite.DataPlane.EventStore
 
   setup do
     EventStore.clear()

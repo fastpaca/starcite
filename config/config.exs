@@ -9,16 +9,26 @@ import Config
 
 config :starcite,
   ecto_repos: [Starcite.Repo],
+  num_groups: 256,
+  write_replication_factor: 3,
+  write_node_ids: [:nonode@nohost],
   raft_data_dir: "priv/raft",
   raft_flush_interval_ms: 5000,
+  emit_routing_telemetry: false,
+  emit_event_append_telemetry: false,
+  emit_event_store_write_telemetry: false,
+  route_leader_probe_on_miss: false,
+  route_leader_cache_ttl_ms: 10_000,
   archive_flush_interval_ms: 5_000,
   archive_name: Starcite.Archive,
   archive_adapter: Starcite.Archive.Adapter.S3,
   archive_adapter_opts: [],
   event_store_cache_chunk_size: 256,
   event_store_max_bytes: 2_147_483_648,
+  event_store_capacity_check_interval: 1,
   archive_read_cache_max_bytes: 536_870_912,
-  archive_read_cache_reclaim_fraction: 0.25
+  archive_read_cache_reclaim_fraction: 0.25,
+  archive_read_cache_compressed: true
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,
