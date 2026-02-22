@@ -1,8 +1,7 @@
 defmodule StarciteWeb.HealthController do
   use StarciteWeb, :controller
 
-  alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.ControlPlane.Ops
 
   @doc """
   GET /health/live
@@ -19,28 +18,19 @@ defmodule StarciteWeb.HealthController do
   Readiness probe - returns ok when local node role startup is complete.
   """
   def ready(conn, _params) do
-    mode = readiness_mode()
+    mode = Ops.local_mode() |> Atom.to_string()
 
-    if RaftBootstrap.ready?() do
+    if Ops.local_ready() do
       json(conn, %{status: "ok", mode: mode})
     else
-      reason =
-        case mode do
-          "write_node" -> "raft_sync"
-          _ -> "router_sync"
-        end
-
       conn
       |> put_status(:service_unavailable)
-      |> json(%{status: "starting", mode: mode, reason: reason})
+      |> json(%{status: "starting", mode: mode, reason: readiness_reason(mode)})
     end
   end
 
-  defp readiness_mode do
-    if WriteNodes.write_node?(Node.self()) do
-      "write_node"
-    else
-      "router_node"
-    end
-  end
+  defp readiness_reason("write_node"),
+    do: if(Ops.local_drained(), do: "draining", else: "raft_sync")
+
+  defp readiness_reason(_mode), do: "router_sync"
 end

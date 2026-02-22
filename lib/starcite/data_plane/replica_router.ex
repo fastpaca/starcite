@@ -74,12 +74,15 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         {:error, {:no_available_replicas, []}}
 
       {:remote, nodes} ->
+        allowed_nodes = MapSet.new(nodes)
+
         {result, stats} =
           try_remote(
             nodes,
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             %{},
             [],
             %{attempts: 0, leader_redirects: 0}
@@ -113,7 +116,24 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
     self_node = Keyword.get(opts, :self, Node.self())
     replicas = Keyword.get(opts, :replicas, RaftManager.replicas_for_group(group_id))
-    ready_nodes = Keyword.get(opts, :ready_nodes, Observer.ready_nodes())
+
+    route_candidates =
+      case Keyword.fetch(opts, :route_candidates) do
+        {:ok, candidates} when is_map(candidates) ->
+          candidates
+
+        _ ->
+          case Keyword.fetch(opts, :ready_nodes) do
+            {:ok, ready_nodes} when is_list(ready_nodes) ->
+              %{ready: ready_nodes, fallbacks: replicas -- ready_nodes}
+
+            _ ->
+              Observer.route_candidates(replicas)
+          end
+      end
+
+    ready_nodes = Map.get(route_candidates, :ready, [])
+    fallback_nodes = Map.get(route_candidates, :fallbacks, [])
     local_running = Keyword.get(opts, :local_running, group_running?(group_id))
     allow_local = Keyword.get(opts, :allow_local, true)
     prefer_leader = Keyword.get(opts, :prefer_leader, false)
@@ -140,26 +160,28 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     target =
       cond do
         prefer_leader and node_hint?(leader_hint) and leader_hint == self_node and local_running and
-            allow_local ->
+          allow_local and self_node in ready_nodes ->
           {:local, self_node}
 
-        self_node in replicas and remote_replicas == [] and allow_local ->
+        self_node in replicas and remote_replicas == [] and allow_local and
+            (self_node in ready_nodes or self_node in fallback_nodes) ->
           {:local, self_node}
 
         prefer_leader ->
           {:remote,
-           remote_candidates_with_leader_first(remote_replicas, ready_nodes, leader_hint)}
+           remote_candidates_with_leader_first(
+             remote_replicas,
+             ready_nodes,
+             fallback_nodes,
+             leader_hint
+           )}
 
-        self_node in replicas and local_running and allow_local ->
+        self_node in replicas and local_running and allow_local and self_node in ready_nodes ->
           {:local, self_node}
 
         true ->
-          ready_candidates =
-            remote_replicas
-            |> Enum.filter(&(&1 in ready_nodes))
-
-          fallbacks =
-            remote_replicas -- ready_candidates
+          ready_candidates = Enum.filter(remote_replicas, &(&1 in ready_nodes))
+          fallbacks = Enum.filter(remote_replicas, &(&1 in fallback_nodes))
 
           {:remote, Enum.uniq(ready_candidates ++ fallbacks)}
       end
@@ -175,7 +197,16 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     {target, meta}
   end
 
-  defp try_remote([], _remote_module, _remote_fun, _remote_args, _visited, failures, stats) do
+  defp try_remote(
+         [],
+         _remote_module,
+         _remote_fun,
+         _remote_args,
+         _allowed_nodes,
+         _visited,
+         failures,
+         stats
+       ) do
     {{:error, {:no_available_replicas, Enum.reverse(failures)}}, stats}
   end
 
@@ -184,12 +215,22 @@ defmodule Starcite.DataPlane.ReplicaRouter do
          remote_module,
          remote_fun,
          remote_args,
+         allowed_nodes,
          visited,
          failures,
          stats
        ) do
     if Map.has_key?(visited, node) do
-      try_remote(rest, remote_module, remote_fun, remote_args, visited, failures, stats)
+      try_remote(
+        rest,
+        remote_module,
+        remote_fun,
+        remote_args,
+        allowed_nodes,
+        visited,
+        failures,
+        stats
+      )
     else
       visited = Map.put(visited, node, true)
       stats = %{stats | attempts: stats.attempts + 1}
@@ -203,6 +244,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             visited,
             [{node, {:badrpc, reason}} | failures],
             stats
@@ -210,7 +252,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         {:error, {:not_leader, leader}} ->
           maybe_cache_leader_hint(leader)
-          rest = maybe_enqueue_leader(leader, rest, visited)
+          rest = maybe_enqueue_leader(leader, rest, visited, allowed_nodes)
           stats = bump_leader_redirects(stats)
 
           try_remote(
@@ -218,6 +260,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             visited,
             [{node, {:not_leader, leader}} | failures],
             stats
@@ -229,6 +272,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             visited,
             [{node, :not_leader} | failures],
             stats
@@ -236,7 +280,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         {:error, {:timeout, leader}} ->
           maybe_cache_leader_hint(leader)
-          rest = maybe_enqueue_leader(leader, rest, visited)
+          rest = maybe_enqueue_leader(leader, rest, visited, allowed_nodes)
           stats = bump_leader_redirects(stats)
 
           try_remote(
@@ -244,6 +288,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             visited,
             [{node, {:timeout, leader}} | failures],
             stats
@@ -251,7 +296,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         {:timeout, leader} ->
           maybe_cache_leader_hint(leader)
-          rest = maybe_enqueue_leader(leader, rest, visited)
+          rest = maybe_enqueue_leader(leader, rest, visited, allowed_nodes)
           stats = bump_leader_redirects(stats)
 
           try_remote(
@@ -259,6 +304,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             remote_module,
             remote_fun,
             remote_args,
+            allowed_nodes,
             visited,
             [{node, {:timeout, leader}} | failures],
             stats
@@ -273,6 +319,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
               remote_module,
               remote_fun,
               remote_args,
+              allowed_nodes,
               visited,
               [{node, {:error, reason}} | failures],
               stats
@@ -313,37 +360,45 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       {:badrpc, reason}
   end
 
-  defp maybe_enqueue_leader({server_id, leader_node}, rest, visited)
+  defp maybe_enqueue_leader({server_id, leader_node}, rest, visited, allowed_nodes)
        when is_atom(server_id) and not is_nil(server_id) and is_atom(leader_node) and
-              not is_nil(leader_node) do
+              not is_nil(leader_node) and is_map(allowed_nodes) do
     cond do
+      not MapSet.member?(allowed_nodes, leader_node) -> rest
       Map.has_key?(visited, leader_node) -> rest
       Enum.member?(rest, leader_node) -> rest
       true -> [leader_node | rest]
     end
   end
 
-  defp maybe_enqueue_leader(_leader, rest, _visited), do: rest
+  defp maybe_enqueue_leader(_leader, rest, _visited, _allowed_nodes), do: rest
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
   end
 
-  defp remote_candidates_with_leader_first(remote_replicas, ready_nodes, leader_hint) do
+  defp remote_candidates_with_leader_first(
+         remote_replicas,
+         ready_nodes,
+         fallback_nodes,
+         leader_hint
+       ) do
+    ready_candidates = Enum.filter(remote_replicas, &(&1 in ready_nodes))
+    fallbacks = Enum.filter(remote_replicas, &(&1 in fallback_nodes))
+
     leader_first =
       case leader_hint do
         node when is_atom(node) and not is_nil(node) ->
-          if Enum.member?(remote_replicas, node), do: [node], else: []
+          if node in ready_candidates, do: [node], else: []
 
         _ ->
           []
       end
 
-    remainder = remote_replicas -- leader_first
-    ready_candidates = Enum.filter(remainder, &(&1 in ready_nodes))
-    fallbacks = remainder -- ready_candidates
+    remainder_ready = ready_candidates -- leader_first
+    remainder_fallbacks = fallbacks -- leader_first
 
-    Enum.uniq(leader_first ++ ready_candidates ++ fallbacks)
+    Enum.uniq(leader_first ++ remainder_ready ++ remainder_fallbacks)
   end
 
   defp resolve_leader_hint(group_id, self_node, now_ms, replicas) do

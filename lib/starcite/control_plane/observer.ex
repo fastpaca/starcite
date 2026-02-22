@@ -9,6 +9,7 @@ defmodule Starcite.ControlPlane.Observer do
 
   alias Starcite.ControlPlane.ObserverState
   alias Starcite.ControlPlane.WriteNodes
+  alias Starcite.DataPlane.RaftBootstrap
 
   @status_call_timeout_ms 1_000
   @suspect_to_lost_ms 120_000
@@ -25,9 +26,7 @@ defmodule Starcite.ControlPlane.Observer do
 
   @doc "Returns write nodes currently eligible for routing."
   def ready_nodes do
-    fallback =
-      WriteNodes.nodes()
-      |> Enum.filter(&(&1 in all_nodes()))
+    fallback = fallback_ready_nodes()
 
     case Process.whereis(__MODULE__) do
       nil -> fallback
@@ -35,9 +34,25 @@ defmodule Starcite.ControlPlane.Observer do
     end
   end
 
+  @doc false
+  def route_candidates(replicas) when is_list(replicas) do
+    fallback = fallback_route_candidates(replicas)
+
+    case Process.whereis(__MODULE__) do
+      nil -> fallback
+      pid -> safe_call(pid, {:route_candidates, replicas}, fallback)
+    end
+  end
+
   @doc "Returns observer diagnostics status."
   def status do
-    fallback = %{status: :down, visible_nodes: all_nodes(), ready_nodes: [], node_statuses: %{}}
+    fallback = %{
+      status: :down,
+      visible_nodes: all_nodes(),
+      ready_nodes: fallback_ready_nodes(),
+      node_statuses: %{},
+      raft_ready_nodes: []
+    }
 
     case Process.whereis(__MODULE__) do
       nil ->
@@ -78,16 +93,36 @@ defmodule Starcite.ControlPlane.Observer do
 
     schedule_maintenance()
 
-    {:ok, %{observer: observer}}
+    raft_ready_nodes = refresh_raft_ready_nodes(all_nodes())
+
+    {:ok, %{observer: observer, raft_ready_nodes: raft_ready_nodes}}
   end
 
   @impl true
-  def handle_call(:ready_nodes, _from, %{observer: observer} = state) do
-    {:reply, ready_nodes_from_observer(observer), state}
+  def handle_call(
+        :ready_nodes,
+        _from,
+        %{observer: observer, raft_ready_nodes: raft_ready_nodes} = state
+      ) do
+    {:reply, ready_nodes_from_observer(observer, raft_ready_nodes), state}
   end
 
   @impl true
-  def handle_call(:status, _from, %{observer: observer} = state) do
+  def handle_call(
+        {:route_candidates, replicas},
+        _from,
+        %{observer: observer, raft_ready_nodes: raft_ready_nodes} = state
+      )
+      when is_list(replicas) do
+    {:reply, route_candidates_from_observer(observer, raft_ready_nodes, replicas), state}
+  end
+
+  @impl true
+  def handle_call(
+        :status,
+        _from,
+        %{observer: observer, raft_ready_nodes: raft_ready_nodes} = state
+      ) do
     visible_nodes = all_nodes()
 
     node_statuses =
@@ -99,8 +134,9 @@ defmodule Starcite.ControlPlane.Observer do
     reply = %{
       status: :ok,
       visible_nodes: visible_nodes,
-      ready_nodes: ready_nodes_from_observer(observer),
-      node_statuses: node_statuses
+      ready_nodes: ready_nodes_from_observer(observer, raft_ready_nodes),
+      node_statuses: node_statuses,
+      raft_ready_nodes: raft_ready_nodes |> MapSet.to_list() |> Enum.sort()
     }
 
     {:reply, reply, state}
@@ -159,15 +195,18 @@ defmodule Starcite.ControlPlane.Observer do
   @impl true
   def handle_info(:maintenance, %{observer: observer} = state) do
     now_ms = System.monotonic_time(:millisecond)
+    visible_nodes = all_nodes()
 
     next =
       observer
-      |> ObserverState.refresh(all_nodes(), now_ms)
+      |> ObserverState.refresh(visible_nodes, now_ms)
       |> ObserverState.advance_timeouts(now_ms, @suspect_to_lost_ms)
+
+    raft_ready_nodes = refresh_raft_ready_nodes(visible_nodes)
 
     schedule_maintenance()
 
-    {:noreply, %{state | observer: next}}
+    {:noreply, %{state | observer: next, raft_ready_nodes: raft_ready_nodes}}
   end
 
   defp schedule_maintenance do
@@ -210,14 +249,86 @@ defmodule Starcite.ControlPlane.Observer do
     :exit, _reason -> fallback
   end
 
-  defp ready_nodes_from_observer(%ObserverState{} = observer) do
+  defp ready_nodes_from_observer(%ObserverState{} = observer, raft_ready_nodes)
+       when is_map(raft_ready_nodes) do
     ready =
       observer.nodes
       |> Enum.filter(fn {_node, %{status: status}} -> status == :ready end)
       |> Enum.map(fn {node, _meta} -> node end)
+      |> Enum.filter(&MapSet.member?(raft_ready_nodes, &1))
       |> Enum.sort()
 
     write_nodes = WriteNodes.nodes()
     Enum.filter(ready, &(&1 in write_nodes))
+  end
+
+  defp route_candidates_from_observer(%ObserverState{} = observer, raft_ready_nodes, replicas)
+       when is_map(raft_ready_nodes) and is_list(replicas) do
+    write_replicas = Enum.filter(replicas, &WriteNodes.write_node?/1)
+
+    ready =
+      write_replicas
+      |> Enum.filter(fn node ->
+        MapSet.member?(raft_ready_nodes, node) and node_status(observer, node) == :ready
+      end)
+
+    fallbacks =
+      write_replicas
+      |> Enum.filter(fn node ->
+        status = node_status(observer, node)
+        status != :draining
+      end)
+      |> Enum.reject(&(&1 in ready))
+
+    %{ready: Enum.uniq(ready), fallbacks: Enum.uniq(fallbacks)}
+  end
+
+  defp node_status(%ObserverState{nodes: nodes}, node) when is_map(nodes) and is_atom(node) do
+    case nodes do
+      %{^node => %{status: status}} -> status
+      _ -> nil
+    end
+  end
+
+  defp refresh_raft_ready_nodes(visible_nodes) when is_list(visible_nodes) do
+    visible = MapSet.new(visible_nodes)
+
+    WriteNodes.nodes()
+    |> Enum.filter(&MapSet.member?(visible, &1))
+    |> Enum.reduce(MapSet.new(), fn node, acc ->
+      if raft_node_ready?(node) do
+        MapSet.put(acc, node)
+      else
+        acc
+      end
+    end)
+  end
+
+  defp raft_node_ready?(node) when is_atom(node) do
+    if node == Node.self() do
+      if Node.self() == :nonode@nohost do
+        true
+      else
+        RaftBootstrap.ready?()
+      end
+    else
+      :rpc.call(node, RaftBootstrap, :ready?, [], @status_call_timeout_ms) == true
+    end
+  end
+
+  defp fallback_ready_nodes do
+    visible_nodes = all_nodes()
+    now_ms = System.monotonic_time(:millisecond)
+    observer = ObserverState.new(visible_nodes, now_ms)
+    raft_ready_nodes = refresh_raft_ready_nodes(visible_nodes)
+    ready_nodes_from_observer(observer, raft_ready_nodes)
+  end
+
+  defp fallback_route_candidates(replicas) when is_list(replicas) do
+    visible_nodes = all_nodes()
+    now_ms = System.monotonic_time(:millisecond)
+    observer = ObserverState.new(visible_nodes, now_ms)
+    raft_ready_nodes = refresh_raft_ready_nodes(visible_nodes)
+    route_candidates_from_observer(observer, raft_ready_nodes, replicas)
   end
 end

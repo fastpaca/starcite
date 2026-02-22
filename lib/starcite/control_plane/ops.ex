@@ -46,14 +46,12 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_ready() :: boolean()
   def local_ready do
-    topology_ready = RaftBootstrap.ready?()
-
     case local_mode() do
       :write_node ->
-        topology_ready and Node.self() in Observer.ready_nodes()
+        Node.self() in Observer.ready_nodes()
 
       :router_node ->
-        topology_ready
+        RaftBootstrap.ready?()
     end
   end
 

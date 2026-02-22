@@ -45,6 +45,41 @@ defmodule Starcite.Runtime.RoutingTest do
                  ready_nodes: []
                )
     end
+
+    test "prefer_leader does not front-load a non-ready leader hint" do
+      group_id = unique_group_id()
+      hinted_leader = :"leader@127.0.0.1"
+      ready_node = :"ready@127.0.0.1"
+
+      seed_leader_hint(group_id, hinted_leader)
+
+      assert {:remote, [^ready_node, ^hinted_leader]} =
+               ReplicaRouter.route_target(group_id,
+                 self: :"router@127.0.0.1",
+                 replicas: [hinted_leader, ready_node],
+                 ready_nodes: [ready_node],
+                 prefer_leader: true,
+                 local_running: false,
+                 allow_local: false
+               )
+    end
+
+    test "prefer_leader does not route local when local node is not ready" do
+      group_id = unique_group_id()
+      self_node = :"leader@127.0.0.1"
+      ready_remote = :"ready@127.0.0.1"
+
+      seed_leader_hint(group_id, self_node)
+
+      assert {:remote, [^ready_remote, ^self_node]} =
+               ReplicaRouter.route_target(group_id,
+                 self: self_node,
+                 replicas: [self_node, ready_remote],
+                 ready_nodes: [ready_remote],
+                 prefer_leader: true,
+                 local_running: true
+               )
+    end
   end
 
   describe "call_on_replica/8 telemetry" do
@@ -161,6 +196,20 @@ defmodule Starcite.Runtime.RoutingTest do
       )
 
     handler_id
+  end
+
+  defp seed_leader_hint(group_id, node) when is_integer(group_id) and is_atom(node) do
+    _ =
+      ReplicaRouter.route_target(group_id,
+        self: node,
+        replicas: [node],
+        ready_nodes: [node]
+      )
+
+    :ets.insert(
+      :starcite_replica_router_leader_cache,
+      {group_id, node, System.monotonic_time(:millisecond)}
+    )
   end
 
   defp collect_routing_events(group_id, count) when is_integer(count) and count > 0 do

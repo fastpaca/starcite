@@ -37,7 +37,7 @@ defmodule StarciteWeb.HealthControllerTest do
       else
         assert conn.status == 503
         assert body["status"] == "starting"
-        assert body["reason"] in ["raft_sync", "router_sync"]
+        assert body["reason"] in ["raft_sync", "router_sync", "draining"]
       end
     end
   end
