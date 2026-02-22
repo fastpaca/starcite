@@ -37,6 +37,70 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - No compaction, token budgets, or prompt-window logic—clients own that responsibility.
 - Background flusher streams Raft state to Postgres (non-blocking, idempotent).
 
+## Performance Learnings
+
+### Generic Hot-Path Playbook (Agent Reusable)
+
+- Step 1: define the target before edits (`qps`, `p95`, `p99`, timeout/error rate, CPU, allocations).
+- Step 2: run a baseline and record both offered load and effective throughput.
+- Step 3: optimize one bottleneck class at a time, then rerun the same workload.
+- Step 4: keep changes only when they improve the declared target; revert complexity otherwise.
+
+- Signal: high allocation rate on a dominant single-item path.
+- Action: add a dedicated single-item code path that bypasses batch list building, reverse, and map churn.
+- Guardrail: preserve ordering and idempotency semantics exactly.
+- Exit criterion: lower alloc pressure and higher sustained throughput at equal or better latency.
+
+- Signal: endpoint/controller CPU dominates even before consensus/storage.
+- Action: parse and validate once at the boundary using strict fast clauses; keep a separate slow path for optional inputs.
+- Guardrail: invalid input still fails loudly with explicit errors.
+- Exit criterion: reduced boundary CPU without shape/validation regressions.
+
+- Signal: hot path performs non-essential synchronous reads.
+- Action: skip read-path work when authorization or flow type makes the read unnecessary.
+- Guardrail: keep strict checks for the privileged/principal path.
+- Exit criterion: fewer sync operations in traces and improved throughput.
+
+- Signal: per-call overhead from generic option containers (`Keyword`, map defaults) for scalar fields.
+- Action: move frequently accessed fields into direct scalars in command payloads and function heads.
+- Guardrail: keep compatibility adapters only at boundaries, not inside hot loops.
+- Exit criterion: lower reductions/instruction count and allocation per request.
+
+- Signal: global contention primitives appear in every request path.
+- Action: replace global counters/IDs with process-local counters or amortized periodic checks.
+- Guardrail: ensure no safety regressions in capacity and back-pressure behavior.
+- Exit criterion: contention disappears from profiles and tail latency improves under load.
+
+- Signal: wrapper helpers add extra ETS/list work in critical queues.
+- Action: use direct operations on named tables/structures and add singleton fast paths where traffic is mostly single events.
+- Guardrail: keep queue semantics and visibility unchanged.
+- Exit criterion: reduced CPU + allocs in queue hot functions.
+
+- Signal: hashing/fingerprinting is a top CPU consumer.
+- Action: use cheaper fingerprints when cryptographic guarantees are unnecessary.
+- Guardrail: document collision risk and restrict weaker hash use to safe domains.
+- Exit criterion: measurable CPU reduction with acceptable collision profile.
+
+- Signal: application hot path is optimized but throughput ceiling remains.
+- Action: validate ingress/routing topology as a first-order bottleneck before deeper consensus changes.
+- Guardrail: do not conflate control-plane churn with data-plane saturation.
+- Exit criterion: topology experiments explain the ceiling difference clearly.
+
+- Rule: treat every optimization as provisional until measured.
+- Rule: prefer deletion over abstraction when an optimization does not move the ceiling.
+
+### Starcite Instantiation (Current Cycle)
+
+- Single append no longer pays batch costs in Raft FSM (`append_one_to_session`, `put_appended_event`, `build_effect_for_event`).
+- Append validation has a strict fast clause and a separate fallback clause.
+- Non-principal append auth skips `ReadPath.get_session/1`; principal flow keeps session checks.
+- Raft command payload uses scalar `expected_seq`; hot append path avoids option-list lookups.
+- Capacity polling uses process-local counters instead of per-write global `:erlang.unique_integer`.
+- Event queue hot methods use direct named ETS operations and singleton `put_events` fast path.
+- Experimental dedupe path used cheaper composite `phash2` fingerprint with explicit collision tradeoff.
+- After CPU/alloc fixes, ingress shape dominated measured ceilings (single-ingress outperformed round-robin).
+- Preferred-write-node routing experiment was rolled back when complexity increased without ceiling gains.
+
 ## Phoenix & LiveView Summary
 
 - LiveView templates must start with `<Layouts.app flash={@flash} current_scope={@current_scope}>`.
@@ -67,6 +131,9 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
   - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
 - Avoid adding start/stop wrapper scripts for Docker Compose workflows; keep local failover drills explicit (`docker compose kill/pause/up`) and document them in `docs/local-testing.md`.
 - Treat cluster runs as optional vibe checks for local iteration; default to faster `mix test` loops when cluster behavior is not under test.
+- For k6 throughput tests, distinguish offered rate from effective throughput (`events_sent`/`http_reqs`) and always inspect `dropped_iterations` and failure rate before concluding the service ceiling.
+- For append benchmarks, avoid artificial contention by using enough sessions and stable producer identity/sequence generation; otherwise results overstate contention bottlenecks.
+- Ensure cluster readiness before high-load tests; if skipping readiness checks for warm reruns, verify node/bootstrap health first.
 
 ## Delivery Checklist
 

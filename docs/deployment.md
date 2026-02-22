@@ -1,143 +1,107 @@
 # Deployment
 
-Starcite needs durable Raft state plus a durable archive backend to keep ordering guarantees.
+This document defines provider-agnostic deployment and operations for Starcite's static write-node model.
 
-Default archive backend is `s3` (S3-compatible object storage). Postgres remains available via `STARCITE_ARCHIVE_ADAPTER=postgres`.
+## Operating model
 
-## Runtime patterns
+- Write path: fixed Raft voter set on static write nodes.
+- Read/API path: stateless router/API nodes may scale independently.
+- Liveness affects routing only; liveness never mutates Raft membership.
+- Rollouts are one write node at a time to preserve quorum.
 
-Single node:
+## Preconditions
 
-```bash
-docker run -d \
-  -p 4000:4000 \
-  -v /var/lib/starcite:/data \
-  -e STARCITE_ARCHIVE_ADAPTER=s3 \
-  -e STARCITE_S3_BUCKET=starcite-archive \
-  -e STARCITE_S3_REGION=auto \
-  -e STARCITE_S3_ENDPOINT=https://fly.storage.tigris.dev \
-  -e STARCITE_S3_ACCESS_KEY_ID=... \
-  -e STARCITE_S3_SECRET_ACCESS_KEY=... \
-  -e STARCITE_EVENT_STORE_MAX_SIZE=2GB \
-  ghcr.io/fastpaca/starcite:latest
-```
+- Each write node has a stable node identity (`NODE_NAME`).
+- All nodes share the same cluster peer list (`CLUSTER_NODES`).
+- All nodes share the same static write-node set (`STARCITE_WRITE_NODE_IDS`).
+- `STARCITE_WRITE_REPLICATION_FACTOR` is less than or equal to write-node count.
+- Write nodes have persistent local disk for `STARCITE_RAFT_DATA_DIR`.
+- Archive backend is configured (`STARCITE_ARCHIVE_ADAPTER=s3` or `postgres`).
 
-Clustered nodes:
+## Required configuration
 
-```bash
-NODE_NAME=starcite-1
-CLUSTER_NODES=starcite-1@starcite-1.local,starcite-2@starcite-2.local,starcite-3@starcite-3.local
-docker run -d \
-  -p 4000:4000 \
-  -e STARCITE_ARCHIVE_ADAPTER=s3 \
-  -e STARCITE_S3_BUCKET=starcite-archive \
-  -e STARCITE_S3_REGION=auto \
-  -e STARCITE_S3_ENDPOINT=https://fly.storage.tigris.dev \
-  -e STARCITE_S3_ACCESS_KEY_ID=... \
-  -e STARCITE_S3_SECRET_ACCESS_KEY=... \
-  -e NODE_NAME=$NODE_NAME \
-  -e CLUSTER_NODES=$CLUSTER_NODES \
-  ghcr.io/fastpaca/starcite:latest
-```
-
-Use the same pattern for `starcite-2` and `starcite-3`, and place a load balancer in front of them.
-
-For rolling updates, prefer infrastructure draining and have clients resume tails with their last committed `seq`.
-
-To run Postgres archive mode instead:
-
-```bash
-docker run -d \
-  -p 4000:4000 \
-  -e STARCITE_ARCHIVE_ADAPTER=postgres \
-  -e DATABASE_URL=postgres://user:password@host/db \
-  ghcr.io/fastpaca/starcite:latest
-```
-
-## Integration testing stack
-
-```bash
-PROJECT_NAME=starcite-it-a
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" up -d --build
-docker compose -f docker-compose.integration.yml -p "$PROJECT_NAME" down -v --remove-orphans
-```
-
-## Authentication behavior
-
-Starcite can run with no API auth or with JWT validation at the boundary:
-
-- `STARCITE_AUTH_MODE=none` (default): API boundary is unauthenticated.
-- `STARCITE_AUTH_MODE=jwt`: layered auth on `/v1/*` HTTP and WebSocket upgrades.
-- `Authorization` is optional for `/health/live` and `/health/ready`.
-
-When JWT mode is enabled:
-
-- Service JWTs are validated using JWKS (`iss`/`aud`/`exp`).
-- Service JWTs can call service-only endpoints (`/v1/auth/issue`, session create/list).
-- `/v1/auth/issue` mints short-lived scoped principal tokens signed by Starcite.
-- Principal tokens can access append/tail within scope/session/tenant limits.
-
-Service JWT validation:
-
-- signature (JWKS from `STARCITE_AUTH_JWKS_URL`)
-- `iss` (`STARCITE_AUTH_JWT_ISSUER`)
-- `aud` (`STARCITE_AUTH_JWT_AUDIENCE`)
-- `exp` with optional leeway (`STARCITE_AUTH_JWT_LEEWAY_SECONDS`)
-
-Missing/invalid token -> `401` (HTTP) or WebSocket close.
-Policy denial (scope/session/tenant) -> `403` for HTTP/WebSocket upgrade.
-
-## Key config
-
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `NODE_NAME` | random | Node identifier |
-| `CLUSTER_NODES` | none | Comma-separated cluster peers |
-| `DNS_CLUSTER_QUERY` | none | DNS discovery target for cluster |
-| `DNS_CLUSTER_NODE_BASENAME` | `starcite` | DNS node basename |
-| `DNS_POLL_INTERVAL_MS` | `5000` | DNS cluster poll interval |
-| `STARCITE_RAFT_DATA_DIR` | `priv/raft` | Raft state directory |
-| `STARCITE_EVENT_STORE_MAX_SIZE` | `2GB` | Hot memory cap for queued session events |
-| `STARCITE_ARCHIVE_ADAPTER` | `s3` | Archive backend (`s3` or `postgres`) |
-| `STARCITE_S3_BUCKET` | none | S3 bucket name (required in `s3` mode) |
-| `STARCITE_S3_REGION` | `AWS_REGION` or `us-east-1` | S3 region for signing |
-| `STARCITE_S3_ENDPOINT` | none | Custom S3-compatible endpoint (for Tigris/MinIO/etc.) |
-| `STARCITE_S3_ACCESS_KEY_ID` | none | S3 access key (falls back to `AWS_ACCESS_KEY_ID`) |
-| `STARCITE_S3_SECRET_ACCESS_KEY` | none | S3 secret key (falls back to `AWS_SECRET_ACCESS_KEY`) |
-| `STARCITE_S3_SESSION_TOKEN` | none | Optional S3 session token (falls back to `AWS_SESSION_TOKEN`) |
-| `STARCITE_S3_PREFIX` | `starcite` | Object key prefix |
-| `STARCITE_S3_PATH_STYLE` | `true` | Use path-style S3 URLs for compatibility |
-| `STARCITE_S3_MAX_WRITE_RETRIES` | `4` | Retry budget for conditional-write conflicts |
-| `DATABASE_URL` | none | Postgres URL (required in `postgres` mode) |
-| `STARCITE_POSTGRES_URL` | none | Alternate Postgres URL (required in `postgres` mode if `DATABASE_URL` unset) |
-| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | `5000` | Archive flush interval |
-| `STARCITE_ARCHIVE_READ_CACHE_TTL_MS` | `600000` | Archive read cache TTL |
-| `STARCITE_ARCHIVE_READ_CACHE_CLEANUP_INTERVAL_MS` | `60000` | Cache cleanup interval |
-| `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | `true` | Compress archive read cache values |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | `512MB` | Archive read cache budget |
-| `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | `0.25` | Cache reclaim fraction |
-| `STARCITE_AUTH_MODE` | `none` | API auth mode (`none` or `jwt`) |
-| `STARCITE_AUTH_JWKS_URL` | none | JWKS endpoint (`jwt` mode) |
-| `STARCITE_AUTH_JWT_ISSUER` | none | Required JWT issuer |
-| `STARCITE_AUTH_JWT_AUDIENCE` | none | Required JWT audience |
-| `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | `30` | Token clock-skew tolerance |
-| `STARCITE_AUTH_JWKS_REFRESH_MS` | `60000` | JWKS cache refresh interval |
-| `STARCITE_AUTH_PRINCIPAL_TOKEN_SALT` | `principal-token-v1` | Phoenix.Token salt for principal token signing |
-| `STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS` | `600` | Default principal token TTL |
-| `STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS` | `900` | Maximum principal token TTL |
-| `DB_POOL_SIZE` | `10` | Postgres pool size |
-| `PORT` | `4000` | HTTP port |
-| `PHX_SERVER` | unset | Enable Phoenix endpoint in releases |
-| `SECRET_KEY_BASE` | none | Phoenix secret for production |
-| `PHX_HOST` | `example.com` | Endpoint host |
-
-## Metrics
-
-Starcite exposes Prometheus metrics on `/metrics`.
-
-| Metric | Why it matters |
+| Variable | Purpose |
 | --- | --- |
-| `starcite_events_append_total` | Append throughput |
-| `starcite_archive_pending_rows` | Backlog waiting for archival |
-| `starcite_archive_lag` | Archive delay |
-| `starcite_event_store_backpressure_total` | Append pressure at hot store |
+| `NODE_NAME` | Stable node identity (`name@host`) |
+| `CLUSTER_NODES` | Comma-separated cluster peers |
+| `STARCITE_WRITE_NODE_IDS` | Comma-separated static write-node identities |
+| `STARCITE_WRITE_REPLICATION_FACTOR` | Voters per group (normally `3`) |
+| `STARCITE_NUM_GROUPS` | Session sharding groups (normally `256`) |
+| `STARCITE_RAFT_DATA_DIR` | Persistent Raft state path |
+| `STARCITE_ARCHIVE_ADAPTER` | Archive backend (`s3` or `postgres`) |
+
+S3 mode requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, optional endpoint/credentials overrides.
+
+Postgres mode requires: `DATABASE_URL`.
+
+## Bootstrap checklist
+
+1. Provision three write nodes with persistent volumes.
+2. Set stable `NODE_NAME` on each write node.
+3. Set identical `CLUSTER_NODES` and `STARCITE_WRITE_NODE_IDS` on all nodes.
+4. Start all write nodes.
+5. Verify readiness and routing state:
+   - `mix starcite.ops status`
+   - `mix starcite.ops ready-nodes`
+   - `curl -sS http://<node>:4000/health/ready`
+   - `curl -sS http://<node>:4000/v1/ops/status`
+
+Expected result: node reports ready, and ready write-node set matches the configured static set.
+
+## Rollout runbook (write nodes)
+
+Run this sequence for each write node, one at a time.
+
+1. Drain target node:
+   - `mix starcite.ops drain <node>`
+2. Wait until drained:
+   - `mix starcite.ops wait-drained 30000`
+3. Restart/redeploy that node.
+4. Wait for local readiness:
+   - `mix starcite.ops wait-ready 60000`
+   - `curl -sS http://<node>:4000/health/ready`
+5. Undrain node:
+   - `mix starcite.ops undrain <node>`
+6. Recheck cluster:
+   - `mix starcite.ops ready-nodes`
+   - `mix starcite.ops status`
+7. Move to the next node.
+
+Do not restart multiple write nodes concurrently.
+
+## Release RPC equivalents
+
+Use release RPC when `mix` is unavailable in production:
+
+```bash
+bin/starcite rpc "Starcite.ControlPlane.Ops.drain_node()"
+bin/starcite rpc "Starcite.ControlPlane.Ops.undrain_node()"
+bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_drained(30000)"
+bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_ready(60000)"
+```
+
+## Node replacement
+
+Preferred replacement keeps the same logical node identity.
+
+1. Drain the node.
+2. Stop the old instance.
+3. Bring up the replacement with the same `NODE_NAME` and same persistent Raft data (or restored equivalent).
+4. Wait for readiness and undrain.
+5. Verify with `mix starcite.ops status`.
+
+Changing write-node identities is a topology migration. Treat it as an explicit maintenance procedure and do not mix it with routine rollouts.
+
+## Failure handling
+
+- Single write-node loss: keep serving writes if quorum remains.
+- Two write-node loss in a three-node voter set: write availability is at risk; restore quorum first.
+- During incidents, do not attempt liveness-driven membership changes.
+
+## Validation drills
+
+Run these periodically:
+
+1. Single write-node restart under load and confirm no churn in group assignment.
+2. Drain/undrain drill and verify `ready-nodes` transitions.
+3. Readiness-gate drill: ensure traffic only targets ready nodes after restart.
