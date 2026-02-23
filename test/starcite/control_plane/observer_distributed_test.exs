@@ -65,6 +65,7 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
     :ok = Ops.undrain_node(local)
 
     eventually(fn ->
+      assert :ok = Ops.wait_local_ready(1_000)
       assert remote_node_status(peer_a, local) == :ready
       assert remote_node_status(peer_b, local) == :ready
     end)
@@ -115,6 +116,7 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
     :ok = Ops.undrain_node(local)
 
     eventually(fn ->
+      assert :ok = Ops.wait_local_ready(1_000)
       assert remote_node_status(restarted_node, local) == :ready
       assert remote_node_status(witness_node, local) == :ready
     end)
