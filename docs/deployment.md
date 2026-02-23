@@ -56,12 +56,13 @@ Run this sequence for each write node, one at a time.
    - `mix starcite.ops drain <node>`
 2. Wait until drained:
    - `mix starcite.ops wait-drained 30000`
+   - this gate waits for observer drain convergence across visible cluster nodes
 3. Restart/redeploy that node.
-4. Wait for local readiness:
+4. Undrain node:
+   - `mix starcite.ops undrain <node>`
+5. Wait for local readiness (post-undrain gate):
    - `mix starcite.ops wait-ready 60000`
    - `curl -sS http://<node>:4000/health/ready`
-5. Undrain node:
-   - `mix starcite.ops undrain <node>`
 6. Recheck cluster:
    - `mix starcite.ops ready-nodes`
    - `mix starcite.ops status`
@@ -87,7 +88,7 @@ Preferred replacement keeps the same logical node identity.
 1. Drain the node.
 2. Stop the old instance.
 3. Bring up the replacement with the same `NODE_NAME` and same persistent Raft data (or restored equivalent).
-4. Wait for readiness and undrain.
+4. Undrain, then wait for readiness.
 5. Verify with `mix starcite.ops status`.
 
 Changing write-node identities is a topology migration. Treat it as an explicit maintenance procedure and do not mix it with routine rollouts.

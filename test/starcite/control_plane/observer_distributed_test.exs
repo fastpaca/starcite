@@ -120,6 +120,26 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
     end)
   end
 
+  test "wait_local_drained waits for visible observer convergence", %{peers: peers} do
+    [{_target_pid, target_node} | _rest] = peers
+    local = Node.self()
+
+    :ok = Ops.undrain_node(local)
+    :ok = stop_peer_observer(target_node)
+    :ok = Ops.drain_node(local)
+
+    assert {:error, :timeout} = Ops.wait_local_drained(300)
+
+    :ok = start_peer_observer(target_node)
+
+    eventually(fn ->
+      assert remote_node_status(target_node, local) == :draining
+      assert :ok = Ops.wait_local_drained(1_000)
+    end)
+
+    :ok = Ops.undrain_node(local)
+  end
+
   defp start_peers(count) when is_integer(count) and count > 0 do
     Enum.map(1..count, fn _index ->
       start_named_peer(:"observer_peer_#{System.unique_integer([:positive])}")

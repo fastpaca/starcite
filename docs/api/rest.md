@@ -83,7 +83,7 @@ Unauthorized requests fail with `401`.
 - `GET /health/live`
 - `GET /health/ready`
   - returns `{"status":"ok","mode":"write_node|router_node"}` when ready
-  - returns `{"status":"starting","mode":"...","reason":"raft_sync|router_sync"}` when not ready
+  - returns `{"status":"starting","mode":"...","reason":"raft_sync|router_sync|draining"}` when not ready
 
 ## Behavioral rules
 

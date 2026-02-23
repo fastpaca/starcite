@@ -11,6 +11,7 @@ defmodule Starcite.ControlPlane.Ops do
   alias Starcite.DataPlane.{RaftBootstrap, RaftManager}
 
   @default_wait_interval_ms 200
+  @status_call_timeout_ms 1_000
 
   @spec status() :: map()
   def status do
@@ -57,7 +58,9 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_drained() :: boolean()
   def local_drained do
-    local_mode() == :write_node and Node.self() not in Observer.ready_nodes()
+    local_mode() == :write_node and
+      local_node_status() == :draining and
+      Node.self() not in Observer.ready_nodes()
   end
 
   @spec wait_local_ready(pos_integer()) :: :ok | {:error, :timeout}
@@ -69,7 +72,7 @@ defmodule Starcite.ControlPlane.Ops do
   @spec wait_local_drained(pos_integer()) :: :ok | {:error, :timeout}
   def wait_local_drained(timeout_ms \\ 30_000)
       when is_integer(timeout_ms) and timeout_ms > 0 do
-    wait_until(&local_drained/0, timeout_ms)
+    wait_until(&local_drain_complete/0, timeout_ms)
   end
 
   @spec drain_node(node()) :: :ok | {:error, :invalid_write_node}
@@ -142,6 +145,52 @@ defmodule Starcite.ControlPlane.Ops do
       :ok
     else
       {:error, :invalid_write_node}
+    end
+  end
+
+  defp local_node_status do
+    local = Node.self()
+
+    case Observer.status() do
+      %{status: :ok, node_statuses: %{^local => %{status: status}}} when is_atom(status) ->
+        status
+
+      _other ->
+        nil
+    end
+  end
+
+  defp local_drain_complete do
+    local = Node.self()
+
+    local_mode() == :write_node and
+      local_drained() and
+      drained_on_visible_nodes?(local)
+  end
+
+  defp drained_on_visible_nodes?(node) when is_atom(node) do
+    Observer.all_nodes()
+    |> Enum.all?(fn observer_node ->
+      observer_node_status(observer_node, node) == :draining
+    end)
+  end
+
+  defp observer_node_status(observer_node, target_node)
+       when is_atom(observer_node) and is_atom(target_node) do
+    status =
+      if observer_node == Node.self() do
+        Observer.status()
+      else
+        :rpc.call(observer_node, Observer, :status, [], @status_call_timeout_ms)
+      end
+
+    case status do
+      %{status: :ok, node_statuses: %{^target_node => %{status: node_status}}}
+      when is_atom(node_status) ->
+        node_status
+
+      _other ->
+        nil
     end
   end
 
