@@ -56,6 +56,7 @@ Run this sequence for each write node, one at a time.
    - `mix starcite.ops drain <node>`
 2. Wait until drained:
    - `mix starcite.ops wait-drained 30000`
+   - this gate waits for observer drain convergence across visible cluster nodes
 3. Restart/redeploy that node.
 4. Undrain node:
    - `mix starcite.ops undrain <node>`
