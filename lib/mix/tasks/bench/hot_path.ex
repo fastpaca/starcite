@@ -154,7 +154,7 @@ defmodule Mix.Tasks.Bench.HotPath do
       raft_data_dir: System.get_env("BENCH_RAFT_DATA_DIR", "tmp/bench_raft"),
       clean_raft_data_dir: env_boolean("BENCH_CLEAN_RAFT_DATA_DIR", true),
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
-      num_groups: env_integer("BENCH_NUM_GROUPS", 32),
+      num_groups: env_integer("BENCH_NUM_GROUPS", 256),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
       batch_size: env_integer("BENCH_BATCH_SIZE", 1),

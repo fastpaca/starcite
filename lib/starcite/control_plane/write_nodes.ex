@@ -9,7 +9,7 @@ defmodule Starcite.ControlPlane.WriteNodes do
   - number of write groups
   """
 
-  @default_num_groups 32
+  @default_num_groups 256
   @default_replication_factor 3
   @default_write_nodes [:nonode@nohost]
   @config_cache_key {__MODULE__, :config}
