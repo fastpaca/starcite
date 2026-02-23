@@ -57,7 +57,13 @@ defmodule Starcite.Archive.Adapter.S3.Client do
     end
   end
 
-  defp request(config, operation), do: ExAws.request(operation, config.request_opts)
+  defp request(config, operation) do
+    ExAws.request(operation, config.request_opts)
+  rescue
+    _ -> {:error, :unavailable}
+  catch
+    :exit, _ -> {:error, :unavailable}
+  end
 
   defp etag(headers) do
     Enum.find_value(headers, fn

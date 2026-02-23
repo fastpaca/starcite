@@ -29,6 +29,7 @@ defmodule Starcite.Archive do
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.get(opts, :adapter, Store.adapter())
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
+    single_local_write_node = single_local_write_node?()
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
 
@@ -38,6 +39,7 @@ defmodule Starcite.Archive do
      %{
        interval: interval,
        adapter: adapter_mod,
+       single_local_write_node: single_local_write_node,
        archived_seq_cache: %{}
      }}
   end
@@ -50,7 +52,14 @@ defmodule Starcite.Archive do
     {stats, archived_seq_cache} =
       Enum.reduce(session_ids, {zero_stats(), state.archived_seq_cache}, fn session_id,
                                                                             {stats_acc, cache_acc} ->
-        {session_stats, cache_next} = flush_session(session_id, state.adapter, cache_acc)
+        {session_stats, cache_next} =
+          flush_session(
+            session_id,
+            state.adapter,
+            cache_acc,
+            state.single_local_write_node
+          )
+
         {merge_stats(stats_acc, session_stats), cache_next}
       end)
 
@@ -75,8 +84,14 @@ defmodule Starcite.Archive do
     {:noreply, %{state | archived_seq_cache: archived_seq_cache}}
   end
 
-  defp flush_session(session_id, adapter, archived_seq_cache)
-       when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) do
+  defp flush_session(
+         session_id,
+         adapter,
+         archived_seq_cache,
+         single_local_write_node
+       )
+       when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) and
+              is_boolean(single_local_write_node) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
            load_archived_seq(session_id, archived_seq_cache) do
@@ -86,7 +101,7 @@ defmodule Starcite.Archive do
         pending_before == 0 ->
           {zero_stats(), archived_seq_cache}
 
-        ensure_local_group_leader(session_id) != :ok ->
+        ensure_local_group_leader(session_id, single_local_write_node) != :ok ->
           {zero_stats(), archived_seq_cache}
 
         true ->
@@ -217,7 +232,10 @@ defmodule Starcite.Archive do
     |> elem(1)
   end
 
-  defp ensure_local_group_leader(session_id) when is_binary(session_id) and session_id != "" do
+  defp ensure_local_group_leader(_session_id, true), do: :ok
+
+  defp ensure_local_group_leader(session_id, false)
+       when is_binary(session_id) and session_id != "" do
     group_id = RaftManager.group_for_session(session_id)
     server_id = RaftManager.server_id(group_id)
 
@@ -227,6 +245,17 @@ defmodule Starcite.Archive do
 
       _ ->
         :error
+    end
+  end
+
+  defp single_local_write_node? do
+    if RaftManager.replication_factor() == 1 do
+      case RaftManager.write_nodes() do
+        [write_node] when write_node == node() -> true
+        _ -> false
+      end
+    else
+      false
     end
   end
 

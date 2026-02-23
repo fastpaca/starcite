@@ -254,11 +254,11 @@ defmodule Starcite.DataPlane.RaftFSM do
     EventStore.put_event(session_id, event)
   end
 
-  defp emit_appended_telemetry(_session_id, []), do: :ok
+  if @emit_event_append_telemetry do
+    defp emit_appended_telemetry(_session_id, []), do: :ok
 
-  defp emit_appended_telemetry(session_id, events)
-       when is_binary(session_id) and is_list(events) do
-    if @emit_event_append_telemetry do
+    defp emit_appended_telemetry(session_id, events)
+         when is_binary(session_id) and is_list(events) do
       Enum.each(events, fn %{type: type, actor: actor, payload: payload} = event ->
         Starcite.Observability.Telemetry.event_appended(
           session_id,
@@ -268,19 +268,17 @@ defmodule Starcite.DataPlane.RaftFSM do
           payload_bytes(payload)
         )
       end)
+
+      :ok
     end
 
-    :ok
-  end
+    defp emit_appended_event_telemetry(_session_id, nil), do: :ok
 
-  defp emit_appended_event_telemetry(_session_id, nil), do: :ok
-
-  defp emit_appended_event_telemetry(
-         session_id,
-         %{type: type, actor: actor, payload: payload} = event
-       )
-       when is_binary(session_id) and is_binary(type) and is_binary(actor) do
-    if @emit_event_append_telemetry do
+    defp emit_appended_event_telemetry(
+           session_id,
+           %{type: type, actor: actor, payload: payload} = event
+         )
+         when is_binary(session_id) and is_binary(type) and is_binary(actor) do
       Starcite.Observability.Telemetry.event_appended(
         session_id,
         type,
@@ -288,9 +286,12 @@ defmodule Starcite.DataPlane.RaftFSM do
         Map.get(event, :source),
         payload_bytes(payload)
       )
-    end
 
-    :ok
+      :ok
+    end
+  else
+    defp emit_appended_telemetry(_session_id, _events), do: :ok
+    defp emit_appended_event_telemetry(_session_id, _event), do: :ok
   end
 
   defp build_effects_for_events(_session_id, []), do: []
@@ -327,5 +328,7 @@ defmodule Starcite.DataPlane.RaftFSM do
     }
   end
 
-  defp payload_bytes(payload), do: :erlang.external_size(payload)
+  if @emit_event_append_telemetry do
+    defp payload_bytes(payload), do: :erlang.external_size(payload)
+  end
 end
