@@ -154,6 +154,46 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one Raft command execution outcome.
+
+  Measurements:
+    - `:count` – fixed at 1 per command execution
+
+  Metadata:
+    - `:command` (`:create_session`, `:append_event`, `:append_events`, `:ack_archived`, `:other`)
+    - `:outcome`
+      (`:local_ok`, `:local_error`, `:local_timeout`, `:leader_retry_ok`,
+      `:leader_retry_error`, or `:leader_retry_timeout`)
+  """
+  @spec raft_command_result(
+          :create_session | :append_event | :append_events | :ack_archived | :other,
+          :local_ok
+          | :local_error
+          | :local_timeout
+          | :leader_retry_ok
+          | :leader_retry_error
+          | :leader_retry_timeout
+        ) :: :ok
+  def raft_command_result(command, outcome)
+      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
+             outcome in [
+               :local_ok,
+               :local_error,
+               :local_timeout,
+               :leader_retry_ok,
+               :leader_retry_error,
+               :leader_retry_timeout
+             ] do
+    :telemetry.execute(
+      [:starcite, :raft, :command],
+      %{count: 1},
+      %{command: command, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one write/read-path routing decision before execution.
 
   Measurements:

@@ -4,6 +4,7 @@ defmodule Starcite.WritePath do
   """
 
   alias Starcite.DataPlane.{RaftAccess, ReplicaRouter}
+  alias Starcite.Observability.Telemetry
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -62,7 +63,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command(server_id, {:append_event, id, event, nil})
+        process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
 
       :error ->
         call_remote(group, :append_event_local, [id, event])
@@ -81,7 +82,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command(server_id, {:append_event, id, event, expected_seq})
+        process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
 
       :error ->
         call_remote(group, :append_event_local, [id, event, opts])
@@ -94,7 +95,7 @@ defmodule Starcite.WritePath do
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command(server_id, {:append_event, id, event, nil})
+      process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
     end
   end
 
@@ -103,7 +104,7 @@ defmodule Starcite.WritePath do
     expected_seq = expected_seq_from_opts(opts)
 
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command(server_id, {:append_event, id, event, expected_seq})
+      process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
     end
   end
 
@@ -123,7 +124,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command(server_id, {:append_events, id, events, opts})
+        process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
 
       :error ->
         call_remote(group, :append_events_local, [id, events, opts])
@@ -136,7 +137,7 @@ defmodule Starcite.WritePath do
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command(server_id, {:append_events, id, events, opts})
+      process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
     end
   end
 
@@ -147,7 +148,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command(server_id, {:ack_archived, id, upto_seq})
+        process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
 
       :error ->
         call_remote(group, :ack_archived_local, [id, upto_seq])
@@ -158,7 +159,7 @@ defmodule Starcite.WritePath do
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command(server_id, {:ack_archived, id, upto_seq})
+      process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
     end
   end
 
@@ -206,13 +207,70 @@ defmodule Starcite.WritePath do
   end
 
   defp process_command(server_id, command) when is_atom(server_id) do
-    case :ra.process_command({server_id, Node.self()}, command, @timeout) do
+    result = process_command_on_node(server_id, Node.self(), command)
+    :ok = emit_raft_command_result(command, classify_local_outcome(result))
+    result
+  end
+
+  defp process_command_with_leader_retry(server_id, command) when is_atom(server_id) do
+    self_node = Node.self()
+    local_result = process_command_on_node(server_id, self_node, command)
+
+    {final_result, outcome} =
+      case local_result do
+        {:timeout, {^server_id, leader_node}}
+        when is_atom(leader_node) and not is_nil(leader_node) ->
+          if leader_node == self_node do
+            {local_result, :local_timeout}
+          else
+            retry_result = process_command_on_node(server_id, leader_node, command)
+            {retry_result, classify_leader_retry_outcome(retry_result)}
+          end
+
+        _ ->
+          {local_result, classify_local_outcome(local_result)}
+      end
+
+    :ok = emit_raft_command_result(command, outcome)
+    final_result
+  end
+
+  defp process_command_on_node(server_id, node, command)
+       when is_atom(server_id) and is_atom(node) do
+    case :ra.process_command({server_id, node}, command, @timeout) do
       {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
       {:ok, {:reply, {:error, reason}}, _leader} -> {:error, reason}
       {:timeout, leader} -> {:timeout, leader}
       {:error, reason} -> {:error, reason}
     end
   end
+
+  defp classify_local_outcome({:ok, _reply}), do: :local_ok
+  defp classify_local_outcome({:error, _reason}), do: :local_error
+  defp classify_local_outcome({:timeout, _leader}), do: :local_timeout
+
+  defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
+  defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
+  defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
+
+  defp emit_raft_command_result(command, outcome)
+       when outcome in [
+              :local_ok,
+              :local_error,
+              :local_timeout,
+              :leader_retry_ok,
+              :leader_retry_error,
+              :leader_retry_timeout
+            ] do
+    Telemetry.raft_command_result(command_type(command), outcome)
+  end
+
+  defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
+    do: :create_session
+
+  defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
+  defp command_type({:append_events, _id, _events, _opts}), do: :append_events
+  defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

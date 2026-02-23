@@ -11,6 +11,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
       events_metrics(),
       archive_metrics(),
       event_store_metrics(),
+      raft_command_metrics(),
       routing_metrics()
     ]
   end
@@ -217,6 +218,20 @@ defmodule Starcite.Observability.PromEx.Metrics do
           event_name: [:starcite, :routing, :result],
           measurement: :leader_redirects,
           description: "Leader redirect hints observed while routing"
+        )
+      ]
+    )
+  end
+
+  defp raft_command_metrics do
+    Event.build(
+      :starcite_raft_command_metrics,
+      [
+        counter("starcite_raft_command_total",
+          event_name: [:starcite, :raft, :command],
+          measurement: :count,
+          description: "Raft command outcomes by command type and local/retry path",
+          tags: [:command, :outcome]
         )
       ]
     )
