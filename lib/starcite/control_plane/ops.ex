@@ -57,7 +57,7 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_drained() :: boolean()
   def local_drained do
-    local_mode() == :write_node and Node.self() not in Observer.ready_nodes()
+    local_mode() == :write_node and local_node_status() == :draining
   end
 
   @spec wait_local_ready(pos_integer()) :: :ok | {:error, :timeout}
@@ -142,6 +142,18 @@ defmodule Starcite.ControlPlane.Ops do
       :ok
     else
       {:error, :invalid_write_node}
+    end
+  end
+
+  defp local_node_status do
+    local = Node.self()
+
+    case Observer.status() do
+      %{status: :ok, node_statuses: %{^local => %{status: status}}} when is_atom(status) ->
+        status
+
+      _other ->
+        nil
     end
   end
 

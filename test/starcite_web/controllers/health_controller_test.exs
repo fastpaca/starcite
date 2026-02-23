@@ -3,6 +3,8 @@ defmodule StarciteWeb.HealthControllerTest do
 
   import Plug.Test
 
+  alias Starcite.ControlPlane.{Observer, Ops}
+
   @endpoint StarciteWeb.Endpoint
 
   setup do
@@ -39,6 +41,31 @@ defmodule StarciteWeb.HealthControllerTest do
         assert body["status"] == "starting"
         assert body["reason"] in ["raft_sync", "router_sync", "draining"]
       end
+    end
+
+    test "reports raft_sync when write node is undrained but not raft-ready" do
+      assert Ops.local_mode() == :write_node
+
+      local = Node.self()
+      :ok = Ops.undrain_node(local)
+
+      original_state = :sys.get_state(Observer)
+
+      on_exit(fn ->
+        :sys.replace_state(Observer, fn _state -> original_state end)
+      end)
+
+      :sys.replace_state(Observer, fn %{raft_ready_nodes: raft_ready_nodes} = state ->
+        %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
+      end)
+
+      conn = request("/health/ready")
+      body = Jason.decode!(conn.resp_body)
+
+      assert conn.status == 503
+      assert body["status"] == "starting"
+      assert body["mode"] == "write_node"
+      assert body["reason"] == "raft_sync"
     end
   end
 end

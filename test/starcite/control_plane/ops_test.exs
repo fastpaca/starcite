@@ -51,6 +51,29 @@ defmodule Starcite.ControlPlane.OpsTest do
     end)
   end
 
+  test "local_drained tracks explicit drain status only" do
+    local = Node.self()
+    :ok = Ops.undrain_node(local)
+
+    eventually(fn ->
+      assert local in Observer.ready_nodes()
+      refute Ops.local_drained()
+    end)
+
+    original_state = :sys.get_state(Observer)
+
+    on_exit(fn ->
+      :sys.replace_state(Observer, fn _state -> original_state end)
+    end)
+
+    :sys.replace_state(Observer, fn %{raft_ready_nodes: raft_ready_nodes} = state ->
+      %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
+    end)
+
+    refute local in Observer.ready_nodes()
+    refute Ops.local_drained()
+  end
+
   test "parse_known_node validates against known node set" do
     node_name = Node.self() |> Atom.to_string()
 
