@@ -22,6 +22,8 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_task_timeout_ms 60_000
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
+  @consensus_refresh_interval_ms 1_000
+  @consensus_probe_timeout_ms 100
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -45,11 +47,13 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     )
 
     send(self(), :bootstrap)
+    schedule_consensus_refresh()
 
     {:ok,
      %{
        startup_complete?: false,
-       sync_ref: nil
+       sync_ref: nil,
+       consensus_ready?: false
      }}
   end
 
@@ -58,7 +62,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     my_groups = compute_my_groups()
     local_ready = my_groups == [] or Enum.all?(my_groups, &group_running?/1)
 
-    {:reply, state.startup_complete? and local_ready, state}
+    {:reply, state.startup_complete? and local_ready and state.consensus_ready?, state}
   end
 
   @impl true
@@ -69,8 +73,23 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @impl true
   def handle_info({:startup_complete, mode}, state)
       when mode in [:coordinator, :follower, :router] do
+    consensus_ready = consensus_ready?()
     Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
-    {:noreply, %{state | startup_complete?: true}}
+    {:noreply, %{state | startup_complete?: true, consensus_ready?: consensus_ready}}
+  end
+
+  @impl true
+  def handle_info(:refresh_consensus_ready, state) do
+    consensus_ready =
+      if state.startup_complete? do
+        consensus_ready?()
+      else
+        false
+      end
+
+    schedule_consensus_refresh()
+
+    {:noreply, %{state | consensus_ready?: consensus_ready}}
   end
 
   @impl true
@@ -107,6 +126,10 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   defp maybe_start_sync(state, _trigger), do: state
+
+  defp schedule_consensus_refresh do
+    Process.send_after(self(), :refresh_consensus_ready, @consensus_refresh_interval_ms)
+  end
 
   defp run_sync(:bootstrap, owner) do
     case WriteNodes.validate() do
@@ -316,6 +339,56 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
+  end
+
+  defp consensus_ready? do
+    case compute_my_groups() do
+      [] ->
+        true
+
+      my_groups ->
+        Enum.all?(my_groups, &group_consensus_ready?/1)
+    end
+  end
+
+  defp group_consensus_ready?(group_id) when is_integer(group_id) and group_id >= 0 do
+    server_id = RaftManager.server_id(group_id)
+    replicas = RaftManager.replicas_for_group(group_id)
+
+    if group_running?(group_id) do
+      case :ra.members({server_id, Node.self()}, @consensus_probe_timeout_ms) do
+        {:ok, members, {^server_id, leader_node}}
+        when is_atom(leader_node) and not is_nil(leader_node) ->
+          leader_node in replicas and quorum_visible?(server_id, members, replicas)
+
+        _ ->
+          false
+      end
+    else
+      false
+    end
+  end
+
+  defp quorum_visible?(server_id, members, replicas)
+       when is_atom(server_id) and is_list(members) and is_list(replicas) do
+    quorum = div(length(replicas), 2) + 1
+
+    member_count =
+      members
+      |> Enum.reduce(MapSet.new(), fn
+        {^server_id, node}, acc when is_atom(node) ->
+          if Enum.member?(replicas, node) do
+            MapSet.put(acc, node)
+          else
+            acc
+          end
+
+        _other, acc ->
+          acc
+      end)
+      |> MapSet.size()
+
+    member_count >= quorum
   end
 
   defp bootstrap_coordinator? do
