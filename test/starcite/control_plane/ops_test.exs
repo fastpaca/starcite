@@ -2,6 +2,7 @@ defmodule Starcite.ControlPlane.OpsTest do
   use ExUnit.Case, async: false
 
   alias Starcite.ControlPlane.{Observer, Ops, WriteNodes}
+  alias Starcite.DataPlane.RaftBootstrap
 
   setup do
     Ops.undrain_node(Node.self())
@@ -72,6 +73,39 @@ defmodule Starcite.ControlPlane.OpsTest do
 
     refute local in Observer.ready_nodes()
     refute Ops.local_drained()
+  end
+
+  test "wait_local_ready succeeds when follower bootstrap is complete" do
+    local = Node.self()
+    :ok = Ops.undrain_node(local)
+
+    original_observer_state = :sys.get_state(Observer)
+    original_bootstrap_state = :sys.get_state(RaftBootstrap)
+
+    on_exit(fn ->
+      :sys.replace_state(Observer, fn _state -> original_observer_state end)
+      :sys.replace_state(RaftBootstrap, fn _state -> original_bootstrap_state end)
+    end)
+
+    :sys.replace_state(RaftBootstrap, fn state ->
+      state
+      |> Map.put(:startup_complete?, true)
+      |> Map.put(:startup_mode, :follower)
+      |> Map.put(:consensus_ready?, false)
+    end)
+
+    :sys.replace_state(Observer, fn %{raft_ready_nodes: raft_ready_nodes} = state ->
+      %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
+    end)
+
+    send(Observer, :maintenance)
+
+    eventually(fn ->
+      observer = Observer.status()
+      assert get_in(observer, [:node_statuses, local, :status]) == :ready
+      assert local in Observer.ready_nodes()
+      assert :ok = Ops.wait_local_ready(500)
+    end)
   end
 
   test "parse_known_node validates against known node set" do

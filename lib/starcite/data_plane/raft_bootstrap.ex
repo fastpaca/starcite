@@ -52,6 +52,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     {:ok,
      %{
        startup_complete?: false,
+       startup_mode: nil,
        sync_ref: nil,
        consensus_ready?: false
      }}
@@ -61,8 +62,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   def handle_call(:ready?, _from, state) do
     my_groups = compute_my_groups()
     local_ready = my_groups == [] or Enum.all?(my_groups, &group_running?/1)
+    consensus_gate_satisfied = consensus_gate_satisfied?(state)
 
-    {:reply, state.startup_complete? and local_ready and state.consensus_ready?, state}
+    {:reply, state.startup_complete? and local_ready and consensus_gate_satisfied, state}
   end
 
   @impl true
@@ -75,7 +77,14 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       when mode in [:coordinator, :follower, :router] do
     consensus_ready = consensus_ready?()
     Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
-    {:noreply, %{state | startup_complete?: true, consensus_ready?: consensus_ready}}
+
+    {:noreply,
+     %{
+       state
+       | startup_complete?: true,
+         startup_mode: mode,
+         consensus_ready?: consensus_ready
+     }}
   end
 
   @impl true
@@ -350,6 +359,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         Enum.all?(my_groups, &group_consensus_ready?/1)
     end
   end
+
+  defp consensus_gate_satisfied?(%{startup_mode: :follower}), do: true
+  defp consensus_gate_satisfied?(%{consensus_ready?: consensus_ready}), do: consensus_ready
 
   defp group_consensus_ready?(group_id) when is_integer(group_id) and group_id >= 0 do
     server_id = RaftManager.server_id(group_id)
