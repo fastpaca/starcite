@@ -87,6 +87,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   def init(_opts) do
     :ok = :ra.start()
     :logger.set_application_level(:ra, :error)
+    :ok = :net_kernel.monitor_nodes(true, [:nodedown_reason])
 
     Logger.info(
       "RaftBootstrap: starting on #{Node.self()} (write_node=#{WriteNodes.write_node?(Node.self())})"
@@ -157,6 +158,26 @@ defmodule Starcite.DataPlane.RaftBootstrap do
      |> Map.put(:startup_complete?, true)
      |> Map.put(:startup_mode, mode)
      |> clear_consensus_state()}
+  end
+
+  @impl true
+  def handle_info({:nodedown, down_node, _reason}, state) when is_atom(down_node) do
+    {:noreply, maybe_mark_peer_down(state, down_node)}
+  end
+
+  @impl true
+  def handle_info({:nodedown, down_node}, state) when is_atom(down_node) do
+    {:noreply, maybe_mark_peer_down(state, down_node)}
+  end
+
+  @impl true
+  def handle_info({:nodeup, up_node, _info}, state) when is_atom(up_node) do
+    {:noreply, maybe_mark_peer_up(state, up_node)}
+  end
+
+  @impl true
+  def handle_info({:nodeup, up_node}, state) when is_atom(up_node) do
+    {:noreply, maybe_mark_peer_up(state, up_node)}
   end
 
   @impl true
@@ -474,13 +495,15 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   defp consensus_probe do
+    connected_nodes = connected_nodes_set()
+
     case compute_my_groups() do
       [] ->
         {:ok, %{checked_groups: 0, failing_group_id: nil, probe_result: "ok"}}
 
       my_groups ->
         Enum.reduce_while(my_groups, {:ok, 0}, fn group_id, {:ok, checked_groups} ->
-          case group_consensus_ready?(group_id) do
+          case group_consensus_ready?(group_id, connected_nodes) do
             :ok ->
               {:cont, {:ok, checked_groups + 1}}
 
@@ -575,13 +598,14 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp consensus_probe_age_ms(_consensus_last_probe_at_ms), do: nil
 
-  defp group_consensus_ready?(group_id) when is_integer(group_id) and group_id >= 0 do
+  defp group_consensus_ready?(group_id, connected_nodes)
+       when is_integer(group_id) and group_id >= 0 and is_struct(connected_nodes, MapSet) do
     server_id = RaftManager.server_id(group_id)
 
     if group_running?(group_id) do
-      metrics = :ra.key_metrics({server_id, Node.self()})
-
-      with {:ok, metrics} <- validate_group_metrics(group_id, metrics),
+      with :ok <- validate_group_quorum(group_id, connected_nodes),
+           metrics <- :ra.key_metrics({server_id, Node.self()}),
+           {:ok, metrics} <- validate_group_metrics(group_id, metrics),
            :ok <- validate_group_leader(group_id, server_id),
            :ok <- validate_group_membership(group_id, metrics) do
         :ok
@@ -591,6 +615,27 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       end
     else
       {:error, %{failing_group_id: group_id, probe_result: "local_group_down"}}
+    end
+  end
+
+  defp validate_group_quorum(group_id, connected_nodes)
+       when is_integer(group_id) and group_id >= 0 and is_struct(connected_nodes, MapSet) do
+    replicas = RaftManager.replicas_for_group(group_id)
+    required_quorum = quorum_size(length(replicas))
+
+    reachable_replicas =
+      Enum.count(replicas, fn replica -> MapSet.member?(connected_nodes, replica) end)
+
+    if reachable_replicas >= required_quorum do
+      :ok
+    else
+      {:error,
+       %{
+         failing_group_id: group_id,
+         probe_result: "quorum_unreachable",
+         reachable_replicas: reachable_replicas,
+         required_quorum: required_quorum
+       }}
     end
   end
 
@@ -686,6 +731,61 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       |> Map.put(:consensus_probe_success_streak, 0)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
     end
+  end
+
+  defp maybe_mark_peer_down(state, down_node)
+       when is_map(state) and is_atom(down_node) do
+    if state.startup_complete? and WriteNodes.write_node?(Node.self()) and
+         down_node in WriteNodes.nodes() and not local_quorum_available?() do
+      now_ms = System.monotonic_time(:millisecond)
+
+      failure_streak =
+        max(state.consensus_probe_failure_streak + 1, @consensus_failure_streak_required)
+
+      state
+      |> Map.put(:consensus_ready?, false)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+      |> Map.put(:consensus_probe_success_streak, 0)
+      |> Map.put(:consensus_probe_failure_streak, failure_streak)
+      |> Map.put(:consensus_probe_detail, %{
+        checked_groups: 0,
+        failing_group_id: nil,
+        probe_result: "quorum_unreachable",
+        node: Atom.to_string(down_node)
+      })
+    else
+      state
+    end
+  end
+
+  defp maybe_mark_peer_up(state, up_node) when is_map(state) and is_atom(up_node) do
+    if state.startup_complete? and WriteNodes.write_node?(Node.self()) and
+         up_node in WriteNodes.nodes() do
+      Map.put(state, :consensus_last_probe_at_ms, nil)
+    else
+      state
+    end
+  end
+
+  defp local_quorum_available? do
+    connected_nodes = connected_nodes_set()
+
+    compute_my_groups()
+    |> Enum.all?(fn group_id ->
+      replicas = RaftManager.replicas_for_group(group_id)
+      required_quorum = quorum_size(length(replicas))
+      reachable_replicas = Enum.count(replicas, &MapSet.member?(connected_nodes, &1))
+      reachable_replicas >= required_quorum
+    end)
+  end
+
+  defp connected_nodes_set do
+    [Node.self() | Node.list(:connected)]
+    |> MapSet.new()
+  end
+
+  defp quorum_size(replica_count) when is_integer(replica_count) and replica_count >= 0 do
+    div(replica_count, 2) + 1
   end
 
   defp normalize_leader_hint({server_id, leader_node})
