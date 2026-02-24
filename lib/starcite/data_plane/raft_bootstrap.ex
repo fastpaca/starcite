@@ -23,7 +23,10 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
   @consensus_refresh_interval_ms 1_000
-  @consensus_probe_timeout_ms 100
+  @consensus_probe_timeout_ms 200
+  @consensus_probe_ttl_ms 3_000
+  @consensus_success_streak_required 1
+  @consensus_failure_streak_required 1
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -34,6 +37,20 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     case Process.whereis(__MODULE__) do
       nil -> false
       pid -> safe_ready_call(pid)
+    end
+  end
+
+  @doc "Returns local intrinsic readiness status used by health/routing gates."
+  @spec readiness_status() :: map()
+  def readiness_status do
+    fallback = readiness_status_fallback()
+
+    case Process.whereis(__MODULE__) do
+      nil ->
+        fallback
+
+      pid ->
+        safe_readiness_status_call(pid, fallback)
     end
   end
 
@@ -54,17 +71,27 @@ defmodule Starcite.DataPlane.RaftBootstrap do
        startup_complete?: false,
        startup_mode: nil,
        sync_ref: nil,
-       consensus_ready?: false
+       consensus_ready?: false,
+       consensus_last_probe_at_ms: nil,
+       consensus_probe_success_streak: 0,
+       consensus_probe_failure_streak: 0,
+       consensus_probe_detail: %{
+         checked_groups: 0,
+         failing_group_id: nil,
+         probe_result: "startup_sync"
+       }
      }}
   end
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    my_groups = compute_my_groups()
-    local_ready = my_groups == [] or Enum.all?(my_groups, &group_running?/1)
-    consensus_gate_satisfied = consensus_gate_satisfied?(state)
+    status = readiness_status_from_state(state)
+    {:reply, status.ready?, state}
+  end
 
-    {:reply, state.startup_complete? and local_ready and consensus_gate_satisfied, state}
+  @impl true
+  def handle_call(:readiness_status, _from, state) do
+    {:reply, readiness_status_from_state(state), state}
   end
 
   @impl true
@@ -75,30 +102,29 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @impl true
   def handle_info({:startup_complete, mode}, state)
       when mode in [:coordinator, :follower, :router] do
-    consensus_ready = consensus_ready?()
     Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
 
-    {:noreply,
-     %{
-       state
-       | startup_complete?: true,
-         startup_mode: mode,
-         consensus_ready?: consensus_ready
-     }}
+    next_state =
+      state
+      |> Map.put(:startup_complete?, true)
+      |> Map.put(:startup_mode, mode)
+      |> refresh_consensus_state()
+
+    {:noreply, next_state}
   end
 
   @impl true
   def handle_info(:refresh_consensus_ready, state) do
-    consensus_ready =
+    next_state =
       if state.startup_complete? do
-        consensus_ready?()
+        refresh_consensus_state(state)
       else
-        false
+        clear_consensus_state(state)
       end
 
     schedule_consensus_refresh()
 
-    {:noreply, %{state | consensus_ready?: consensus_ready}}
+    {:noreply, next_state}
   end
 
   @impl true
@@ -182,6 +208,12 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     GenServer.call(pid, :ready?, @ready_call_timeout_ms)
   catch
     :exit, _reason -> false
+  end
+
+  defp safe_readiness_status_call(pid, fallback) when is_map(fallback) do
+    GenServer.call(pid, :readiness_status, @ready_call_timeout_ms)
+  catch
+    :exit, _reason -> fallback
   end
 
   defp wait_and_join_group(group_id) do
@@ -350,58 +382,206 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     Process.whereis(RaftManager.server_id(group_id)) != nil
   end
 
-  defp consensus_ready? do
-    case compute_my_groups() do
-      [] ->
-        true
+  defp refresh_consensus_state(state) when is_map(state) do
+    now_ms = System.monotonic_time(:millisecond)
 
-      my_groups ->
-        Enum.all?(my_groups, &group_consensus_ready?/1)
+    case consensus_probe() do
+      {:ok, detail} ->
+        success_streak = state.consensus_probe_success_streak + 1
+
+        %{
+          state
+          | consensus_ready?: success_streak >= @consensus_success_streak_required,
+            consensus_last_probe_at_ms: now_ms,
+            consensus_probe_success_streak: success_streak,
+            consensus_probe_failure_streak: 0,
+            consensus_probe_detail: detail
+        }
+
+      {:error, detail} ->
+        failure_streak = state.consensus_probe_failure_streak + 1
+
+        %{
+          state
+          | consensus_ready?: failure_streak < @consensus_failure_streak_required,
+            consensus_last_probe_at_ms: now_ms,
+            consensus_probe_success_streak: 0,
+            consensus_probe_failure_streak: failure_streak,
+            consensus_probe_detail: detail
+        }
     end
   end
 
-  defp consensus_gate_satisfied?(%{startup_mode: :follower}), do: true
-  defp consensus_gate_satisfied?(%{consensus_ready?: consensus_ready}), do: consensus_ready
+  defp clear_consensus_state(state) when is_map(state) do
+    %{
+      state
+      | consensus_ready?: false,
+        consensus_last_probe_at_ms: nil,
+        consensus_probe_success_streak: 0,
+        consensus_probe_failure_streak: 0,
+        consensus_probe_detail: %{
+          checked_groups: 0,
+          failing_group_id: nil,
+          probe_result: "startup_sync"
+        }
+    }
+  end
+
+  defp consensus_probe do
+    case compute_my_groups() do
+      [] ->
+        {:ok, %{checked_groups: 0, failing_group_id: nil, probe_result: "ok"}}
+
+      my_groups ->
+        Enum.reduce_while(my_groups, {:ok, 0}, fn group_id, {:ok, checked_groups} ->
+          case group_consensus_ready?(group_id) do
+            :ok ->
+              {:cont, {:ok, checked_groups + 1}}
+
+            {:error, detail} ->
+              {:halt, {:error, Map.put(detail, :checked_groups, checked_groups + 1)}}
+          end
+        end)
+        |> case do
+          {:ok, checked_groups} ->
+            {:ok, %{checked_groups: checked_groups, failing_group_id: nil, probe_result: "ok"}}
+
+          {:error, detail} ->
+            {:error, detail}
+        end
+    end
+  end
+
+  defp consensus_gate_satisfied?(%{
+         consensus_ready?: consensus_ready,
+         consensus_last_probe_at_ms: consensus_last_probe_at_ms
+       }) do
+    consensus_ready and consensus_probe_fresh?(consensus_last_probe_at_ms)
+  end
+
+  defp readiness_status_from_state(state) when is_map(state) do
+    ready? = state.startup_complete? and consensus_gate_satisfied?(state)
+    probe_fresh? = consensus_probe_fresh?(state.consensus_last_probe_at_ms)
+
+    probe_detail =
+      Map.merge(readiness_detail_base(state, probe_fresh?), state.consensus_probe_detail)
+
+    {reason, detail} =
+      cond do
+        ready? ->
+          {:ok, probe_detail}
+
+        not state.startup_complete? ->
+          {:startup_sync, probe_detail}
+
+        true ->
+          {:raft_sync, probe_detail}
+      end
+
+    %{
+      ready?: ready?,
+      reason: reason,
+      detail: detail
+    }
+  end
+
+  defp readiness_detail_base(state, probe_fresh?)
+       when is_map(state) and is_boolean(probe_fresh?) do
+    %{
+      startup_mode: state.startup_mode,
+      consensus_ready?: state.consensus_ready?,
+      consensus_probe_fresh?: probe_fresh?,
+      consensus_probe_age_ms: consensus_probe_age_ms(state.consensus_last_probe_at_ms),
+      consensus_success_streak: state.consensus_probe_success_streak,
+      consensus_failure_streak: state.consensus_probe_failure_streak
+    }
+  end
+
+  defp readiness_status_fallback do
+    %{
+      ready?: false,
+      reason: :bootstrap_down,
+      detail: %{
+        startup_mode: nil,
+        consensus_ready?: false,
+        consensus_probe_fresh?: false,
+        consensus_probe_age_ms: nil,
+        consensus_success_streak: 0,
+        consensus_failure_streak: 0,
+        checked_groups: 0,
+        failing_group_id: nil,
+        probe_result: "bootstrap_down"
+      }
+    }
+  end
+
+  defp consensus_probe_fresh?(consensus_last_probe_at_ms)
+       when is_integer(consensus_last_probe_at_ms) do
+    System.monotonic_time(:millisecond) - consensus_last_probe_at_ms <= @consensus_probe_ttl_ms
+  end
+
+  defp consensus_probe_fresh?(_consensus_last_probe_at_ms), do: false
+
+  defp consensus_probe_age_ms(consensus_last_probe_at_ms)
+       when is_integer(consensus_last_probe_at_ms) do
+    max(System.monotonic_time(:millisecond) - consensus_last_probe_at_ms, 0)
+  end
+
+  defp consensus_probe_age_ms(_consensus_last_probe_at_ms), do: nil
 
   defp group_consensus_ready?(group_id) when is_integer(group_id) and group_id >= 0 do
     server_id = RaftManager.server_id(group_id)
-    replicas = RaftManager.replicas_for_group(group_id)
 
     if group_running?(group_id) do
-      case :ra.members({server_id, Node.self()}, @consensus_probe_timeout_ms) do
-        {:ok, members, {^server_id, leader_node}}
+      case :ra.consistent_query(
+             {server_id, Node.self()},
+             &consensus_probe_query/1,
+             @consensus_probe_timeout_ms
+           ) do
+        {:ok, _reply, {^server_id, leader_node}}
         when is_atom(leader_node) and not is_nil(leader_node) ->
-          leader_node in replicas and quorum_visible?(server_id, members, replicas)
+          :ok
+
+        {:timeout, leader} ->
+          {:error,
+           %{
+             failing_group_id: group_id,
+             probe_result: "timeout",
+             leader: normalize_leader_hint(leader)
+           }}
+
+        {:error, reason} ->
+          {:error,
+           %{
+             failing_group_id: group_id,
+             probe_result: "error",
+             error: inspect(reason)
+           }}
 
         _ ->
-          false
+          {:error,
+           %{
+             failing_group_id: group_id,
+             probe_result: "unexpected"
+           }}
       end
     else
-      false
+      {:error, %{failing_group_id: group_id, probe_result: "local_group_down"}}
     end
   end
 
-  defp quorum_visible?(server_id, members, replicas)
-       when is_atom(server_id) and is_list(members) and is_list(replicas) do
-    quorum = div(length(replicas), 2) + 1
+  defp consensus_probe_query(_state), do: :ok
 
-    member_count =
-      members
-      |> Enum.reduce(MapSet.new(), fn
-        {^server_id, node}, acc when is_atom(node) ->
-          if Enum.member?(replicas, node) do
-            MapSet.put(acc, node)
-          else
-            acc
-          end
-
-        _other, acc ->
-          acc
-      end)
-      |> MapSet.size()
-
-    member_count >= quorum
+  defp normalize_leader_hint({server_id, leader_node})
+       when is_atom(server_id) and not is_nil(server_id) and is_atom(leader_node) and
+              not is_nil(leader_node) do
+    %{
+      server_id: Atom.to_string(server_id),
+      node: Atom.to_string(leader_node)
+    }
   end
+
+  defp normalize_leader_hint(other), do: inspect(other)
 
   defp bootstrap_coordinator? do
     case WriteNodes.nodes() do

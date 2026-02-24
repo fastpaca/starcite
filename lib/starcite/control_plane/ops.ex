@@ -47,12 +47,17 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_ready() :: boolean()
   def local_ready do
+    local_readiness().ready?
+  end
+
+  @spec local_readiness() :: map()
+  def local_readiness do
     case local_mode() do
       :write_node ->
-        Node.self() in Observer.ready_nodes()
+        write_node_readiness()
 
       :router_node ->
-        RaftBootstrap.ready?()
+        router_node_readiness()
     end
   end
 
@@ -157,6 +162,51 @@ defmodule Starcite.ControlPlane.Ops do
 
       _other ->
         nil
+    end
+  end
+
+  defp write_node_readiness do
+    raft_status = RaftBootstrap.readiness_status()
+    observer_ready? = Node.self() in Observer.ready_nodes()
+
+    cond do
+      local_drained() ->
+        %{
+          ready?: false,
+          reason: :draining,
+          detail: %{}
+        }
+
+      not raft_status.ready? ->
+        raft_status
+
+      not observer_ready? ->
+        %{
+          ready?: false,
+          reason: :observer_sync,
+          detail: %{}
+        }
+
+      true ->
+        %{
+          ready?: true,
+          reason: :ok,
+          detail: %{}
+        }
+    end
+  end
+
+  defp router_node_readiness do
+    raft_status = RaftBootstrap.readiness_status()
+
+    if raft_status.ready? do
+      %{
+        ready?: true,
+        reason: :ok,
+        detail: %{}
+      }
+    else
+      raft_status
     end
   end
 

@@ -75,7 +75,7 @@ defmodule Starcite.ControlPlane.OpsTest do
     refute Ops.local_drained()
   end
 
-  test "wait_local_ready succeeds when follower bootstrap is complete" do
+  test "wait_local_ready succeeds once follower convergence is restored" do
     local = Node.self()
     :ok = Ops.undrain_node(local)
 
@@ -88,22 +88,45 @@ defmodule Starcite.ControlPlane.OpsTest do
     end)
 
     :sys.replace_state(RaftBootstrap, fn state ->
+      now_ms = System.monotonic_time(:millisecond)
+
       state
       |> Map.put(:startup_complete?, true)
       |> Map.put(:startup_mode, :follower)
       |> Map.put(:consensus_ready?, false)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+      |> Map.put(:consensus_probe_success_streak, 0)
+      |> Map.put(:consensus_probe_failure_streak, 1)
+      |> Map.put(:consensus_probe_detail, %{
+        checked_groups: 1,
+        failing_group_id: 0,
+        probe_result: "timeout"
+      })
     end)
 
     :sys.replace_state(Observer, fn %{raft_ready_nodes: raft_ready_nodes} = state ->
       %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
     end)
 
-    send(Observer, :maintenance)
+    assert {:error, :timeout} = Ops.wait_local_ready(100)
+
+    :sys.replace_state(RaftBootstrap, fn state ->
+      now_ms = System.monotonic_time(:millisecond)
+
+      state
+      |> Map.put(:consensus_ready?, true)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+      |> Map.put(:consensus_probe_success_streak, 1)
+      |> Map.put(:consensus_probe_failure_streak, 0)
+      |> Map.put(:consensus_probe_detail, %{
+        checked_groups: 1,
+        failing_group_id: nil,
+        probe_result: "ok"
+      })
+    end)
 
     eventually(fn ->
-      observer = Observer.status()
-      assert get_in(observer, [:node_statuses, local, :status]) == :ready
-      assert local in Observer.ready_nodes()
+      send(Observer, :maintenance)
       assert :ok = Ops.wait_local_ready(500)
     end)
   end
