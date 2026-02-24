@@ -22,7 +22,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_task_timeout_ms 60_000
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
-  @consensus_probe_timeout_ms 200
   @consensus_probe_ttl_ms 3_000
   @consensus_success_streak_required 1
   @consensus_failure_streak_required 1
@@ -54,6 +53,33 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
       pid ->
         safe_readiness_status_call(pid, message, timeout_ms, fallback)
+    end
+  end
+
+  @doc "Records write-path outcomes so readiness can fail fast on Raft timeouts."
+  @spec record_write_outcome(
+          :local_ok
+          | :local_error
+          | :local_timeout
+          | :leader_retry_ok
+          | :leader_retry_error
+          | :leader_retry_timeout
+        ) :: :ok
+  def record_write_outcome(outcome)
+      when outcome in [
+             :local_ok,
+             :local_error,
+             :local_timeout,
+             :leader_retry_ok,
+             :leader_retry_error,
+             :leader_retry_timeout
+           ] do
+    case Process.whereis(__MODULE__) do
+      nil ->
+        :ok
+
+      pid ->
+        GenServer.cast(pid, {:write_outcome, outcome})
     end
   end
 
@@ -101,6 +127,19 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   def handle_call(:readiness_status, _from, state) do
     next_state = maybe_refresh_consensus_state(state, false)
     {:reply, readiness_status_from_state(next_state), next_state}
+  end
+
+  @impl true
+  def handle_cast({:write_outcome, outcome}, state)
+      when outcome in [
+             :local_ok,
+             :local_error,
+             :local_timeout,
+             :leader_retry_ok,
+             :leader_retry_error,
+             :leader_retry_timeout
+           ] do
+    {:noreply, maybe_mark_write_timeout(state, outcome)}
   end
 
   @impl true
@@ -540,44 +579,114 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     server_id = RaftManager.server_id(group_id)
 
     if group_running?(group_id) do
-      case :ra.consistent_query(
-             {server_id, Node.self()},
-             &consensus_probe_query/1,
-             @consensus_probe_timeout_ms
-           ) do
-        {:ok, _reply, {^server_id, leader_node}}
-        when is_atom(leader_node) and not is_nil(leader_node) ->
-          :ok
+      metrics = :ra.key_metrics({server_id, Node.self()})
 
-        {:timeout, leader} ->
-          {:error,
-           %{
-             failing_group_id: group_id,
-             probe_result: "timeout",
-             leader: normalize_leader_hint(leader)
-           }}
-
-        {:error, reason} ->
-          {:error,
-           %{
-             failing_group_id: group_id,
-             probe_result: "error",
-             error: inspect(reason)
-           }}
-
-        _ ->
-          {:error,
-           %{
-             failing_group_id: group_id,
-             probe_result: "unexpected"
-           }}
+      with {:ok, metrics} <- validate_group_metrics(group_id, metrics),
+           :ok <- validate_group_leader(group_id, server_id),
+           :ok <- validate_group_membership(group_id, metrics) do
+        :ok
+      else
+        {:error, detail} ->
+          {:error, detail}
       end
     else
       {:error, %{failing_group_id: group_id, probe_result: "local_group_down"}}
     end
   end
 
-  defp consensus_probe_query(_state), do: :ok
+  defp validate_group_metrics(group_id, metrics)
+       when is_integer(group_id) and group_id >= 0 and is_map(metrics) do
+    state = Map.get(metrics, :state)
+
+    case state do
+      :leader ->
+        {:ok, metrics}
+
+      :follower ->
+        {:ok, metrics}
+
+      _ ->
+        {:error,
+         %{
+           failing_group_id: group_id,
+           probe_result: "raft_state",
+           state: inspect(state)
+         }}
+    end
+  end
+
+  defp validate_group_metrics(group_id, _metrics) when is_integer(group_id) and group_id >= 0 do
+    {:error, %{failing_group_id: group_id, probe_result: "metrics_unavailable"}}
+  end
+
+  defp validate_group_leader(group_id, server_id)
+       when is_integer(group_id) and group_id >= 0 and is_atom(server_id) do
+    cluster_name = RaftManager.cluster_name(group_id)
+
+    case :ra_leaderboard.lookup_leader(cluster_name) do
+      {^server_id, leader_node} when is_atom(leader_node) and not is_nil(leader_node) ->
+        :ok
+
+      :undefined ->
+        {:error, %{failing_group_id: group_id, probe_result: "leader_unknown"}}
+
+      leader ->
+        {:error,
+         %{
+           failing_group_id: group_id,
+           probe_result: "leader_mismatch",
+           leader: normalize_leader_hint(leader)
+         }}
+    end
+  end
+
+  defp validate_group_membership(group_id, metrics)
+       when is_integer(group_id) and group_id >= 0 and is_map(metrics) do
+    case Map.get(metrics, :membership) do
+      :voter ->
+        :ok
+
+      membership ->
+        {:error,
+         %{
+           failing_group_id: group_id,
+           probe_result: "membership",
+           membership: inspect(membership)
+         }}
+    end
+  end
+
+  defp maybe_mark_write_timeout(state, outcome)
+       when is_map(state) and
+              outcome in [:local_ok, :local_error, :leader_retry_ok, :leader_retry_error] do
+    state
+  end
+
+  defp maybe_mark_write_timeout(state, outcome)
+       when is_map(state) and outcome in [:local_timeout, :leader_retry_timeout] do
+    now_ms = System.monotonic_time(:millisecond)
+
+    failure_streak = state.consensus_probe_failure_streak + 1
+
+    if failure_streak >= @consensus_failure_streak_required do
+      state
+      |> Map.put(:consensus_ready?, false)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+      |> Map.put(:consensus_probe_success_streak, 0)
+      |> Map.put(:consensus_probe_failure_streak, failure_streak)
+      |> Map.put(:consensus_probe_detail, %{
+        checked_groups: 0,
+        failing_group_id: nil,
+        probe_result: "write_timeout",
+        outcome: Atom.to_string(outcome)
+      })
+    else
+      state
+      |> Map.put(:consensus_probe_failure_streak, failure_streak)
+      |> Map.put(:consensus_probe_success_streak, 0)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+    end
+  end
 
   defp normalize_leader_hint({server_id, leader_node})
        when is_atom(server_id) and not is_nil(server_id) and is_atom(leader_node) and
