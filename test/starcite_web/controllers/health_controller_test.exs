@@ -168,20 +168,39 @@ defmodule StarciteWeb.HealthControllerTest do
       assert body["mode"] == "write_node"
     end
 
-    test "reports raft_sync when write node is undrained but not raft-ready" do
+    test "reports observer_sync when raft is healthy but observer excludes write node" do
       assert Ops.local_mode() == :write_node
 
       local = Node.self()
       :ok = Ops.undrain_node(local)
 
-      original_state = :sys.get_state(Observer)
+      original_observer_state = :sys.get_state(Observer)
+      original_bootstrap_state = :sys.get_state(RaftBootstrap)
 
       on_exit(fn ->
-        :sys.replace_state(Observer, fn _state -> original_state end)
+        :sys.replace_state(Observer, fn _state -> original_observer_state end)
+        :sys.replace_state(RaftBootstrap, fn _state -> original_bootstrap_state end)
       end)
 
       :sys.replace_state(Observer, fn %{raft_ready_nodes: raft_ready_nodes} = state ->
         %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
+      end)
+
+      :sys.replace_state(RaftBootstrap, fn state ->
+        now_ms = System.monotonic_time(:millisecond)
+
+        state
+        |> Map.put(:startup_complete?, true)
+        |> Map.put(:startup_mode, :follower)
+        |> Map.put(:consensus_ready?, true)
+        |> Map.put(:consensus_last_probe_at_ms, now_ms)
+        |> Map.put(:consensus_probe_success_streak, 1)
+        |> Map.put(:consensus_probe_failure_streak, 0)
+        |> Map.put(:consensus_probe_detail, %{
+          checked_groups: 1,
+          failing_group_id: nil,
+          probe_result: "ok"
+        })
       end)
 
       conn = request("/health/ready")
@@ -190,7 +209,7 @@ defmodule StarciteWeb.HealthControllerTest do
       assert conn.status == 503
       assert body["status"] == "starting"
       assert body["mode"] == "write_node"
-      assert body["reason"] == "raft_sync"
+      assert body["reason"] == "observer_sync"
     end
   end
 end
