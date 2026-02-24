@@ -3,7 +3,17 @@ defmodule Starcite.DataPlane.RaftPipelineClient do
   Thin RA command client using `:ra.pipeline_command/4` directly from the
   caller process.
 
-  This avoids the extra per-command hop through intermediate worker processes.
+  Why this is faster on the hot write path than `:ra.process_command/3`:
+
+  - enqueue is asynchronous, so callers do not block the leader's ingress on a
+    synchronous call path;
+  - multiple in-flight commands can be coalesced by the leader into fewer
+    append entries/WAL write cycles;
+  - we avoid an extra helper-process hop per command and wait directly for the
+    correlated `:ra_event` reply in the caller process.
+
+  The durability/ack point is unchanged: callers only return `{:ok, reply}`
+  after receiving the applied reply for their correlation id.
   """
 
   @type command_result ::
