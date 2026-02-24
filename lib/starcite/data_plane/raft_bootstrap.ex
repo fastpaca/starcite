@@ -22,11 +22,11 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_task_timeout_ms 60_000
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
-  @consensus_refresh_interval_ms 1_000
   @consensus_probe_timeout_ms 200
   @consensus_probe_ttl_ms 3_000
   @consensus_success_streak_required 1
   @consensus_failure_streak_required 1
+  @readiness_refresh_call_timeout_ms 5_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -41,16 +41,19 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   @doc "Returns local intrinsic readiness status used by health/routing gates."
-  @spec readiness_status() :: map()
-  def readiness_status do
+  @spec readiness_status(keyword()) :: map()
+  def readiness_status(opts \\ []) when is_list(opts) do
     fallback = readiness_status_fallback()
+    refresh? = Keyword.get(opts, :refresh?, false)
+    timeout_ms = readiness_status_timeout_ms(refresh?)
+    message = {:readiness_status, refresh?}
 
     case Process.whereis(__MODULE__) do
       nil ->
         fallback
 
       pid ->
-        safe_readiness_status_call(pid, fallback)
+        safe_readiness_status_call(pid, message, timeout_ms, fallback)
     end
   end
 
@@ -64,7 +67,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     )
 
     send(self(), :bootstrap)
-    schedule_consensus_refresh()
 
     {:ok,
      %{
@@ -90,8 +92,15 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   @impl true
+  def handle_call({:readiness_status, refresh?}, _from, state) when is_boolean(refresh?) do
+    next_state = maybe_refresh_consensus_state(state, refresh?)
+    {:reply, readiness_status_from_state(next_state), next_state}
+  end
+
+  @impl true
   def handle_call(:readiness_status, _from, state) do
-    {:reply, readiness_status_from_state(state), state}
+    next_state = maybe_refresh_consensus_state(state, false)
+    {:reply, readiness_status_from_state(next_state), next_state}
   end
 
   @impl true
@@ -104,27 +113,11 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       when mode in [:coordinator, :follower, :router] do
     Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
 
-    next_state =
-      state
-      |> Map.put(:startup_complete?, true)
-      |> Map.put(:startup_mode, mode)
-      |> refresh_consensus_state()
-
-    {:noreply, next_state}
-  end
-
-  @impl true
-  def handle_info(:refresh_consensus_ready, state) do
-    next_state =
-      if state.startup_complete? do
-        refresh_consensus_state(state)
-      else
-        clear_consensus_state(state)
-      end
-
-    schedule_consensus_refresh()
-
-    {:noreply, next_state}
+    {:noreply,
+     state
+     |> Map.put(:startup_complete?, true)
+     |> Map.put(:startup_mode, mode)
+     |> clear_consensus_state()}
   end
 
   @impl true
@@ -161,10 +154,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   defp maybe_start_sync(state, _trigger), do: state
-
-  defp schedule_consensus_refresh do
-    Process.send_after(self(), :refresh_consensus_ready, @consensus_refresh_interval_ms)
-  end
 
   defp run_sync(:bootstrap, owner) do
     case WriteNodes.validate() do
@@ -210,11 +199,15 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     :exit, _reason -> false
   end
 
-  defp safe_readiness_status_call(pid, fallback) when is_map(fallback) do
-    GenServer.call(pid, :readiness_status, @ready_call_timeout_ms)
+  defp safe_readiness_status_call(pid, message, timeout_ms, fallback)
+       when is_map(fallback) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(pid, message, timeout_ms)
   catch
     :exit, _reason -> fallback
   end
+
+  defp readiness_status_timeout_ms(true), do: @readiness_refresh_call_timeout_ms
+  defp readiness_status_timeout_ms(false), do: @ready_call_timeout_ms
 
   defp wait_and_join_group(group_id) do
     server_id = RaftManager.server_id(group_id)
@@ -425,6 +418,20 @@ defmodule Starcite.DataPlane.RaftBootstrap do
           probe_result: "startup_sync"
         }
     }
+  end
+
+  defp maybe_refresh_consensus_state(state, refresh?)
+       when is_map(state) and is_boolean(refresh?) do
+    cond do
+      not state.startup_complete? ->
+        clear_consensus_state(state)
+
+      refresh? and not consensus_probe_fresh?(state.consensus_last_probe_at_ms) ->
+        refresh_consensus_state(state)
+
+      true ->
+        state
+    end
   end
 
   defp consensus_probe do

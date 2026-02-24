@@ -19,7 +19,7 @@ defmodule StarciteWeb.HealthController do
   """
   def ready(conn, _params) do
     mode = Ops.local_mode() |> Atom.to_string()
-    readiness = Ops.local_readiness()
+    readiness = Ops.local_readiness(refresh?: true)
 
     if readiness.ready? do
       json(conn, %{status: "ok", mode: mode})

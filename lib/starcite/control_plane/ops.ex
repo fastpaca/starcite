@@ -45,19 +45,21 @@ defmodule Starcite.ControlPlane.Ops do
     end
   end
 
-  @spec local_ready() :: boolean()
-  def local_ready do
-    local_readiness().ready?
+  @spec local_ready(keyword()) :: boolean()
+  def local_ready(opts \\ []) when is_list(opts) do
+    local_readiness(opts).ready?
   end
 
-  @spec local_readiness() :: map()
-  def local_readiness do
+  @spec local_readiness(keyword()) :: map()
+  def local_readiness(opts \\ []) when is_list(opts) do
+    refresh? = Keyword.get(opts, :refresh?, false)
+
     case local_mode() do
       :write_node ->
-        write_node_readiness()
+        write_node_readiness(refresh?)
 
       :router_node ->
-        router_node_readiness()
+        router_node_readiness(refresh?)
     end
   end
 
@@ -71,7 +73,7 @@ defmodule Starcite.ControlPlane.Ops do
   @spec wait_local_ready(pos_integer()) :: :ok | {:error, :timeout}
   def wait_local_ready(timeout_ms \\ 30_000)
       when is_integer(timeout_ms) and timeout_ms > 0 do
-    wait_until(&local_ready/0, timeout_ms)
+    wait_until(fn -> local_ready(refresh?: true) end, timeout_ms)
   end
 
   @spec wait_local_drained(pos_integer()) :: :ok | {:error, :timeout}
@@ -165,8 +167,8 @@ defmodule Starcite.ControlPlane.Ops do
     end
   end
 
-  defp write_node_readiness do
-    raft_status = RaftBootstrap.readiness_status()
+  defp write_node_readiness(refresh?) when is_boolean(refresh?) do
+    raft_status = RaftBootstrap.readiness_status(refresh?: refresh?)
     observer_ready? = Node.self() in Observer.ready_nodes()
 
     cond do
@@ -196,8 +198,8 @@ defmodule Starcite.ControlPlane.Ops do
     end
   end
 
-  defp router_node_readiness do
-    raft_status = RaftBootstrap.readiness_status()
+  defp router_node_readiness(refresh?) when is_boolean(refresh?) do
+    raft_status = RaftBootstrap.readiness_status(refresh?: refresh?)
 
     if raft_status.ready? do
       %{
