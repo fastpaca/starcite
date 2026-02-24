@@ -38,13 +38,7 @@ defmodule StarciteWeb.HealthController do
 
   defp readiness_reason(:draining, _mode), do: "draining"
   defp readiness_reason(:observer_sync, "write_node"), do: "observer_sync"
-  defp readiness_reason(:startup_sync, "write_node"), do: "raft_sync"
-  defp readiness_reason(:raft_sync, "write_node"), do: "raft_sync"
-  defp readiness_reason(:bootstrap_down, "write_node"), do: "raft_sync"
   defp readiness_reason(_reason, "write_node"), do: "raft_sync"
-
-  defp readiness_reason(:startup_sync, _mode), do: "router_sync"
-  defp readiness_reason(:bootstrap_down, _mode), do: "router_sync"
   defp readiness_reason(_reason, _mode), do: "router_sync"
 
   defp put_detail(body, detail) when map_size(detail) == 0, do: body

@@ -52,15 +52,11 @@ defmodule Starcite.ControlPlane.Ops do
 
   @spec local_readiness(keyword()) :: map()
   def local_readiness(opts \\ []) when is_list(opts) do
+    mode = local_mode()
     refresh? = Keyword.get(opts, :refresh?, false)
+    checks = readiness_checks(mode, refresh?)
 
-    case local_mode() do
-      :write_node ->
-        write_node_readiness(refresh?)
-
-      :router_node ->
-        router_node_readiness(refresh?)
-    end
+    compose_readiness(mode, checks)
   end
 
   @spec local_drained() :: boolean()
@@ -167,10 +163,23 @@ defmodule Starcite.ControlPlane.Ops do
     end
   end
 
-  defp write_node_readiness(refresh?) when is_boolean(refresh?) do
-    raft_status = RaftBootstrap.readiness_status(refresh?: refresh?)
-    observer_ready? = Node.self() in Observer.ready_nodes()
+  defp readiness_checks(mode, refresh?)
+       when mode in [:write_node, :router_node] and is_boolean(refresh?) do
+    %{
+      in_service: in_service_gate(mode),
+      write_path: write_path_gate(refresh?)
+    }
+  end
 
+  defp in_service_gate(:router_node) do
+    %{
+      ready?: true,
+      reason: :ok,
+      detail: %{}
+    }
+  end
+
+  defp in_service_gate(:write_node) do
     cond do
       local_drained() ->
         %{
@@ -179,37 +188,69 @@ defmodule Starcite.ControlPlane.Ops do
           detail: %{}
         }
 
-      not raft_status.ready? ->
-        raft_status
-
-      not observer_ready? ->
-        %{
-          ready?: false,
-          reason: :observer_sync,
-          detail: %{}
-        }
-
-      true ->
+      Node.self() in Observer.ready_nodes() ->
         %{
           ready?: true,
           reason: :ok,
           detail: %{}
         }
+
+      true ->
+        %{
+          ready?: false,
+          reason: :observer_sync,
+          detail: %{}
+        }
     end
   end
 
-  defp router_node_readiness(refresh?) when is_boolean(refresh?) do
-    raft_status = RaftBootstrap.readiness_status(refresh?: refresh?)
+  defp write_path_gate(refresh?) when is_boolean(refresh?) do
+    RaftBootstrap.readiness_status(refresh?: refresh?)
+  end
 
-    if raft_status.ready? do
-      %{
-        ready?: true,
-        reason: :ok,
-        detail: %{}
-      }
+  defp compose_readiness(:router_node, %{write_path: write_path} = checks) when is_map(checks) do
+    if write_path.ready? do
+      ready_result(checks)
     else
-      raft_status
+      not_ready_result(write_path.reason, write_path.detail, checks)
     end
+  end
+
+  defp compose_readiness(:write_node, %{in_service: in_service, write_path: write_path} = checks)
+       when is_map(checks) do
+    # Keep gate precedence explicit: operator drain first, then write-path safety, then observer routing.
+    cond do
+      in_service.reason == :draining ->
+        not_ready_result(:draining, %{}, checks)
+
+      not write_path.ready? ->
+        not_ready_result(write_path.reason, write_path.detail, checks)
+
+      not in_service.ready? ->
+        not_ready_result(:observer_sync, %{}, checks)
+
+      true ->
+        ready_result(checks)
+    end
+  end
+
+  defp ready_result(checks) when is_map(checks) do
+    %{
+      ready?: true,
+      reason: :ok,
+      detail: %{},
+      checks: checks
+    }
+  end
+
+  defp not_ready_result(reason, detail, checks)
+       when is_atom(reason) and is_map(detail) and is_map(checks) do
+    %{
+      ready?: false,
+      reason: reason,
+      detail: detail,
+      checks: checks
+    }
   end
 
   defp local_drain_complete do
