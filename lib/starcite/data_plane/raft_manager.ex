@@ -200,35 +200,42 @@ defmodule Starcite.DataPlane.RaftManager do
 
     data_dir_root = Application.get_env(:starcite, :raft_data_dir, "priv/raft")
     data_dir = Path.join([data_dir_root, "group_#{group_id}", node_name])
-    File.mkdir_p!(data_dir)
-    system_config = :ra_system.default_config() |> Map.put(:data_dir, data_dir)
 
-    server_conf = %{
-      id: {server_id, my_node},
-      uid: member_uid(group_id, my_node),
-      cluster_name: cluster_name,
-      initial_members: initial_members,
-      log_init_args: %{
-        uid: "raft_log_#{group_id}_#{node_name}",
-        system_config: system_config
-      },
-      machine: machine
-    }
-
-    case :ra.start_server(:default, server_conf) do
+    case File.mkdir_p(data_dir) do
       :ok ->
-        Logger.debug("RaftManager: Joined group #{group_id}")
-        :ok
+        system_config = :ra_system.default_config() |> Map.put(:data_dir, data_dir)
 
-      {:error, {:already_started, _}} ->
-        :ok
+        server_conf = %{
+          id: {server_id, my_node},
+          uid: member_uid(group_id, my_node),
+          cluster_name: cluster_name,
+          initial_members: initial_members,
+          log_init_args: %{
+            uid: "raft_log_#{group_id}_#{node_name}",
+            system_config: system_config
+          },
+          machine: machine
+        }
 
-      {:error, {:shutdown, {:failed_to_start_child, _, {:already_started, _}}}} ->
-        Logger.debug("RaftManager: Group #{group_id} already running locally")
-        :ok
+        case :ra.start_server(:default, server_conf) do
+          :ok ->
+            Logger.debug("RaftManager: Joined group #{group_id}")
+            :ok
+
+          {:error, {:already_started, _}} ->
+            :ok
+
+          {:error, {:shutdown, {:failed_to_start_child, _, {:already_started, _}}}} ->
+            Logger.debug("RaftManager: Group #{group_id} already running locally")
+            :ok
+
+          {:error, reason} ->
+            Logger.error("RaftManager: Failed to join group #{group_id}: #{inspect(reason)}")
+            {:error, reason}
+        end
 
       {:error, reason} ->
-        Logger.error("RaftManager: Failed to join group #{group_id}: #{inspect(reason)}")
+        Logger.error("RaftManager: Failed to create data dir #{data_dir}: #{inspect(reason)}")
         {:error, reason}
     end
   end
