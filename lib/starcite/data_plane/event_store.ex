@@ -26,11 +26,12 @@ defmodule Starcite.DataPlane.EventStore do
                                     )
 
   @default_max_memory_bytes 2_147_483_648
-  @default_capacity_check_interval 1
+  @default_capacity_check_interval 4
   @default_cache_reclaim_fraction 0.25
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
   @capacity_check_interval_cache_key {__MODULE__, :capacity_check_interval}
   @capacity_check_tick_key {__MODULE__, :capacity_check_tick}
+  @archive_cache_memory_bytes_cache_key {__MODULE__, :archive_cache_memory_bytes}
 
   @doc """
   Start the event store owner process.
@@ -43,6 +44,7 @@ defmodule Starcite.DataPlane.EventStore do
   @doc false
   def init(_opts) do
     :ok = EventQueue.ensure_tables()
+    :ok = cache_archive_memory_bytes(Store.cache_memory_bytes_or_zero())
     {:ok, %{}}
   end
 
@@ -55,7 +57,22 @@ defmodule Starcite.DataPlane.EventStore do
   @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    put_events(session_id, [event])
+    case ensure_capacity_for_put_event(session_id, event) do
+      {:ok, _current_memory_bytes} ->
+        :ok = EventQueue.put_event(session_id, seq, event)
+        :ok = emit_event_store_write_telemetry(session_id, event)
+        :ok
+
+      {:error, :event_store_backpressure, metadata} ->
+        Telemetry.event_store_backpressure(
+          session_id,
+          metadata.current_memory_bytes,
+          metadata.max_memory_bytes,
+          metadata.reason
+        )
+
+        {:error, :event_store_backpressure}
+    end
   end
 
   @doc """
@@ -116,7 +133,14 @@ defmodule Starcite.DataPlane.EventStore do
   def read_archived_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    Store.read_events(session_id, from_seq, to_seq)
+    case Store.read_events(session_id, from_seq, to_seq) do
+      {:ok, _events} = ok ->
+        :ok = refresh_archive_cache_memory_bytes()
+        ok
+
+      {:error, _reason} = error ->
+        error
+    end
   end
 
   @doc """
@@ -127,6 +151,7 @@ defmodule Starcite.DataPlane.EventStore do
       when is_binary(session_id) and session_id != "" and is_list(events) do
     :ok = Store.cache_events(session_id, events)
     :ok = maybe_enforce_capacity()
+    :ok = refresh_archive_cache_memory_bytes()
     :ok
   end
 
@@ -160,7 +185,7 @@ defmodule Starcite.DataPlane.EventStore do
   """
   @spec memory_bytes() :: non_neg_integer()
   def memory_bytes do
-    EventQueue.memory_bytes() + Store.cache_memory_bytes_or_zero()
+    EventQueue.memory_bytes() + archive_cache_memory_bytes()
   end
 
   @doc """
@@ -184,11 +209,11 @@ defmodule Starcite.DataPlane.EventStore do
   def clear do
     EventQueue.clear()
     _ = Store.clear_cache()
+    :ok = cache_archive_memory_bytes(0)
     :ok
   end
 
-  defp ensure_capacity(session_id, event)
-       when is_binary(session_id) and session_id != "" and is_map(event) do
+  defp ensure_capacity(session_id) when is_binary(session_id) and session_id != "" do
     max_memory_bytes = max_memory_bytes_limit()
     current_memory_bytes = memory_bytes()
 
@@ -211,10 +236,19 @@ defmodule Starcite.DataPlane.EventStore do
     end
   end
 
+  defp ensure_capacity_for_put_event(session_id, event)
+       when is_binary(session_id) and session_id != "" and is_map(event) do
+    if capacity_check_due?() do
+      ensure_capacity(session_id)
+    else
+      {:ok, :capacity_check_skipped}
+    end
+  end
+
   defp ensure_capacity_for_puts(session_id, [first_event | _rest])
        when is_binary(session_id) and session_id != "" and is_map(first_event) do
     if capacity_check_due?() do
-      ensure_capacity(session_id, first_event)
+      ensure_capacity(session_id)
     else
       {:ok, :capacity_check_skipped}
     end
@@ -280,7 +314,9 @@ defmodule Starcite.DataPlane.EventStore do
     pending_bytes = EventQueue.memory_bytes()
     target_total_bytes = reclaim_target_total_bytes(max_memory_bytes)
     target_cache_bytes = max(target_total_bytes - pending_bytes, 0)
-    Store.evict_cache_to_target_memory(target_cache_bytes)
+    :ok = Store.evict_cache_to_target_memory(target_cache_bytes)
+    :ok = refresh_archive_cache_memory_bytes()
+    :ok
   end
 
   defp reclaim_target_total_bytes(max_memory_bytes)
@@ -304,17 +340,47 @@ defmodule Starcite.DataPlane.EventStore do
     end
   end
 
-  defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
-  defp payload_bytes(_event), do: 0
+  if @emit_event_store_write_telemetry do
+    defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
+    defp payload_bytes(_event), do: 0
 
-  defp emit_event_store_write_telemetry(session_id, events)
-       when is_binary(session_id) and is_list(events) do
-    if @emit_event_store_write_telemetry do
+    defp emit_event_store_write_telemetry(session_id, %{seq: seq} = event)
+         when is_binary(session_id) and is_integer(seq) and seq > 0 and is_map(event) do
+      :ok = Telemetry.event_store_write(session_id, seq, payload_bytes(event))
+      :ok
+    end
+
+    defp emit_event_store_write_telemetry(session_id, events)
+         when is_binary(session_id) and is_list(events) do
       Enum.each(events, fn %{seq: seq} = event ->
         :ok = Telemetry.event_store_write(session_id, seq, payload_bytes(event))
       end)
-    end
 
+      :ok
+    end
+  else
+    defp emit_event_store_write_telemetry(_session_id, _event_or_events), do: :ok
+  end
+
+  defp archive_cache_memory_bytes do
+    case :persistent_term.get(@archive_cache_memory_bytes_cache_key, :undefined) do
+      bytes when is_integer(bytes) and bytes >= 0 ->
+        bytes
+
+      _ ->
+        bytes = Store.cache_memory_bytes_or_zero()
+        :ok = cache_archive_memory_bytes(bytes)
+        bytes
+    end
+  end
+
+  defp refresh_archive_cache_memory_bytes do
+    Store.cache_memory_bytes_or_zero()
+    |> cache_archive_memory_bytes()
+  end
+
+  defp cache_archive_memory_bytes(bytes) when is_integer(bytes) and bytes >= 0 do
+    :persistent_term.put(@archive_cache_memory_bytes_cache_key, bytes)
     :ok
   end
 

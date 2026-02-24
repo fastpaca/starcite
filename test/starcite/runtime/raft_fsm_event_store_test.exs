@@ -251,6 +251,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   end
 
   test "append_event rejects writes under event-store backpressure without advancing session" do
+    with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
@@ -273,6 +274,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   end
 
   test "append_events rejects writes under event-store backpressure without partial writes" do
+    with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = unique_session_id()
     state = seeded_state(session_id)
 

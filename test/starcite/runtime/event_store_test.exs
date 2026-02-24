@@ -326,6 +326,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
   end
 
   test "enforces memory-based backpressure limit" do
+    with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = "ses-cap-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now()
 
@@ -353,6 +354,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
   end
 
   test "enforces byte-based size settings" do
+    with_env(:starcite, :event_store_capacity_check_interval, 1)
     with_env(:starcite, :event_store_max_bytes, 1)
     session_id = "ses-size-#{System.unique_integer([:positive, :monotonic])}"
 

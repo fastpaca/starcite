@@ -98,22 +98,41 @@ defmodule Mix.Tasks.Bench do
   end
 
   defp configure_local_archive_adapter do
-    if Application.get_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3) ==
-         Starcite.Archive.Adapter.S3 do
-      default_opts = [
-        bucket: "starcite-archive",
-        region: "us-east-1",
-        endpoint: "http://127.0.0.1:9000",
-        access_key_id: "minioadmin",
-        secret_access_key: "minioadmin",
-        path_style: true
-      ]
+    default_opts = [
+      bucket: System.get_env("BENCH_S3_BUCKET", "starcite-archive"),
+      region: System.get_env("BENCH_S3_REGION", "us-east-1"),
+      endpoint: System.get_env("BENCH_S3_ENDPOINT", "http://127.0.0.1:9000"),
+      access_key_id: System.get_env("BENCH_S3_ACCESS_KEY_ID", "minioadmin"),
+      secret_access_key: System.get_env("BENCH_S3_SECRET_ACCESS_KEY", "minioadmin"),
+      path_style: env_bool("BENCH_S3_PATH_STYLE", true)
+    ]
 
-      Application.put_env(
-        :starcite,
-        :archive_adapter_opts,
-        Keyword.merge(default_opts, Application.get_env(:starcite, :archive_adapter_opts, []))
-      )
+    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3)
+
+    Application.put_env(
+      :starcite,
+      :archive_adapter_opts,
+      Keyword.merge(default_opts, Application.get_env(:starcite, :archive_adapter_opts, []))
+    )
+  end
+
+  defp env_bool(name, default) when is_binary(name) and is_boolean(default) do
+    case System.get_env(name) do
+      nil ->
+        default
+
+      value ->
+        case String.downcase(String.trim(value)) do
+          "1" -> true
+          "true" -> true
+          "yes" -> true
+          "on" -> true
+          "0" -> false
+          "false" -> false
+          "no" -> false
+          "off" -> false
+          other -> Mix.raise("invalid boolean for #{name}: #{inspect(other)}")
+        end
     end
   end
 end

@@ -13,6 +13,8 @@ defmodule Starcite.DataPlane.RaftManager do
 
   alias Starcite.ControlPlane.WriteNodes
   alias Starcite.DataPlane.RaftFSM
+  @server_ids_cache_key {__MODULE__, :server_ids}
+  @cluster_names_cache_key {__MODULE__, :cluster_names}
 
   @doc false
   @spec validate_config!() :: :ok
@@ -53,13 +55,21 @@ defmodule Starcite.DataPlane.RaftManager do
   @doc "Get Ra server ID (process name) for a group"
   @spec server_id(non_neg_integer()) :: atom()
   def server_id(group_id) when is_integer(group_id) and group_id >= 0 do
-    String.to_atom("raft_group_#{group_id}")
+    if group_id < num_groups() do
+      server_ids() |> elem(group_id)
+    else
+      raise ArgumentError, "invalid group_id: #{inspect(group_id)}"
+    end
   end
 
   @doc "Get cluster name for Ra API calls"
   @spec cluster_name(non_neg_integer()) :: atom()
   def cluster_name(group_id) when is_integer(group_id) and group_id >= 0 do
-    String.to_atom("raft_cluster_#{group_id}")
+    if group_id < num_groups() do
+      cluster_names() |> elem(group_id)
+    else
+      raise ArgumentError, "invalid group_id: #{inspect(group_id)}"
+    end
   end
 
   @doc "Stable Ra member UID for a specific group/node pair."
@@ -231,5 +241,32 @@ defmodule Starcite.DataPlane.RaftManager do
 
   defp safe_node_name(node) when is_atom(node) do
     node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
+  end
+
+  defp server_ids do
+    build_cached_group_atoms(@server_ids_cache_key, "raft_group_")
+  end
+
+  defp cluster_names do
+    build_cached_group_atoms(@cluster_names_cache_key, "raft_cluster_")
+  end
+
+  defp build_cached_group_atoms(cache_key, prefix)
+       when is_tuple(cache_key) and is_binary(prefix) do
+    total_groups = num_groups()
+
+    case :persistent_term.get(cache_key, :undefined) do
+      {^total_groups, values} when is_tuple(values) ->
+        values
+
+      _ ->
+        values =
+          0..(total_groups - 1)
+          |> Enum.map(&String.to_atom("#{prefix}#{&1}"))
+          |> List.to_tuple()
+
+        :persistent_term.put(cache_key, {total_groups, values})
+        values
+    end
   end
 end

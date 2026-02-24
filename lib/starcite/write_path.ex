@@ -3,10 +3,14 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
-  alias Starcite.DataPlane.{RaftAccess, ReplicaRouter}
-  alias Starcite.Observability.Telemetry
+  alias Starcite.DataPlane.{RaftAccess, RaftPipelineClient, ReplicaRouter}
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
+  @emit_raft_command_result_telemetry Application.compile_env(
+                                        :starcite,
+                                        :emit_raft_command_result_telemetry,
+                                        false
+                                      )
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -24,7 +28,10 @@ defmodule Starcite.WritePath do
     result =
       case RaftAccess.local_server_for_group(group) do
         {:ok, server_id} ->
-          process_command(server_id, {:create_session, id, title, creator_principal, metadata})
+          process_command_with_leader_retry(
+            server_id,
+            {:create_session, id, title, creator_principal, metadata}
+          )
 
         :error ->
           call_remote(group, :create_session_local, [id, title, creator_principal, metadata])
@@ -47,7 +54,10 @@ defmodule Starcite.WritePath do
                 is_nil(creator_principal)) and
              is_map(metadata) do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command(server_id, {:create_session, id, title, creator_principal, metadata})
+      process_command_with_leader_retry(
+        server_id,
+        {:create_session, id, title, creator_principal, metadata}
+      )
     end
   end
 
@@ -206,36 +216,59 @@ defmodule Starcite.WritePath do
     )
   end
 
-  defp process_command(server_id, command) when is_atom(server_id) do
-    result = process_command_on_node(server_id, Node.self(), command)
-    :ok = emit_raft_command_result(command, classify_local_outcome(result))
-    result
-  end
+  if @emit_raft_command_result_telemetry do
+    defp process_command_with_leader_retry(server_id, command) when is_atom(server_id) do
+      self_node = Node.self()
+      local_result = process_command_on_node(server_id, self_node, command)
 
-  defp process_command_with_leader_retry(server_id, command) when is_atom(server_id) do
-    self_node = Node.self()
-    local_result = process_command_on_node(server_id, self_node, command)
+      {final_result, outcome} =
+        case local_result do
+          {:timeout, {^server_id, leader_node}}
+          when is_atom(leader_node) and not is_nil(leader_node) ->
+            if leader_node == self_node do
+              {local_result, :local_timeout}
+            else
+              retry_result = process_command_on_node(server_id, leader_node, command)
+              {retry_result, classify_leader_retry_outcome(retry_result)}
+            end
 
-    {final_result, outcome} =
-      case local_result do
+          _ ->
+            {local_result, classify_local_outcome(local_result)}
+        end
+
+      :ok = emit_raft_command_result(command, outcome)
+      final_result
+    end
+  else
+    defp process_command_with_leader_retry(server_id, command) when is_atom(server_id) do
+      self_node = Node.self()
+
+      case process_command_on_node(server_id, self_node, command) do
         {:timeout, {^server_id, leader_node}}
-        when is_atom(leader_node) and not is_nil(leader_node) ->
-          if leader_node == self_node do
-            {local_result, :local_timeout}
-          else
-            retry_result = process_command_on_node(server_id, leader_node, command)
-            {retry_result, classify_leader_retry_outcome(retry_result)}
-          end
+        when is_atom(leader_node) and not is_nil(leader_node) and leader_node != self_node ->
+          process_command_on_node(server_id, leader_node, command)
 
-        _ ->
-          {local_result, classify_local_outcome(local_result)}
+        result ->
+          result
       end
-
-    :ok = emit_raft_command_result(command, outcome)
-    final_result
+    end
   end
 
   defp process_command_on_node(server_id, node, command)
+       when is_atom(server_id) and is_atom(node) do
+    case RaftPipelineClient.command(server_id, node, command, @timeout) do
+      {:ok, _reply} = ok ->
+        ok
+
+      {:error, _reason} = error ->
+        error
+
+      {:timeout, _leader} ->
+        process_command_on_node_fallback(server_id, node, command)
+    end
+  end
+
+  defp process_command_on_node_fallback(server_id, node, command)
        when is_atom(server_id) and is_atom(node) do
     case :ra.process_command({server_id, node}, command, @timeout) do
       {:ok, {:reply, {:ok, reply}}, _leader} -> {:ok, reply}
@@ -245,32 +278,34 @@ defmodule Starcite.WritePath do
     end
   end
 
-  defp classify_local_outcome({:ok, _reply}), do: :local_ok
-  defp classify_local_outcome({:error, _reason}), do: :local_error
-  defp classify_local_outcome({:timeout, _leader}), do: :local_timeout
+  if @emit_raft_command_result_telemetry do
+    defp classify_local_outcome({:ok, _reply}), do: :local_ok
+    defp classify_local_outcome({:error, _reason}), do: :local_error
+    defp classify_local_outcome({:timeout, _leader}), do: :local_timeout
 
-  defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
-  defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
-  defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
+    defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
+    defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
+    defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
 
-  defp emit_raft_command_result(command, outcome)
-       when outcome in [
-              :local_ok,
-              :local_error,
-              :local_timeout,
-              :leader_retry_ok,
-              :leader_retry_error,
-              :leader_retry_timeout
-            ] do
-    Telemetry.raft_command_result(command_type(command), outcome)
+    defp emit_raft_command_result(command, outcome)
+         when outcome in [
+                :local_ok,
+                :local_error,
+                :local_timeout,
+                :leader_retry_ok,
+                :leader_retry_error,
+                :leader_retry_timeout
+              ] do
+      Starcite.Observability.Telemetry.raft_command_result(command_type(command), outcome)
+    end
+
+    defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
+      do: :create_session
+
+    defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
+    defp command_type({:append_events, _id, _events, _opts}), do: :append_events
+    defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
   end
-
-  defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
-    do: :create_session
-
-  defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
-  defp command_type({:append_events, _id, _events, _opts}), do: :append_events
-  defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

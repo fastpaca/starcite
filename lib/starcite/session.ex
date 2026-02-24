@@ -158,7 +158,7 @@ defmodule Starcite.Session do
 
   defp do_append_event(
          %Session{} = session,
-         input,
+         _input,
          producer_id,
          producer_seq,
          type,
@@ -169,7 +169,19 @@ defmodule Starcite.Session do
          refs,
          idempotency_key
        ) do
-    fingerprint = event_fingerprint(input)
+    fingerprint =
+      event_fingerprint(
+        type,
+        payload,
+        actor,
+        source,
+        metadata,
+        refs,
+        idempotency_key,
+        producer_id,
+        producer_seq
+      )
+
     next_seq = session.last_seq + 1
 
     case ProducerIndex.decide(
@@ -276,23 +288,29 @@ defmodule Starcite.Session do
   end
 
   defp event_fingerprint(
-         %{
-           type: type,
-           payload: payload,
-           actor: actor,
-           producer_id: producer_id,
-           producer_seq: producer_seq
-         } = input
-       ) do
+         type,
+         payload,
+         actor,
+         source,
+         metadata,
+         refs,
+         idempotency_key,
+         producer_id,
+         producer_seq
+       )
+       when is_binary(type) and is_map(payload) and is_binary(actor) and
+              (is_binary(source) or is_nil(source)) and is_map(metadata) and is_map(refs) and
+              (is_binary(idempotency_key) or is_nil(idempotency_key)) and is_binary(producer_id) and
+              is_integer(producer_seq) do
     fingerprint_term = {
       :event_fingerprint,
       type,
       payload,
       actor,
-      Map.get(input, :source),
-      Map.get(input, :metadata, %{}),
-      Map.get(input, :refs, %{}),
-      Map.get(input, :idempotency_key),
+      source,
+      metadata,
+      refs,
+      idempotency_key,
       producer_id,
       producer_seq
     }

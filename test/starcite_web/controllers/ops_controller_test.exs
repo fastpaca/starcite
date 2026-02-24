@@ -104,11 +104,12 @@ defmodule StarciteWeb.OpsControllerTest do
 
   describe "GET /v1/ops/groups/:group_id/replicas" do
     test "returns configured replicas for a write group" do
-      conn = json_conn(:get, "/v1/ops/groups/42/replicas", nil)
+      group_id = min(42, Starcite.ControlPlane.WriteNodes.num_groups() - 1)
+      conn = json_conn(:get, "/v1/ops/groups/#{group_id}/replicas", nil)
 
       assert conn.status == 200
       body = Jason.decode!(conn.resp_body)
-      assert body["group_id"] == 42
+      assert body["group_id"] == group_id
       assert body["replicas"] == [Atom.to_string(Node.self())]
     end
 

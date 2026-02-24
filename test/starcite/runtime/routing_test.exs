@@ -11,9 +11,10 @@ defmodule Starcite.Runtime.RoutingTest do
   describe "route_target/2" do
     test "returns local when node is in replica set" do
       self_node = :"node1@127.0.0.1"
+      group_id = unique_group_id()
 
       assert {:local, ^self_node} =
-               ReplicaRouter.route_target(42,
+               ReplicaRouter.route_target(group_id,
                  self: self_node,
                  replicas: [self_node, :"node2@127.0.0.1"],
                  ready_nodes: [self_node],
@@ -175,7 +176,10 @@ defmodule Starcite.Runtime.RoutingTest do
   end
 
   defp unique_group_id do
-    System.unique_integer([:positive, :monotonic])
+    rem(
+      System.unique_integer([:positive, :monotonic]),
+      Starcite.DataPlane.RaftManager.num_groups()
+    )
   end
 
   defp attach_routing_handler do
