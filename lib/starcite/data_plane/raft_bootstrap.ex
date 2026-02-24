@@ -23,8 +23,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
   @consensus_probe_ttl_ms 3_000
-  @consensus_success_streak_required 1
-  @consensus_failure_streak_required 1
   @readiness_refresh_call_timeout_ms 5_000
 
   def start_link(opts) do
@@ -104,8 +102,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
        sync_ref: nil,
        consensus_ready?: false,
        consensus_last_probe_at_ms: nil,
-       consensus_probe_success_streak: 0,
-       consensus_probe_failure_streak: 0,
        consensus_probe_detail: %{
          checked_groups: 0,
          failing_group_id: nil,
@@ -442,26 +438,18 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
     case consensus_probe() do
       {:ok, detail} ->
-        success_streak = state.consensus_probe_success_streak + 1
-
         %{
           state
-          | consensus_ready?: success_streak >= @consensus_success_streak_required,
+          | consensus_ready?: true,
             consensus_last_probe_at_ms: now_ms,
-            consensus_probe_success_streak: success_streak,
-            consensus_probe_failure_streak: 0,
             consensus_probe_detail: detail
         }
 
       {:error, detail} ->
-        failure_streak = state.consensus_probe_failure_streak + 1
-
         %{
           state
-          | consensus_ready?: failure_streak < @consensus_failure_streak_required,
+          | consensus_ready?: false,
             consensus_last_probe_at_ms: now_ms,
-            consensus_probe_success_streak: 0,
-            consensus_probe_failure_streak: failure_streak,
             consensus_probe_detail: detail
         }
     end
@@ -472,8 +460,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       state
       | consensus_ready?: false,
         consensus_last_probe_at_ms: nil,
-        consensus_probe_success_streak: 0,
-        consensus_probe_failure_streak: 0,
         consensus_probe_detail: %{
           checked_groups: 0,
           failing_group_id: nil,
@@ -562,9 +548,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       startup_mode: state.startup_mode,
       consensus_ready?: state.consensus_ready?,
       consensus_probe_fresh?: probe_fresh?,
-      consensus_probe_age_ms: consensus_probe_age_ms(state.consensus_last_probe_at_ms),
-      consensus_success_streak: state.consensus_probe_success_streak,
-      consensus_failure_streak: state.consensus_probe_failure_streak
+      consensus_probe_age_ms: consensus_probe_age_ms(state.consensus_last_probe_at_ms)
     }
   end
 
@@ -577,8 +561,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         consensus_ready?: false,
         consensus_probe_fresh?: false,
         consensus_probe_age_ms: nil,
-        consensus_success_streak: 0,
-        consensus_failure_streak: 0,
         checked_groups: 0,
         failing_group_id: nil,
         probe_result: "bootstrap_down"
@@ -713,26 +695,15 @@ defmodule Starcite.DataPlane.RaftBootstrap do
        when is_map(state) and outcome in [:local_timeout, :leader_retry_timeout] do
     now_ms = System.monotonic_time(:millisecond)
 
-    failure_streak = state.consensus_probe_failure_streak + 1
-
-    if failure_streak >= @consensus_failure_streak_required do
-      state
-      |> Map.put(:consensus_ready?, false)
-      |> Map.put(:consensus_last_probe_at_ms, now_ms)
-      |> Map.put(:consensus_probe_success_streak, 0)
-      |> Map.put(:consensus_probe_failure_streak, failure_streak)
-      |> Map.put(:consensus_probe_detail, %{
-        checked_groups: 0,
-        failing_group_id: nil,
-        probe_result: "write_timeout",
-        outcome: Atom.to_string(outcome)
-      })
-    else
-      state
-      |> Map.put(:consensus_probe_failure_streak, failure_streak)
-      |> Map.put(:consensus_probe_success_streak, 0)
-      |> Map.put(:consensus_last_probe_at_ms, now_ms)
-    end
+    state
+    |> Map.put(:consensus_ready?, false)
+    |> Map.put(:consensus_last_probe_at_ms, now_ms)
+    |> Map.put(:consensus_probe_detail, %{
+      checked_groups: 0,
+      failing_group_id: nil,
+      probe_result: "write_timeout",
+      outcome: Atom.to_string(outcome)
+    })
   end
 
   defp maybe_mark_peer_down(state, down_node)
@@ -741,14 +712,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
          down_node in WriteNodes.nodes() and not local_quorum_available?() do
       now_ms = System.monotonic_time(:millisecond)
 
-      failure_streak =
-        max(state.consensus_probe_failure_streak + 1, @consensus_failure_streak_required)
-
       state
       |> Map.put(:consensus_ready?, false)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
-      |> Map.put(:consensus_probe_success_streak, 0)
-      |> Map.put(:consensus_probe_failure_streak, failure_streak)
       |> Map.put(:consensus_probe_detail, %{
         checked_groups: 0,
         failing_group_id: nil,
