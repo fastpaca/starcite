@@ -6,9 +6,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   - Bootstrap groups from static write-node config.
   - Start/join local assigned groups.
+  - Maintain intrinsic Raft readiness state used by health/routing gates.
 
-  This module does not perform dynamic membership add/remove operations or
-  react to runtime nodeup/nodedown events.
+  This module does not perform dynamic membership add/remove operations.
   """
 
   use GenServer
@@ -87,6 +87,8 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   def init(_opts) do
     :ok = :ra.start()
     :logger.set_application_level(:ra, :error)
+    # Readiness is served on demand, so we subscribe to node liveness events to
+    # keep the cached consensus state current and fail readiness immediately.
     :ok = :net_kernel.monitor_nodes(true, [:nodedown_reason])
 
     Logger.info(
