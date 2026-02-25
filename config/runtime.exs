@@ -49,7 +49,14 @@ if cluster_nodes && cluster_nodes != "" do
 end
 
 if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
+  ra_system_dir = Path.join(raft_dir, "ra_system")
+  ra_system_dir_charlist = String.to_charlist(ra_system_dir)
+
   config :starcite, :raft_data_dir, raft_dir
+
+  config :ra,
+    data_dir: ra_system_dir_charlist,
+    wal_data_dir: ra_system_dir_charlist
 end
 
 parse_positive_integer! = fn env_name, raw ->

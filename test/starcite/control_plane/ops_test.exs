@@ -28,6 +28,10 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert is_integer(status.num_groups)
     assert status.num_groups > 0
     assert is_list(status.local_groups)
+    assert is_map(status.raft_storage)
+    assert is_binary(status.raft_storage.starcite_data_dir)
+    assert is_binary(status.raft_storage.ra_data_dir)
+    assert is_binary(status.raft_storage.ra_wal_data_dir)
     assert is_map(status.observer)
   end
 

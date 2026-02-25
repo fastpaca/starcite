@@ -54,7 +54,10 @@ defmodule Starcite.Runtime.TestHelper do
     test_data_dir = Application.get_env(:starcite, :raft_data_dir, "tmp/test_raft")
 
     if String.contains?(test_data_dir, "test") do
-      File.rm_rf(test_data_dir)
+      test_data_dir
+      |> Path.join("group_*")
+      |> Path.wildcard()
+      |> Enum.each(&File.rm_rf/1)
     end
   end
 

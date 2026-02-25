@@ -50,6 +50,10 @@ defmodule StarciteWeb.OpsControllerTest do
       assert is_integer(body["write_replication_factor"])
       assert is_integer(body["num_groups"])
       assert is_list(body["local_groups"])
+      assert is_map(body["raft_storage"])
+      assert is_binary(body["raft_storage"]["starcite_data_dir"])
+      assert is_binary(body["raft_storage"]["ra_data_dir"])
+      assert is_binary(body["raft_storage"]["ra_wal_data_dir"])
       assert is_map(body["observer"])
       assert body["observer"]["status"] in ["ok", "down"]
       assert is_list(body["observer"]["visible_nodes"])

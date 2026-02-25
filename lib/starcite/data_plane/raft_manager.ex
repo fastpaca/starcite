@@ -46,6 +46,32 @@ defmodule Starcite.DataPlane.RaftManager do
     WriteNodes.write_node?(node)
   end
 
+  @doc false
+  @spec raft_data_dir_root() :: String.t()
+  def raft_data_dir_root do
+    case Application.get_env(:starcite, :raft_data_dir, "priv/raft") do
+      path when is_binary(path) ->
+        normalized_path = String.trim(path)
+
+        if normalized_path == "" do
+          raise ArgumentError,
+                "invalid value for :raft_data_dir: #{inspect(path)} (expected non-empty path string)"
+        else
+          normalized_path
+        end
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :raft_data_dir: #{inspect(value)} (expected path string)"
+    end
+  end
+
+  @doc false
+  @spec ra_system_data_dir() :: String.t()
+  def ra_system_data_dir do
+    Path.join(raft_data_dir_root(), "ra_system")
+  end
+
   @doc "Map session_id -> group_id (0..num_groups-1)"
   @spec group_for_session(binary()) :: non_neg_integer()
   def group_for_session(session_id) when is_binary(session_id) do
@@ -198,7 +224,7 @@ defmodule Starcite.DataPlane.RaftManager do
     initial_members =
       for node <- replicas_for_group(group_id), is_atom(node), do: {server_id, node}
 
-    data_dir_root = Application.get_env(:starcite, :raft_data_dir, "priv/raft")
+    data_dir_root = raft_data_dir_root()
     data_dir = Path.join([data_dir_root, "group_#{group_id}", node_name])
 
     case File.mkdir_p(data_dir) do
