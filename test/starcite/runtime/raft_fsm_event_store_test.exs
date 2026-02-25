@@ -14,6 +14,27 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     :ok
   end
 
+  test "declares raft machine version mapping" do
+    assert RaftFSM.version() == 1
+    assert RaftFSM.which_module(0) == RaftFSM
+    assert RaftFSM.which_module(1) == RaftFSM
+    assert_raise ArgumentError, fn -> RaftFSM.which_module(99) end
+  end
+
+  test "machine_version command migrates legacy state schema" do
+    legacy_state =
+      RaftFSM.init(%{group_id: 7})
+      |> Map.delete(:last_checkpoint_index)
+
+    refute Map.has_key?(legacy_state, :last_checkpoint_index)
+
+    {migrated_state, :ok} =
+      RaftFSM.apply(%{index: 1}, {:machine_version, 0, 1}, legacy_state)
+
+    assert Map.has_key?(migrated_state, :last_checkpoint_index)
+    assert migrated_state.last_checkpoint_index == nil
+  end
+
   test "append_event mirrors appended events to ETS" do
     session_id = unique_session_id()
     state = seeded_state(session_id)

@@ -24,6 +24,8 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_bootstrap_max_attempts 300
   @readiness_refresh_call_timeout_ms 5_000
   @runtime_reconcile_interval_ms 5_000
+  @group_leader_probe_timeout_ms 250
+  @group_election_timeout_ms 500
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -241,6 +243,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
             )
 
             ensure_all_local_groups_running()
+            ensure_local_group_leaders(compute_my_groups())
 
             send(owner, {:startup_complete, :coordinator})
 
@@ -249,6 +252,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
             run_groups_parallel(my_groups, "join", &wait_and_join_group/1)
             run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
+            ensure_local_group_leaders(my_groups)
 
             Logger.info("RaftBootstrap: write follower joined #{length(my_groups)} groups")
             send(owner, {:startup_complete, :follower})
@@ -359,6 +363,50 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       RaftManager.start_group(group_id)
     else
       :ok
+    end
+  end
+
+  defp ensure_local_group_leaders(groups) do
+    run_groups_parallel(groups, "ensure-leader", &ensure_group_has_leader/1)
+  end
+
+  defp ensure_group_has_leader(group_id) do
+    if RaftManager.should_participate?(group_id) and group_running?(group_id) do
+      server_ref = {RaftManager.server_id(group_id), Node.self()}
+
+      case :ra.member_overview(server_ref, @group_leader_probe_timeout_ms) do
+        {:ok, %{leader_id: {_, _}}, _} ->
+          :ok
+
+        {:ok, _overview, _} ->
+          trigger_group_election(group_id, server_ref, :leader_unknown)
+
+        {:timeout, _} ->
+          trigger_group_election(group_id, server_ref, :leader_query_timeout)
+
+        {:error, reason} ->
+          trigger_group_election(group_id, server_ref, {:leader_query_error, reason})
+      end
+    else
+      :ok
+    end
+  end
+
+  defp trigger_group_election(group_id, server_ref, reason) do
+    Logger.debug(
+      "RaftBootstrap: triggering election for group #{group_id} (reason=#{inspect(reason)})"
+    )
+
+    try do
+      :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
+      :ok
+    catch
+      :exit, exit_reason ->
+        Logger.warning(
+          "RaftBootstrap: trigger_election failed for group #{group_id}: #{inspect(exit_reason)}"
+        )
+
+        :ok
     end
   end
 
@@ -480,6 +528,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         )
 
         run_groups_parallel(down_groups, "runtime-reconcile", &ensure_local_group_running/1)
+        ensure_local_group_leaders(down_groups)
         Map.put(state, :consensus_last_probe_at_ms, nil)
       end
     else

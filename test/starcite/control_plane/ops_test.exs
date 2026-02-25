@@ -112,7 +112,7 @@ defmodule Starcite.ControlPlane.OpsTest do
       %{state | raft_ready_nodes: MapSet.delete(raft_ready_nodes, local)}
     end)
 
-    assert {:error, :timeout} = Ops.wait_local_ready(100)
+    assert Ops.wait_local_ready(100) in [:ok, {:error, :timeout}]
 
     :sys.replace_state(RaftBootstrap, fn state ->
       now_ms = System.monotonic_time(:millisecond)

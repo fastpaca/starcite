@@ -10,6 +10,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
+  @machine_version 1
 
   @emit_event_append_telemetry Application.compile_env(
                                  :starcite,
@@ -35,6 +36,18 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def init(%{group_id: group_id}) do
     %__MODULE__{group_id: group_id, sessions: %{}, last_checkpoint_index: nil}
+  end
+
+  @impl true
+  def version, do: @machine_version
+
+  @impl true
+  def which_module(0), do: __MODULE__
+
+  def which_module(@machine_version), do: __MODULE__
+
+  def which_module(version) do
+    raise ArgumentError, "unsupported Raft FSM version: #{inspect(version)}"
   end
 
   @impl true
@@ -150,6 +163,12 @@ defmodule Starcite.DataPlane.RaftFSM do
       {:error, reason} ->
         reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
+  end
+
+  @impl true
+  def apply(_meta, {:machine_version, from, to}, state)
+      when is_integer(from) and is_integer(to) do
+    {ensure_state_schema(state), :ok}
   end
 
   # Queries
@@ -281,16 +300,17 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   defp maybe_add_checkpoint_effect(
          %{index: raft_index},
-         %__MODULE__{} = state,
+         %__MODULE__{} = raw_state,
          effects
        )
        when is_integer(raft_index) and raft_index > 0 and is_list(effects) do
+    state = ensure_state_schema(raw_state)
     interval = checkpoint_interval_entries()
-    last_checkpoint_index = state.last_checkpoint_index || 0
+    last_checkpoint_index = Map.get(state, :last_checkpoint_index) || 0
 
     # Keep checkpoint opportunities independent of archive ack / release-cursor cadence.
     if raft_index - last_checkpoint_index >= interval do
-      updated_state = %{state | last_checkpoint_index: raft_index}
+      updated_state = Map.put(state, :last_checkpoint_index, raft_index)
       {updated_state, effects ++ [{:checkpoint, raft_index, updated_state}]}
     else
       {state, effects}
@@ -306,6 +326,13 @@ defmodule Starcite.DataPlane.RaftFSM do
     case @checkpoint_interval_entries do
       value when is_integer(value) and value > 0 -> value
       _ -> 2_048
+    end
+  end
+
+  defp ensure_state_schema(%__MODULE__{} = state) do
+    case Map.has_key?(state, :last_checkpoint_index) do
+      true -> state
+      false -> Map.put(state, :last_checkpoint_index, nil)
     end
   end
 
