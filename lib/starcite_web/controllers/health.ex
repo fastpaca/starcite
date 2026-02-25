@@ -19,18 +19,28 @@ defmodule StarciteWeb.HealthController do
   """
   def ready(conn, _params) do
     mode = Ops.local_mode() |> Atom.to_string()
+    readiness = Ops.local_readiness(refresh?: true)
 
-    if Ops.local_ready() do
+    if readiness.ready? do
       json(conn, %{status: "ok", mode: mode})
     else
+      body = %{
+        status: "starting",
+        mode: mode,
+        reason: readiness_reason(readiness.reason, mode)
+      }
+
       conn
       |> put_status(:service_unavailable)
-      |> json(%{status: "starting", mode: mode, reason: readiness_reason(mode)})
+      |> json(put_detail(body, readiness.detail))
     end
   end
 
-  defp readiness_reason("write_node"),
-    do: if(Ops.local_drained(), do: "draining", else: "raft_sync")
+  defp readiness_reason(:draining, _mode), do: "draining"
+  defp readiness_reason(:observer_sync, "write_node"), do: "observer_sync"
+  defp readiness_reason(_reason, "write_node"), do: "raft_sync"
+  defp readiness_reason(_reason, _mode), do: "router_sync"
 
-  defp readiness_reason(_mode), do: "router_sync"
+  defp put_detail(body, detail) when map_size(detail) == 0, do: body
+  defp put_detail(body, detail), do: Map.put(body, :detail, detail)
 end

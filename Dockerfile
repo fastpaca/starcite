@@ -58,7 +58,8 @@ COPY --from=build /app/_build/prod/rel/starcite ./starcite
 COPY docker-entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh && \
-    chown -R app:app /app
+    mkdir -p /var/lib/starcite/raft && \
+    chown -R app:app /app /var/lib/starcite
 
 USER app
 

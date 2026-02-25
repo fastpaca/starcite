@@ -6,24 +6,23 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   - Bootstrap groups from static write-node config.
   - Start/join local assigned groups.
+  - Maintain intrinsic Raft readiness state used by health/routing gates.
 
-  This module does not perform dynamic membership add/remove operations or
-  react to runtime nodeup/nodedown events.
+  This module does not perform dynamic membership add/remove operations.
   """
 
   use GenServer
   require Logger
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.DataPlane.{RaftHealth, RaftManager}
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
   @group_task_timeout_ms 60_000
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
-  @consensus_refresh_interval_ms 1_000
-  @consensus_probe_timeout_ms 100
+  @readiness_refresh_call_timeout_ms 5_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -37,34 +36,108 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     end
   end
 
+  @doc "Returns local intrinsic readiness status used by health/routing gates."
+  @spec readiness_status(keyword()) :: map()
+  def readiness_status(opts \\ []) when is_list(opts) do
+    fallback = RaftHealth.readiness_status_fallback()
+    refresh? = Keyword.get(opts, :refresh?, false)
+    timeout_ms = readiness_status_timeout_ms(refresh?)
+    message = {:readiness_status, refresh?}
+
+    case Process.whereis(__MODULE__) do
+      nil ->
+        fallback
+
+      pid ->
+        safe_readiness_status_call(pid, message, timeout_ms, fallback)
+    end
+  end
+
+  @doc "Records write-path outcomes so readiness can fail fast on Raft timeouts."
+  @spec record_write_outcome(
+          :local_ok
+          | :local_error
+          | :local_timeout
+          | :leader_retry_ok
+          | :leader_retry_error
+          | :leader_retry_timeout
+        ) :: :ok
+  def record_write_outcome(outcome)
+      when outcome in [
+             :local_ok,
+             :local_error,
+             :local_timeout,
+             :leader_retry_ok,
+             :leader_retry_error,
+             :leader_retry_timeout
+           ] do
+    case Process.whereis(__MODULE__) do
+      nil ->
+        :ok
+
+      pid ->
+        GenServer.cast(pid, {:write_outcome, outcome})
+    end
+  end
+
   @impl true
   def init(_opts) do
     :ok = :ra.start()
     :logger.set_application_level(:ra, :error)
+    # Readiness is served on demand, so we subscribe to node liveness events to
+    # keep the cached consensus state current and fail readiness immediately.
+    :ok = :net_kernel.monitor_nodes(true, [:nodedown_reason])
 
     Logger.info(
       "RaftBootstrap: starting on #{Node.self()} (write_node=#{WriteNodes.write_node?(Node.self())})"
     )
 
     send(self(), :bootstrap)
-    schedule_consensus_refresh()
 
     {:ok,
      %{
        startup_complete?: false,
        startup_mode: nil,
        sync_ref: nil,
-       consensus_ready?: false
+       consensus_ready?: false,
+       consensus_last_probe_at_ms: nil,
+       consensus_probe_detail: %{
+         checked_groups: 0,
+         failing_group_id: nil,
+         probe_result: "startup_sync"
+       }
      }}
   end
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    my_groups = compute_my_groups()
-    local_ready = my_groups == [] or Enum.all?(my_groups, &group_running?/1)
-    consensus_gate_satisfied = consensus_gate_satisfied?(state)
+    status = RaftHealth.readiness_status(state)
+    {:reply, status.ready?, state}
+  end
 
-    {:reply, state.startup_complete? and local_ready and consensus_gate_satisfied, state}
+  @impl true
+  def handle_call({:readiness_status, refresh?}, _from, state) when is_boolean(refresh?) do
+    next_state = RaftHealth.maybe_refresh(state, refresh?)
+    {:reply, RaftHealth.readiness_status(next_state), next_state}
+  end
+
+  @impl true
+  def handle_call(:readiness_status, _from, state) do
+    next_state = RaftHealth.maybe_refresh(state, false)
+    {:reply, RaftHealth.readiness_status(next_state), next_state}
+  end
+
+  @impl true
+  def handle_cast({:write_outcome, outcome}, state)
+      when outcome in [
+             :local_ok,
+             :local_error,
+             :local_timeout,
+             :leader_retry_ok,
+             :leader_retry_error,
+             :leader_retry_timeout
+           ] do
+    {:noreply, RaftHealth.record_write_outcome(state, outcome)}
   end
 
   @impl true
@@ -75,30 +148,33 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @impl true
   def handle_info({:startup_complete, mode}, state)
       when mode in [:coordinator, :follower, :router] do
-    consensus_ready = consensus_ready?()
     Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
 
     {:noreply,
-     %{
-       state
-       | startup_complete?: true,
-         startup_mode: mode,
-         consensus_ready?: consensus_ready
-     }}
+     state
+     |> Map.put(:startup_complete?, true)
+     |> Map.put(:startup_mode, mode)
+     |> RaftHealth.clear()}
   end
 
   @impl true
-  def handle_info(:refresh_consensus_ready, state) do
-    consensus_ready =
-      if state.startup_complete? do
-        consensus_ready?()
-      else
-        false
-      end
+  def handle_info({:nodedown, down_node, _reason}, state) when is_atom(down_node) do
+    {:noreply, RaftHealth.note_peer_down(state, down_node)}
+  end
 
-    schedule_consensus_refresh()
+  @impl true
+  def handle_info({:nodedown, down_node}, state) when is_atom(down_node) do
+    {:noreply, RaftHealth.note_peer_down(state, down_node)}
+  end
 
-    {:noreply, %{state | consensus_ready?: consensus_ready}}
+  @impl true
+  def handle_info({:nodeup, up_node, _info}, state) when is_atom(up_node) do
+    {:noreply, RaftHealth.note_peer_up(state, up_node)}
+  end
+
+  @impl true
+  def handle_info({:nodeup, up_node}, state) when is_atom(up_node) do
+    {:noreply, RaftHealth.note_peer_up(state, up_node)}
   end
 
   @impl true
@@ -135,10 +211,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   defp maybe_start_sync(state, _trigger), do: state
-
-  defp schedule_consensus_refresh do
-    Process.send_after(self(), :refresh_consensus_ready, @consensus_refresh_interval_ms)
-  end
 
   defp run_sync(:bootstrap, owner) do
     case WriteNodes.validate() do
@@ -183,6 +255,16 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   catch
     :exit, _reason -> false
   end
+
+  defp safe_readiness_status_call(pid, message, timeout_ms, fallback)
+       when is_map(fallback) and is_integer(timeout_ms) and timeout_ms > 0 do
+    GenServer.call(pid, message, timeout_ms)
+  catch
+    :exit, _reason -> fallback
+  end
+
+  defp readiness_status_timeout_ms(true), do: @readiness_refresh_call_timeout_ms
+  defp readiness_status_timeout_ms(false), do: @ready_call_timeout_ms
 
   defp wait_and_join_group(group_id) do
     server_id = RaftManager.server_id(group_id)
@@ -348,59 +430,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
-  end
-
-  defp consensus_ready? do
-    case compute_my_groups() do
-      [] ->
-        true
-
-      my_groups ->
-        Enum.all?(my_groups, &group_consensus_ready?/1)
-    end
-  end
-
-  defp consensus_gate_satisfied?(%{startup_mode: :follower}), do: true
-  defp consensus_gate_satisfied?(%{consensus_ready?: consensus_ready}), do: consensus_ready
-
-  defp group_consensus_ready?(group_id) when is_integer(group_id) and group_id >= 0 do
-    server_id = RaftManager.server_id(group_id)
-    replicas = RaftManager.replicas_for_group(group_id)
-
-    if group_running?(group_id) do
-      case :ra.members({server_id, Node.self()}, @consensus_probe_timeout_ms) do
-        {:ok, members, {^server_id, leader_node}}
-        when is_atom(leader_node) and not is_nil(leader_node) ->
-          leader_node in replicas and quorum_visible?(server_id, members, replicas)
-
-        _ ->
-          false
-      end
-    else
-      false
-    end
-  end
-
-  defp quorum_visible?(server_id, members, replicas)
-       when is_atom(server_id) and is_list(members) and is_list(replicas) do
-    quorum = div(length(replicas), 2) + 1
-
-    member_count =
-      members
-      |> Enum.reduce(MapSet.new(), fn
-        {^server_id, node}, acc when is_atom(node) ->
-          if Enum.member?(replicas, node) do
-            MapSet.put(acc, node)
-          else
-            acc
-          end
-
-        _other, acc ->
-          acc
-      end)
-      |> MapSet.size()
-
-    member_count >= quorum
   end
 
   defp bootstrap_coordinator? do
