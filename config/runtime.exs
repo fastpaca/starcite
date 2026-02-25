@@ -59,17 +59,6 @@ if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
     wal_data_dir: ra_system_dir_charlist
 end
 
-if required_prefix = System.get_env("STARCITE_RAFT_DATA_DIR_REQUIRED_PREFIX") do
-  normalized_required_prefix = String.trim(required_prefix)
-
-  if normalized_required_prefix == "" do
-    raise ArgumentError,
-          "invalid STARCITE_RAFT_DATA_DIR_REQUIRED_PREFIX: #{inspect(required_prefix)} (expected non-empty absolute path)"
-  end
-
-  config :starcite, :raft_data_dir_required_prefix, normalized_required_prefix
-end
-
 parse_positive_integer! = fn env_name, raw ->
   case Integer.parse(String.trim(raw)) do
     {value, ""} when value > 0 -> value

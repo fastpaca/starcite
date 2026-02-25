@@ -2,15 +2,12 @@ defmodule Starcite.RuntimeConfigTest do
   use ExUnit.Case, async: false
 
   @raft_data_dir_env "STARCITE_RAFT_DATA_DIR"
-  @raft_data_dir_required_prefix_env "STARCITE_RAFT_DATA_DIR_REQUIRED_PREFIX"
 
   setup do
     original_raft_data_dir = System.get_env(@raft_data_dir_env)
-    original_required_prefix = System.get_env(@raft_data_dir_required_prefix_env)
 
     on_exit(fn ->
       restore_env(@raft_data_dir_env, original_raft_data_dir)
-      restore_env(@raft_data_dir_required_prefix_env, original_required_prefix)
     end)
 
     :ok
@@ -30,16 +27,6 @@ defmodule Starcite.RuntimeConfigTest do
 
     assert Keyword.fetch!(ra_config, :data_dir) == expected_ra_system_dir
     assert Keyword.fetch!(ra_config, :wal_data_dir) == expected_ra_system_dir
-  end
-
-  test "runtime config sets raft data-dir required prefix from env" do
-    required_prefix = "/var/lib/starcite"
-    System.put_env(@raft_data_dir_required_prefix_env, required_prefix)
-
-    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    starcite_config = Keyword.fetch!(config, :starcite)
-
-    assert Keyword.fetch!(starcite_config, :raft_data_dir_required_prefix) == required_prefix
   end
 
   defp restore_env(env_name, nil), do: System.delete_env(env_name)

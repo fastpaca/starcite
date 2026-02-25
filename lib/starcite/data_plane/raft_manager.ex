@@ -57,7 +57,7 @@ defmodule Starcite.DataPlane.RaftManager do
           raise ArgumentError,
                 "invalid value for :raft_data_dir: #{inspect(path)} (expected non-empty path string)"
         else
-          validate_required_prefix!(normalized_path)
+          normalized_path
         end
 
       value ->
@@ -274,58 +274,6 @@ defmodule Starcite.DataPlane.RaftManager do
 
   defp safe_node_name(node) when is_atom(node) do
     node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
-  end
-
-  defp validate_required_prefix!(path) when is_binary(path) do
-    case Application.get_env(:starcite, :raft_data_dir_required_prefix) do
-      nil ->
-        path
-
-      prefix when is_binary(prefix) ->
-        normalized_prefix = String.trim(prefix)
-
-        if normalized_prefix == "" do
-          raise ArgumentError,
-                "invalid value for :raft_data_dir_required_prefix: #{inspect(prefix)} (expected non-empty absolute path string)"
-        end
-
-        if Path.type(path) != :absolute do
-          raise ArgumentError,
-                "invalid value for :raft_data_dir: #{inspect(path)} (expected absolute path when :raft_data_dir_required_prefix is configured)"
-        end
-
-        expanded_prefix = expand_required_prefix!(normalized_prefix)
-        expanded_path = Path.expand(path)
-
-        if path_within_prefix?(expanded_path, expanded_prefix) do
-          path
-        else
-          raise ArgumentError,
-                "invalid value for :raft_data_dir: #{inspect(path)} (must be within #{inspect(expanded_prefix)})"
-        end
-
-      value ->
-        raise ArgumentError,
-              "invalid value for :raft_data_dir_required_prefix: #{inspect(value)} (expected path string)"
-    end
-  end
-
-  defp expand_required_prefix!(prefix) when is_binary(prefix) do
-    if Path.type(prefix) != :absolute do
-      raise ArgumentError,
-            "invalid value for :raft_data_dir_required_prefix: #{inspect(prefix)} (expected absolute path string)"
-    end
-
-    case Path.expand(prefix) do
-      "/" -> "/"
-      expanded -> String.trim_trailing(expanded, "/")
-    end
-  end
-
-  defp path_within_prefix?(_path, "/"), do: true
-
-  defp path_within_prefix?(path, prefix) when is_binary(path) and is_binary(prefix) do
-    path == prefix or String.starts_with?(path, prefix <> "/")
   end
 
   defp server_ids do
