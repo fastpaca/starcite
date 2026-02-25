@@ -20,6 +20,7 @@ defmodule StarciteWeb.OpsController do
       write_replication_factor: write_replication_factor,
       num_groups: num_groups,
       local_groups: local_groups,
+      raft_storage: raft_storage,
       observer: observer
     } = Ops.status()
 
@@ -33,6 +34,7 @@ defmodule StarciteWeb.OpsController do
       write_replication_factor: write_replication_factor,
       num_groups: num_groups,
       local_groups: local_groups,
+      raft_storage: raft_storage,
       observer: render_observer(observer)
     })
   end

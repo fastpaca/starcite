@@ -7,12 +7,15 @@
 # General application configuration
 import Config
 
+default_raft_data_dir = "priv/raft"
+default_ra_system_data_dir = Path.join(default_raft_data_dir, "ra_system")
+
 config :starcite,
   ecto_repos: [Starcite.Repo],
   num_groups: 256,
   write_replication_factor: 3,
   write_node_ids: [:nonode@nohost],
-  raft_data_dir: "priv/raft",
+  raft_data_dir: default_raft_data_dir,
   raft_flush_interval_ms: 5000,
   emit_routing_telemetry: false,
   emit_event_append_telemetry: false,
@@ -32,6 +35,8 @@ config :starcite,
   archive_read_cache_compressed: true
 
 config :ra,
+  data_dir: String.to_charlist(default_ra_system_data_dir),
+  wal_data_dir: String.to_charlist(default_ra_system_data_dir),
   wal_write_strategy: :o_sync,
   wal_sync_method: :datasync,
   wal_compute_checksums: false,

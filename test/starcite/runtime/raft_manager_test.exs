@@ -3,7 +3,7 @@ defmodule Starcite.DataPlane.RaftManagerTest do
 
   alias Starcite.DataPlane.RaftManager
 
-  @config_keys [:num_groups, :write_replication_factor, :write_node_ids]
+  @config_keys [:num_groups, :write_replication_factor, :write_node_ids, :raft_data_dir]
 
   setup do
     original =
@@ -55,5 +55,12 @@ defmodule Starcite.DataPlane.RaftManagerTest do
     assert_raise ArgumentError, ~r/write_replication_factor=4 exceeds write_node_ids=3/, fn ->
       RaftManager.validate_config!()
     end
+  end
+
+  test "ra_system_data_dir uses configured raft_data_dir root" do
+    Application.put_env(:starcite, :raft_data_dir, "tmp/custom_raft")
+
+    assert RaftManager.raft_data_dir_root() == "tmp/custom_raft"
+    assert RaftManager.ra_system_data_dir() == Path.join("tmp/custom_raft", "ra_system")
   end
 end

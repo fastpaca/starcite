@@ -82,6 +82,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   @impl true
   def init(_opts) do
+    :ok = configure_ra_system_storage()
     :ok = :ra.start()
     :logger.set_application_level(:ra, :error)
     # Readiness is served on demand, so we subscribe to node liveness events to
@@ -436,6 +437,22 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     case WriteNodes.nodes() do
       [first | _] -> Node.self() == first
       [] -> false
+    end
+  end
+
+  defp configure_ra_system_storage do
+    ra_system_dir = RaftManager.ra_system_data_dir()
+
+    case File.mkdir_p(ra_system_dir) do
+      :ok ->
+        ra_system_dir_charlist = String.to_charlist(ra_system_dir)
+        Application.put_env(:ra, :data_dir, ra_system_dir_charlist)
+        Application.put_env(:ra, :wal_data_dir, ra_system_dir_charlist)
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "failed to prepare :ra storage directory #{inspect(ra_system_dir)}: #{inspect(reason)}"
     end
   end
 end

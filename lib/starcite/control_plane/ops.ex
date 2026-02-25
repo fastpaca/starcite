@@ -27,6 +27,7 @@ defmodule Starcite.ControlPlane.Ops do
       write_replication_factor: WriteNodes.replication_factor(),
       num_groups: WriteNodes.num_groups(),
       local_groups: local_write_groups(),
+      raft_storage: raft_storage_status(),
       observer: Observer.status()
     }
   end
@@ -150,6 +151,23 @@ defmodule Starcite.ControlPlane.Ops do
       {:error, :invalid_write_node}
     end
   end
+
+  defp raft_storage_status do
+    %{
+      starcite_data_dir: RaftManager.raft_data_dir_root(),
+      ra_data_dir: normalize_raft_path(Application.get_env(:ra, :data_dir)),
+      ra_wal_data_dir: normalize_raft_path(Application.get_env(:ra, :wal_data_dir))
+    }
+  end
+
+  defp normalize_raft_path(value) when is_binary(value), do: value
+
+  defp normalize_raft_path(value) when is_list(value) do
+    if List.ascii_printable?(value), do: List.to_string(value), else: inspect(value)
+  end
+
+  defp normalize_raft_path(nil), do: nil
+  defp normalize_raft_path(value), do: inspect(value)
 
   defp local_node_status do
     local = Node.self()

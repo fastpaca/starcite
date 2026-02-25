@@ -14,9 +14,13 @@ defmodule Starcite.Runtime.TestHelper do
       # Wait for processes to fully terminate
       Process.sleep(100)
 
-      # Cleanup Raft data directory (test mode only)
+      # Restart :ra around cleanup so we can safely clear ra_system metadata.
+      stop_ra_application()
       cleanup_raft_test_data()
       cleanup_ra_default_directory()
+      configure_ra_system_storage()
+      :ok = :ra.start()
+      :logger.set_application_level(:ra, :error)
 
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
@@ -54,7 +58,14 @@ defmodule Starcite.Runtime.TestHelper do
     test_data_dir = Application.get_env(:starcite, :raft_data_dir, "tmp/test_raft")
 
     if String.contains?(test_data_dir, "test") do
-      File.rm_rf(test_data_dir)
+      test_data_dir
+      |> Path.join("group_*")
+      |> Path.wildcard()
+      |> Enum.each(&File.rm_rf/1)
+
+      test_data_dir
+      |> Path.join("ra_system")
+      |> File.rm_rf()
     end
   end
 
@@ -63,6 +74,35 @@ defmodule Starcite.Runtime.TestHelper do
 
     if File.dir?(ra_default_dir) and String.ends_with?(ra_default_dir, "nonode@nohost") do
       File.rm_rf(ra_default_dir)
+    end
+  end
+
+  defp stop_ra_application do
+    case Application.stop(:ra) do
+      :ok ->
+        :ok
+
+      {:error, {:not_started, :ra}} ->
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError, "failed to stop :ra during test reset: #{inspect(reason)}"
+    end
+  end
+
+  defp configure_ra_system_storage do
+    ra_system_dir = RaftManager.ra_system_data_dir()
+
+    case File.mkdir_p(ra_system_dir) do
+      :ok ->
+        ra_system_dir_charlist = String.to_charlist(ra_system_dir)
+        Application.put_env(:ra, :data_dir, ra_system_dir_charlist)
+        Application.put_env(:ra, :wal_data_dir, ra_system_dir_charlist)
+        :ok
+
+      {:error, reason} ->
+        raise ArgumentError,
+              "failed to prepare :ra storage directory #{inspect(ra_system_dir)} during test reset: #{inspect(reason)}"
     end
   end
 
