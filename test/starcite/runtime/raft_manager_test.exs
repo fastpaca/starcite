@@ -63,12 +63,4 @@ defmodule Starcite.DataPlane.RaftManagerTest do
     assert RaftManager.raft_data_dir_root() == "tmp/custom_raft"
     assert RaftManager.ra_system_data_dir() == Path.join("tmp/custom_raft", "ra_system")
   end
-
-  test "raft_data_dir_root fails on invalid empty path" do
-    Application.put_env(:starcite, :raft_data_dir, "   ")
-
-    assert_raise ArgumentError, ~r/invalid value for :raft_data_dir/, fn ->
-      RaftManager.raft_data_dir_root()
-    end
-  end
 end

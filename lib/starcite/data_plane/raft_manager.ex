@@ -49,21 +49,7 @@ defmodule Starcite.DataPlane.RaftManager do
   @doc false
   @spec raft_data_dir_root() :: String.t()
   def raft_data_dir_root do
-    case Application.get_env(:starcite, :raft_data_dir, "priv/raft") do
-      path when is_binary(path) ->
-        normalized_path = String.trim(path)
-
-        if normalized_path == "" do
-          raise ArgumentError,
-                "invalid value for :raft_data_dir: #{inspect(path)} (expected non-empty path string)"
-        else
-          normalized_path
-        end
-
-      value ->
-        raise ArgumentError,
-              "invalid value for :raft_data_dir: #{inspect(value)} (expected path string)"
-    end
+    Application.fetch_env!(:starcite, :raft_data_dir)
   end
 
   @doc false
