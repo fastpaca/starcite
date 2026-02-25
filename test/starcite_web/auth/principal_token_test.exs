@@ -60,6 +60,86 @@ defmodule StarciteWeb.Auth.PrincipalTokenTest do
              )
   end
 
+  test "uses default ttl when ttl_seconds is omitted" do
+    {:ok, issued} =
+      PrincipalToken.issue(
+        %{
+          "principal" => %{"tenant_id" => "acme", "id" => "user-42", "type" => "user"},
+          "scopes" => ["session:read"]
+        },
+        @config
+      )
+
+    assert issued.expires_in == @config.principal_token_default_ttl_seconds
+    assert {:ok, verified} = PrincipalToken.verify(issued.token, @config)
+    assert verified.principal == %Principal{tenant_id: "acme", id: "user-42", type: :user}
+  end
+
+  test "rejects issue for agent principals without exactly one session id" do
+    base_attrs = %{
+      "principal" => %{"tenant_id" => "acme", "id" => "agent-1", "type" => "agent"},
+      "scopes" => ["session:read"]
+    }
+
+    assert {:error, :invalid_issue_request} = PrincipalToken.issue(base_attrs, @config)
+
+    assert {:error, :invalid_issue_request} =
+             PrincipalToken.issue(Map.put(base_attrs, "session_ids", []), @config)
+
+    assert {:error, :invalid_issue_request} =
+             PrincipalToken.issue(Map.put(base_attrs, "session_ids", ["ses-1", "ses-2"]), @config)
+
+    assert {:ok, issued} =
+             PrincipalToken.issue(Map.put(base_attrs, "session_ids", ["ses-1"]), @config)
+
+    assert issued.session_ids == ["ses-1"]
+  end
+
+  test "rejects verify when agent token has invalid session binding claims" do
+    now = System.system_time(:second)
+
+    missing_session_ids_token =
+      Phoenix.Token.sign(
+        StarciteWeb.Endpoint,
+        @config.principal_token_salt,
+        %{
+          "v" => 1,
+          "typ" => "principal",
+          "tenant_id" => "acme",
+          "sub" => "agent-1",
+          "principal_type" => "agent",
+          "actor" => "agent:agent-1",
+          "scopes" => ["session:read"],
+          "iat" => now,
+          "exp" => now + 60
+        }
+      )
+
+    assert {:error, :invalid_bearer_token} =
+             PrincipalToken.verify(missing_session_ids_token, @config)
+
+    multiple_session_ids_token =
+      Phoenix.Token.sign(
+        StarciteWeb.Endpoint,
+        @config.principal_token_salt,
+        %{
+          "v" => 1,
+          "typ" => "principal",
+          "tenant_id" => "acme",
+          "sub" => "agent-1",
+          "principal_type" => "agent",
+          "actor" => "agent:agent-1",
+          "scopes" => ["session:read"],
+          "session_ids" => ["ses-1", "ses-2"],
+          "iat" => now,
+          "exp" => now + 60
+        }
+      )
+
+    assert {:error, :invalid_bearer_token} =
+             PrincipalToken.verify(multiple_session_ids_token, @config)
+  end
+
   test "rejects verify when actor does not match principal identity" do
     now = System.system_time(:second)
 

@@ -464,6 +464,43 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(create_conn.resp_body)["error"] == "forbidden_tenant"
   end
 
+  test "rejects session create when metadata tenant_id mismatches service tenant" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-service-create-metadata-mismatch"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    create_conn =
+      json_conn(
+        :post,
+        "/v1/sessions",
+        %{
+          "id" => unique_id("ses"),
+          "creator_principal" => %{
+            "tenant_id" => "acme",
+            "id" => "user-42",
+            "type" => "user"
+          },
+          "metadata" => %{
+            "tenant_id" => "beta",
+            "env" => "prod"
+          }
+        },
+        [service_auth_header(private_key, kid)]
+      )
+
+    assert create_conn.status == 403
+    assert Jason.decode!(create_conn.resp_body)["error"] == "forbidden_tenant"
+  end
+
   test "enforces principal session constraints on append" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
@@ -692,6 +729,20 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert ids == [acme_session_id]
     refute beta_session_id in ids
+
+    forged_filter_conn =
+      json_conn(:get, "/v1/sessions?metadata[tenant_id]=beta", nil, [acme_header])
+
+    assert forged_filter_conn.status == 200
+
+    forged_ids =
+      forged_filter_conn.resp_body
+      |> Jason.decode!()
+      |> Map.fetch!("sessions")
+      |> Enum.map(&Map.fetch!(&1, "id"))
+
+    assert forged_ids == [acme_session_id]
+    refute beta_session_id in forged_ids
   end
 
   test "denies session create and list for agent principal tokens" do

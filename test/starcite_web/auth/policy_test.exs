@@ -37,6 +37,20 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
   end
 
+  test "can_issue_token denies malformed service issue payloads" do
+    assert {:error, :forbidden_tenant} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               %{"principal" => %{"id" => "user-1", "type" => "user"}}
+             )
+
+    assert {:error, :invalid_issue_request} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               %{"scopes" => ["session:read"]}
+             )
+  end
+
   test "can_create_session allows service with explicit same-tenant creator principal" do
     assert {:ok, %Principal{tenant_id: "acme", id: "user-1", type: :user}} =
              Policy.can_create_session(
@@ -159,6 +173,14 @@ defmodule StarciteWeb.Auth.PolicyTest do
              })
   end
 
+  test "can_list_sessions denies malformed service auth contexts" do
+    assert {:error, :forbidden} =
+             Policy.can_list_sessions(%{
+               kind: :service,
+               scopes: ["session:read"]
+             })
+  end
+
   test "can_list_sessions denies principal user without read scope" do
     principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
 
@@ -239,6 +261,38 @@ defmodule StarciteWeb.Auth.PolicyTest do
                  id: "ses-1",
                  creator_principal: %Principal{tenant_id: "beta", id: "user-1", type: :user}
                }
+             )
+  end
+
+  test "allowed_to_read_session enforces read scope and principal session grants" do
+    principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
+
+    session = %{
+      id: "ses-2",
+      creator_principal: %Principal{tenant_id: "acme", id: "user-9", type: :user}
+    }
+
+    assert {:error, :forbidden_scope} =
+             Policy.allowed_to_read_session(
+               %{kind: :principal, principal: principal, scopes: ["session:append"]},
+               session
+             )
+
+    assert {:error, :forbidden_session} =
+             Policy.allowed_to_read_session(
+               %{kind: :principal, principal: principal, scopes: ["session:read"]},
+               session
+             )
+
+    assert :ok =
+             Policy.allowed_to_read_session(
+               %{
+                 kind: :principal,
+                 principal: principal,
+                 scopes: ["session:read"],
+                 session_ids: ["ses-2"]
+               },
+               session
              )
   end
 
