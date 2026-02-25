@@ -8,8 +8,8 @@ defmodule Starcite.DataPlane.EventStore do
   - `Starcite.Archive.Store` for archived reads and archived-read cache
 
   Memory pressure is enforced across both tiers. When local memory exceeds
-  `event_store_max_bytes`, cached archived reads are reclaimed before new
-  writes are rejected with `:event_store_backpressure`.
+  `event_store_max_bytes`, cached archived reads are reclaimed and pressure is
+  emitted via telemetry.
   """
 
   use GenServer
@@ -51,56 +51,33 @@ defmodule Starcite.DataPlane.EventStore do
   @doc """
   Insert one committed event into pending local state.
 
-  Returns `{:error, :event_store_backpressure}` when memory cannot be reclaimed
-  enough to safely accept additional writes.
+  This path does not reject committed writes under pressure; it emits
+  backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_event(String.t(), Event.t()) :: :ok | {:error, :event_store_backpressure}
+  @spec put_event(String.t(), Event.t()) :: :ok
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    case ensure_capacity_for_put_event(session_id, event) do
-      {:ok, _current_memory_bytes} ->
-        :ok = EventQueue.put_event(session_id, seq, event)
-        :ok = emit_event_store_write_telemetry(session_id, event)
-        :ok
+    maybe_emit_backpressure(ensure_capacity_for_put_event(session_id, event), session_id)
 
-      {:error, :event_store_backpressure, metadata} ->
-        Telemetry.event_store_backpressure(
-          session_id,
-          metadata.current_memory_bytes,
-          metadata.max_memory_bytes,
-          metadata.reason
-        )
-
-        {:error, :event_store_backpressure}
-    end
+    :ok = EventQueue.put_event(session_id, seq, event)
+    :ok = emit_event_store_write_telemetry(session_id, event)
+    :ok
   end
 
   @doc """
   Insert many committed events into pending local state.
 
-  Returns `{:error, :event_store_backpressure}` when memory cannot be reclaimed
-  enough to safely accept additional writes.
+  This path does not reject committed writes under pressure; it emits
+  backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_events(String.t(), [Event.t()]) :: :ok | {:error, :event_store_backpressure}
+  @spec put_events(String.t(), [Event.t()]) :: :ok
   def put_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
-    case ensure_capacity_for_puts(session_id, events) do
-      {:ok, _current_memory_bytes} ->
-        :ok = EventQueue.put_events(session_id, events)
-        :ok = emit_event_store_write_telemetry(session_id, events)
+    maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id)
 
-        :ok
-
-      {:error, :event_store_backpressure, metadata} ->
-        Telemetry.event_store_backpressure(
-          session_id,
-          metadata.current_memory_bytes,
-          metadata.max_memory_bytes,
-          metadata.reason
-        )
-
-        {:error, :event_store_backpressure}
-    end
+    :ok = EventQueue.put_events(session_id, events)
+    :ok = emit_event_store_write_telemetry(session_id, events)
+    :ok
   end
 
   @doc """
@@ -253,6 +230,23 @@ defmodule Starcite.DataPlane.EventStore do
       {:ok, :capacity_check_skipped}
     end
   end
+
+  defp maybe_emit_backpressure(
+         {:error, :event_store_backpressure, metadata},
+         session_id
+       )
+       when is_binary(session_id) and is_map(metadata) do
+    Telemetry.event_store_backpressure(
+      session_id,
+      metadata.current_memory_bytes,
+      metadata.max_memory_bytes,
+      metadata.reason
+    )
+
+    :ok
+  end
+
+  defp maybe_emit_backpressure(_result, _session_id), do: :ok
 
   defp max_memory_bytes_limit do
     raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)

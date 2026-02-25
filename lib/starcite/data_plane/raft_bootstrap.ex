@@ -23,6 +23,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
   @readiness_refresh_call_timeout_ms 5_000
+  @runtime_reconcile_interval_ms 5_000
+  @group_leader_probe_timeout_ms 250
+  @group_election_timeout_ms 500
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -94,6 +97,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     )
 
     send(self(), :bootstrap)
+    schedule_runtime_reconcile()
 
     {:ok,
      %{
@@ -112,8 +116,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    status = RaftHealth.readiness_status(state)
-    {:reply, status.ready?, state}
+    next_state = RaftHealth.maybe_refresh(state, true)
+    status = RaftHealth.readiness_status(next_state)
+    {:reply, status.ready?, next_state}
   end
 
   @impl true
@@ -196,6 +201,12 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   @impl true
+  def handle_info(:runtime_reconcile, state) do
+    schedule_runtime_reconcile()
+    {:noreply, maybe_reconcile_local_groups(state)}
+  end
+
+  @impl true
   def handle_info({ref, _result}, state) when is_reference(ref) do
     {:noreply, state}
   end
@@ -232,6 +243,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
             )
 
             ensure_all_local_groups_running()
+            ensure_local_group_leaders(compute_my_groups())
 
             send(owner, {:startup_complete, :coordinator})
 
@@ -240,6 +252,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
             run_groups_parallel(my_groups, "join", &wait_and_join_group/1)
             run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
+            ensure_local_group_leaders(my_groups)
 
             Logger.info("RaftBootstrap: write follower joined #{length(my_groups)} groups")
             send(owner, {:startup_complete, :follower})
@@ -334,12 +347,14 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     machine = RaftManager.machine(group_id)
     server_ids = for node <- replica_nodes, do: {server_id, node}
 
-    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} ->
-        :ok
+    with :ok <- RaftManager.ensure_runtime_started() do
+      case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
+        {:ok, _started, _not_started} ->
+          :ok
 
-      {:error, :cluster_not_formed} ->
-        :ok
+        {:error, :cluster_not_formed} ->
+          :ok
+      end
     end
   end
 
@@ -348,6 +363,50 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       RaftManager.start_group(group_id)
     else
       :ok
+    end
+  end
+
+  defp ensure_local_group_leaders(groups) do
+    run_groups_parallel(groups, "ensure-leader", &ensure_group_has_leader/1)
+  end
+
+  defp ensure_group_has_leader(group_id) do
+    if RaftManager.should_participate?(group_id) and group_running?(group_id) do
+      server_ref = {RaftManager.server_id(group_id), Node.self()}
+
+      case :ra.member_overview(server_ref, @group_leader_probe_timeout_ms) do
+        {:ok, %{leader_id: {_, _}}, _} ->
+          :ok
+
+        {:ok, _overview, _} ->
+          trigger_group_election(group_id, server_ref, :leader_unknown)
+
+        {:timeout, _} ->
+          trigger_group_election(group_id, server_ref, :leader_query_timeout)
+
+        {:error, reason} ->
+          trigger_group_election(group_id, server_ref, {:leader_query_error, reason})
+      end
+    else
+      :ok
+    end
+  end
+
+  defp trigger_group_election(group_id, server_ref, reason) do
+    Logger.debug(
+      "RaftBootstrap: triggering election for group #{group_id} (reason=#{inspect(reason)})"
+    )
+
+    try do
+      :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
+      :ok
+    catch
+      :exit, exit_reason ->
+        Logger.warning(
+          "RaftBootstrap: trigger_election failed for group #{group_id}: #{inspect(exit_reason)}"
+        )
+
+        :ok
     end
   end
 
@@ -454,5 +513,32 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         raise ArgumentError,
               "failed to prepare :ra storage directory #{inspect(ra_system_dir)}: #{inspect(reason)}"
     end
+  end
+
+  defp maybe_reconcile_local_groups(%{startup_complete?: true} = state) do
+    if WriteNodes.write_node?(Node.self()) do
+      local_groups = compute_my_groups()
+      down_groups = Enum.reject(local_groups, &group_running?/1)
+
+      if down_groups == [] do
+        state
+      else
+        Logger.warning(
+          "RaftBootstrap: detected #{length(down_groups)} local groups down, attempting recovery"
+        )
+
+        run_groups_parallel(down_groups, "runtime-reconcile", &ensure_local_group_running/1)
+        ensure_local_group_leaders(down_groups)
+        Map.put(state, :consensus_last_probe_at_ms, nil)
+      end
+    else
+      state
+    end
+  end
+
+  defp maybe_reconcile_local_groups(state), do: state
+
+  defp schedule_runtime_reconcile do
+    Process.send_after(self(), :runtime_reconcile, @runtime_reconcile_interval_ms)
   end
 end

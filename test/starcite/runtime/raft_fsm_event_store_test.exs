@@ -14,6 +14,27 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     :ok
   end
 
+  test "declares raft machine version mapping" do
+    assert RaftFSM.version() == 1
+    assert RaftFSM.which_module(0) == RaftFSM
+    assert RaftFSM.which_module(1) == RaftFSM
+    assert_raise ArgumentError, fn -> RaftFSM.which_module(99) end
+  end
+
+  test "machine_version command migrates legacy state schema" do
+    legacy_state =
+      RaftFSM.init(%{group_id: 7})
+      |> Map.delete(:last_checkpoint_index)
+
+    refute Map.has_key?(legacy_state, :last_checkpoint_index)
+
+    {migrated_state, :ok} =
+      RaftFSM.apply(%{index: 1}, {:machine_version, 0, 1}, legacy_state)
+
+    assert Map.has_key?(migrated_state, :last_checkpoint_index)
+    assert migrated_state.last_checkpoint_index == nil
+  end
+
   test "append_event mirrors appended events to ETS" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
@@ -250,7 +271,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
       RaftFSM.apply(%{index: 43}, {:ack_archived, session_id, 1}, state)
   end
 
-  test "append_event rejects writes under event-store backpressure without advancing session" do
+  test "append_event preserves deterministic state transition under event-store backpressure" do
     with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = unique_session_id()
     state = seeded_state(session_id)
@@ -260,20 +281,22 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
 
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
-    {next_state, {:reply, {:error, :event_store_backpressure}}} =
+    {next_state, {:reply, {:ok, %{seq: 2, deduped: false}}}, _effects} =
       RaftFSM.apply(
         nil,
         {:append_event, session_id, event_payload("two", producer_seq: 2), nil},
         state
       )
 
-    assert next_state == state
-    assert EventStore.session_size(session_id) == 1
+    refute next_state == state
+    assert EventStore.session_size(session_id) == 2
     assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
-    assert session.last_seq == 1
+    assert session.last_seq == 2
+    assert {:ok, event} = EventStore.get_event(session_id, 2)
+    assert event.payload == %{text: "two"}
   end
 
-  test "append_events rejects writes under event-store backpressure without partial writes" do
+  test "append_events preserves deterministic state transition under event-store backpressure" do
     with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = unique_session_id()
     state = seeded_state(session_id)
@@ -283,7 +306,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
 
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
-    {next_state, {:reply, {:error, :event_store_backpressure}}} =
+    {next_state, {:reply, {:ok, %{results: [_second, _third], last_seq: 3}}}, _effects} =
       RaftFSM.apply(
         nil,
         {:append_events, session_id,
@@ -291,10 +314,14 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    assert next_state == state
-    assert EventStore.session_size(session_id) == 1
+    refute next_state == state
+    assert EventStore.session_size(session_id) == 3
     assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
-    assert session.last_seq == 1
+    assert session.last_seq == 3
+    assert {:ok, two} = EventStore.get_event(session_id, 2)
+    assert {:ok, three} = EventStore.get_event(session_id, 3)
+    assert two.payload == %{text: "two"}
+    assert three.payload == %{text: "three"}
   end
 
   defp seeded_state(session_id) do

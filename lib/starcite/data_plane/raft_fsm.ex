@@ -10,30 +10,49 @@ defmodule Starcite.DataPlane.RaftFSM do
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
+  @machine_version 1
 
   @emit_event_append_telemetry Application.compile_env(
                                  :starcite,
                                  :emit_event_append_telemetry,
                                  false
                                )
+  @checkpoint_interval_entries Application.compile_env(
+                                 :starcite,
+                                 :raft_checkpoint_interval_entries,
+                                 2_048
+                               )
 
-  defstruct [:group_id, :sessions]
+  defstruct [:group_id, :sessions, :last_checkpoint_index]
 
   @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
 
   @type t :: %__MODULE__{
           group_id: term(),
-          sessions: %{optional(String.t()) => session_state()}
+          sessions: %{optional(String.t()) => session_state()},
+          last_checkpoint_index: non_neg_integer() | nil
         }
 
   @impl true
   def init(%{group_id: group_id}) do
-    %__MODULE__{group_id: group_id, sessions: %{}}
+    %__MODULE__{group_id: group_id, sessions: %{}, last_checkpoint_index: nil}
+  end
+
+  @impl true
+  def version, do: @machine_version
+
+  @impl true
+  def which_module(0), do: __MODULE__
+
+  def which_module(@machine_version), do: __MODULE__
+
+  def which_module(version) do
+    raise ArgumentError, "unsupported Raft FSM version: #{inspect(version)}"
   end
 
   @impl true
   def apply(
-        _meta,
+        meta,
         {:create_session, session_id, title, creator_principal, metadata},
         state
       ) do
@@ -47,56 +66,61 @@ defmodule Starcite.DataPlane.RaftFSM do
           )
 
         new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
-        {new_state, {:reply, {:ok, Session.to_map(session)}}}
+
+        reply_with_optional_effects(
+          meta,
+          new_state,
+          {:reply, {:ok, Session.to_map(session)}}
+        )
 
       %Session{} ->
-        {state, {:reply, {:error, :session_exists}}}
+        reply_with_optional_effects(
+          meta,
+          state,
+          {:reply, {:error, :session_exists}}
+        )
     end
   end
 
   @impl true
-  def apply(_meta, {:append_event, session_id, input, expected_seq}, state) do
+  def apply(meta, {:append_event, session_id, input, expected_seq}, state) do
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq),
-         {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input),
-         :ok <- put_appended_event(session_id, event_to_store) do
+         {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
+      :ok = put_appended_event(session_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
       emit_appended_event_telemetry(session_id, event_to_store)
       effect = build_effect_for_event(session_id, event_to_store)
       reply = {:reply, {:ok, reply}}
+      effects = if is_nil(effect), do: [], else: [effect]
 
-      case effect do
-        nil -> {new_state, reply}
-        value -> {new_state, reply, [value]}
-      end
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
-      {:error, reason} -> {state, {:reply, {:error, reason}}}
+      {:error, reason} ->
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
   end
 
   @impl true
-  def apply(_meta, {:append_events, _session_id, [], _opts}, state) do
-    {state, {:reply, {:error, :invalid_event}}}
+  def apply(meta, {:append_events, _session_id, [], _opts}, state) do
+    reply_with_optional_effects(meta, state, {:reply, {:error, :invalid_event}})
   end
 
   @impl true
-  def apply(_meta, {:append_events, session_id, inputs, opts}, state)
+  def apply(meta, {:append_events, session_id, inputs, opts}, state)
       when is_list(inputs) and (is_list(opts) or is_nil(opts)) do
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
-         {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs),
-         :ok <- put_appended_events(session_id, events_to_store) do
+         {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
+      :ok = put_appended_events(session_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
       emit_appended_telemetry(session_id, events_to_store)
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
-
-      case effects do
-        [] -> {new_state, reply}
-        _ -> {new_state, reply, effects}
-      end
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
-      {:error, reason} -> {state, {:reply, {:error, reason}}}
+      {:error, reason} ->
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
   end
 
@@ -123,18 +147,28 @@ defmodule Starcite.DataPlane.RaftFSM do
 
       reply = {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: evicted}}}
 
-      case release_cursor_effect(
-             meta,
-             previous_archived_seq,
-             updated_session.archived_seq,
-             new_state
-           ) do
-        nil -> {new_state, reply}
-        effect -> {new_state, reply, [effect]}
-      end
+      effects =
+        case release_cursor_effect(
+               meta,
+               previous_archived_seq,
+               updated_session.archived_seq,
+               new_state
+             ) do
+          nil -> []
+          effect -> [effect]
+        end
+
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
-      {:error, reason} -> {state, {:reply, {:error, reason}}}
+      {:error, reason} ->
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
+  end
+
+  @impl true
+  def apply(_meta, {:machine_version, from, to}, state)
+      when is_integer(from) and is_integer(to) do
+    {ensure_state_schema(state), :ok}
   end
 
   # Queries
@@ -252,6 +286,54 @@ defmodule Starcite.DataPlane.RaftFSM do
   defp put_appended_event(session_id, %{seq: seq} = event)
        when is_binary(session_id) and is_integer(seq) and seq > 0 do
     EventStore.put_event(session_id, event)
+  end
+
+  defp reply_with_optional_effects(meta, %__MODULE__{} = state, reply, effects \\ [])
+       when is_list(effects) do
+    {next_state, next_effects} = maybe_add_checkpoint_effect(meta, state, effects)
+
+    case next_effects do
+      [] -> {next_state, reply}
+      _ -> {next_state, reply, next_effects}
+    end
+  end
+
+  defp maybe_add_checkpoint_effect(
+         %{index: raft_index},
+         %__MODULE__{} = raw_state,
+         effects
+       )
+       when is_integer(raft_index) and raft_index > 0 and is_list(effects) do
+    state = ensure_state_schema(raw_state)
+    interval = checkpoint_interval_entries()
+    last_checkpoint_index = Map.get(state, :last_checkpoint_index) || 0
+
+    # Keep checkpoint opportunities independent of archive ack / release-cursor cadence.
+    if raft_index - last_checkpoint_index >= interval do
+      updated_state = Map.put(state, :last_checkpoint_index, raft_index)
+      {updated_state, effects ++ [{:checkpoint, raft_index, updated_state}]}
+    else
+      {state, effects}
+    end
+  end
+
+  defp maybe_add_checkpoint_effect(_meta, %__MODULE__{} = state, effects)
+       when is_list(effects) do
+    {state, effects}
+  end
+
+  defp checkpoint_interval_entries do
+    case @checkpoint_interval_entries do
+      value when is_integer(value) and value > 0 -> value
+      _ -> 2_048
+    end
+  end
+
+  defp ensure_state_schema(%__MODULE__{} = state) do
+    case Map.has_key?(state, :last_checkpoint_index) do
+      true -> state
+      false -> Map.put(state, :last_checkpoint_index, nil)
+    end
   end
 
   if @emit_event_append_telemetry do
