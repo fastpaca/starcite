@@ -288,6 +288,7 @@ defmodule Starcite.DataPlane.RaftFSM do
     interval = checkpoint_interval_entries()
     last_checkpoint_index = state.last_checkpoint_index || 0
 
+    # Keep checkpoint opportunities independent of archive ack / release-cursor cadence.
     if raft_index - last_checkpoint_index >= interval do
       updated_state = %{state | last_checkpoint_index: raft_index}
       {updated_state, effects ++ [{:checkpoint, raft_index, updated_state}]}
