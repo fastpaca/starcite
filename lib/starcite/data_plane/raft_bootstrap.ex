@@ -23,6 +23,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @group_bootstrap_poll_ms 100
   @group_bootstrap_max_attempts 300
   @readiness_refresh_call_timeout_ms 5_000
+  @runtime_reconcile_interval_ms 5_000
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -94,6 +95,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     )
 
     send(self(), :bootstrap)
+    schedule_runtime_reconcile()
 
     {:ok,
      %{
@@ -112,8 +114,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    status = RaftHealth.readiness_status(state)
-    {:reply, status.ready?, state}
+    next_state = RaftHealth.maybe_refresh(state, true)
+    status = RaftHealth.readiness_status(next_state)
+    {:reply, status.ready?, next_state}
   end
 
   @impl true
@@ -193,6 +196,12 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @impl true
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
     {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:runtime_reconcile, state) do
+    schedule_runtime_reconcile()
+    {:noreply, maybe_reconcile_local_groups(state)}
   end
 
   @impl true
@@ -334,12 +343,14 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     machine = RaftManager.machine(group_id)
     server_ids = for node <- replica_nodes, do: {server_id, node}
 
-    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-      {:ok, _started, _not_started} ->
-        :ok
+    with :ok <- RaftManager.ensure_runtime_started() do
+      case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
+        {:ok, _started, _not_started} ->
+          :ok
 
-      {:error, :cluster_not_formed} ->
-        :ok
+        {:error, :cluster_not_formed} ->
+          :ok
+      end
     end
   end
 
@@ -454,5 +465,31 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         raise ArgumentError,
               "failed to prepare :ra storage directory #{inspect(ra_system_dir)}: #{inspect(reason)}"
     end
+  end
+
+  defp maybe_reconcile_local_groups(%{startup_complete?: true} = state) do
+    if WriteNodes.write_node?(Node.self()) do
+      local_groups = compute_my_groups()
+      down_groups = Enum.reject(local_groups, &group_running?/1)
+
+      if down_groups == [] do
+        state
+      else
+        Logger.warning(
+          "RaftBootstrap: detected #{length(down_groups)} local groups down, attempting recovery"
+        )
+
+        run_groups_parallel(down_groups, "runtime-reconcile", &ensure_local_group_running/1)
+        Map.put(state, :consensus_last_probe_at_ms, nil)
+      end
+    else
+      state
+    end
+  end
+
+  defp maybe_reconcile_local_groups(state), do: state
+
+  defp schedule_runtime_reconcile do
+    Process.send_after(self(), :runtime_reconcile, @runtime_reconcile_interval_ms)
   end
 end

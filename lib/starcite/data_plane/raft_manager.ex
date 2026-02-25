@@ -15,6 +15,8 @@ defmodule Starcite.DataPlane.RaftManager do
   alias Starcite.DataPlane.RaftFSM
   @server_ids_cache_key {__MODULE__, :server_ids}
   @cluster_names_cache_key {__MODULE__, :cluster_names}
+  @ra_runtime_start_wait_attempts 20
+  @ra_runtime_start_wait_sleep_ms 50
 
   @doc false
   @spec validate_config!() :: :ok
@@ -133,29 +135,31 @@ defmodule Starcite.DataPlane.RaftManager do
     if Process.whereis(server_id) do
       :ok
     else
-      my_node = Node.self()
-      cluster_name = cluster_name(group_id)
-      machine = {:module, RaftFSM, %{group_id: group_id}}
+      with :ok <- ensure_runtime_started() do
+        my_node = Node.self()
+        cluster_name = cluster_name(group_id)
+        machine = {:module, RaftFSM, %{group_id: group_id}}
 
-      replica_nodes = replicas_for_group(group_id)
-      server_ids = for node <- replica_nodes, do: {server_id, node}
-      bootstrap_node = Enum.min(replica_nodes)
+        replica_nodes = replicas_for_group(group_id)
+        server_ids = for node <- replica_nodes, do: {server_id, node}
+        bootstrap_node = Enum.min(replica_nodes)
 
-      Logger.debug(
-        "RaftManager: Starting group #{group_id} with #{length(replica_nodes)} replicas (bootstrap: #{bootstrap_node == my_node})"
-      )
-
-      if my_node == bootstrap_node do
-        :global.trans(
-          {:raft_bootstrap, group_id},
-          fn ->
-            bootstrap_cluster(group_id, cluster_name, machine, server_ids, {server_id, my_node})
-          end,
-          [Node.self()],
-          10_000
+        Logger.debug(
+          "RaftManager: Starting group #{group_id} with #{length(replica_nodes)} replicas (bootstrap: #{bootstrap_node == my_node})"
         )
-      else
-        join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
+
+        if my_node == bootstrap_node do
+          :global.trans(
+            {:raft_bootstrap, group_id},
+            fn ->
+              bootstrap_cluster(group_id, cluster_name, machine, server_ids, {server_id, my_node})
+            end,
+            [Node.self()],
+            10_000
+          )
+        else
+          join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
+        end
       end
     end
   end
@@ -195,6 +199,10 @@ defmodule Starcite.DataPlane.RaftManager do
         :ok
 
       {:error, :enoent} ->
+        Process.sleep(100)
+        join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
+
+      {:error, :ra_runtime_unavailable} ->
         Process.sleep(100)
         join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
 
@@ -242,8 +250,17 @@ defmodule Starcite.DataPlane.RaftManager do
             :ok
 
           {:error, reason} ->
-            Logger.error("RaftManager: Failed to join group #{group_id}: #{inspect(reason)}")
-            {:error, reason}
+            if runtime_boot_error?(reason) do
+              Logger.warning(
+                "RaftManager: Failed to join group #{group_id} due to RA runtime availability: #{inspect(reason)}"
+              )
+
+              _ = ensure_runtime_started()
+              {:error, :ra_runtime_unavailable}
+            else
+              Logger.error("RaftManager: Failed to join group #{group_id}: #{inspect(reason)}")
+              {:error, reason}
+            end
         end
 
       {:error, reason} ->
@@ -258,8 +275,54 @@ defmodule Starcite.DataPlane.RaftManager do
     {:module, RaftFSM, %{group_id: group_id}}
   end
 
+  @doc false
+  @spec ensure_runtime_started() :: :ok | {:error, term()}
+  def ensure_runtime_started do
+    if ra_runtime_ready?() do
+      :ok
+    else
+      with :ok <- start_ra_runtime(),
+           :ok <- wait_for_ra_runtime(@ra_runtime_start_wait_attempts) do
+        :ok
+      end
+    end
+  end
+
   defp safe_node_name(node) when is_atom(node) do
     node |> Atom.to_string() |> String.replace(~r/[^a-zA-Z0-9_]/, "_")
+  end
+
+  defp start_ra_runtime do
+    case :application.ensure_all_started(:ra) do
+      {:ok, _started_apps} ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.warning("RaftManager: failed to start :ra runtime: #{inspect(reason)}")
+        error
+    end
+  end
+
+  defp wait_for_ra_runtime(0), do: {:error, :ra_runtime_unavailable}
+
+  defp wait_for_ra_runtime(attempts) when is_integer(attempts) and attempts > 0 do
+    if ra_runtime_ready?() do
+      :ok
+    else
+      Process.sleep(@ra_runtime_start_wait_sleep_ms)
+      wait_for_ra_runtime(attempts - 1)
+    end
+  end
+
+  defp ra_runtime_ready? do
+    Process.whereis(:ra_server_sup_sup) != nil and :ets.whereis(:ra_directory) != :undefined
+  end
+
+  defp runtime_boot_error?(reason) do
+    reason_text = inspect(reason)
+
+    String.contains?(reason_text, "ra_directory") or
+      String.contains?(reason_text, "ra_server_sup_sup")
   end
 
   defp server_ids do
