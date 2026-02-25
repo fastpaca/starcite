@@ -157,7 +157,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
         counter("starcite_cursor_updates_total",
           event_name: [:starcite, :cursor, :update],
           measurement: :count,
-          description: "Total payload-free cursor updates emitted"
+          description: "Total cursor updates emitted"
         ),
         last_value("starcite_cursor_lag",
           event_name: [:starcite, :cursor, :update],
