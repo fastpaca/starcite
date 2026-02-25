@@ -70,10 +70,7 @@ defmodule Mix.Tasks.Bench.Internal do
       session_id = elem(sessions, rem(seq - 1, session_count))
       event = Map.put(stored_event_template, :seq, seq)
 
-      case EventStore.put_event(session_id, event) do
-        :ok -> :ok
-        {:error, reason} -> raise "event_store.put_event failed: #{inspect(reason)}"
-      end
+      :ok = EventStore.put_event(session_id, event)
     end
 
     raw_ets_insert = fn ->

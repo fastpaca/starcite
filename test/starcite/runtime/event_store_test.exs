@@ -325,7 +325,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     refute session_id in EventStore.session_ids()
   end
 
-  test "enforces memory-based backpressure limit" do
+  test "accepts committed writes while under memory pressure" do
     with_env(:starcite, :event_store_capacity_check_interval, 1)
     session_id = "ses-cap-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now()
@@ -341,7 +341,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
-    assert {:error, :event_store_backpressure} =
+    assert :ok =
              EventStore.put_event(session_id, %{
                seq: 2,
                type: "content",
@@ -350,15 +350,15 @@ defmodule Starcite.DataPlane.EventStoreTest do
                inserted_at: inserted_at
              })
 
-    assert EventStore.size() == 1
+    assert EventStore.size() == 2
   end
 
-  test "enforces byte-based size settings" do
+  test "accepts committed writes even with tiny byte limit" do
     with_env(:starcite, :event_store_capacity_check_interval, 1)
     with_env(:starcite, :event_store_max_bytes, 1)
     session_id = "ses-size-#{System.unique_integer([:positive, :monotonic])}"
 
-    assert {:error, :event_store_backpressure} =
+    assert :ok =
              EventStore.put_event(session_id, %{
                seq: 1,
                type: "content",
@@ -371,9 +371,9 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     assert :ok =
              EventStore.put_event(session_id, %{
-               seq: 1,
+               seq: 2,
                type: "content",
-               payload: %{n: 1},
+               payload: %{n: 2},
                actor: "agent:test",
                inserted_at: NaiveDateTime.utc_now()
              })

@@ -259,14 +259,14 @@ defmodule Starcite.DataPlane.RaftFSM do
   defp put_appended_events(_session_id, []), do: :ok
 
   defp put_appended_events(session_id, events) when is_binary(session_id) and is_list(events) do
-    EventStore.put_committed_events(session_id, events)
+    EventStore.put_events(session_id, events)
   end
 
   defp put_appended_event(_session_id, nil), do: :ok
 
   defp put_appended_event(session_id, %{seq: seq} = event)
        when is_binary(session_id) and is_integer(seq) and seq > 0 do
-    EventStore.put_committed_event(session_id, event)
+    EventStore.put_event(session_id, event)
   end
 
   defp reply_with_optional_effects(meta, %__MODULE__{} = state, reply, effects \\ [])
