@@ -55,14 +55,14 @@ defmodule Starcite.DataPlane.RaftFSM do
         new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
 
         reply_with_optional_effects(
-          meta_or_empty(meta),
+          meta,
           new_state,
           {:reply, {:ok, Session.to_map(session)}}
         )
 
       %Session{} ->
         reply_with_optional_effects(
-          meta_or_empty(meta),
+          meta,
           state,
           {:reply, {:error, :session_exists}}
         )
@@ -81,16 +81,16 @@ defmodule Starcite.DataPlane.RaftFSM do
       reply = {:reply, {:ok, reply}}
       effects = if is_nil(effect), do: [], else: [effect]
 
-      reply_with_optional_effects(meta_or_empty(meta), new_state, reply, effects)
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
       {:error, reason} ->
-        reply_with_optional_effects(meta_or_empty(meta), state, {:reply, {:error, reason}})
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
   end
 
   @impl true
   def apply(meta, {:append_events, _session_id, [], _opts}, state) do
-    reply_with_optional_effects(meta_or_empty(meta), state, {:reply, {:error, :invalid_event}})
+    reply_with_optional_effects(meta, state, {:reply, {:error, :invalid_event}})
   end
 
   @impl true
@@ -104,10 +104,10 @@ defmodule Starcite.DataPlane.RaftFSM do
       emit_appended_telemetry(session_id, events_to_store)
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
-      reply_with_optional_effects(meta_or_empty(meta), new_state, reply, effects)
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
       {:error, reason} ->
-        reply_with_optional_effects(meta_or_empty(meta), state, {:reply, {:error, reason}})
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
   end
 
@@ -145,10 +145,10 @@ defmodule Starcite.DataPlane.RaftFSM do
           effect -> [effect]
         end
 
-      reply_with_optional_effects(meta_or_empty(meta), new_state, reply, effects)
+      reply_with_optional_effects(meta, new_state, reply, effects)
     else
       {:error, reason} ->
-        reply_with_optional_effects(meta_or_empty(meta), state, {:reply, {:error, reason}})
+        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
     end
   end
 
@@ -270,7 +270,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   end
 
   defp reply_with_optional_effects(meta, %__MODULE__{} = state, reply, effects \\ [])
-       when is_map(meta) and is_list(effects) do
+       when is_list(effects) do
     {next_state, next_effects} = maybe_add_checkpoint_effect(meta, state, effects)
 
     case next_effects do
@@ -308,9 +308,6 @@ defmodule Starcite.DataPlane.RaftFSM do
       _ -> 2_048
     end
   end
-
-  defp meta_or_empty(meta) when is_map(meta), do: meta
-  defp meta_or_empty(_meta), do: %{}
 
   if @emit_event_append_telemetry do
     defp emit_appended_telemetry(_session_id, []), do: :ok
