@@ -3,7 +3,13 @@ defmodule Starcite.DataPlane.RaftManagerTest do
 
   alias Starcite.DataPlane.RaftManager
 
-  @config_keys [:num_groups, :write_replication_factor, :write_node_ids, :raft_data_dir]
+  @config_keys [
+    :num_groups,
+    :write_replication_factor,
+    :write_node_ids,
+    :raft_data_dir,
+    :raft_data_dir_required_prefix
+  ]
 
   setup do
     original =
@@ -68,6 +74,31 @@ defmodule Starcite.DataPlane.RaftManagerTest do
     Application.put_env(:starcite, :raft_data_dir, "   ")
 
     assert_raise ArgumentError, ~r/invalid value for :raft_data_dir/, fn ->
+      RaftManager.raft_data_dir_root()
+    end
+  end
+
+  test "raft_data_dir_root enforces required prefix when configured" do
+    Application.put_env(:starcite, :raft_data_dir_required_prefix, "/var/lib/starcite")
+    Application.put_env(:starcite, :raft_data_dir, "/var/lib/starcite/raft")
+
+    assert RaftManager.raft_data_dir_root() == "/var/lib/starcite/raft"
+  end
+
+  test "raft_data_dir_root rejects path outside required prefix" do
+    Application.put_env(:starcite, :raft_data_dir_required_prefix, "/var/lib/starcite")
+    Application.put_env(:starcite, :raft_data_dir, "/tmp/custom_raft")
+
+    assert_raise ArgumentError, ~r/must be within/, fn ->
+      RaftManager.raft_data_dir_root()
+    end
+  end
+
+  test "raft_data_dir_root requires absolute path when required prefix is configured" do
+    Application.put_env(:starcite, :raft_data_dir_required_prefix, "/var/lib/starcite")
+    Application.put_env(:starcite, :raft_data_dir, "tmp/custom_raft")
+
+    assert_raise ArgumentError, ~r/expected absolute path/, fn ->
       RaftManager.raft_data_dir_root()
     end
   end
