@@ -26,7 +26,7 @@ defmodule StarciteWeb.AuthTokenController do
       ) do
     auth = conn.assigns[:auth] || %{kind: :none}
 
-    with :ok <- Policy.can_issue_token(auth),
+    with :ok <- Policy.can_issue_token(auth, params),
          {:ok, issued} <- PrincipalToken.issue(params, ServiceAuth.config()) do
       principal = issued.principal
 

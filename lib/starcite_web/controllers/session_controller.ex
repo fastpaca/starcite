@@ -54,7 +54,7 @@ defmodule StarciteWeb.SessionController do
   defp append_event(id, event, expected_seq),
     do: WritePath.append_event(id, event, expected_seq: expected_seq)
 
-  defp authorize_append(%{kind: kind}, _id) when kind in [:none, :service], do: :ok
+  defp authorize_append(%{kind: :none}, _id), do: :ok
 
   defp authorize_append(auth, id) when is_map(auth) and is_binary(id) and id != "" do
     with {:ok, session} <- ReadPath.get_session(id),
@@ -82,7 +82,8 @@ defmodule StarciteWeb.SessionController do
     with {:ok, creator_principal} <- Policy.can_create_session(auth, params),
          {:ok, id} <- optional_non_empty_string(params["id"]),
          {:ok, title} <- optional_string(params["title"]),
-         {:ok, metadata} <- optional_object(params["metadata"]) do
+         {:ok, metadata} <- optional_object(params["metadata"]),
+         {:ok, metadata} <- ensure_session_metadata_tenant(metadata, creator_principal) do
       {:ok,
        [
          id: id,
@@ -202,12 +203,19 @@ defmodule StarciteWeb.SessionController do
          %{tenant_id: tenant_id, owner_principal_ids: owner_principal_ids},
          opts
        )
-       when is_binary(tenant_id) and tenant_id != "" and is_list(owner_principal_ids) and
+       when is_binary(tenant_id) and tenant_id != "" and
+              (is_nil(owner_principal_ids) or is_list(owner_principal_ids)) and
               is_map(opts) do
+    metadata_filters =
+      opts
+      |> Map.get(:metadata, %{})
+      |> Map.put("tenant_id", tenant_id)
+
     Starcite.Archive.Store.list_sessions(
       opts
       |> Map.put(:tenant_id, tenant_id)
       |> Map.put(:owner_principal_ids, owner_principal_ids)
+      |> Map.put(:metadata, metadata_filters)
     )
   end
 
@@ -234,6 +242,21 @@ defmodule StarciteWeb.SessionController do
   defp optional_object(nil), do: {:ok, %{}}
   defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
   defp optional_object(_value), do: {:error, :invalid_metadata}
+
+  defp ensure_session_metadata_tenant(
+         metadata,
+         %Starcite.Auth.Principal{tenant_id: tenant_id}
+       )
+       when is_map(metadata) and is_binary(tenant_id) and tenant_id != "" do
+    case Map.get(metadata, "tenant_id") do
+      nil -> {:ok, Map.put(metadata, "tenant_id", tenant_id)}
+      ^tenant_id -> {:ok, metadata}
+      _other -> {:error, :forbidden_tenant}
+    end
+  end
+
+  defp ensure_session_metadata_tenant(metadata, _creator_principal) when is_map(metadata),
+    do: {:ok, metadata}
 
   defp optional_refs(nil), do: {:ok, %{}}
 

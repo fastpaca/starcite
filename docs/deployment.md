@@ -44,7 +44,6 @@ Postgres mode requires: `DATABASE_URL`.
    - `mix starcite.ops status`
    - `mix starcite.ops ready-nodes`
    - `curl -sS http://<node>:4000/health/ready`
-   - `curl -sS http://<node>:4000/v1/ops/status`
 
 Expected result: node reports ready, and ready write-node set matches the configured static set.
 

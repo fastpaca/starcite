@@ -342,7 +342,7 @@ auth_mode =
 
 jwt_leeway_seconds =
   case System.get_env("STARCITE_AUTH_JWT_LEEWAY_SECONDS") do
-    nil -> 30
+    nil -> 1
     raw -> parse_non_neg_integer!.("STARCITE_AUTH_JWT_LEEWAY_SECONDS", raw)
   end
 
@@ -366,7 +366,7 @@ end
 # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS.
 principal_token_default_ttl_seconds =
   case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS") do
-    nil -> 600
+    nil -> 5
     raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS", raw)
   end
 
@@ -374,7 +374,7 @@ principal_token_default_ttl_seconds =
 # Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS.
 principal_token_max_ttl_seconds =
   case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS") do
-    nil -> 900
+    nil -> 15
     raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS", raw)
   end
 

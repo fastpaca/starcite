@@ -71,8 +71,18 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
         config = config()
 
         with {:ok, claims} <- JWT.verify(token, config),
-             {:ok, exp} <- claim_exp(claims) do
-          {:ok, %{kind: :service, claims: claims, expires_at: exp, bearer_token: token}}
+             {:ok, exp} <- claim_exp(claims),
+             {:ok, tenant_id} <- claim_tenant_id(claims),
+             {:ok, scopes} <- claim_scopes(claims) do
+          {:ok,
+           %{
+             kind: :service,
+             claims: claims,
+             tenant_id: tenant_id,
+             scopes: scopes,
+             expires_at: exp,
+             bearer_token: token
+           }}
         end
     end
   end
@@ -115,6 +125,50 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   defp claim_exp(%{"exp" => exp}) when is_integer(exp) and exp >= 0, do: {:ok, exp}
   defp claim_exp(_claims), do: {:error, :invalid_jwt_claims}
+
+  defp claim_tenant_id(%{"tenant_id" => tenant_id})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: {:ok, tenant_id}
+
+  defp claim_tenant_id(_claims), do: {:error, :invalid_jwt_claims}
+
+  defp claim_scopes(claims) when is_map(claims) do
+    with {:ok, scope_values} <- scope_values(Map.get(claims, "scope")),
+         {:ok, scopes_values} <- scopes_values(Map.get(claims, "scopes")) do
+      scopes = Enum.uniq(scope_values ++ scopes_values)
+
+      if scopes == [] do
+        {:error, :invalid_jwt_claims}
+      else
+        {:ok, scopes}
+      end
+    end
+  end
+
+  defp scope_values(nil), do: {:ok, []}
+
+  defp scope_values(scope) when is_binary(scope) do
+    scope_values = String.split(scope, ~r/\s+/, trim: true)
+    {:ok, scope_values}
+  end
+
+  defp scope_values(_scope), do: {:error, :invalid_jwt_claims}
+
+  defp scopes_values(nil), do: {:ok, []}
+
+  defp scopes_values(scopes) when is_list(scopes) do
+    normalized = Enum.uniq(scopes)
+
+    if Enum.all?(normalized, &is_non_empty_string/1) do
+      {:ok, normalized}
+    else
+      {:error, :invalid_jwt_claims}
+    end
+  end
+
+  defp scopes_values(_scopes), do: {:error, :invalid_jwt_claims}
+
+  defp is_non_empty_string(value), do: is_binary(value) and value != ""
 
   defp parse_bearer_token(header) when is_binary(header) do
     with [scheme, token] <- String.split(String.trim(header), " ", parts: 2, trim: true),

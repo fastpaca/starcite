@@ -6,6 +6,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
   alias Starcite.AuthTestSupport
   alias Starcite.{ReadPath, Repo, WritePath}
+  alias Starcite.Auth.Principal
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
@@ -45,11 +46,23 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="starcite")]
   end
 
-  test "requires service auth for ops endpoints in jwt mode" do
+  test "requires service auth for token issue endpoint in jwt mode" do
     bypass = Bypass.open()
     configure_jwt_auth!(bypass)
 
-    conn = json_conn(:get, "/v1/ops/status", nil)
+    conn =
+      json_conn(
+        :post,
+        "/v1/auth/issue",
+        %{
+          "principal" => %{
+            "tenant_id" => "acme",
+            "id" => "user-42",
+            "type" => "user"
+          },
+          "scopes" => ["session:read"]
+        }
+      )
 
     assert conn.status == 401
     body = Jason.decode!(conn.resp_body)
@@ -57,10 +70,10 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="starcite")]
   end
 
-  test "accepts valid service JWT for ops status endpoint" do
+  test "accepts valid service JWT for token issue endpoint" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
-    kid = "kid-ops-status"
+    kid = "kid-issue-endpoint"
     jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
 
     Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
@@ -71,14 +84,32 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     configure_jwt_auth!(bypass)
 
-    conn = json_conn(:get, "/v1/ops/status", nil, [service_auth_header(private_key, kid)])
+    conn =
+      json_conn(
+        :post,
+        "/v1/auth/issue",
+        %{
+          "principal" => %{
+            "tenant_id" => "acme",
+            "id" => "user-42",
+            "type" => "user"
+          },
+          "scopes" => ["session:read"]
+        },
+        [service_auth_header(private_key, kid)]
+      )
 
     assert conn.status == 200
     body = Jason.decode!(conn.resp_body)
-    assert body["node"] == Atom.to_string(Node.self())
+    assert is_binary(body["token"])
+    assert body["token_type"] == "Bearer"
+    assert body["principal"]["tenant_id"] == "acme"
+    assert body["principal"]["id"] == "user-42"
+    assert body["principal"]["type"] == "user"
+    assert body["scopes"] == ["session:read"]
   end
 
-  test "accepts valid JWT for session create and append" do
+  test "accepts valid JWT for session create and denies service append" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-valid"
@@ -121,7 +152,8 @@ defmodule StarciteWeb.ApiAuthJwtTest do
         [auth_header]
       )
 
-    assert append_conn.status == 201
+    assert append_conn.status == 403
+    assert Jason.decode!(append_conn.resp_body)["error"] == "forbidden_session"
   end
 
   test "returns 401 for invalid JWT audience" do
@@ -144,6 +176,8 @@ defmodule StarciteWeb.ApiAuthJwtTest do
         %{
           "iss" => @issuer,
           "aud" => "not-starcite-api",
+          "tenant_id" => "acme",
+          "scope" => "session:create session:read auth:issue",
           "sub" => "svc:customer-a",
           "exp" => System.system_time(:second) + 300
         },
@@ -162,6 +196,78 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert get_resp_header(conn, "www-authenticate") == [
              ~s(Bearer realm="starcite", error="invalid_token")
            ]
+  end
+
+  test "returns 401 when service JWT is missing tenant_id claim" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-missing-tenant"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    token =
+      AuthTestSupport.sign_rs256(
+        private_key,
+        %{
+          "iss" => @issuer,
+          "aud" => @audience,
+          "scope" => "session:create session:read auth:issue",
+          "sub" => "svc:customer-a",
+          "exp" => System.system_time(:second) + 300
+        },
+        kid
+      )
+
+    conn =
+      json_conn(:post, "/v1/sessions", service_create_session_body(unique_id("ses")), [
+        {"authorization", "Bearer #{token}"}
+      ])
+
+    assert conn.status == 401
+    assert Jason.decode!(conn.resp_body)["error"] == "unauthorized"
+  end
+
+  test "returns 401 when service JWT is missing scope claim" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-missing-scope"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    token =
+      AuthTestSupport.sign_rs256(
+        private_key,
+        %{
+          "iss" => @issuer,
+          "aud" => @audience,
+          "tenant_id" => "acme",
+          "sub" => "svc:customer-a",
+          "exp" => System.system_time(:second) + 300
+        },
+        kid
+      )
+
+    conn =
+      json_conn(:post, "/v1/sessions", service_create_session_body(unique_id("ses")), [
+        {"authorization", "Bearer #{token}"}
+      ])
+
+    assert conn.status == 401
+    assert Jason.decode!(conn.resp_body)["error"] == "unauthorized"
   end
 
   test "returns 401 when JWKS is structurally invalid in jwt mode" do
@@ -241,6 +347,15 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert with_auth.status == 400
     body = Jason.decode!(with_auth.resp_body)
     assert body["error"] == "invalid_cursor"
+
+    denied_tail =
+      conn_get("/v1/sessions/#{session_id}/tail?cursor=0", [
+        {"authorization", "Bearer #{token}"}
+        | websocket_headers()
+      ])
+
+    assert denied_tail.status == 403
+    assert Jason.decode!(denied_tail.resp_body)["error"] == "forbidden_session"
   end
 
   test "issues a principal token from service auth and infers actor on append" do
@@ -319,6 +434,34 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert event.metadata["starcite_principal"]["tenant_id"] == "acme"
     assert event.metadata["starcite_principal"]["principal_type"] == "user"
     assert event.metadata["starcite_principal"]["principal_id"] == "user-42"
+  end
+
+  test "rejects cross-tenant session create for service JWT" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-service-create-tenant"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    service_header = service_auth_header(private_key, kid)
+
+    create_conn =
+      json_conn(
+        :post,
+        "/v1/sessions",
+        service_create_session_body(unique_id("ses"), "beta"),
+        [service_header]
+      )
+
+    assert create_conn.status == 403
+    assert Jason.decode!(create_conn.resp_body)["error"] == "forbidden_tenant"
   end
 
   test "enforces principal session constraints on append" do
@@ -458,6 +601,97 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert nested_issue_conn.status == 401
     body = Jason.decode!(nested_issue_conn.resp_body)
     assert body["error"] == "unauthorized"
+  end
+
+  test "rejects cross-tenant principal issuance from service JWT" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-issue-tenant-mismatch"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    service_header = service_auth_header(private_key, kid)
+
+    issue_conn =
+      json_conn(
+        :post,
+        "/v1/auth/issue",
+        %{
+          "principal" => %{
+            "tenant_id" => "beta",
+            "id" => "user-42",
+            "type" => "user"
+          },
+          "scopes" => ["session:read"]
+        },
+        [service_header]
+      )
+
+    assert issue_conn.status == 403
+    assert Jason.decode!(issue_conn.resp_body)["error"] == "forbidden_tenant"
+  end
+
+  test "lists sessions tenant-fenced for service JWT" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-service-list-tenant"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    acme_header = service_auth_header(private_key, kid)
+
+    beta_token =
+      AuthTestSupport.sign_rs256(
+        private_key,
+        valid_claims(sub: "svc:customer-b", tenant_id: "beta"),
+        kid
+      )
+
+    beta_header = {"authorization", "Bearer #{beta_token}"}
+    acme_session_id = unique_id("ses")
+    beta_session_id = unique_id("ses")
+
+    assert 201 ==
+             json_conn(
+               :post,
+               "/v1/sessions",
+               service_create_session_body(acme_session_id, "acme"),
+               [acme_header]
+             ).status
+
+    assert 201 ==
+             json_conn(
+               :post,
+               "/v1/sessions",
+               service_create_session_body(beta_session_id, "beta"),
+               [beta_header]
+             ).status
+
+    list_conn = json_conn(:get, "/v1/sessions", nil, [acme_header])
+    assert list_conn.status == 200
+
+    ids =
+      list_conn.resp_body
+      |> Jason.decode!()
+      |> Map.fetch!("sessions")
+      |> Enum.map(&Map.fetch!(&1, "id"))
+
+    assert ids == [acme_session_id]
+    refute beta_session_id in ids
   end
 
   test "denies session create and list for agent principal tokens" do
@@ -669,20 +903,21 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     service_header = service_auth_header(private_key, kid)
     session_id = unique_id("ses")
 
-    assert 201 ==
-             json_conn(
-               :post,
-               "/v1/sessions",
-               service_create_session_body(session_id),
-               [service_header]
-             ).status
+    {:ok, creator_principal} = Principal.new("beta", "user-beta", :user)
+
+    assert {:ok, _session} =
+             WritePath.create_session(
+               id: session_id,
+               creator_principal: creator_principal,
+               metadata: %{"tenant_id" => "beta"}
+             )
 
     principal_token =
       issue_principal_token!(
         service_header,
         %{
           "principal" => %{
-            "tenant_id" => "beta",
+            "tenant_id" => "acme",
             "id" => "user-tenant-mismatch",
             "type" => "user"
           },
@@ -862,6 +1097,8 @@ defmodule StarciteWeb.ApiAuthJwtTest do
       "iss" => @issuer,
       "aud" => @audience,
       "sub" => Keyword.fetch!(opts, :sub),
+      "tenant_id" => Keyword.get(opts, :tenant_id, "acme"),
+      "scope" => Keyword.get(opts, :scope, "session:create session:read auth:issue"),
       "exp" => System.system_time(:second) + 300
     }
   end

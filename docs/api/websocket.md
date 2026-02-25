@@ -8,13 +8,14 @@ Starcite exposes `tail` as a WebSocket endpoint.
 ws://HOST/v1/sessions/:id/tail?cursor=41
 ```
 
-If `STARCITE_AUTH_MODE=jwt` is enabled, include an `Authorization: Bearer <jwt>` header
+If `STARCITE_AUTH_MODE=jwt` is enabled, include an `Authorization: Bearer <token>` header
 during the WebSocket upgrade request.
 
-In JWT mode Starcite accepts:
+In JWT mode `tail` accepts:
 
-- service JWT bearer token
 - Starcite-issued principal bearer token
+
+Service JWT bearer tokens are rejected for `tail`.
 
 Auth behavior:
 

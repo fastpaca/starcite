@@ -75,6 +75,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert String.starts_with?(body["id"], "ses_")
       assert body["title"] == "Draft"
       assert body["metadata"]["workflow"] == "legal"
+      assert body["metadata"]["tenant_id"] == "acme"
       assert body["last_seq"] == 0
       assert String.ends_with?(body["created_at"], "Z")
       assert String.ends_with?(body["updated_at"], "Z")
@@ -96,6 +97,21 @@ defmodule StarciteWeb.SessionControllerTest do
       assert conn.status == 201
       body = Jason.decode!(conn.resp_body)
       assert body["id"] == id
+    end
+
+    test "rejects metadata tenant_id mismatch with creator principal tenant" do
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "metadata" => %{"tenant_id" => "beta"}
+          })
+        )
+
+      assert conn.status == 403
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "forbidden_tenant"
     end
 
     test "accepts empty title string" do
