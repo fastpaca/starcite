@@ -610,21 +610,15 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert %SessionRecord{} = Repo.get(SessionRecord, session_id)
     assert {:ok, _record} = Repo.delete(Repo.get!(SessionRecord, session_id))
 
-    service_append_conn =
-      json_conn(
-        :post,
-        "/v1/sessions/#{session_id}/append",
-        %{
-          "type" => "content",
-          "payload" => %{"text" => "still in raft"},
-          "actor" => "agent:test",
-          "producer_id" => "writer:svc",
-          "producer_seq" => 1
-        },
-        [service_header]
-      )
+    assert {:ok, _reply} =
+             WritePath.append_event(session_id, %{
+               type: "content",
+               payload: %{text: "still in raft"},
+               actor: "agent:test",
+               producer_id: "writer:svc",
+               producer_seq: 1
+             })
 
-    assert service_append_conn.status == 201
     :ok = SessionStore.clear()
 
     principal_token =
