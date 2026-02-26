@@ -14,6 +14,7 @@ defmodule StarciteWeb.TailSocket do
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
+  @catchup_interval_ms 5_000
 
   @impl true
   def init(%{session_id: session_id, cursor: cursor} = params) do
@@ -31,6 +32,7 @@ defmodule StarciteWeb.TailSocket do
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
+      catchup_timer_ref: nil,
       auth_bearer_token: auth_bearer_token,
       auth_expires_at: auth_expires_at,
       auth_check_interval_ms: auth_check_interval_ms,
@@ -42,6 +44,7 @@ defmodule StarciteWeb.TailSocket do
      state
      |> schedule_auth_expiry()
      |> schedule_auth_check()
+     |> schedule_catchup()
      |> schedule_drain()}
   end
 
@@ -70,6 +73,26 @@ defmodule StarciteWeb.TailSocket do
 
   def handle_info({:cursor_update, update}, state) when is_map(update) do
     handle_cursor_update(update, state)
+  end
+
+  def handle_info(:catchup_check, state) do
+    state = %{state | catchup_timer_ref: nil}
+
+    case EventStore.max_seq(state.session_id) do
+      {:ok, max_seq} when max_seq > state.cursor ->
+        # Events exist beyond our cursor that we missed (likely a PubSub gap
+        # during Raft leadership transition). Re-enter replay to catch up.
+        next_state =
+          state
+          |> Map.put(:replay_done, false)
+          |> schedule_catchup()
+          |> schedule_drain()
+
+        {:ok, next_state}
+
+      _ ->
+        {:ok, schedule_catchup(state)}
+    end
   end
 
   def handle_info(_message, state), do: {:ok, state}
@@ -230,6 +253,13 @@ defmodule StarciteWeb.TailSocket do
     send(self(), :drain_replay)
     %{state | drain_scheduled: true}
   end
+
+  defp schedule_catchup(%{catchup_timer_ref: nil} = state) do
+    ref = Process.send_after(self(), :catchup_check, @catchup_interval_ms)
+    %{state | catchup_timer_ref: ref}
+  end
+
+  defp schedule_catchup(state), do: state
 
   defp schedule_auth_check(
          %{auth_bearer_token: token, auth_check_interval_ms: interval_ms} = state
