@@ -66,8 +66,10 @@ config :starcite, StarciteWeb.Endpoint,
 
 config :starcite, StarciteWeb.Auth,
   mode: :none,
-  jwt_leeway_seconds: 30,
-  jwks_refresh_ms: :timer.seconds(60)
+  jwt_leeway_seconds: 1,
+  jwks_refresh_ms: :timer.seconds(60),
+  principal_token_default_ttl_seconds: 5,
+  principal_token_max_ttl_seconds: 15
 
 # Configures Elixir's Logger
 config :logger, :default_formatter,

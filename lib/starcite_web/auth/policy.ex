@@ -7,18 +7,44 @@ defmodule StarciteWeb.Auth.Policy do
 
   @type auth :: map()
 
-  @spec can_issue_token(auth()) :: :ok | {:error, :forbidden}
-  def can_issue_token(%{kind: kind}) when kind in [:none, :service], do: :ok
-  def can_issue_token(_auth), do: {:error, :forbidden}
+  @spec can_issue_token(auth(), map()) :: :ok | {:error, atom()}
+  # Even in `STARCITE_AUTH_MODE=none`, deny token issuance so this endpoint
+  # does not mint credentials without an authenticated service principal.
+  def can_issue_token(%{kind: :none}, _params), do: {:error, :forbidden}
+
+  def can_issue_token(
+        %{kind: :service, tenant_id: tenant_id} = auth,
+        %{"principal" => %{"tenant_id" => tenant_id}}
+      )
+      when is_binary(tenant_id) and tenant_id != "" do
+    has_scope(auth, "auth:issue")
+  end
+
+  def can_issue_token(%{kind: :service}, %{"principal" => _principal}),
+    do: {:error, :forbidden_tenant}
+
+  def can_issue_token(%{kind: :service}, _params), do: {:error, :invalid_issue_request}
+  def can_issue_token(_auth, _params), do: {:error, :forbidden}
 
   @spec can_create_session(auth(), map()) :: {:ok, Principal.t()} | {:error, atom()}
-  def can_create_session(%{kind: kind}, %{"creator_principal" => creator_principal})
-      when kind in [:none, :service] do
+  def can_create_session(%{kind: :none}, %{"creator_principal" => creator_principal}) do
     principal_from_payload(creator_principal)
   end
 
-  def can_create_session(%{kind: kind}, _params) when kind in [:none, :service],
-    do: {:error, :invalid_session}
+  def can_create_session(%{kind: :service, tenant_id: tenant_id} = auth, %{
+        "creator_principal" => creator_principal
+      })
+      when is_binary(tenant_id) and tenant_id != "" do
+    with :ok <- has_scope(auth, "session:create"),
+         {:ok, principal} <- principal_from_payload(creator_principal),
+         :ok <- require_same_tenant(tenant_id, principal.tenant_id) do
+      {:ok, principal}
+    end
+  end
+
+  def can_create_session(%{kind: :service}, _params), do: {:error, :invalid_session}
+
+  def can_create_session(%{kind: :none}, _params), do: {:error, :invalid_session}
 
   def can_create_session(%{kind: :principal, principal: %Principal{type: :agent}}, _params),
     do: {:error, :forbidden}
@@ -41,9 +67,16 @@ defmodule StarciteWeb.Auth.Policy do
   def can_create_session(_auth, _params), do: {:error, :invalid_session}
 
   @spec can_list_sessions(auth()) ::
-          {:ok, :all | %{tenant_id: String.t(), owner_principal_ids: [String.t()]}}
+          {:ok, :all | %{tenant_id: String.t(), owner_principal_ids: [String.t()] | nil}}
           | {:error, atom()}
-  def can_list_sessions(%{kind: kind}) when kind in [:none, :service], do: {:ok, :all}
+  def can_list_sessions(%{kind: :none}), do: {:ok, :all}
+
+  def can_list_sessions(%{kind: :service, tenant_id: tenant_id} = auth)
+      when is_binary(tenant_id) and tenant_id != "" do
+    with :ok <- has_scope(auth, "session:read") do
+      {:ok, %{tenant_id: tenant_id, owner_principal_ids: nil}}
+    end
+  end
 
   def can_list_sessions(%{kind: :principal, principal: %Principal{type: :agent}}),
     do: {:error, :forbidden}
@@ -72,8 +105,8 @@ defmodule StarciteWeb.Auth.Policy do
   end
 
   @spec allowed_to_access_session(auth(), String.t()) :: :ok | {:error, :forbidden_session}
-  def allowed_to_access_session(%{kind: kind}, _session_id) when kind in [:none, :service],
-    do: :ok
+  def allowed_to_access_session(%{kind: :none}, _session_id), do: :ok
+  def allowed_to_access_session(%{kind: :service}, _session_id), do: {:error, :forbidden_session}
 
   def allowed_to_access_session(
         %{kind: :principal, principal: %Principal{} = principal} = auth,
@@ -138,7 +171,12 @@ defmodule StarciteWeb.Auth.Policy do
   def attach_principal_metadata(_auth, metadata) when is_map(metadata), do: metadata
 
   @spec has_scope(auth(), String.t()) :: :ok | {:error, :forbidden_scope}
-  def has_scope(%{kind: kind}, _scope) when kind in [:none, :service], do: :ok
+  def has_scope(%{kind: :none}, _scope), do: :ok
+
+  def has_scope(%{kind: :service, scopes: scopes}, scope)
+      when is_binary(scope) and scope != "" and is_list(scopes) do
+    if Enum.member?(scopes, scope), do: :ok, else: {:error, :forbidden_scope}
+  end
 
   def has_scope(%{kind: :principal, scopes: scopes}, scope)
       when is_binary(scope) and scope != "" and is_list(scopes) do
@@ -147,7 +185,7 @@ defmodule StarciteWeb.Auth.Policy do
 
   def has_scope(_auth, _scope), do: {:error, :forbidden_scope}
 
-  defp session_permission(%{kind: kind}, _session, _scope) when kind in [:none, :service], do: :ok
+  defp session_permission(%{kind: :none}, _session, _scope), do: :ok
 
   defp session_permission(
          %{kind: :principal, principal: %Principal{} = principal} = auth,
@@ -228,6 +266,9 @@ defmodule StarciteWeb.Auth.Policy do
   end
 
   defp user_list_scope(_principal), do: {:error, :forbidden}
+
+  defp require_same_tenant(tenant_id, tenant_id), do: :ok
+  defp require_same_tenant(_expected_tenant, _actual_tenant), do: {:error, :forbidden_tenant}
 
   defp principal_from_payload(%{
          "tenant_id" => tenant_id,

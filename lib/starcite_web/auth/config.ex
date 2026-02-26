@@ -1,11 +1,11 @@
 defmodule StarciteWeb.Auth.Config do
   @moduledoc false
 
-  @default_jwt_leeway_seconds 30
+  @default_jwt_leeway_seconds 1
   @default_jwks_refresh_ms :timer.seconds(60)
   @default_principal_token_salt "principal-token-v1"
-  @default_principal_token_default_ttl_seconds 600
-  @default_principal_token_max_ttl_seconds 900
+  @default_principal_token_default_ttl_seconds 5
+  @default_principal_token_max_ttl_seconds 15
 
   @type mode :: :none | :jwt
 

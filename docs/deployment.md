@@ -29,6 +29,7 @@ This document defines provider-agnostic deployment and operations for Starcite's
 | `STARCITE_NUM_GROUPS` | Session sharding groups (normally `256`) |
 | `STARCITE_RAFT_DATA_DIR` | Persistent Raft state path |
 | `STARCITE_ARCHIVE_ADAPTER` | Archive backend (`s3` or `postgres`) |
+| `STARCITE_AUTH_MODE` | Auth mode (`jwt` recommended in production) |
 
 S3 mode requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, optional endpoint/credentials overrides.
 
@@ -44,7 +45,6 @@ Postgres mode requires: `DATABASE_URL`.
    - `mix starcite.ops status`
    - `mix starcite.ops ready-nodes`
    - `curl -sS http://<node>:4000/health/ready`
-   - `curl -sS http://<node>:4000/v1/ops/status`
 
 Expected result: node reports ready, and ready write-node set matches the configured static set.
 

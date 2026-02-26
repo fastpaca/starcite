@@ -4,16 +4,57 @@ defmodule StarciteWeb.Auth.PolicyTest do
   alias Starcite.Auth.Principal
   alias StarciteWeb.Auth.Policy
 
-  test "can_issue_token allows service and denies principal" do
-    assert :ok = Policy.can_issue_token(%{kind: :service})
-    assert :ok = Policy.can_issue_token(%{kind: :none})
-    assert {:error, :forbidden} = Policy.can_issue_token(%{kind: :principal})
+  test "can_issue_token allows tenant-scoped service, denies none mode, and denies principal" do
+    params = %{"principal" => %{"tenant_id" => "acme", "id" => "user-1", "type" => "user"}}
+
+    assert :ok =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               params
+             )
+
+    assert {:error, :forbidden} = Policy.can_issue_token(%{kind: :none}, params)
+    assert {:error, :forbidden} = Policy.can_issue_token(%{kind: :principal}, params)
   end
 
-  test "can_create_session allows service with explicit creator principal" do
+  test "can_issue_token denies cross-tenant issue requests" do
+    params = %{"principal" => %{"tenant_id" => "beta", "id" => "user-1", "type" => "user"}}
+
+    assert {:error, :forbidden_tenant} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               params
+             )
+  end
+
+  test "can_issue_token enforces auth:issue scope when service scopes are present" do
+    params = %{"principal" => %{"tenant_id" => "acme", "id" => "user-1", "type" => "user"}}
+
+    assert {:error, :forbidden_scope} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["session:read"]},
+               params
+             )
+  end
+
+  test "can_issue_token denies malformed service issue payloads" do
+    assert {:error, :forbidden_tenant} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               %{"principal" => %{"id" => "user-1", "type" => "user"}}
+             )
+
+    assert {:error, :invalid_issue_request} =
+             Policy.can_issue_token(
+               %{kind: :service, tenant_id: "acme", scopes: ["auth:issue"]},
+               %{"scopes" => ["session:read"]}
+             )
+  end
+
+  test "can_create_session allows service with explicit same-tenant creator principal" do
     assert {:ok, %Principal{tenant_id: "acme", id: "user-1", type: :user}} =
              Policy.can_create_session(
-               %{kind: :service},
+               %{kind: :service, tenant_id: "acme", scopes: ["session:create"]},
                %{
                  "creator_principal" => %{
                    "tenant_id" => "acme",
@@ -26,7 +67,35 @@ defmodule StarciteWeb.Auth.PolicyTest do
 
   test "can_create_session denies service without creator principal" do
     assert {:error, :invalid_session} =
-             Policy.can_create_session(%{kind: :service}, %{"id" => "ses-1"})
+             Policy.can_create_session(%{kind: :service, tenant_id: "acme"}, %{"id" => "ses-1"})
+  end
+
+  test "can_create_session denies service creator principal tenant mismatch" do
+    assert {:error, :forbidden_tenant} =
+             Policy.can_create_session(
+               %{kind: :service, tenant_id: "acme", scopes: ["session:create"]},
+               %{
+                 "creator_principal" => %{
+                   "tenant_id" => "beta",
+                   "id" => "user-1",
+                   "type" => "user"
+                 }
+               }
+             )
+  end
+
+  test "can_create_session enforces session:create scope when service scopes are present" do
+    assert {:error, :forbidden_scope} =
+             Policy.can_create_session(
+               %{kind: :service, tenant_id: "acme", scopes: ["session:read"]},
+               %{
+                 "creator_principal" => %{
+                   "tenant_id" => "acme",
+                   "id" => "user-1",
+                   "type" => "user"
+                 }
+               }
+             )
   end
 
   test "can_create_session allows scoped principal user with implicit self principal" do
@@ -86,6 +155,32 @@ defmodule StarciteWeb.Auth.PolicyTest do
              })
   end
 
+  test "can_list_sessions returns tenant-fenced scope for service token" do
+    assert {:ok, %{tenant_id: "acme", owner_principal_ids: nil}} =
+             Policy.can_list_sessions(%{
+               kind: :service,
+               tenant_id: "acme",
+               scopes: ["session:read"]
+             })
+  end
+
+  test "can_list_sessions enforces session:read scope when service scopes are present" do
+    assert {:error, :forbidden_scope} =
+             Policy.can_list_sessions(%{
+               kind: :service,
+               tenant_id: "acme",
+               scopes: ["session:create"]
+             })
+  end
+
+  test "can_list_sessions denies malformed service auth contexts" do
+    assert {:error, :forbidden} =
+             Policy.can_list_sessions(%{
+               kind: :service,
+               scopes: ["session:read"]
+             })
+  end
+
   test "can_list_sessions denies principal user without read scope" do
     principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
 
@@ -118,6 +213,11 @@ defmodule StarciteWeb.Auth.PolicyTest do
                %{kind: :principal, principal: principal, session_ids: ["ses-1"]},
                "ses-2"
              )
+  end
+
+  test "allowed_to_access_session denies service token access to session-scoped endpoints" do
+    assert {:error, :forbidden_session} =
+             Policy.allowed_to_access_session(%{kind: :service, tenant_id: "acme"}, "ses-1")
   end
 
   test "allowed_to_append_session allows principal user on own-created session" do
@@ -161,6 +261,38 @@ defmodule StarciteWeb.Auth.PolicyTest do
                  id: "ses-1",
                  creator_principal: %Principal{tenant_id: "beta", id: "user-1", type: :user}
                }
+             )
+  end
+
+  test "allowed_to_read_session enforces read scope and principal session grants" do
+    principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
+
+    session = %{
+      id: "ses-2",
+      creator_principal: %Principal{tenant_id: "acme", id: "user-9", type: :user}
+    }
+
+    assert {:error, :forbidden_scope} =
+             Policy.allowed_to_read_session(
+               %{kind: :principal, principal: principal, scopes: ["session:append"]},
+               session
+             )
+
+    assert {:error, :forbidden_session} =
+             Policy.allowed_to_read_session(
+               %{kind: :principal, principal: principal, scopes: ["session:read"]},
+               session
+             )
+
+    assert :ok =
+             Policy.allowed_to_read_session(
+               %{
+                 kind: :principal,
+                 principal: principal,
+                 scopes: ["session:read"],
+                 session_ids: ["ses-2"]
+               },
+               session
              )
   end
 
