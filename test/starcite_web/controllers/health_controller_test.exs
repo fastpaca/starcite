@@ -76,7 +76,7 @@ defmodule StarciteWeb.HealthControllerTest do
 
         state
         |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :follower)
+        |> Map.put(:startup_mode, :write)
         |> Map.put(:consensus_ready?, false)
         |> Map.put(:consensus_last_probe_at_ms, now_ms)
         |> Map.put(:consensus_probe_success_streak, 0)
@@ -129,7 +129,7 @@ defmodule StarciteWeb.HealthControllerTest do
 
         state
         |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :follower)
+        |> Map.put(:startup_mode, :write)
         |> Map.put(:consensus_ready?, false)
         |> Map.put(:consensus_last_probe_at_ms, now_ms)
         |> Map.put(:consensus_probe_success_streak, 0)
@@ -191,7 +191,7 @@ defmodule StarciteWeb.HealthControllerTest do
 
         state
         |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :follower)
+        |> Map.put(:startup_mode, :write)
         |> Map.put(:consensus_ready?, true)
         |> Map.put(:consensus_last_probe_at_ms, now_ms)
         |> Map.put(:consensus_probe_success_streak, 1)
@@ -243,7 +243,7 @@ defmodule StarciteWeb.HealthControllerTest do
 
         state
         |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :follower)
+        |> Map.put(:startup_mode, :write)
         |> Map.put(:consensus_ready?, true)
         |> Map.put(:consensus_last_probe_at_ms, now_ms)
         |> Map.put(:consensus_probe_success_streak, 1)

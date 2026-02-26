@@ -380,7 +380,7 @@ defmodule Starcite.RuntimeTest do
           2_000 -> flunk("Raft process did not die")
         end
 
-        assert RaftManager.start_group(group_id) in [:ok, {:error, :cluster_not_formed}]
+        assert :ok = RaftManager.start_group(group_id)
 
         eventually(
           fn ->

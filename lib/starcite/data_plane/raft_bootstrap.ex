@@ -20,8 +20,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
   @group_task_timeout_ms 60_000
-  @group_bootstrap_poll_ms 100
-  @group_bootstrap_max_attempts 300
   @readiness_refresh_call_timeout_ms 5_000
   @runtime_reconcile_interval_ms 5_000
   @group_leader_probe_timeout_ms 250
@@ -104,6 +102,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
        startup_complete?: false,
        startup_mode: nil,
        sync_ref: nil,
+       sync_pending?: false,
        consensus_ready?: false,
        consensus_last_probe_at_ms: nil,
        consensus_probe_detail: %{
@@ -153,14 +152,18 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   @impl true
   def handle_info({:startup_complete, mode}, state)
-      when mode in [:coordinator, :follower, :router] do
-    Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
+      when mode in [:write, :router] do
+    if state.startup_complete? do
+      {:noreply, Map.put(state, :startup_mode, mode)}
+    else
+      Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
 
-    {:noreply,
-     state
-     |> Map.put(:startup_complete?, true)
-     |> Map.put(:startup_mode, mode)
-     |> RaftHealth.clear()}
+      {:noreply,
+       state
+       |> Map.put(:startup_complete?, true)
+       |> Map.put(:startup_mode, mode)
+       |> RaftHealth.clear()}
+    end
   end
 
   @impl true
@@ -175,28 +178,41 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   @impl true
   def handle_info({:nodeup, up_node, _info}, state) when is_atom(up_node) do
-    {:noreply, RaftHealth.note_peer_up(state, up_node)}
+    {:noreply,
+     state
+     |> RaftHealth.note_peer_up(up_node)
+     |> maybe_start_sync_on_write_node_change(up_node)}
   end
 
   @impl true
   def handle_info({:nodeup, up_node}, state) when is_atom(up_node) do
-    {:noreply, RaftHealth.note_peer_up(state, up_node)}
+    {:noreply,
+     state
+     |> RaftHealth.note_peer_up(up_node)
+     |> maybe_start_sync_on_write_node_change(up_node)}
   end
 
   @impl true
   def handle_info({ref, _result}, %{sync_ref: ref} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, %{state | sync_ref: nil}}
+    {:noreply, maybe_start_pending_sync(%{state | sync_ref: nil})}
   end
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{sync_ref: ref} = state) do
     Logger.warning("RaftBootstrap: bootstrap task failed: #{inspect(reason)}")
-    {:noreply, %{state | sync_ref: nil}}
+    {:noreply, maybe_start_pending_sync(%{state | sync_ref: nil})}
   end
 
   @impl true
   def handle_info({:DOWN, _ref, :process, _pid, _reason}, state) do
+    {:noreply, state}
+  end
+
+  @impl true
+  def handle_info(:runtime_reconcile, %{sync_ref: sync_ref} = state)
+      when is_reference(sync_ref) do
+    schedule_runtime_reconcile()
     {:noreply, state}
   end
 
@@ -219,49 +235,48 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         run_sync(trigger, owner)
       end)
 
-    %{state | sync_ref: task.ref}
+    %{state | sync_ref: task.ref, sync_pending?: false}
   end
 
-  defp maybe_start_sync(state, _trigger), do: state
+  defp maybe_start_sync(state, _trigger), do: Map.put(state, :sync_pending?, true)
 
-  defp run_sync(:bootstrap, owner) do
+  defp maybe_start_pending_sync(%{sync_pending?: true} = state) do
+    state
+    |> Map.put(:sync_pending?, false)
+    |> maybe_start_sync(:nodeup)
+  end
+
+  defp maybe_start_pending_sync(state), do: state
+
+  defp run_sync(trigger, owner)
+       when trigger in [:bootstrap, :nodeup] do
     case WriteNodes.validate() do
       {:ok, _config} ->
-        cond do
-          not WriteNodes.write_node?(Node.self()) ->
-            send(owner, {:startup_complete, :router})
-
-          bootstrap_coordinator?() ->
-            Logger.info(
-              "RaftBootstrap: write coordinator bootstrapping #{WriteNodes.num_groups()} groups"
-            )
-
-            run_groups_parallel(
-              0..(WriteNodes.num_groups() - 1),
-              "bootstrap",
-              &ensure_group_bootstrapped/1
-            )
-
-            ensure_all_local_groups_running()
-            ensure_local_group_leaders(compute_my_groups())
-
-            send(owner, {:startup_complete, :coordinator})
-
-          true ->
-            my_groups = compute_my_groups()
-
-            run_groups_parallel(my_groups, "join", &wait_and_join_group/1)
-            run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
-            ensure_local_group_leaders(my_groups)
-
-            Logger.info("RaftBootstrap: write follower joined #{length(my_groups)} groups")
-            send(owner, {:startup_complete, :follower})
-        end
+        run_sync_for_valid_config(trigger, owner)
 
       {:error, reason} ->
         raise ArgumentError,
               "RaftBootstrap bootstrap aborted due to invalid write-node config: #{reason}"
     end
+  end
+
+  defp run_sync_for_valid_config(trigger, owner) do
+    if WriteNodes.write_node?(Node.self()) do
+      my_groups = compute_my_groups()
+
+      Logger.info(
+        "RaftBootstrap: reconciling #{length(my_groups)} local write groups (trigger=#{trigger})"
+      )
+
+      run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
+      ensure_local_group_leaders(my_groups)
+
+      send(owner, {:startup_complete, :write})
+    else
+      send(owner, {:startup_complete, :router})
+    end
+
+    :ok
   end
 
   defp safe_ready_call(pid) do
@@ -279,84 +294,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp readiness_status_timeout_ms(true), do: @readiness_refresh_call_timeout_ms
   defp readiness_status_timeout_ms(false), do: @ready_call_timeout_ms
-
-  defp wait_and_join_group(group_id) do
-    server_id = RaftManager.server_id(group_id)
-
-    case wait_for_group_exists(group_id, server_id) do
-      :ok ->
-        ensure_local_group_running(group_id)
-
-      :timeout ->
-        Logger.warning("RaftBootstrap: timeout waiting for group #{group_id} bootstrap")
-        ensure_local_group_running(group_id)
-        {:error, :bootstrap_timeout}
-    end
-  end
-
-  defp wait_for_group_exists(group_id, server_id) do
-    wait_for_group_exists(group_id, server_id, 0, @group_bootstrap_max_attempts)
-  end
-
-  defp wait_for_group_exists(_group_id, _server_id, attempt, max) when attempt >= max do
-    :timeout
-  end
-
-  defp wait_for_group_exists(group_id, server_id, attempt, max) do
-    nodes = RaftManager.replicas_for_group(group_id)
-
-    case find_group_member(server_id, nodes) do
-      :ok ->
-        :ok
-
-      :missing ->
-        Process.sleep(@group_bootstrap_poll_ms)
-        wait_for_group_exists(group_id, server_id, attempt + 1, max)
-    end
-  end
-
-  defp find_group_member(server_id, nodes) do
-    Enum.reduce_while(nodes, :missing, fn node, _acc ->
-      case :ra.members({server_id, node}) do
-        {:ok, _members, _leader} -> {:halt, :ok}
-        _ -> {:cont, :missing}
-      end
-    end)
-  end
-
-  defp ensure_group_bootstrapped(group_id) do
-    server_id = RaftManager.server_id(group_id)
-    replica_nodes = RaftManager.replicas_for_group(group_id)
-
-    case cluster_members(server_id, replica_nodes) do
-      {:ok, _members, _leader} ->
-        ensure_local_group_running(group_id)
-
-      :missing ->
-        _ = bootstrap_group(group_id, replica_nodes)
-        ensure_local_group_running(group_id)
-
-      :timeout ->
-        ensure_local_group_running(group_id)
-    end
-  end
-
-  defp bootstrap_group(group_id, replica_nodes) do
-    server_id = RaftManager.server_id(group_id)
-    cluster_name = RaftManager.cluster_name(group_id)
-    machine = RaftManager.machine(group_id)
-    server_ids = for node <- replica_nodes, do: {server_id, node}
-
-    with :ok <- RaftManager.ensure_runtime_started() do
-      case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-        {:ok, _started, _not_started} ->
-          :ok
-
-        {:error, :cluster_not_formed} ->
-          :ok
-      end
-    end
-  end
 
   defp ensure_local_group_running(group_id) do
     if RaftManager.should_participate?(group_id) and not group_running?(group_id) do
@@ -410,23 +347,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     end
   end
 
-  defp cluster_members(server_id, nodes) do
-    {result, saw_timeout} =
-      Enum.reduce_while(nodes, {:missing, false}, fn node, {_acc, timed_out} ->
-        case :ra.members({server_id, node}) do
-          {:ok, members, leader} -> {:halt, {{:ok, members, leader}, timed_out}}
-          {:timeout, _} -> {:cont, {:missing, true}}
-          _ -> {:cont, {:missing, timed_out}}
-        end
-      end)
-
-    case result do
-      {:ok, _members, _leader} = ok -> ok
-      :missing when saw_timeout -> :timeout
-      :missing -> :missing
-    end
-  end
-
   defp run_groups_parallel(groups, label, fun) when is_function(fun, 1) do
     total = Enum.count(groups)
 
@@ -477,9 +397,12 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     Logger.warning("RaftBootstrap: #{label} worker crashed: #{inspect(reason)}")
   end
 
-  defp ensure_all_local_groups_running do
-    compute_my_groups()
-    |> run_groups_parallel("ensure-local", &ensure_local_group_running/1)
+  defp maybe_start_sync_on_write_node_change(state, up_node) when is_atom(up_node) do
+    if WriteNodes.write_node?(Node.self()) and up_node in WriteNodes.nodes() do
+      maybe_start_sync(state, :nodeup)
+    else
+      state
+    end
   end
 
   defp compute_my_groups do
@@ -490,13 +413,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp group_running?(group_id) do
     Process.whereis(RaftManager.server_id(group_id)) != nil
-  end
-
-  defp bootstrap_coordinator? do
-    case WriteNodes.nodes() do
-      [first | _] -> Node.self() == first
-      [] -> false
-    end
   end
 
   defp configure_ra_system_storage do
