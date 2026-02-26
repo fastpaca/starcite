@@ -102,6 +102,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
        startup_complete?: false,
        startup_mode: nil,
        sync_ref: nil,
+       sync_pending?: false,
        consensus_ready?: false,
        consensus_last_probe_at_ms: nil,
        consensus_probe_detail: %{
@@ -194,13 +195,13 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   @impl true
   def handle_info({ref, _result}, %{sync_ref: ref} = state) do
     Process.demonitor(ref, [:flush])
-    {:noreply, %{state | sync_ref: nil}}
+    {:noreply, maybe_start_pending_sync(%{state | sync_ref: nil})}
   end
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{sync_ref: ref} = state) do
     Logger.warning("RaftBootstrap: bootstrap task failed: #{inspect(reason)}")
-    {:noreply, %{state | sync_ref: nil}}
+    {:noreply, maybe_start_pending_sync(%{state | sync_ref: nil})}
   end
 
   @impl true
@@ -234,10 +235,18 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         run_sync(trigger, owner)
       end)
 
-    %{state | sync_ref: task.ref}
+    %{state | sync_ref: task.ref, sync_pending?: false}
   end
 
-  defp maybe_start_sync(state, _trigger), do: state
+  defp maybe_start_sync(state, _trigger), do: Map.put(state, :sync_pending?, true)
+
+  defp maybe_start_pending_sync(%{sync_pending?: true} = state) do
+    state
+    |> Map.put(:sync_pending?, false)
+    |> maybe_start_sync(:nodeup)
+  end
+
+  defp maybe_start_pending_sync(state), do: state
 
   defp run_sync(trigger, owner)
        when trigger in [:bootstrap, :nodeup] do

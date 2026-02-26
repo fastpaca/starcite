@@ -216,6 +216,8 @@ defmodule Starcite.DataPlane.RaftManager do
             :ok
 
           {:error, :not_new} ->
+            # If start_server reports existing metadata after a restart miss,
+            # prefer restart_server so Ra recovers from the persisted config.
             :ra.restart_server(:default, {server_name, my_node})
 
           {:error, {:already_started, _}} ->
