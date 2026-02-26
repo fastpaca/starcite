@@ -55,6 +55,15 @@ defmodule Starcite.RuntimeTest do
       assert {:error, :session_not_found} = RaftAccess.query_session(server_id, "missing")
     end
 
+    test "create_session warms session store for immediate reads" do
+      id = unique_id("ses")
+      principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
+      {:ok, _session} = WritePath.create_session(id: id, creator_principal: principal)
+      assert {:ok, loaded} = SessionStore.get_session(id)
+      assert loaded.id == id
+      assert loaded.creator_principal == principal
+    end
+
     test "auth lookup returns session store hit without raft/archive read-through" do
       id = unique_id("ses")
       principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}

@@ -12,26 +12,10 @@ defmodule Starcite.ReadPath do
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(id) when is_binary(id) and id != "" do
-    group = RaftAccess.group_for_session(id)
-
-    ReplicaRouter.call_on_replica(
-      group,
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      prefer_leader: false
-    )
+    do_get_session(id)
   end
 
   def get_session(_id), do: {:error, :invalid_session_id}
-
-  @doc false
-  def rpc_get_session(id) when is_binary(id) and id != "" do
-    do_get_session(id)
-  end
 
   defp do_get_session(id) do
     case SessionStore.get_session(id) do

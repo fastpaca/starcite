@@ -8,6 +8,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   alias Starcite.Archive.SessionRecord
   alias Starcite.{ReadPath, Repo, WritePath}
   alias Starcite.Auth.Principal
+  alias Starcite.DataPlane.SessionStore
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
@@ -624,6 +625,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
       )
 
     assert service_append_conn.status == 201
+    :ok = SessionStore.clear()
 
     principal_token =
       issue_principal_token!(
