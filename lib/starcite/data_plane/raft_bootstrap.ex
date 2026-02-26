@@ -170,6 +170,11 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   end
 
   @impl true
+  def handle_info(:retry_sync, %{sync_retry_ref: nil} = state) do
+    {:noreply, state}
+  end
+
+  @impl true
   def handle_info(:retry_sync, state) do
     {:noreply,
      state

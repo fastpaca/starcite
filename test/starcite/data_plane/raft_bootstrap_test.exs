@@ -7,7 +7,7 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     original_state = :sys.get_state(RaftBootstrap)
 
     on_exit(fn ->
-      :sys.replace_state(RaftBootstrap, fn _state -> original_state end)
+      restore_bootstrap_state(original_state)
     end)
 
     sync_ref = make_ref()
@@ -34,7 +34,7 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     original_state = :sys.get_state(RaftBootstrap)
 
     on_exit(fn ->
-      :sys.replace_state(RaftBootstrap, fn _state -> original_state end)
+      restore_bootstrap_state(original_state)
     end)
 
     first_ref = make_ref()
@@ -82,7 +82,7 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     original_state = :sys.get_state(RaftBootstrap)
 
     on_exit(fn ->
-      :sys.replace_state(RaftBootstrap, fn _state -> original_state end)
+      restore_bootstrap_state(original_state)
     end)
 
     now_ms = System.monotonic_time(:millisecond)
@@ -113,6 +113,26 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     end)
   end
 
+  test "ignores stale retry_sync messages when no retry is pending" do
+    original_state = :sys.get_state(RaftBootstrap)
+
+    on_exit(fn ->
+      restore_bootstrap_state(original_state)
+    end)
+
+    :sys.replace_state(RaftBootstrap, fn state ->
+      state
+      |> Map.put(:sync_ref, nil)
+      |> Map.put(:sync_retry_ref, nil)
+    end)
+
+    send(RaftBootstrap, :retry_sync)
+
+    eventually(fn ->
+      assert %{sync_ref: nil, sync_retry_ref: nil} = :sys.get_state(RaftBootstrap)
+    end)
+  end
+
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 1_000)
     interval = Keyword.get(opts, :interval, 25)
@@ -133,4 +153,18 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
         end
     end
   end
+
+  defp restore_bootstrap_state(original_state) when is_map(original_state) do
+    :sys.replace_state(RaftBootstrap, fn state ->
+      cancel_retry_timer(state)
+      original_state
+    end)
+  end
+
+  defp cancel_retry_timer(%{sync_retry_ref: ref}) when is_reference(ref) do
+    _ = Process.cancel_timer(ref)
+    :ok
+  end
+
+  defp cancel_retry_timer(_state), do: :ok
 end
