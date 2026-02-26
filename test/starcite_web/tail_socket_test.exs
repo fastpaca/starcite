@@ -2,8 +2,8 @@ defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.IdempotentTestAdapter
-  alias Starcite.{ReadPath, WritePath}
-  alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.WritePath
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
   alias Starcite.Repo
   alias StarciteWeb.TailSocket
 
@@ -213,7 +213,8 @@ defmodule StarciteWeb.TailSocketTest do
       send(Starcite.Archive, :flush_tick)
 
       eventually(fn ->
-        {:ok, session} = ReadPath.get_session(session_id)
+        {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+        {:ok, session} = RaftAccess.query_session(server_id, session_id)
         assert session.archived_seq == 1
         assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)

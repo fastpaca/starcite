@@ -9,6 +9,8 @@ defmodule Starcite.DataPlane.Supervisor do
   def init(_arg) do
     children =
       [
+        # Stable owner for Cachex-backed session store (control-plane/lifecycle use)
+        {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table
         {Starcite.DataPlane.EventStore, []},
         # Task.Supervisor for async Raft group startup

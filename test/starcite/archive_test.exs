@@ -28,8 +28,9 @@ defmodule Starcite.ArchiveTest do
     def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
   end
 
-  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.WritePath
   alias Starcite.DataPlane.EventStore
+  alias Starcite.DataPlane.RaftAccess
   alias Starcite.Archive.IdempotentTestAdapter
 
   setup do
@@ -62,7 +63,8 @@ defmodule Starcite.ArchiveTest do
     # Wait until archived_seq catches up
     eventually(
       fn ->
-        {:ok, session} = ReadPath.get_session(session_id)
+        {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+        {:ok, session} = RaftAccess.query_session(server_id, session_id)
         assert session.archived_seq == session.last_seq
         assert EventStore.session_size(session_id) == 0
       end,
@@ -263,8 +265,11 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session_a_state} = ReadPath.get_session(session_a)
-          {:ok, session_b_state} = ReadPath.get_session(session_b)
+          {:ok, server_a, _group_a} = RaftAccess.locate_and_ensure_started(session_a)
+          {:ok, session_a_state} = RaftAccess.query_session(server_a, session_a)
+
+          {:ok, server_b, _group_b} = RaftAccess.locate_and_ensure_started(session_b)
+          {:ok, session_b_state} = RaftAccess.query_session(server_b, session_b)
 
           assert session_a_state.archived_seq == session_a_state.last_seq
           assert session_b_state.archived_seq == session_b_state.last_seq
@@ -327,7 +332,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = ReadPath.get_session(session_id)
+          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+          {:ok, session} = RaftAccess.query_session(server_id, session_id)
           assert session.archived_seq == session.last_seq
 
           batch_sizes =
@@ -367,7 +373,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = ReadPath.get_session(session_id)
+          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+          {:ok, session} = RaftAccess.query_session(server_id, session_id)
           assert session.archived_seq == 3
           assert EventStore.session_size(session_id) == 0
         end,
@@ -385,7 +392,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          {:ok, session} = ReadPath.get_session(session_id)
+          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+          {:ok, session} = RaftAccess.query_session(server_id, session_id)
           assert session.archived_seq == 4
           assert EventStore.session_size(session_id) == 0
 

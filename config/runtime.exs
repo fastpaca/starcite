@@ -328,6 +328,40 @@ if archive_read_cache_compressed = System.get_env("STARCITE_ARCHIVE_READ_CACHE_C
          )
 end
 
+if session_store_ttl_ms = System.get_env("STARCITE_SESSION_STORE_TTL_MS") do
+  config :starcite,
+         :session_store_ttl_ms,
+         parse_positive_integer!.("STARCITE_SESSION_STORE_TTL_MS", session_store_ttl_ms)
+end
+
+if session_store_purge_interval_ms =
+     System.get_env("STARCITE_SESSION_STORE_PURGE_INTERVAL_MS") do
+  config :starcite,
+         :session_store_purge_interval_ms,
+         parse_positive_integer!.(
+           "STARCITE_SESSION_STORE_PURGE_INTERVAL_MS",
+           session_store_purge_interval_ms
+         )
+end
+
+if session_store_compressed = System.get_env("STARCITE_SESSION_STORE_COMPRESSED") do
+  config :starcite,
+         :session_store_compressed,
+         Starcite.Env.parse_bool!(
+           session_store_compressed,
+           "STARCITE_SESSION_STORE_COMPRESSED"
+         )
+end
+
+if session_store_touch_on_read = System.get_env("STARCITE_SESSION_STORE_TOUCH_ON_READ") do
+  config :starcite,
+         :session_store_touch_on_read,
+         Starcite.Env.parse_bool!(
+           session_store_touch_on_read,
+           "STARCITE_SESSION_STORE_TOUCH_ON_READ"
+         )
+end
+
 # Auth mode is intentionally explicit:
 # - `jwt`: signed service/principal tokens enforced
 # - `none`: no bearer-token verification; intended for local/dev workflows only
