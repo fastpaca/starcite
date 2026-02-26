@@ -8,6 +8,8 @@ defmodule StarciteWeb.Auth.Policy do
   @type auth :: map()
 
   @spec can_issue_token(auth(), map()) :: :ok | {:error, atom()}
+  # Even in `STARCITE_AUTH_MODE=none`, deny token issuance so this endpoint
+  # does not mint credentials without an authenticated service principal.
   def can_issue_token(%{kind: :none}, _params), do: {:error, :forbidden}
 
   def can_issue_token(

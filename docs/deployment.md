@@ -35,9 +35,6 @@ S3 mode requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, optional endpoint/
 
 Postgres mode requires: `DATABASE_URL`.
 
-Production guard: `STARCITE_AUTH_MODE=none` is blocked by default in production.
-To intentionally bypass that guard, set `STARCITE_AUTH_ALLOW_INSECURE_NONE=true`.
-
 ## Bootstrap checklist
 
 1. Provision three write nodes with persistent volumes.

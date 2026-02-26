@@ -328,6 +328,9 @@ if archive_read_cache_compressed = System.get_env("STARCITE_ARCHIVE_READ_CACHE_C
          )
 end
 
+# Auth mode is intentionally explicit:
+# - `jwt`: signed service/principal tokens enforced
+# - `none`: no bearer-token verification; intended for local/dev workflows only
 auth_mode =
   case System.get_env("STARCITE_AUTH_MODE", "none") |> String.downcase() |> String.trim() do
     "none" ->
@@ -338,15 +341,6 @@ auth_mode =
 
     other ->
       raise ArgumentError, "invalid STARCITE_AUTH_MODE: #{inspect(other)} (expected none|jwt)"
-  end
-
-allow_insecure_auth_none =
-  case System.get_env("STARCITE_AUTH_ALLOW_INSECURE_NONE") do
-    nil ->
-      false
-
-    raw ->
-      Starcite.Env.parse_bool!(raw, "STARCITE_AUTH_ALLOW_INSECURE_NONE")
   end
 
 jwt_leeway_seconds =
@@ -436,13 +430,6 @@ if db_url && db_url != "" do
 end
 
 if config_env() == :prod do
-  if auth_mode == :none and not allow_insecure_auth_none do
-    raise """
-    invalid auth configuration for production: STARCITE_AUTH_MODE=none is insecure.
-    Set STARCITE_AUTH_MODE=jwt, or set STARCITE_AUTH_ALLOW_INSECURE_NONE=true to bypass this guard intentionally.
-    """
-  end
-
   if archive_adapter == Starcite.Archive.Adapter.Postgres and repo_url in [nil, ""] do
     raise """
     environment variable DATABASE_URL or STARCITE_POSTGRES_URL is missing.
