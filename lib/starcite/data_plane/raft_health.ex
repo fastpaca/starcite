@@ -165,8 +165,7 @@ defmodule Starcite.DataPlane.RaftHealth do
     end
   end
 
-  @spec consensus_probe() :: {:ok, map()} | {:error, map()}
-  def consensus_probe do
+  defp consensus_probe do
     connected_nodes = connected_nodes_set()
 
     case compute_my_groups() do

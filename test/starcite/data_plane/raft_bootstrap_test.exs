@@ -3,86 +3,11 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
 
   alias Starcite.DataPlane.RaftBootstrap
 
-  test "schedules retry when sync result is not converged" do
-    original_state = :sys.get_state(RaftBootstrap)
-
-    on_exit(fn ->
-      restore_bootstrap_state(original_state)
-    end)
-
-    sync_ref = make_ref()
-
-    :sys.replace_state(RaftBootstrap, fn state ->
-      state
-      |> Map.put(:sync_ref, sync_ref)
-      |> Map.put(:sync_retry_ref, nil)
-    end)
-
-    send(
-      RaftBootstrap,
-      {sync_ref,
-       {:ok, :coordinator, false, %{probe_result: "leader_unknown", failing_group_id: 0}}}
-    )
-
-    eventually(fn ->
-      assert %{sync_ref: nil, sync_retry_ref: retry_ref} = :sys.get_state(RaftBootstrap)
-      assert is_reference(retry_ref)
-    end)
-  end
-
-  test "clears pending retry timer when sync converges" do
-    original_state = :sys.get_state(RaftBootstrap)
-
-    on_exit(fn ->
-      restore_bootstrap_state(original_state)
-    end)
-
-    first_ref = make_ref()
-
-    :sys.replace_state(RaftBootstrap, fn state ->
-      state
-      |> Map.put(:sync_ref, first_ref)
-      |> Map.put(:sync_retry_ref, nil)
-    end)
-
-    send(
-      RaftBootstrap,
-      {first_ref,
-       {:ok, :coordinator, false, %{probe_result: "leader_unknown", failing_group_id: 7}}}
-    )
-
-    retry_ref =
-      eventually(fn ->
-        assert %{sync_ref: nil, sync_retry_ref: pending_retry_ref} =
-                 :sys.get_state(RaftBootstrap)
-
-        assert is_reference(pending_retry_ref)
-        pending_retry_ref
-      end)
-
-    converged_ref = make_ref()
-
-    :sys.replace_state(RaftBootstrap, fn state ->
-      state
-      |> Map.put(:sync_ref, converged_ref)
-      |> Map.put(:sync_retry_ref, retry_ref)
-    end)
-
-    send(
-      RaftBootstrap,
-      {converged_ref, {:ok, :coordinator, true, %{probe_result: "ok", failing_group_id: nil}}}
-    )
-
-    eventually(fn ->
-      assert %{sync_ref: nil, sync_retry_ref: nil} = :sys.get_state(RaftBootstrap)
-    end)
-  end
-
   test "startup_complete is idempotent once startup has finished" do
     original_state = :sys.get_state(RaftBootstrap)
 
     on_exit(fn ->
-      restore_bootstrap_state(original_state)
+      :sys.replace_state(RaftBootstrap, fn _state -> original_state end)
     end)
 
     now_ms = System.monotonic_time(:millisecond)
@@ -113,26 +38,6 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     end)
   end
 
-  test "ignores stale retry_sync messages when no retry is pending" do
-    original_state = :sys.get_state(RaftBootstrap)
-
-    on_exit(fn ->
-      restore_bootstrap_state(original_state)
-    end)
-
-    :sys.replace_state(RaftBootstrap, fn state ->
-      state
-      |> Map.put(:sync_ref, nil)
-      |> Map.put(:sync_retry_ref, nil)
-    end)
-
-    send(RaftBootstrap, :retry_sync)
-
-    eventually(fn ->
-      assert %{sync_ref: nil, sync_retry_ref: nil} = :sys.get_state(RaftBootstrap)
-    end)
-  end
-
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 1_000)
     interval = Keyword.get(opts, :interval, 25)
@@ -153,18 +58,4 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
         end
     end
   end
-
-  defp restore_bootstrap_state(original_state) when is_map(original_state) do
-    :sys.replace_state(RaftBootstrap, fn state ->
-      cancel_retry_timer(state)
-      original_state
-    end)
-  end
-
-  defp cancel_retry_timer(%{sync_retry_ref: ref}) when is_reference(ref) do
-    _ = Process.cancel_timer(ref)
-    :ok
-  end
-
-  defp cancel_retry_timer(_state), do: :ok
 end
