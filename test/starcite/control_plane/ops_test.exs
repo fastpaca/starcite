@@ -79,7 +79,7 @@ defmodule Starcite.ControlPlane.OpsTest do
     refute Ops.local_drained()
   end
 
-  test "wait_local_ready succeeds once follower convergence is restored" do
+  test "wait_local_ready succeeds once write-node convergence is restored" do
     local = Node.self()
     :ok = Ops.undrain_node(local)
 
@@ -96,7 +96,7 @@ defmodule Starcite.ControlPlane.OpsTest do
 
       state
       |> Map.put(:startup_complete?, true)
-      |> Map.put(:startup_mode, :follower)
+      |> Map.put(:startup_mode, :write)
       |> Map.put(:consensus_ready?, false)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
       |> Map.put(:consensus_probe_success_streak, 0)

@@ -17,6 +17,7 @@ defmodule Starcite.DataPlane.RaftManager do
   @cluster_names_cache_key {__MODULE__, :cluster_names}
   @ra_runtime_start_wait_attempts 20
   @ra_runtime_start_wait_sleep_ms 50
+  @group_election_timeout_ms 500
 
   @doc false
   @spec validate_config!() :: :ok
@@ -130,93 +131,65 @@ defmodule Starcite.DataPlane.RaftManager do
   end
 
   defp do_start_group(group_id) do
-    server_id = server_id(group_id)
+    local_server_name = server_id(group_id)
 
-    if Process.whereis(server_id) do
+    if Process.whereis(local_server_name) do
       :ok
     else
       with :ok <- ensure_runtime_started() do
-        my_node = Node.self()
-        cluster_name = cluster_name(group_id)
-        machine = {:module, RaftFSM, %{group_id: group_id}}
+        case restart_or_start_local_server(group_id) do
+          :ok ->
+            _ = maybe_trigger_local_election(group_id)
+            :ok
 
-        replica_nodes = replicas_for_group(group_id)
-        server_ids = for node <- replica_nodes, do: {server_id, node}
-        bootstrap_node = Enum.min(replica_nodes)
+          {:error, {:already_started, _pid}} ->
+            :ok
 
-        Logger.debug(
-          "RaftManager: Starting group #{group_id} with #{length(replica_nodes)} replicas (bootstrap: #{bootstrap_node == my_node})"
-        )
+          {:error, {:shutdown, {:failed_to_start_child, _child, {:already_started, _pid}}}} ->
+            :ok
 
-        if my_node == bootstrap_node do
-          :global.trans(
-            {:raft_bootstrap, group_id},
-            fn ->
-              bootstrap_cluster(group_id, cluster_name, machine, server_ids, {server_id, my_node})
-            end,
-            [Node.self()],
-            10_000
-          )
-        else
-          join_cluster_with_retry(group_id, server_id, cluster_name, machine, 10)
+          {:error, reason} ->
+            if runtime_boot_error?(reason) do
+              Logger.warning(
+                "RaftManager: Group #{group_id} unavailable due to RA runtime state: #{inspect(reason)}"
+              )
+
+              _ = ensure_runtime_started()
+              {:error, :ra_runtime_unavailable}
+            else
+              Logger.error("RaftManager: Failed to start group #{group_id}: #{inspect(reason)}")
+              {:error, reason}
+            end
         end
       end
     end
   end
 
-  defp bootstrap_cluster(group_id, cluster_name, machine, server_ids, my_server_id) do
-    case :ra.start_cluster(:default, cluster_name, machine, server_ids) do
-      {:ok, started, not_started} ->
-        cond do
-          my_server_id in started ->
-            Logger.debug("RaftManager: Bootstrapped group #{group_id}")
-            :ok
+  defp restart_or_start_local_server(group_id) do
+    local_server_id = {server_id(group_id), Node.self()}
 
-          my_server_id in not_started ->
-            join_cluster(group_id, elem(my_server_id, 0), cluster_name, machine)
-
-          true ->
-            Logger.warning("RaftManager: Not in member list for group #{group_id}")
-            :ok
-        end
-
-      {:error, :cluster_not_formed} ->
-        Logger.debug("RaftManager: Cluster not formed for group #{group_id}, joining with retry")
-
-        join_cluster_with_retry(group_id, elem(my_server_id, 0), cluster_name, machine, 10)
-    end
-  end
-
-  defp join_cluster_with_retry(group_id, _server_id, _cluster_name, _machine, 0) do
-    Logger.error("RaftManager: Failed to join group #{group_id} after retries")
-    {:error, :join_timeout}
-  end
-
-  defp join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries)
-       when is_integer(retries) and retries > 0 do
-    case join_cluster(group_id, server_id, cluster_name, machine) do
+    case :ra.restart_server(:default, local_server_id) do
       :ok ->
+        Logger.debug("RaftManager: Restarted group #{group_id} from persisted state")
         :ok
 
-      {:error, :enoent} ->
-        Process.sleep(100)
-        join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
-
-      {:error, :ra_runtime_unavailable} ->
-        Process.sleep(100)
-        join_cluster_with_retry(group_id, server_id, cluster_name, machine, retries - 1)
+      {:error, reason} when reason in [:name_not_registered, :not_found] ->
+        start_local_server(group_id)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp join_cluster(group_id, server_id, cluster_name, machine) do
+  defp start_local_server(group_id) do
+    server_name = server_id(group_id)
+    cluster_name = cluster_name(group_id)
+    machine = {:module, RaftFSM, %{group_id: group_id}}
     my_node = Node.self()
     node_name = safe_node_name(my_node)
 
     initial_members =
-      for node <- replicas_for_group(group_id), is_atom(node), do: {server_id, node}
+      for node <- replicas_for_group(group_id), is_atom(node), do: {server_name, node}
 
     data_dir_root = raft_data_dir_root()
     data_dir = Path.join([data_dir_root, "group_#{group_id}", node_name])
@@ -226,7 +199,7 @@ defmodule Starcite.DataPlane.RaftManager do
         system_config = :ra_system.default_config() |> Map.put(:data_dir, data_dir)
 
         server_conf = %{
-          id: {server_id, my_node},
+          id: {server_name, my_node},
           uid: member_uid(group_id, my_node),
           cluster_name: cluster_name,
           initial_members: initial_members,
@@ -239,8 +212,11 @@ defmodule Starcite.DataPlane.RaftManager do
 
         case :ra.start_server(:default, server_conf) do
           :ok ->
-            Logger.debug("RaftManager: Joined group #{group_id}")
+            Logger.debug("RaftManager: Started fresh server for group #{group_id}")
             :ok
+
+          {:error, :not_new} ->
+            :ra.restart_server(:default, {server_name, my_node})
 
           {:error, {:already_started, _}} ->
             :ok
@@ -250,22 +226,27 @@ defmodule Starcite.DataPlane.RaftManager do
             :ok
 
           {:error, reason} ->
-            if runtime_boot_error?(reason) do
-              Logger.warning(
-                "RaftManager: Failed to join group #{group_id} due to RA runtime availability: #{inspect(reason)}"
-              )
-
-              _ = ensure_runtime_started()
-              {:error, :ra_runtime_unavailable}
-            else
-              Logger.error("RaftManager: Failed to join group #{group_id}: #{inspect(reason)}")
-              {:error, reason}
-            end
+            {:error, reason}
         end
 
       {:error, reason} ->
-        Logger.error("RaftManager: Failed to create data dir #{data_dir}: #{inspect(reason)}")
+        Logger.error(
+          "RaftManager: Failed to create raft data dir for group #{group_id}: #{inspect(reason)}"
+        )
+
         {:error, reason}
+    end
+  end
+
+  defp maybe_trigger_local_election(group_id) when is_integer(group_id) and group_id >= 0 do
+    server_ref = {server_id(group_id), Node.self()}
+
+    try do
+      :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
+      :ok
+    catch
+      :exit, _reason ->
+        :ok
     end
   end
 

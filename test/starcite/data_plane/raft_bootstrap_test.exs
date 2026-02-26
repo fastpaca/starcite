@@ -15,7 +15,7 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
     :sys.replace_state(RaftBootstrap, fn state ->
       state
       |> Map.put(:startup_complete?, true)
-      |> Map.put(:startup_mode, :coordinator)
+      |> Map.put(:startup_mode, :write)
       |> Map.put(:consensus_ready?, true)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
       |> Map.put(:consensus_probe_detail, %{
@@ -25,12 +25,12 @@ defmodule Starcite.DataPlane.RaftBootstrapTest do
       })
     end)
 
-    send(RaftBootstrap, {:startup_complete, :follower})
+    send(RaftBootstrap, {:startup_complete, :router})
 
     eventually(fn ->
       assert %{
                startup_complete?: true,
-               startup_mode: :follower,
+               startup_mode: :router,
                consensus_ready?: true,
                consensus_last_probe_at_ms: ^now_ms,
                consensus_probe_detail: %{probe_result: "ok"}
