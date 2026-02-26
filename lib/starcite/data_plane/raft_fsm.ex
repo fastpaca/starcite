@@ -51,6 +51,9 @@ defmodule Starcite.DataPlane.RaftFSM do
   end
 
   @impl true
+  def state_enter(_ra_state, _state), do: []
+
+  @impl true
   def apply(
         meta,
         {:create_session, session_id, title, creator_principal, metadata},
