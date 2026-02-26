@@ -8,7 +8,7 @@ defmodule StarciteWeb.Auth.Policy do
   @type auth :: map()
 
   @spec can_issue_token(auth(), map()) :: :ok | {:error, atom()}
-  def can_issue_token(%{kind: :none}, _params), do: :ok
+  def can_issue_token(%{kind: :none}, _params), do: {:error, :forbidden}
 
   def can_issue_token(
         %{kind: :service, tenant_id: tenant_id} = auth,

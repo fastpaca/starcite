@@ -29,10 +29,14 @@ This document defines provider-agnostic deployment and operations for Starcite's
 | `STARCITE_NUM_GROUPS` | Session sharding groups (normally `256`) |
 | `STARCITE_RAFT_DATA_DIR` | Persistent Raft state path |
 | `STARCITE_ARCHIVE_ADAPTER` | Archive backend (`s3` or `postgres`) |
+| `STARCITE_AUTH_MODE` | Auth mode (`jwt` recommended in production) |
 
 S3 mode requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, optional endpoint/credentials overrides.
 
 Postgres mode requires: `DATABASE_URL`.
+
+Production guard: `STARCITE_AUTH_MODE=none` is blocked by default in production.
+To intentionally bypass that guard, set `STARCITE_AUTH_ALLOW_INSECURE_NONE=true`.
 
 ## Bootstrap checklist
 

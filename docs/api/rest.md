@@ -49,6 +49,7 @@ Unauthorized requests fail with `401`.
 - `POST /v1/auth/issue`
   - issue short-lived principal token from service auth
   - service token only
+  - disabled when `STARCITE_AUTH_MODE=none`
   - required: `principal: {tenant_id, id, type}`, `scopes`
   - service token tenant and requested `principal.tenant_id` must match
   - optional: `session_ids`, `owner_principal_ids`, `ttl_seconds`

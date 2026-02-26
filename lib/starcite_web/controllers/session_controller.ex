@@ -21,9 +21,8 @@ defmodule StarciteWeb.SessionController do
   Create a session.
   """
   def create(conn, params) do
-    auth = conn.assigns[:auth] || %{kind: :none}
-
-    with {:ok, opts} <- validate_create(params, auth),
+    with {:ok, auth} <- fetch_auth(conn),
+         {:ok, opts} <- validate_create(params, auth),
          {:ok, session} <- WritePath.create_session(opts) do
       conn
       |> put_status(:created)
@@ -35,9 +34,8 @@ defmodule StarciteWeb.SessionController do
   Append one event to a session.
   """
   def append(conn, %{"id" => id} = params) do
-    auth = conn.assigns[:auth] || %{kind: :none}
-
-    with :ok <- Policy.allowed_to_access_session(auth, id),
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.allowed_to_access_session(auth, id),
          :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_event(id, event, expected_seq) do
@@ -67,9 +65,8 @@ defmodule StarciteWeb.SessionController do
   List known sessions from the configured archive adapter.
   """
   def index(conn, params) do
-    auth = conn.assigns[:auth] || %{kind: :none}
-
-    with {:ok, opts} <- validate_list(params),
+    with {:ok, auth} <- fetch_auth(conn),
+         {:ok, opts} <- validate_list(params),
          {:ok, scope} <- Policy.can_list_sessions(auth),
          {:ok, page} <- list_sessions(scope, opts) do
       json(conn, page)
@@ -220,6 +217,9 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp list_sessions(_scope, _opts), do: {:error, :forbidden}
+
+  defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
+  defp fetch_auth(_conn), do: {:error, :unauthorized}
 
   defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp required_non_empty_string(_value), do: {:error, :invalid_event}

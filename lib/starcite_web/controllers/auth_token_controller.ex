@@ -24,9 +24,8 @@ defmodule StarciteWeb.AuthTokenController do
           "scopes" => _scopes
         } = params
       ) do
-    auth = conn.assigns[:auth] || %{kind: :none}
-
-    with :ok <- Policy.can_issue_token(auth, params),
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_issue_token(auth, params),
          {:ok, issued} <- PrincipalToken.issue(params, ServiceAuth.config()) do
       principal = issued.principal
 
@@ -47,4 +46,7 @@ defmodule StarciteWeb.AuthTokenController do
   end
 
   def issue(_conn, _params), do: {:error, :invalid_issue_request}
+
+  defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
+  defp fetch_auth(_conn), do: {:error, :unauthorized}
 end

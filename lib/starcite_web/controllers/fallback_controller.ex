@@ -76,6 +76,10 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :forbidden, "forbidden", "Forbidden")
   end
 
+  def call(conn, {:error, :unauthorized}) do
+    error(conn, :unauthorized, "unauthorized", "Unauthorized")
+  end
+
   def call(conn, {:error, :forbidden_scope}) do
     error(conn, :forbidden, "forbidden_scope", "Token scope does not allow this operation")
   end

@@ -19,9 +19,8 @@ defmodule StarciteWeb.TailController do
   plug :ensure_websocket_upgrade_plug when action in [:tail]
 
   def tail(conn, %{"id" => id} = params) do
-    auth = conn.assigns[:auth] || %{kind: :none}
-
-    with {:ok, cursor} <- parse_cursor_param(params),
+    with {:ok, auth} <- fetch_auth(conn),
+         {:ok, cursor} <- parse_cursor_param(params),
          :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- ReadPath.get_session(id),
          :ok <- Policy.allowed_to_read_session(auth, session) do
@@ -42,6 +41,9 @@ defmodule StarciteWeb.TailController do
   end
 
   def tail(_conn, _params), do: {:error, :invalid_session_id}
+
+  defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
+  defp fetch_auth(_conn), do: {:error, :unauthorized}
 
   defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
   defp parse_cursor_param(%{}), do: {:ok, 0}

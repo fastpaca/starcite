@@ -4,7 +4,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   alias Starcite.Auth.Principal
   alias StarciteWeb.Auth.Policy
 
-  test "can_issue_token allows tenant-scoped service and denies principal" do
+  test "can_issue_token allows tenant-scoped service, denies none mode, and denies principal" do
     params = %{"principal" => %{"tenant_id" => "acme", "id" => "user-1", "type" => "user"}}
 
     assert :ok =
@@ -13,7 +13,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
                params
              )
 
-    assert :ok = Policy.can_issue_token(%{kind: :none}, params)
+    assert {:error, :forbidden} = Policy.can_issue_token(%{kind: :none}, params)
     assert {:error, :forbidden} = Policy.can_issue_token(%{kind: :principal}, params)
   end
 
