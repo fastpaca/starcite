@@ -136,6 +136,36 @@ defmodule StarciteWeb.TailSocketTest do
       assert next_state.cursor == 1
     end
 
+    test "uses cursor update event payload without performing lookup reads" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "state",
+          payload: %{state: "running"},
+          actor: "agent:test"
+        })
+
+      {:ok, update} = cursor_update_for(session_id, 1)
+      assert 1 == EventStore.delete_below(session_id, 2)
+      assert :error = EventStore.get_event(session_id, 1)
+
+      handler_id = attach_tail_lookup_handler()
+      on_exit(fn -> detach_tail_lookup_handler(handler_id) end)
+
+      state = %{base_state(session_id, 0) | replay_done: true}
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      frame = Jason.decode!(payload)
+      assert frame["seq"] == 1
+      assert frame["payload"] == %{"state" => "running"}
+      assert next_state.cursor == 1
+      refute_receive {:tail_lookup, _metadata}, 100
+    end
+
     test "falls back to storage when a live cursor update misses ETS" do
       ensure_repo_started()
       :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)

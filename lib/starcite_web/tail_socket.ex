@@ -109,7 +109,7 @@ defmodule StarciteWeb.TailSocket do
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        case read_event_for_tail(state.session_id, seq) do
+        case resolve_cursor_update_event(state.session_id, update) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
             {:push, {:text, Jason.encode!(render_event(event))}, next_state}
@@ -199,12 +199,30 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq}})
+  defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq} = update})
        when is_integer(seq) and seq > 0 do
-    read_event_for_tail(session_id, seq)
+    resolve_cursor_update_event(session_id, update)
   end
 
   defp resolve_buffered_value(_state, _value), do: :error
+
+  defp resolve_cursor_update_event(session_id, %{seq: seq} = update)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+    case event_from_cursor_update(update, seq) do
+      {:ok, event} ->
+        {:ok, event}
+
+      :error ->
+        read_event_for_tail(session_id, seq)
+    end
+  end
+
+  defp event_from_cursor_update(%{event: %{seq: seq} = event}, seq)
+       when is_integer(seq) and seq > 0 do
+    {:ok, event}
+  end
+
+  defp event_from_cursor_update(_update, _seq), do: :error
 
   defp read_event_for_tail(session_id, seq)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do

@@ -1,6 +1,6 @@
 defmodule Starcite.DataPlane.CursorUpdate do
   @moduledoc """
-  Payload-free cursor update contract for internal PubSub consumers.
+  Cursor update contract for internal PubSub consumers.
 
   Topic:
     - `"session_cursor:<session_id>"`
@@ -20,7 +20,8 @@ defmodule Starcite.DataPlane.CursorUpdate do
           required(:type) => String.t(),
           required(:actor) => String.t(),
           optional(:source) => String.t() | nil,
-          required(:inserted_at) => NaiveDateTime.t() | DateTime.t()
+          required(:inserted_at) => NaiveDateTime.t() | DateTime.t(),
+          required(:event) => Event.t()
         }
 
   @type message :: {:cursor_update, t()}
@@ -51,7 +52,8 @@ defmodule Starcite.DataPlane.CursorUpdate do
        type: type,
        actor: actor,
        source: Map.get(event, :source),
-       inserted_at: inserted_at
+       inserted_at: inserted_at,
+       event: event
      }}
   end
 end

@@ -43,7 +43,7 @@ defmodule Starcite.DataPlane.EventStoreMirrorTest do
     assert EventStore.session_size(session_id) == 1
   end
 
-  test "publishes payload-free cursor updates on the cursor topic" do
+  test "publishes cursor updates with the committed event payload" do
     session_id = "ses-cursor-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -67,6 +67,8 @@ defmodule Starcite.DataPlane.EventStoreMirrorTest do
     assert update.type == "state"
     assert update.actor == "agent:test"
     assert update.source == "agent"
-    refute Map.has_key?(update, :payload)
+
+    assert %{seq: 1, type: "state", payload: %{state: "running"}, actor: "agent:test"} =
+             update.event
   end
 end
