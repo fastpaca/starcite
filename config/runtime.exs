@@ -534,6 +534,16 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("PORT") || "4000")
 
+  if pprof_port = System.get_env("STARCITE_PPROF_PORT") do
+    config :starcite, :pprof_port, parse_positive_integer!.("STARCITE_PPROF_PORT", pprof_port)
+  end
+
+  if pprof_timeout_ms = System.get_env("STARCITE_PPROF_TIMEOUT_MS") do
+    config :starcite,
+           :pprof_profile_timeout_ms,
+           parse_positive_integer!.("STARCITE_PPROF_TIMEOUT_MS", pprof_timeout_ms)
+  end
+
   # Cluster configuration
   # For production: DNS_CLUSTER_QUERY=starcite-headless.default.svc.cluster.local
   # For local dev: CLUSTER_NODES=node1@localhost,node2@localhost

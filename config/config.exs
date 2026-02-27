@@ -39,7 +39,9 @@ config :starcite,
   session_store_touch_on_read: true,
   archive_read_cache_max_bytes: 536_870_912,
   archive_read_cache_reclaim_fraction: 0.25,
-  archive_read_cache_compressed: true
+  archive_read_cache_compressed: true,
+  pprof_port: nil,
+  pprof_profile_timeout_ms: 60_000
 
 config :ra,
   data_dir: String.to_charlist(default_ra_system_data_dir),

@@ -10,6 +10,7 @@ defmodule Starcite.MixProject do
       start_permanent: Mix.env() == :prod,
       dialyzer: dialyzer(),
       aliases: aliases(),
+      releases: releases(),
       deps: deps(),
       listeners: [Phoenix.CodeReloader],
       description:
@@ -57,6 +58,7 @@ defmodule Starcite.MixProject do
       {:uniq, "~> 0.6"},
       {:finch, "~> 0.19"},
       {:req, "~> 0.5"},
+      {:pprof, "~> 0.1.0", runtime: false},
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},
@@ -95,6 +97,14 @@ defmodule Starcite.MixProject do
         "deps.unlock --unused",
         "format",
         "test"
+      ]
+    ]
+  end
+
+  defp releases do
+    [
+      starcite: [
+        applications: [pprof: :load]
       ]
     ]
   end

@@ -6,6 +6,8 @@ defmodule Starcite.Application do
 
   @impl true
   def start(_type, _args) do
+    pprof_port = pprof_port()
+    :ok = maybe_prepare_pprof(pprof_port)
     :ok = Starcite.ControlPlane.WriteNodes.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
@@ -26,6 +28,7 @@ defmodule Starcite.Application do
         # Data-plane runtime (Raft bootstrap, archive, event store)
         Starcite.DataPlane.Supervisor
       ]
+      |> Enum.concat(pprof_children(pprof_port))
       |> Enum.concat(cluster_children(topologies))
       |> Enum.reject(&is_nil/1)
       |> Enum.concat([
@@ -97,5 +100,51 @@ defmodule Starcite.Application do
         raise ArgumentError,
               "invalid value for :archive_read_cache_compressed: #{inspect(value)} (expected true/false)"
     end
+  end
+
+  defp pprof_port do
+    case Application.get_env(:starcite, :pprof_port) do
+      nil ->
+        nil
+
+      port when is_integer(port) and port > 0 ->
+        port
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :pprof_port: #{inspect(value)} (expected positive integer or nil)"
+    end
+  end
+
+  defp maybe_prepare_pprof(nil), do: :ok
+
+  defp maybe_prepare_pprof(_port) do
+    case Application.load(:pprof) do
+      :ok ->
+        :ok
+
+      {:error, {:already_loaded, :pprof}} ->
+        :ok
+
+      {:error, reason} ->
+        raise "failed to load pprof: #{inspect(reason)}"
+    end
+
+    case Application.ensure_all_started(:plug_cowboy) do
+      {:ok, _apps} ->
+        :ok
+
+      {:error, reason} ->
+        raise "failed to start plug_cowboy for pprof: #{inspect(reason)}"
+    end
+  end
+
+  defp pprof_children(nil), do: []
+
+  defp pprof_children(port) do
+    [
+      {Pprof.Servers.Profile, []},
+      {Plug.Cowboy, scheme: :http, plug: Starcite.Pprof.Router, port: port, compress: true}
+    ]
   end
 end
