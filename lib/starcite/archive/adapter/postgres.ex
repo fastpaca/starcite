@@ -117,11 +117,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
     rows = Repo.all(query)
 
-    {:ok,
-     %{
-       sessions: Enum.map(rows, &to_session_map/1),
-       next_cursor: next_cursor(rows, limit)
-     }}
+    build_session_page(rows, limit)
   rescue
     _ -> {:error, :archive_read_unavailable}
   end
@@ -147,11 +143,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
       rows = Repo.all(query)
 
-      {:ok,
-       %{
-         sessions: Enum.map(rows, &to_session_map/1),
-         next_cursor: next_cursor(rows, limit)
-       }}
+      build_session_page(rows, limit)
     end
   rescue
     _ -> {:error, :archive_read_unavailable}
@@ -250,15 +242,69 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp next_cursor(_rows, _limit), do: nil
 
-  defp to_session_map(%SessionRecord{} = session) do
-    %{
-      id: session.id,
-      title: session.title,
-      creator_principal: session.creator_principal,
-      metadata: session.metadata || %{},
-      created_at: DateTime.to_iso8601(session.created_at)
-    }
+  defp build_session_page(rows, limit) when is_list(rows) and is_integer(limit) and limit > 0 do
+    with {:ok, sessions} <- normalize_session_rows(rows) do
+      {:ok,
+       %{
+         sessions: sessions,
+         next_cursor: next_cursor(rows, limit)
+       }}
+    end
   end
+
+  defp normalize_session_rows(rows) when is_list(rows) do
+    rows
+    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
+      case to_session_row(row) do
+        {:ok, session} -> {:cont, {:ok, [session | acc]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:ok, sessions} -> {:ok, Enum.reverse(sessions)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp to_session_row(%SessionRecord{} = session) do
+    with {:ok, creator_principal} <- principal_from_map(session.creator_principal) do
+      {:ok,
+       %{
+         id: session.id,
+         title: session.title,
+         creator_principal: creator_principal,
+         metadata: session.metadata || %{},
+         created_at: session.created_at
+       }}
+    end
+  end
+
+  defp principal_from_map(nil), do: {:ok, nil}
+  defp principal_from_map(%Principal{} = principal), do: {:ok, principal}
+
+  defp principal_from_map(%{"tenant_id" => tenant_id, "id" => id, "type" => type})
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
+    with {:ok, principal_type} <- principal_type(type),
+         {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
+      {:ok, principal}
+    end
+  end
+
+  defp principal_from_map(%{tenant_id: tenant_id, id: id, type: type})
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
+    with {:ok, principal_type} <- principal_type(type),
+         {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
+      {:ok, principal}
+    end
+  end
+
+  defp principal_from_map(_invalid), do: {:error, :archive_read_unavailable}
+
+  defp principal_type("user"), do: {:ok, :user}
+  defp principal_type("agent"), do: {:ok, :agent}
+  defp principal_type(:user), do: {:ok, :user}
+  defp principal_type(:agent), do: {:ok, :agent}
+  defp principal_type(_invalid), do: {:error, :archive_read_unavailable}
 
   defp principal_to_map(nil), do: nil
 

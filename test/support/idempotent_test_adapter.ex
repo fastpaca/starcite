@@ -236,6 +236,11 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
     Enum.member?(owner_ids, creator_principal["id"] || creator_principal[:id])
   end
 
+  defp owner_principal_match?(%Starcite.Auth.Principal{id: id}, owner_ids)
+       when is_list(owner_ids) do
+    Enum.member?(owner_ids, id)
+  end
+
   defp owner_principal_match?(_creator_principal, _owner_ids), do: false
 
   defp normalize_tenant_id(nil), do: :all
@@ -248,6 +253,11 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   defp tenant_match?(creator_principal, tenant_id)
        when is_map(creator_principal) and is_binary(tenant_id) do
     (creator_principal["tenant_id"] || creator_principal[:tenant_id]) == tenant_id
+  end
+
+  defp tenant_match?(%Starcite.Auth.Principal{tenant_id: principal_tenant_id}, tenant_id)
+       when is_binary(tenant_id) do
+    principal_tenant_id == tenant_id
   end
 
   defp tenant_match?(_creator_principal, _tenant_id), do: false

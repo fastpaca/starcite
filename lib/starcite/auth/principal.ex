@@ -7,6 +7,7 @@ defmodule Starcite.Auth.Principal do
   """
 
   @enforce_keys [:tenant_id, :id, :type]
+  @derive {Jason.Encoder, only: [:tenant_id, :id, :type]}
   defstruct [:tenant_id, :id, :type]
 
   @type type :: :user | :agent

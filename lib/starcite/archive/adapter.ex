@@ -39,7 +39,7 @@ defmodule Starcite.Archive.Adapter do
         }
 
   @type session_page :: %{
-          required(:sessions) => [map()],
+          required(:sessions) => [session_row()],
           required(:next_cursor) => String.t() | nil
         }
 
