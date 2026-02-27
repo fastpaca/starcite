@@ -79,7 +79,7 @@ defmodule StarciteWeb.SessionController do
          {:ok, id} <- Policy.resolve_create_session_id(auth, requested_id),
          {:ok, title} <- optional_string(params["title"]),
          {:ok, metadata} <- optional_object(params["metadata"]),
-         {:ok, metadata} <- ensure_session_metadata_tenant(metadata, Map.get(auth, :tenant_id)) do
+         {:ok, metadata} <- ensure_session_metadata_tenant(metadata, auth) do
       {:ok,
        [
          id: id,
@@ -221,6 +221,10 @@ defmodule StarciteWeb.SessionController do
     )
   end
 
+  defp list_sessions(:all, opts) when is_map(opts) do
+    Starcite.Archive.Store.list_sessions(opts)
+  end
+
   defp list_sessions(_scope, _opts), do: {:error, :forbidden}
 
   defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
@@ -248,7 +252,11 @@ defmodule StarciteWeb.SessionController do
   defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
   defp optional_object(_value), do: {:error, :invalid_metadata}
 
-  defp ensure_session_metadata_tenant(metadata, tenant_id)
+  defp ensure_session_metadata_tenant(metadata, %{kind: :none}) when is_map(metadata) do
+    {:ok, metadata}
+  end
+
+  defp ensure_session_metadata_tenant(metadata, %{tenant_id: tenant_id})
        when is_map(metadata) and is_binary(tenant_id) and tenant_id != "" do
     case Map.get(metadata, "tenant_id") do
       nil -> {:ok, Map.put(metadata, "tenant_id", tenant_id)}

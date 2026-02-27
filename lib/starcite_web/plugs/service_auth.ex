@@ -35,37 +35,54 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
     Config.load()
   end
 
+  @spec mode() :: :none | :jwt
+  def mode do
+    config().mode
+  end
+
   @spec authenticate_conn(Conn.t()) :: {:ok, map()} | {:error, atom()}
   def authenticate_conn(%Conn{} = conn) do
-    with {:ok, token} <- bearer_token(conn),
-         {:ok, auth_context} <- authenticate_token(token) do
-      {:ok, auth_context}
+    case mode() do
+      :none ->
+        {:ok, %{kind: :none}}
+
+      :jwt ->
+        with {:ok, token} <- bearer_token(conn),
+             {:ok, auth_context} <- authenticate_token(token) do
+          {:ok, auth_context}
+        end
     end
   end
 
   @spec authenticate_token(String.t()) :: {:ok, map()} | {:error, atom()}
   def authenticate_token(token) when is_binary(token) and token != "" do
-    cfg = config()
+    case mode() do
+      :none ->
+        {:ok, %{kind: :none}}
 
-    with {:ok, claims} <- JWT.verify(token, cfg),
-         {:ok, exp} <- claim_exp(claims),
-         {:ok, tenant_id} <- claim_tenant_id(claims),
-         {:ok, scopes} <- claim_scopes(claims),
-         {:ok, session_id} <- claim_session_id(claims),
-         {:ok, subject} <- claim_subject(claims),
-         {:ok, principal} <- principal_from_subject(subject, tenant_id) do
-      {:ok,
-       %{
-         kind: :jwt,
-         claims: claims,
-         tenant_id: tenant_id,
-         scopes: scopes,
-         session_id: session_id,
-         subject: subject,
-         principal: principal,
-         expires_at: exp,
-         bearer_token: token
-       }}
+      :jwt ->
+        cfg = config()
+
+        with {:ok, claims} <- JWT.verify(token, cfg),
+             {:ok, exp} <- claim_exp(claims),
+             {:ok, tenant_id} <- claim_tenant_id(claims),
+             {:ok, scopes} <- claim_scopes(claims),
+             {:ok, session_id} <- claim_session_id(claims),
+             {:ok, subject} <- claim_subject(claims),
+             {:ok, principal} <- principal_from_subject(subject, tenant_id) do
+          {:ok,
+           %{
+             kind: :jwt,
+             claims: claims,
+             tenant_id: tenant_id,
+             scopes: scopes,
+             session_id: session_id,
+             subject: subject,
+             principal: principal,
+             expires_at: exp,
+             bearer_token: token
+           }}
+        end
     end
   end
 

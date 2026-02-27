@@ -26,7 +26,7 @@ defmodule StarciteWeb.SessionControllerTest do
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
     jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
 
-    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+    Bypass.stub(bypass, "GET", @jwks_path, fn conn ->
       conn
       |> put_resp_content_type("application/json")
       |> resp(200, Jason.encode!(jwks))
@@ -199,6 +199,24 @@ defmodule StarciteWeb.SessionControllerTest do
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "session_exists"
       assert is_binary(body["message"])
+    end
+
+    test "supports explicit no-auth mode for local runs" do
+      Application.put_env(:starcite, @auth_env_key, mode: :none)
+      Process.delete(:default_auth_header)
+
+      conn =
+        json_conn(:post, "/v1/sessions", %{
+          "id" => unique_id("ses"),
+          "title" => "Local",
+          "metadata" => %{"workflow" => "local"}
+        })
+
+      assert conn.status == 201
+      body = Jason.decode!(conn.resp_body)
+      assert body["title"] == "Local"
+      assert body["metadata"]["workflow"] == "local"
+      refute Map.has_key?(body["metadata"], "tenant_id")
     end
   end
 

@@ -23,6 +23,17 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
   end
 
+  test "none mode allows create/list/read/append without jwt claims" do
+    session = %{id: "ses-1", metadata: %{"tenant_id" => "acme"}, creator_principal: nil}
+
+    assert {:ok, nil} = Policy.can_create_session(%{kind: :none}, %{})
+    assert {:ok, "ses-1"} = Policy.resolve_create_session_id(%{kind: :none}, "ses-1")
+    assert {:ok, :all} = Policy.can_list_sessions(%{kind: :none})
+    assert :ok = Policy.allowed_to_access_session(%{kind: :none}, "ses-1")
+    assert :ok = Policy.allowed_to_read_session(%{kind: :none}, session)
+    assert :ok = Policy.allowed_to_append_session(%{kind: :none}, session)
+  end
+
   test "resolve_create_session_id enforces optional session_id lock" do
     assert {:ok, nil} =
              Policy.resolve_create_session_id(%{tenant_id: "acme", session_id: nil}, nil)

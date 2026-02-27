@@ -8,6 +8,8 @@ defmodule StarciteWeb.Auth.Policy do
   @type auth :: map()
 
   @spec can_create_session(auth(), map()) :: {:ok, Principal.t() | nil} | {:error, atom()}
+  def can_create_session(%{kind: :none}, _params), do: {:ok, nil}
+
   def can_create_session(%{tenant_id: tenant_id} = auth, _params)
       when is_binary(tenant_id) and tenant_id != "" do
     with :ok <- has_scope(auth, "session:create") do
@@ -19,6 +21,8 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec resolve_create_session_id(auth(), String.t() | nil) ::
           {:ok, String.t() | nil} | {:error, atom()}
+  def resolve_create_session_id(%{kind: :none}, requested_id), do: {:ok, requested_id}
+
   def resolve_create_session_id(%{session_id: nil}, requested_id), do: {:ok, requested_id}
 
   def resolve_create_session_id(%{session_id: session_id}, nil)
@@ -34,7 +38,9 @@ defmodule StarciteWeb.Auth.Policy do
   def resolve_create_session_id(_auth, _requested_id), do: {:error, :invalid_session}
 
   @spec can_list_sessions(auth()) ::
-          {:ok, %{tenant_id: String.t(), session_id: String.t() | nil}} | {:error, atom()}
+          {:ok, :all | %{tenant_id: String.t(), session_id: String.t() | nil}} | {:error, atom()}
+  def can_list_sessions(%{kind: :none}), do: {:ok, :all}
+
   def can_list_sessions(%{tenant_id: tenant_id} = auth)
       when is_binary(tenant_id) and tenant_id != "" do
     with :ok <- has_scope(auth, "session:read") do
@@ -55,6 +61,10 @@ defmodule StarciteWeb.Auth.Policy do
   end
 
   @spec allowed_to_access_session(auth(), String.t()) :: :ok | {:error, :forbidden_session}
+  def allowed_to_access_session(%{kind: :none}, session_id)
+      when is_binary(session_id) and session_id != "",
+      do: :ok
+
   def allowed_to_access_session(%{session_id: nil}, session_id)
       when is_binary(session_id) and session_id != "",
       do: :ok
@@ -114,6 +124,14 @@ defmodule StarciteWeb.Auth.Policy do
   end
 
   def has_scope(_auth, _scope), do: {:error, :forbidden_scope}
+
+  defp session_permission(
+         %{kind: :none},
+         %{id: session_id},
+         _scope
+       )
+       when is_binary(session_id) and session_id != "",
+       do: :ok
 
   defp session_permission(
          %{tenant_id: tenant_id} = auth,

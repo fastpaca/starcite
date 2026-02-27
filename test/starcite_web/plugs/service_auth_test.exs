@@ -107,6 +107,13 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     assert {:error, :missing_bearer_token} = ServiceAuth.authenticate_conn(conn)
   end
 
+  test "authenticate_conn allows requests when auth mode is none" do
+    Application.put_env(:starcite, @auth_env_key, mode: :none)
+    conn = conn(:get, "/")
+
+    assert {:ok, %{kind: :none}} = ServiceAuth.authenticate_conn(conn)
+  end
+
   test "authenticate_token rejects non-binary token values" do
     assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_token(nil)
     assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_token("")
