@@ -54,7 +54,9 @@ defmodule Starcite.Archive.Adapter.S3 do
         metadata: metadata,
         created_at: created_at
       })
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and is_map(metadata) do
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
+             is_map(metadata) do
     with {:ok, creator_principal_payload} <- principal_to_map(creator_principal) do
       config = config!()
 
@@ -346,17 +348,8 @@ defmodule Starcite.Archive.Adapter.S3 do
   defp decode_session(_invalid), do: {:error, :archive_read_unavailable}
 
   defp principal_from_map(nil), do: {:ok, nil}
-  defp principal_from_map(%Principal{} = principal), do: {:ok, principal}
 
   defp principal_from_map(%{"tenant_id" => tenant_id, "id" => id, "type" => type})
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
-    with {:ok, principal_type} <- principal_type(type),
-         {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
-      {:ok, principal}
-    end
-  end
-
-  defp principal_from_map(%{tenant_id: tenant_id, id: id, type: type})
        when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
     with {:ok, principal_type} <- principal_type(type),
          {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
@@ -377,12 +370,8 @@ defmodule Starcite.Archive.Adapter.S3 do
      }}
   end
 
-  defp principal_to_map(_invalid), do: {:error, :archive_write_unavailable}
-
   defp principal_type("user"), do: {:ok, :user}
   defp principal_type("agent"), do: {:ok, :agent}
-  defp principal_type(:user), do: {:ok, :user}
-  defp principal_type(:agent), do: {:ok, :agent}
   defp principal_type(_invalid), do: {:error, :archive_read_unavailable}
 
   defp config!, do: :persistent_term.get(@config_key)

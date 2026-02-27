@@ -280,17 +280,8 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   defp principal_from_map(nil), do: {:ok, nil}
-  defp principal_from_map(%Principal{} = principal), do: {:ok, principal}
 
   defp principal_from_map(%{"tenant_id" => tenant_id, "id" => id, "type" => type})
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
-    with {:ok, principal_type} <- principal_type(type),
-         {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
-      {:ok, principal}
-    end
-  end
-
-  defp principal_from_map(%{tenant_id: tenant_id, id: id, type: type})
        when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
     with {:ok, principal_type} <- principal_type(type),
          {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
@@ -302,8 +293,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp principal_type("user"), do: {:ok, :user}
   defp principal_type("agent"), do: {:ok, :agent}
-  defp principal_type(:user), do: {:ok, :user}
-  defp principal_type(:agent), do: {:ok, :agent}
   defp principal_type(_invalid), do: {:error, :archive_read_unavailable}
 
   defp principal_to_map(nil), do: nil
