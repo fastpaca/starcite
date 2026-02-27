@@ -3,7 +3,7 @@ defmodule Starcite.DataPlane.SessionStore do
   Cachex-backed session state store.
 
   `SessionStore` is intentionally decoupled from append/read hot paths. It is
-  available for lifecycle and control-plane session operations in this POC.
+  available for lifecycle and control-plane session operations.
   """
 
   alias Starcite.Session
