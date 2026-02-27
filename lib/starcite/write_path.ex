@@ -47,7 +47,9 @@ defmodule Starcite.WritePath do
 
     case result do
       {:ok, session} = ok ->
+        # Keep archive session catalog in sync for list/get lookups backed by cold storage.
         _ = maybe_index_session(session, creator_principal)
+        # Warm local session cache so immediate same-node reads stay on the RAM path.
         _ = maybe_cache_session(id, title, creator_principal, metadata)
         ok
 

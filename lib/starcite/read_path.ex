@@ -18,11 +18,13 @@ defmodule Starcite.ReadPath do
   def get_session(_id), do: {:error, :invalid_session_id}
 
   defp do_get_session(id) do
+    # Session reads are cache-first so active sessions stay on the low-latency RAM path.
     case SessionStore.get_session(id) do
       {:ok, %Session{} = session} ->
         {:ok, session}
 
       :error ->
+        # On cache miss, hydrate from archive once and warm local cache for follow-up reads.
         with {:ok, %Session{} = session} <- load_session_from_archive(id) do
           :ok = SessionStore.put_session(session)
           {:ok, session}
@@ -31,40 +33,55 @@ defmodule Starcite.ReadPath do
   end
 
   defp load_session_from_archive(id) when is_binary(id) and id != "" do
-    with {:ok, page} <- Store.list_sessions_by_ids([id], %{limit: 1, cursor: nil, metadata: %{}}),
-         {:ok, row} <- archive_session_row(page, id),
-         {:ok, creator_principal} <- archive_creator_principal(row),
-         {:ok, metadata} <- archive_metadata(row) do
-      title = archive_title(row)
-
-      {:ok,
-       Session.new(id, title: title, creator_principal: creator_principal, metadata: metadata)}
+    with {:ok, %{sessions: sessions}} when is_list(sessions) <-
+           Store.list_sessions_by_ids([id], %{limit: 1, cursor: nil, metadata: %{}}),
+         {:ok, %Session{} = session} <- session_from_archive_rows(id, sessions) do
+      {:ok, session}
+    else
+      {:error, reason} -> {:error, reason}
     end
   end
 
-  defp archive_session_row(%{sessions: [%{id: id} = row | _rest]}, id), do: {:ok, row}
+  defp session_from_archive_rows(_id, []), do: {:error, :session_not_found}
+  defp session_from_archive_rows(id, [row | _rest]), do: session_from_archive_row(id, row)
 
-  defp archive_session_row(%{sessions: [_other | _rest]}, _id),
-    do: {:error, :archive_read_unavailable}
+  defp session_from_archive_row(
+         id,
+         %{id: id, title: title, metadata: metadata, creator_principal: creator_principal}
+       )
+       when (is_binary(title) or is_nil(title)) and is_map(metadata) do
+    with {:ok, principal} <- archive_creator_principal(creator_principal) do
+      {:ok, Session.new(id, title: title, creator_principal: principal, metadata: metadata)}
+    end
+  end
 
-  defp archive_session_row(%{sessions: []}, _id), do: {:error, :session_not_found}
+  defp session_from_archive_row(id, %{id: id, title: title, metadata: metadata})
+       when (is_binary(title) or is_nil(title)) and is_map(metadata) do
+    {:ok, Session.new(id, title: title, metadata: metadata)}
+  end
 
-  defp archive_title(%{title: title}) when is_binary(title) or is_nil(title), do: title
-  defp archive_title(_row), do: nil
+  defp session_from_archive_row(_id, _row), do: {:error, :archive_read_unavailable}
 
-  defp archive_metadata(%{metadata: metadata}) when is_map(metadata), do: {:ok, metadata}
-  defp archive_metadata(_row), do: {:ok, %{}}
+  defp archive_creator_principal(nil), do: {:ok, nil}
+  defp archive_creator_principal(%Principal{} = principal), do: {:ok, principal}
 
-  defp archive_creator_principal(%{creator_principal: nil}), do: {:ok, nil}
+  defp archive_creator_principal(%{
+         "tenant_id" => tenant_id,
+         "id" => principal_id,
+         "type" => type
+       })
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(principal_id) and
+              principal_id != "" do
+    with {:ok, principal_type} <- principal_type(type),
+         {:ok, principal} <- Principal.new(tenant_id, principal_id, principal_type) do
+      {:ok, principal}
+    end
+  end
 
-  defp archive_creator_principal(%{creator_principal: %Principal{} = principal}),
-    do: {:ok, principal}
-
-  defp archive_creator_principal(%{creator_principal: creator}) when is_map(creator) do
-    with {:ok, tenant_id} <- fetch_creator_field(creator, "tenant_id"),
-         {:ok, principal_id} <- fetch_creator_field(creator, "id"),
-         {:ok, type} <- fetch_creator_field(creator, "type"),
-         {:ok, principal_type} <- creator_type(type),
+  defp archive_creator_principal(%{tenant_id: tenant_id, id: principal_id, type: type})
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(principal_id) and
+              principal_id != "" do
+    with {:ok, principal_type} <- principal_type(type),
          {:ok, principal} <- Principal.new(tenant_id, principal_id, principal_type) do
       {:ok, principal}
     else
@@ -72,25 +89,13 @@ defmodule Starcite.ReadPath do
     end
   end
 
-  defp archive_creator_principal(_row), do: {:ok, nil}
+  defp archive_creator_principal(_other), do: {:error, :archive_read_unavailable}
 
-  defp fetch_creator_field(map, field) when is_map(map) and is_binary(field) do
-    case field do
-      "tenant_id" -> fetch_creator_field_value(map, "tenant_id", :tenant_id)
-      "id" -> fetch_creator_field_value(map, "id", :id)
-      "type" -> fetch_creator_field_value(map, "type", :type)
-      _other -> :error
-    end
-  end
-
-  defp fetch_creator_field_value(map, string_key, atom_key) when is_map(map) do
-    value = Map.get(map, string_key) || Map.get(map, atom_key)
-    if is_binary(value) and value != "", do: {:ok, value}, else: :error
-  end
-
-  defp creator_type("user"), do: {:ok, :user}
-  defp creator_type("agent"), do: {:ok, :agent}
-  defp creator_type(_other), do: :error
+  defp principal_type("user"), do: {:ok, :user}
+  defp principal_type("agent"), do: {:ok, :agent}
+  defp principal_type(:user), do: {:ok, :user}
+  defp principal_type(:agent), do: {:ok, :agent}
+  defp principal_type(_other), do: :error
 
   @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
