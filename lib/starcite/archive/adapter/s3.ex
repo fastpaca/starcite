@@ -17,6 +17,7 @@ defmodule Starcite.Archive.Adapter.S3 do
 
   use GenServer
 
+  alias Starcite.Auth.Principal
   alias __MODULE__.{Config, Layout}
 
   @config_key {__MODULE__, :config}
@@ -46,9 +47,25 @@ defmodule Starcite.Archive.Adapter.S3 do
     do: read_events(session_id, from_seq, to_seq, config!())
 
   @impl true
-  def upsert_session(%{id: id, title: title, metadata: metadata, created_at: created_at}) do
+  def upsert_session(%{
+        id: id,
+        title: title,
+        creator_principal: creator_principal,
+        metadata: metadata,
+        created_at: created_at
+      })
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
+             is_map(metadata) do
     config = config!()
-    session = %{id: id, title: title, metadata: metadata, created_at: created_at}
+
+    session = %{
+      id: id,
+      title: title,
+      creator_principal: creator_principal,
+      metadata: metadata,
+      created_at: created_at
+    }
 
     case put_session(config, id, session) do
       :ok -> :ok
@@ -223,8 +240,24 @@ defmodule Starcite.Archive.Adapter.S3 do
       {:ok, {body, _etag}} ->
         case Jason.decode(body) do
           {:ok,
-           %{"id" => id, "title" => title, "metadata" => metadata, "created_at" => created_at}} ->
-            {:ok, %{id: id, title: title, metadata: metadata, created_at: created_at}}
+           %{
+             "id" => id,
+             "title" => title,
+             "creator_principal" => creator_principal,
+             "metadata" => metadata,
+             "created_at" => created_at
+           }}
+          when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+                 (is_map(creator_principal) or is_nil(creator_principal)) and is_map(metadata) and
+                 is_binary(created_at) ->
+            {:ok,
+             %{
+               id: id,
+               title: title,
+               creator_principal: creator_principal,
+               metadata: metadata,
+               created_at: created_at
+             }}
 
           _ ->
             {:error, :archive_read_unavailable}

@@ -259,7 +259,7 @@ defmodule Starcite.Session do
     %{
       id: session.id,
       title: session.title,
-      creator_principal: principal_to_map(session.creator_principal),
+      creator_principal: session.creator_principal,
       metadata: session.metadata,
       last_seq: session.last_seq,
       created_at: created_at,
@@ -327,17 +327,28 @@ defmodule Starcite.Session do
   defp optional_principal!(nil, _field), do: nil
   defp optional_principal!(%Principal{} = principal, _field), do: principal
 
+  defp optional_principal!(
+         %{"tenant_id" => tenant_id, "id" => id, "type" => type},
+         field
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
+              is_binary(type) and type != "" do
+    type = principal_type!(type, field)
+
+    case Principal.new(tenant_id, id, type) do
+      {:ok, principal} -> principal
+      {:error, :invalid_principal} -> raise ArgumentError, "invalid session #{field}"
+    end
+  end
+
   defp optional_principal!(value, field) do
     raise ArgumentError, "invalid session #{field}: #{inspect(value)}"
   end
 
-  defp principal_to_map(nil), do: nil
+  defp principal_type!("user", _field), do: :user
+  defp principal_type!("agent", _field), do: :agent
 
-  defp principal_to_map(%Principal{} = principal) do
-    %{
-      "tenant_id" => principal.tenant_id,
-      "id" => principal.id,
-      "type" => Atom.to_string(principal.type)
-    }
+  defp principal_type!(value, field) do
+    raise ArgumentError, "invalid session #{field} type: #{inspect(value)}"
   end
 end

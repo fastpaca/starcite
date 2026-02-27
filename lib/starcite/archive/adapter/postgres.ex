@@ -79,8 +79,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
              is_map(metadata) do
-    creator_principal_payload = principal_to_map(creator_principal)
-
     {_inserted, _} =
       Repo.insert_all(
         "sessions",
@@ -88,7 +86,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
           %{
             id: id,
             title: title,
-            creator_principal: creator_principal_payload,
+            creator_principal: creator_principal,
             metadata: metadata,
             created_at: created_at
           }
@@ -117,11 +115,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
     rows = Repo.all(query)
 
-    {:ok,
-     %{
-       sessions: Enum.map(rows, &to_session_map/1),
-       next_cursor: next_cursor(rows, limit)
-     }}
+    build_session_page(rows, limit)
   rescue
     _ -> {:error, :archive_read_unavailable}
   end
@@ -147,11 +141,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
       rows = Repo.all(query)
 
-      {:ok,
-       %{
-         sessions: Enum.map(rows, &to_session_map/1),
-         next_cursor: next_cursor(rows, limit)
-       }}
+      build_session_page(rows, limit)
     end
   rescue
     _ -> {:error, :archive_read_unavailable}
@@ -250,23 +240,28 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp next_cursor(_rows, _limit), do: nil
 
-  defp to_session_map(%SessionRecord{} = session) do
+  defp build_session_page(rows, limit) when is_list(rows) and is_integer(limit) and limit > 0 do
+    sessions = normalize_session_rows(rows)
+
+    {:ok,
+     %{
+       sessions: sessions,
+       next_cursor: next_cursor(rows, limit)
+     }}
+  end
+
+  defp normalize_session_rows(rows) when is_list(rows) do
+    rows
+    |> Enum.map(&to_session_row/1)
+  end
+
+  defp to_session_row(%SessionRecord{} = session) do
     %{
       id: session.id,
       title: session.title,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
       created_at: DateTime.to_iso8601(session.created_at)
-    }
-  end
-
-  defp principal_to_map(nil), do: nil
-
-  defp principal_to_map(%Principal{} = principal) do
-    %{
-      "tenant_id" => principal.tenant_id,
-      "id" => principal.id,
-      "type" => Atom.to_string(principal.type)
     }
   end
 end

@@ -102,6 +102,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-a",
                title: "A",
+               creator_principal: nil,
                metadata: %{"tenant_id" => "acme"},
                created_at: created_at
              })
@@ -110,6 +111,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-b",
                title: "B",
+               creator_principal: nil,
                metadata: %{"tenant_id" => "acme"},
                created_at: created_at
              })
@@ -118,6 +120,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-c",
                title: "C",
+               creator_principal: nil,
                metadata: %{"tenant_id" => "beta"},
                created_at: created_at
              })
@@ -126,6 +129,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-a",
                title: "A-overwrite-attempt",
+               creator_principal: nil,
                metadata: %{"tenant_id" => "wrong"},
                created_at: created_at
              })

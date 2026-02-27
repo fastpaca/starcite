@@ -3,37 +3,13 @@ defmodule Starcite.ReadPath do
   Read path for session and event tail operations.
   """
 
-  alias Starcite.DataPlane.EventStore
-  alias Starcite.DataPlane.RaftAccess
-  alias Starcite.DataPlane.ReplicaRouter
+  alias Starcite.DataPlane.{EventStore, RaftAccess, ReplicaRouter, SessionStore}
   alias Starcite.Session
 
   @default_tail_batch_size 1_000
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
-  def get_session(id) when is_binary(id) and id != "" do
-    group = RaftAccess.group_for_session(id)
-
-    ReplicaRouter.call_on_replica(
-      group,
-      __MODULE__,
-      :get_session_local,
-      [id],
-      __MODULE__,
-      :get_session_local,
-      [id],
-      prefer_leader: false
-    )
-  end
-
-  def get_session(_id), do: {:error, :invalid_session_id}
-
-  @doc false
-  def get_session_local(id) when is_binary(id) and id != "" do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      RaftAccess.query_session(server_id, id)
-    end
-  end
+  def get_session(id), do: SessionStore.get_session(id)
 
   @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
@@ -47,10 +23,10 @@ defmodule Starcite.ReadPath do
     ReplicaRouter.call_on_replica(
       group,
       __MODULE__,
-      :get_events_from_cursor_local,
+      :rpc_get_events_from_cursor,
       [id, cursor, limit],
       __MODULE__,
-      :get_events_from_cursor_local,
+      :rpc_get_events_from_cursor,
       [id, cursor, limit],
       prefer_leader: false
     )
@@ -59,42 +35,51 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
   @doc false
-  def get_events_from_cursor_local(id, cursor, limit)
+  def rpc_get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id),
-         {:ok, session} <- RaftAccess.query_session(server_id, id) do
-      read_events_across_tiers(id, cursor, limit, session)
-    end
+    do_get_events_from_cursor(id, cursor, limit)
   end
 
-  defp read_events_across_tiers(id, cursor, limit, %Session{} = session) do
-    with {:ok, cold_events} <- read_cold_events(id, cursor, limit, session),
-         {:ok, hot_events} <- read_hot_events(id, cursor, limit, session, cold_events),
+  defp do_get_events_from_cursor(id, cursor, limit) do
+    with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
+         {:ok, cold_events} <- maybe_read_cold_events(id, cursor, limit, hot_events),
          {:ok, merged} <- merge_events(cold_events, hot_events, limit) do
       {:ok, merged}
+    else
+      {:error, :archive_read_unavailable} ->
+        with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
+             {:ok, merged} <- merge_events([], hot_events, limit) do
+          {:ok, merged}
+        end
     end
   end
 
-  defp read_cold_events(id, cursor, limit, %Session{archived_seq: archived_seq}) do
-    if archived_seq > cursor do
-      from_seq = cursor + 1
-      to_seq = min(archived_seq, cursor + limit)
+  defp maybe_read_cold_events(id, cursor, limit, []),
+    do: read_cold_events(id, cursor, limit)
+
+  defp maybe_read_cold_events(_id, cursor, _limit, [%{seq: seq} | _rest])
+       when is_integer(cursor) and is_integer(seq) and seq == cursor + 1 do
+    {:ok, []}
+  end
+
+  defp maybe_read_cold_events(id, cursor, limit, _hot_events) do
+    read_cold_events(id, cursor, limit)
+  end
+
+  defp read_cold_events(id, cursor, limit) do
+    from_seq = cursor + 1
+    to_seq = cursor + limit
+
+    try do
       EventStore.read_archived_events(id, from_seq, to_seq)
-    else
-      {:ok, []}
+    rescue
+      DBConnection.OwnershipError -> {:error, :archive_read_unavailable}
     end
   end
 
-  defp read_hot_events(id, cursor, limit, %Session{archived_seq: archived_seq}, cold_events) do
-    remaining = max(limit - length(cold_events), 0)
-
-    if remaining == 0 do
-      {:ok, []}
-    else
-      hot_cursor = max(cursor, archived_seq)
-      {:ok, EventStore.from_cursor(id, hot_cursor, remaining)}
-    end
+  defp read_hot_events(id, cursor, limit) do
+    {:ok, EventStore.from_cursor(id, cursor, limit)}
   end
 
   defp merge_events(cold_events, hot_events, limit) do

@@ -14,9 +14,8 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
-  alias Starcite.{ReadPath, WritePath}
-  alias Starcite.DataPlane.EventStore
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.{WritePath}
+  alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -266,13 +265,10 @@ defmodule Starcite.Archive do
         {:ok, archived_seq, archived_seq_cache}
 
       _ ->
-        case ReadPath.get_session_local(session_id) do
-          {:ok, %{archived_seq: archived_seq}}
-          when is_integer(archived_seq) and archived_seq >= 0 ->
-            {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
-
-          _ ->
-            {:error, :session_lookup_failed}
+        with {:ok, archived_seq} <- RaftAccess.fetch_archived_seq(session_id) do
+          {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
+        else
+          _ -> {:error, :session_lookup_failed}
         end
     end
   end

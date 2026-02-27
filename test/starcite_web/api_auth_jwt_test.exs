@@ -5,8 +5,10 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
+  alias Starcite.Archive.SessionRecord
   alias Starcite.{ReadPath, Repo, WritePath}
   alias Starcite.Auth.Principal
+  alias Starcite.DataPlane.SessionStore
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
@@ -577,6 +579,77 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert blocked_append.status == 403
     body = Jason.decode!(blocked_append.resp_body)
     assert body["error"] == "forbidden_session"
+  end
+
+  test "principal auth lookup does not read through raft when archive session row is missing" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-no-raft-readthrough"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+
+    service_header = service_auth_header(private_key, kid)
+    session_id = unique_id("ses")
+
+    create_conn =
+      json_conn(
+        :post,
+        "/v1/sessions",
+        service_create_session_body(session_id),
+        [service_header]
+      )
+
+    assert create_conn.status == 201
+    assert %SessionRecord{} = Repo.get(SessionRecord, session_id)
+    assert {:ok, _record} = Repo.delete(Repo.get!(SessionRecord, session_id))
+
+    assert {:ok, _reply} =
+             WritePath.append_event(session_id, %{
+               type: "content",
+               payload: %{text: "still in raft"},
+               actor: "agent:test",
+               producer_id: "writer:svc",
+               producer_seq: 1
+             })
+
+    :ok = SessionStore.clear()
+
+    principal_token =
+      issue_principal_token!(
+        service_header,
+        %{
+          "principal" => %{
+            "tenant_id" => "acme",
+            "id" => "user-42",
+            "type" => "user"
+          },
+          "scopes" => ["session:append"],
+          "session_ids" => [session_id]
+        }
+      )
+
+    principal_append_conn =
+      json_conn(
+        :post,
+        "/v1/sessions/#{session_id}/append",
+        %{
+          "type" => "content",
+          "payload" => %{"text" => "auth lookup"},
+          "producer_id" => "writer:principal",
+          "producer_seq" => 1
+        },
+        [{"authorization", "Bearer #{principal_token}"}]
+      )
+
+    assert principal_append_conn.status == 404
+    assert Jason.decode!(principal_append_conn.resp_body)["error"] == "session_not_found"
   end
 
   test "requires service auth for token issuance endpoint" do

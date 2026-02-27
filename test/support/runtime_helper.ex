@@ -24,6 +24,7 @@ defmodule Starcite.Runtime.TestHelper do
 
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
+      clear_session_store()
       clear_archive_read_cache()
 
       # Brief wait to ensure all cleanup completes
@@ -109,6 +110,12 @@ defmodule Starcite.Runtime.TestHelper do
   defp clear_event_store do
     if Code.ensure_loaded?(Starcite.DataPlane.EventStore) do
       Starcite.DataPlane.EventStore.clear()
+    end
+  end
+
+  defp clear_session_store do
+    if Code.ensure_loaded?(Starcite.DataPlane.SessionStore) do
+      Starcite.DataPlane.SessionStore.clear()
     end
   end
 

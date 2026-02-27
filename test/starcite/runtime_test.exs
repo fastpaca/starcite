@@ -3,9 +3,11 @@ defmodule Starcite.RuntimeTest do
 
   import ExUnit.CaptureLog
 
+  alias Starcite.Auth.Principal
   alias Starcite.{ReadPath, WritePath}
-  alias Starcite.DataPlane.EventStore
+  alias Starcite.DataPlane.{EventStore, RaftAccess, SessionStore}
   alias Starcite.DataPlane.RaftManager
+  alias Starcite.Session
   alias Starcite.Repo
 
   setup do
@@ -42,13 +44,36 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
-      {:ok, session} = ReadPath.get_session(id)
+      {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(id)
+      {:ok, session} = RaftAccess.query_session(server_id, id)
       assert session.id == id
       assert session.last_seq == 0
     end
 
     test "returns not found for missing session" do
-      assert {:error, :session_not_found} = ReadPath.get_session("missing")
+      {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started("missing")
+      assert {:error, :session_not_found} = RaftAccess.query_session(server_id, "missing")
+    end
+
+    test "create_session warms session store for immediate reads" do
+      id = unique_id("ses")
+      principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
+      {:ok, _session} = WritePath.create_session(id: id, creator_principal: principal)
+      assert {:ok, loaded} = SessionStore.get_session(id)
+      assert loaded.id == id
+      assert loaded.creator_principal == principal
+    end
+
+    test "auth lookup returns session store hit without raft/archive read-through" do
+      id = unique_id("ses")
+      principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
+      session = Session.new(id, creator_principal: principal, metadata: %{"source" => "cache"})
+      assert :ok = SessionStore.put_session(session)
+
+      assert {:ok, loaded} = ReadPath.get_session(id)
+      assert loaded.id == id
+      assert loaded.creator_principal == principal
+      assert loaded.metadata["source"] == "cache"
     end
   end
 
@@ -238,7 +263,7 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [4, 5]
     end
 
-    test "returns session_not_found when ETS has events for unknown session" do
+    test "returns hot events even when session metadata is unavailable" do
       missing_id = unique_id("missing")
 
       :ok =
@@ -256,7 +281,8 @@ defmodule Starcite.RuntimeTest do
           inserted_at: NaiveDateTime.utc_now()
         })
 
-      assert {:error, :session_not_found} = ReadPath.get_events_from_cursor(missing_id, 0, 100)
+      assert {:ok, events} = ReadPath.get_events_from_cursor(missing_id, 0, 100)
+      assert Enum.map(events, & &1.seq) == [1]
     end
 
     test "returns ordered events across Postgres cold + ETS hot boundary" do

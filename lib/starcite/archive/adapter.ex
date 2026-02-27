@@ -25,9 +25,9 @@ defmodule Starcite.Archive.Adapter do
   @type session_row :: %{
           required(:id) => String.t(),
           optional(:title) => String.t() | nil,
-          required(:creator_principal) => Principal.t() | nil,
+          required(:creator_principal) => Principal.t() | map() | nil,
           optional(:metadata) => map(),
-          required(:created_at) => DateTime.t()
+          required(:created_at) => DateTime.t() | String.t()
         }
 
   @type session_query :: %{
@@ -39,7 +39,7 @@ defmodule Starcite.Archive.Adapter do
         }
 
   @type session_page :: %{
-          required(:sessions) => [map()],
+          required(:sessions) => [session_row()],
           required(:next_cursor) => String.t() | nil
         }
 

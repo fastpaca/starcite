@@ -3,7 +3,15 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
-  alias Starcite.DataPlane.{RaftAccess, RaftBootstrap, RaftPipelineClient, ReplicaRouter}
+  alias Starcite.DataPlane.{
+    RaftAccess,
+    RaftBootstrap,
+    RaftPipelineClient,
+    ReplicaRouter,
+    SessionStore
+  }
+
+  alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
   @emit_raft_command_result_telemetry Application.compile_env(
@@ -39,7 +47,10 @@ defmodule Starcite.WritePath do
 
     case result do
       {:ok, session} = ok ->
+        # Keep archive session catalog in sync for list/get lookups backed by cold storage.
         _ = maybe_index_session(session, creator_principal)
+        # Warm local session cache so immediate same-node reads stay on the RAM path.
+        _ = maybe_cache_session(id, title, creator_principal, metadata)
         ok
 
       other ->
@@ -201,6 +212,23 @@ defmodule Starcite.WritePath do
   end
 
   defp maybe_index_session(_session, _creator_principal), do: :ok
+
+  defp maybe_cache_session(id, title, creator_principal, metadata)
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              (is_struct(creator_principal, Starcite.Auth.Principal) or
+                 is_nil(creator_principal)) and
+              is_map(metadata) do
+    session =
+      Session.new(id,
+        title: title,
+        creator_principal: creator_principal,
+        metadata: metadata
+      )
+
+    SessionStore.put_session(session)
+  end
+
+  defp maybe_cache_session(_id, _title, _creator_principal, _metadata), do: :ok
 
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
