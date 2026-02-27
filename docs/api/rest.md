@@ -61,8 +61,9 @@ Unauthorized requests fail with `401`.
   - `actor` is derived from JWT `sub` when omitted; if provided, it must equal JWT `sub`
   - response: `{"seq", "last_seq", "deduped"}`
 
-- `GET /v1/sessions/:id/tail?cursor=N`
+- `GET /v1/sessions/:id/tail?cursor=N[&batch_size=M]`
   - WebSocket channel for replay + live stream
+  - optional `batch_size` (`1..1000`): when `M > 1`, server emits JSON array frames with up to `M` events per frame
   - requires `session:read`
   - session must match JWT `tenant_id`
   - if JWT has `session_id`, `:id` must match it

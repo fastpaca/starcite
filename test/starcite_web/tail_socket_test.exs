@@ -23,10 +23,12 @@ defmodule StarciteWeb.TailSocketTest do
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
       cursor: cursor,
+      frame_batch_size: 1,
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
+      catchup_timer_ref: nil,
       auth_expires_at: nil,
       auth_expiry_timer_ref: nil
     }
@@ -39,8 +41,8 @@ defmodule StarciteWeb.TailSocketTest do
   defp drain_until_idle(state, frames, remaining) do
     case TailSocket.handle_info(:drain_replay, state) do
       {:push, {:text, payload}, next_state} ->
-        seq = payload |> Jason.decode!() |> Map.fetch!("seq")
-        drain_until_idle(next_state, [seq | frames], remaining - 1)
+        seqs = payload_seqs(payload)
+        drain_until_idle(next_state, Enum.reverse(seqs) ++ frames, remaining - 1)
 
       {:ok, next_state} ->
         idle? =
@@ -52,6 +54,13 @@ defmodule StarciteWeb.TailSocketTest do
         else
           drain_until_idle(next_state, frames, remaining - 1)
         end
+    end
+  end
+
+  defp payload_seqs(payload) when is_binary(payload) do
+    case Jason.decode!(payload) do
+      [%{"seq" => _seq} | _rest] = events -> Enum.map(events, &Map.fetch!(&1, "seq"))
+      %{"seq" => seq} -> [seq]
     end
   end
 
@@ -118,6 +127,69 @@ defmodule StarciteWeb.TailSocketTest do
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
       assert String.ends_with?(frame["inserted_at"], "Z")
+      assert next_state.cursor == 1
+    end
+
+    test "batches replay frames when frame_batch_size is greater than one" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      for n <- 1..5 do
+        {:ok, _} =
+          append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:test"
+          })
+      end
+
+      state = %{base_state(session_id, 0) | frame_batch_size: 2}
+
+      assert {:ok, state_after_fetch} = TailSocket.handle_info(:drain_replay, state)
+
+      assert {:push, {:text, first_payload}, state_after_first_push} =
+               TailSocket.handle_info(:drain_replay, state_after_fetch)
+
+      assert [%{"seq" => 1}, %{"seq" => 2}] = Jason.decode!(first_payload)
+
+      assert {:push, {:text, second_payload}, state_after_second_push} =
+               TailSocket.handle_info(:drain_replay, state_after_first_push)
+
+      assert [%{"seq" => 3}, %{"seq" => 4}] = Jason.decode!(second_payload)
+
+      assert {:push, {:text, third_payload}, state_after_third_push} =
+               TailSocket.handle_info(:drain_replay, state_after_second_push)
+
+      assert [%{"seq" => 5}] = Jason.decode!(third_payload)
+
+      assert {:ok, final_state} = TailSocket.handle_info(:drain_replay, state_after_third_push)
+      assert final_state.cursor == 5
+      assert final_state.replay_done
+      assert :queue.is_empty(final_state.replay_queue)
+    end
+
+    test "pushes single-element array frames for live events when batching is enabled" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      state =
+        base_state(session_id, 0)
+        |> Map.put(:replay_done, true)
+        |> Map.put(:frame_batch_size, 128)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "state",
+          payload: %{state: "running"},
+          actor: "agent:test"
+        })
+
+      {:ok, update} = cursor_update_for(session_id, 1)
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      assert [%{"seq" => 1, "payload" => %{"state" => "running"}}] = Jason.decode!(payload)
       assert next_state.cursor == 1
     end
 

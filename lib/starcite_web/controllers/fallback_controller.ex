@@ -98,6 +98,7 @@ defmodule StarciteWeb.FallbackController do
              :invalid_metadata,
              :invalid_refs,
              :invalid_cursor,
+             :invalid_tail_batch_size,
              :invalid_limit,
              :invalid_list_query,
              :invalid_write_node,
@@ -117,6 +118,7 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_metadata), do: "Invalid metadata payload"
   defp reason_message(:invalid_refs), do: "Invalid refs payload"
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
+  defp reason_message(:invalid_tail_batch_size), do: "Invalid tail batch size value"
   defp reason_message(:invalid_limit), do: "Invalid limit value"
   defp reason_message(:invalid_list_query), do: "Invalid list query"
   defp reason_message(:invalid_write_node), do: "Invalid write node"

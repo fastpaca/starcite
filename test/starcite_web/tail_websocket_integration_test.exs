@@ -125,6 +125,56 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     :ok = :gen_tcp.close(socket)
   end
 
+  test "tail websocket emits array frames when batch_size is greater than one", %{
+    private_key: private_key,
+    kid: kid
+  } do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+
+    for n <- 1..3 do
+      {:ok, _reply} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "replay-#{n}"},
+          actor: "agent:test"
+        })
+    end
+
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{"sub" => "user:user-42", "scopes" => ["session:read"], "tenant_id" => "acme"}
+      )
+
+    {:ok, socket, response_headers, buffer} =
+      connect_tail_ws(session_id, 0, [], %{"access_token" => token, "batch_size" => "2"})
+
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
+
+    {frame_one, buffer} = recv_text_frame(socket, buffer)
+    replay_batch_one = Jason.decode!(frame_one)
+    assert Enum.map(replay_batch_one, &Map.fetch!(&1, "seq")) == [1, 2]
+
+    {frame_two, buffer} = recv_text_frame(socket, buffer)
+    replay_batch_two = Jason.decode!(frame_two)
+    assert Enum.map(replay_batch_two, &Map.fetch!(&1, "seq")) == [3]
+
+    {:ok, _reply} =
+      append_event(session_id, %{
+        type: "state",
+        payload: %{state: "running"},
+        actor: "agent:test"
+      })
+
+    {frame_three, _buffer} = recv_text_frame(socket, buffer)
+    live_batch = Jason.decode!(frame_three)
+    assert Enum.map(live_batch, &Map.fetch!(&1, "seq")) == [4]
+
+    :ok = :gen_tcp.close(socket)
+  end
+
   test "tail websocket closes with token_expired at JWT exp", %{
     private_key: private_key,
     kid: kid
