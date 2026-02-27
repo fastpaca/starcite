@@ -79,8 +79,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
              is_map(metadata) do
-    creator_principal_payload = principal_to_map(creator_principal)
-
     {_inserted, _} =
       Repo.insert_all(
         "sessions",
@@ -88,7 +86,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
           %{
             id: id,
             title: title,
-            creator_principal: creator_principal_payload,
+            creator_principal: creator_principal,
             metadata: metadata,
             created_at: created_at
           }
@@ -243,65 +241,27 @@ defmodule Starcite.Archive.Adapter.Postgres do
   defp next_cursor(_rows, _limit), do: nil
 
   defp build_session_page(rows, limit) when is_list(rows) and is_integer(limit) and limit > 0 do
-    with {:ok, sessions} <- normalize_session_rows(rows) do
-      {:ok,
-       %{
-         sessions: sessions,
-         next_cursor: next_cursor(rows, limit)
-       }}
-    end
+    sessions = normalize_session_rows(rows)
+
+    {:ok,
+     %{
+       sessions: sessions,
+       next_cursor: next_cursor(rows, limit)
+     }}
   end
 
   defp normalize_session_rows(rows) when is_list(rows) do
     rows
-    |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case to_session_row(row) do
-        {:ok, session} -> {:cont, {:ok, [session | acc]}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
-    |> case do
-      {:ok, sessions} -> {:ok, Enum.reverse(sessions)}
-      {:error, reason} -> {:error, reason}
-    end
+    |> Enum.map(&to_session_row/1)
   end
 
   defp to_session_row(%SessionRecord{} = session) do
-    with {:ok, creator_principal} <- principal_from_map(session.creator_principal) do
-      {:ok,
-       %{
-         id: session.id,
-         title: session.title,
-         creator_principal: creator_principal,
-         metadata: session.metadata || %{},
-         created_at: session.created_at
-       }}
-    end
-  end
-
-  defp principal_from_map(nil), do: {:ok, nil}
-
-  defp principal_from_map(%{"tenant_id" => tenant_id, "id" => id, "type" => type})
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
-    with {:ok, principal_type} <- principal_type(type),
-         {:ok, principal} <- Principal.new(tenant_id, id, principal_type) do
-      {:ok, principal}
-    end
-  end
-
-  defp principal_from_map(_invalid), do: {:error, :archive_read_unavailable}
-
-  defp principal_type("user"), do: {:ok, :user}
-  defp principal_type("agent"), do: {:ok, :agent}
-  defp principal_type(_invalid), do: {:error, :archive_read_unavailable}
-
-  defp principal_to_map(nil), do: nil
-
-  defp principal_to_map(%Principal{} = principal) do
     %{
-      "tenant_id" => principal.tenant_id,
-      "id" => principal.id,
-      "type" => Atom.to_string(principal.type)
+      id: session.id,
+      title: session.title,
+      creator_principal: session.creator_principal,
+      metadata: session.metadata || %{},
+      created_at: DateTime.to_iso8601(session.created_at)
     }
   end
 end

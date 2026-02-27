@@ -11,7 +11,6 @@ defmodule Starcite.DataPlane.SessionStore do
   """
 
   alias Starcite.Archive.Store
-  alias Starcite.Auth.Principal
   alias Starcite.Session
   import Cachex.Spec, only: [expiration: 1]
 
@@ -224,7 +223,7 @@ defmodule Starcite.DataPlane.SessionStore do
          %{id: session_id, title: title, creator_principal: creator_principal, metadata: metadata}
        )
        when (is_binary(title) or is_nil(title)) and is_map(metadata) and
-              (is_struct(creator_principal, Principal) or is_nil(creator_principal)) do
+              (is_map(creator_principal) or is_nil(creator_principal)) do
     {:ok,
      Session.new(session_id,
        title: title,
