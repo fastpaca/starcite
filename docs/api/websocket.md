@@ -8,19 +8,34 @@ Starcite exposes `tail` as a WebSocket endpoint.
 ws://HOST/v1/sessions/:id/tail?cursor=41
 ```
 
-If `STARCITE_AUTH_MODE=jwt` is enabled, include an `Authorization: Bearer <token>` header
-during the WebSocket upgrade request.
+Token transport during WebSocket upgrade:
 
-In JWT mode `tail` accepts:
+- non-browser clients: `Authorization: Bearer <jwt>` header
+- browser clients: include `access_token=<jwt>` query param
 
-- Starcite-issued principal bearer token
+Example (browser):
 
-Service JWT bearer tokens are rejected for `tail`.
+```js
+const ws = new WebSocket(
+  `wss://HOST/v1/sessions/${sessionId}/tail?cursor=0&access_token=${encodeURIComponent(token)}`
+)
+```
+
+Starcite redacts `access_token` from application-level logs/telemetry metadata. If you run a reverse proxy or load balancer, redact query strings there too.
+
+JWT requirements for tail:
+
+- valid JWT signature via JWKS
+- `session:read` scope
+- JWT `tenant_id` must match session tenant
+- if JWT has `session_id`, it must match `:id`
 
 Auth behavior:
 
-- Missing/invalid/expired token: HTTP `401` during upgrade
-- Valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
+- missing/invalid/expired token: HTTP `401` during upgrade
+- valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
+- after successful upgrade, socket lifetime is bounded by token `exp`
+- on expiry, server closes with code `4001` and reason `token_expired`
 
 ## Semantics
 
@@ -52,8 +67,7 @@ Starcite emits one JSON event object per WebSocket text frame:
 
 Notes:
 
-- No `gap` event in the primary contract.
-- No `tombstone` event in the primary contract.
-- No `tail_synced` event.
-- Tail is server-to-client only; inbound client frames are ignored.
-- In JWT mode, bearer auth is enforced at WebSocket upgrade and re-checked periodically while connected. Invalid/revoked tokens close with `4001` (`token_invalid`), and expiry closes with `4001` (`token_expired`).
+- no `gap` event in the primary contract
+- no `tombstone` event in the primary contract
+- no `tail_synced` event
+- tail is server-to-client only; inbound client frames are ignored

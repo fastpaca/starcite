@@ -4,6 +4,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
   import Plug.Conn
   import Plug.Test
 
+  alias Starcite.Auth.Principal
   alias Starcite.AuthTestSupport
   alias StarciteWeb.Auth.JWKS
   alias StarciteWeb.Plugs.ServiceAuth
@@ -30,8 +31,47 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
   end
 
   test "bearer_token parses a valid bearer header" do
-    conn = conn(:get, "/") |> Plug.Conn.put_req_header("authorization", "Bearer abc.def")
+    conn = conn(:get, "/") |> put_req_header("authorization", "Bearer abc.def")
     assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
+  end
+
+  test "bearer_token accepts websocket access_token query param" do
+    conn =
+      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
+      |> put_req_header("upgrade", "websocket")
+
+    assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
+  end
+
+  test "bearer_token uses raw access_token preserved in conn.private by redaction plug" do
+    conn =
+      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=%5BREDACTED%5D")
+      |> put_req_header("upgrade", "websocket")
+      |> put_private(:starcite_ws_access_token, "abc.def")
+
+    assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
+  end
+
+  test "bearer_token ignores access_token query param for non-websocket requests" do
+    conn = conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
+    assert {:error, :missing_bearer_token} = ServiceAuth.bearer_token(conn)
+  end
+
+  test "bearer_token rejects websocket requests that provide both auth header and access_token" do
+    conn =
+      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
+      |> put_req_header("upgrade", "websocket")
+      |> put_req_header("authorization", "Bearer ghi.jkl")
+
+    assert {:error, :invalid_bearer_token} = ServiceAuth.bearer_token(conn)
+  end
+
+  test "bearer_token rejects blank websocket access_token query param" do
+    conn =
+      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=   ")
+      |> put_req_header("upgrade", "websocket")
+
+    assert {:error, :invalid_bearer_token} = ServiceAuth.bearer_token(conn)
   end
 
   test "bearer_token rejects missing authorization header" do
@@ -56,69 +96,68 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
   test "bearer_token rejects comma-separated token values" do
     conn =
       conn(:get, "/")
-      |> Plug.Conn.put_req_header("authorization", "Bearer one, Bearer two")
+      |> put_req_header("authorization", "Bearer one, Bearer two")
 
     assert {:error, :invalid_bearer_token} = ServiceAuth.bearer_token(conn)
   end
 
-  test "authenticate_service_conn rejects missing bearer token in jwt mode" do
+  test "authenticate_conn rejects missing bearer token" do
     configure_jwt_auth!("http://localhost:1#{@jwks_path}")
     conn = conn(:get, "/")
-    assert {:error, :missing_bearer_token} = ServiceAuth.authenticate_service_conn(conn)
+    assert {:error, :missing_bearer_token} = ServiceAuth.authenticate_conn(conn)
   end
 
-  test "authenticate_service_token rejects non-binary token values" do
-    assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_service_token(nil)
-    assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_service_token("")
+  test "authenticate_conn allows requests when auth mode is none" do
+    Application.put_env(:starcite, @auth_env_key, mode: :none)
+    conn = conn(:get, "/")
+
+    assert {:ok, %{kind: :none}} = ServiceAuth.authenticate_conn(conn)
   end
 
-  test "authenticate_service_token accepts tenant-scoped jwt with scope claim" do
+  test "authenticate_token rejects non-binary token values" do
+    assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_token(nil)
+    assert {:error, :invalid_bearer_token} = ServiceAuth.authenticate_token("")
+  end
+
+  test "authenticate_token accepts JWT and extracts scope/session/sub claims" do
     {private_key, kid} = jwt_signing_fixture!()
 
     token =
       private_key
-      |> sign_service_token(kid, %{
+      |> sign_token(kid, %{
         "tenant_id" => "acme",
-        "scope" => "session:create session:read auth:issue"
+        "sub" => "user:user-42",
+        "scope" => "session:create session:read session:append",
+        "session_id" => "ses-1"
       })
 
-    assert {:ok, auth_context} = ServiceAuth.authenticate_service_token(token)
-    assert auth_context.kind == :service
+    assert {:ok, auth_context} = ServiceAuth.authenticate_token(token)
+    assert auth_context.kind == :jwt
     assert auth_context.tenant_id == "acme"
-    assert auth_context.scopes == ["session:create", "session:read", "auth:issue"]
+    assert auth_context.subject == "user:user-42"
+    assert auth_context.session_id == "ses-1"
+    assert auth_context.scopes == ["session:create", "session:read", "session:append"]
+    assert auth_context.principal == %Principal{tenant_id: "acme", id: "user-42", type: :user}
     assert auth_context.bearer_token == token
     assert is_integer(auth_context.expires_at)
   end
 
-  test "authenticate_service_token accepts scopes array claim" do
+  test "authenticate_token accepts non user/agent sub without principal struct" do
     {private_key, kid} = jwt_signing_fixture!()
 
     token =
       private_key
-      |> sign_service_token(kid, %{
-        "scope" => nil,
-        "scopes" => ["session:create", "session:read", "auth:issue"]
+      |> sign_token(kid, %{
+        "tenant_id" => "acme",
+        "sub" => "svc:customer-a",
+        "scopes" => ["session:read"]
       })
 
-    assert {:ok, %{scopes: ["session:create", "session:read", "auth:issue"]}} =
-             ServiceAuth.authenticate_service_token(token)
+    assert {:ok, %{subject: "svc:customer-a", principal: nil}} =
+             ServiceAuth.authenticate_token(token)
   end
 
-  test "authenticate_service_token merges scope and scopes claims with stable order" do
-    {private_key, kid} = jwt_signing_fixture!()
-
-    token =
-      private_key
-      |> sign_service_token(kid, %{
-        "scope" => "session:create session:read",
-        "scopes" => ["session:read", "auth:issue", "session:create"]
-      })
-
-    assert {:ok, %{scopes: scopes}} = ServiceAuth.authenticate_service_token(token)
-    assert scopes == ["session:create", "session:read", "auth:issue"]
-  end
-
-  test "authenticate_service_token rejects jwt missing tenant_id claim" do
+  test "authenticate_token rejects jwt missing tenant_id claim" do
     {private_key, kid} = jwt_signing_fixture!()
 
     claims =
@@ -127,98 +166,48 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
     token = AuthTestSupport.sign_rs256(private_key, claims, kid)
 
-    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_service_token(token)
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
-  test "authenticate_service_token rejects jwt missing scope claims" do
+  test "authenticate_token rejects jwt missing scope claims" do
     {private_key, kid} = jwt_signing_fixture!()
 
     claims =
       base_claims()
       |> Map.delete("scope")
+      |> Map.delete("scopes")
 
     token = AuthTestSupport.sign_rs256(private_key, claims, kid)
 
-    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_service_token(token)
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
-  test "authenticate_service_token rejects empty scope values" do
+  test "authenticate_token rejects jwt missing sub claim" do
     {private_key, kid} = jwt_signing_fixture!()
 
-    token =
-      private_key
-      |> sign_service_token(kid, %{
-        "scope" => "   ",
-        "scopes" => []
-      })
+    claims =
+      base_claims()
+      |> Map.delete("sub")
 
-    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_service_token(token)
+    token = AuthTestSupport.sign_rs256(private_key, claims, kid)
+
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
-  test "authenticate_service_token rejects non-string scopes entries" do
+  test "authenticate_token rejects invalid session_id claim types" do
     {private_key, kid} = jwt_signing_fixture!()
-
-    token =
-      private_key
-      |> sign_service_token(kid, %{
-        "scope" => nil,
-        "scopes" => ["session:create", 7]
-      })
-
-    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_service_token(token)
+    token = sign_token(private_key, kid, %{"session_id" => 7})
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
-  test "authenticate_service_token rejects non-integer exp values" do
-    {private_key, kid} = jwt_signing_fixture!()
-
-    token =
-      private_key
-      |> sign_service_token(kid, %{
-        "exp" => Integer.to_string(System.system_time(:second) + 120)
-      })
-
-    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_service_token(token)
-  end
-
-  test "authenticate_service_conn returns none context in none mode" do
-    Application.put_env(:starcite, @auth_env_key, mode: :none)
-
-    conn = conn(:get, "/")
-    assert {:ok, %{kind: :none}} = ServiceAuth.authenticate_service_conn(conn)
-  end
-
-  test "service auth plug assigns auth in none mode" do
-    Application.put_env(:starcite, @auth_env_key, mode: :none)
-
-    conn = conn(:get, "/")
-    result = ServiceAuth.call(conn, %{required: true})
-
-    assert result.assigns[:auth] == %{kind: :none}
-    refute result.halted
-  end
-
-  test "service auth plug in optional mode preserves request and exposes auth error" do
+  test "plug halts malformed bearer tokens with invalid_request header" do
     configure_jwt_auth!("http://localhost:1#{@jwks_path}")
 
     conn =
       conn(:get, "/")
       |> put_req_header("authorization", "Bearer one two")
 
-    result = ServiceAuth.call(conn, %{required: false})
-
-    assert result.assigns[:service_auth_error] == :invalid_bearer_token
-    refute Map.has_key?(result.assigns, :auth)
-    refute result.halted
-  end
-
-  test "service auth plug in required mode halts malformed bearer tokens with invalid_request" do
-    configure_jwt_auth!("http://localhost:1#{@jwks_path}")
-
-    conn =
-      conn(:get, "/")
-      |> put_req_header("authorization", "Bearer one two")
-
-    result = ServiceAuth.call(conn, %{required: true})
+    result = ServiceAuth.call(conn, %{})
 
     assert result.status == 401
     assert result.halted
@@ -249,19 +238,15 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     Application.put_env(
       :starcite,
       @auth_env_key,
-      mode: :jwt,
       issuer: @issuer,
       audience: @audience,
       jwks_url: jwks_url,
       jwt_leeway_seconds: 0,
-      jwks_refresh_ms: 60_000,
-      principal_token_salt: "principal-token-v1",
-      principal_token_default_ttl_seconds: 5,
-      principal_token_max_ttl_seconds: 15
+      jwks_refresh_ms: 60_000
     )
   end
 
-  defp sign_service_token(private_key, kid, overrides)
+  defp sign_token(private_key, kid, overrides)
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
     claims =
       base_claims()
@@ -278,7 +263,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
       "aud" => @audience,
       "sub" => "svc:customer-a",
       "tenant_id" => "acme",
-      "scope" => "session:create session:read auth:issue",
+      "scope" => "session:create session:read session:append",
       "exp" => System.system_time(:second) + 300
     }
   end
