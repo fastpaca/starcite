@@ -181,6 +181,14 @@ defmodule Starcite.DataPlane.EventStore do
     EventQueue.max_seq(session_id)
   end
 
+  @doc """
+  Return the minimum pending sequence for one session.
+  """
+  @spec min_seq(String.t()) :: {:ok, pos_integer()} | :error
+  def min_seq(session_id) when is_binary(session_id) and session_id != "" do
+    EventQueue.min_seq(session_id)
+  end
+
   @doc false
   @spec clear() :: :ok
   def clear do
