@@ -166,17 +166,6 @@ defmodule Starcite.DataPlane.EventStore.EventQueue do
     end
   end
 
-  @spec min_seq(String.t()) :: {:ok, pos_integer()} | :error
-  @doc """
-  Return the lowest pending sequence for one session.
-  """
-  def min_seq(session_id) when is_binary(session_id) and session_id != "" do
-    case :ets.next(@table, {session_id, 0}) do
-      {^session_id, seq} when is_integer(seq) and seq > 0 -> {:ok, seq}
-      _ -> :error
-    end
-  end
-
   @spec clear() :: :ok
   @doc """
   Clear all pending state.

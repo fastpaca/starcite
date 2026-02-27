@@ -15,7 +15,7 @@ defmodule Starcite.Archive do
 
   alias Starcite.Archive.Store
   alias Starcite.{WritePath}
-  alias Starcite.DataPlane.{EventStore, RaftManager}
+  alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -38,8 +38,7 @@ defmodule Starcite.Archive do
      %{
        interval: interval,
        adapter: adapter_mod,
-       single_local_write_node: single_local_write_node,
-       archived_seq_cache: %{}
+       single_local_write_node: single_local_write_node
      }}
   end
 
@@ -48,21 +47,17 @@ defmodule Starcite.Archive do
     start = System.monotonic_time(:millisecond)
     session_ids = EventStore.session_ids()
 
-    {stats, archived_seq_cache} =
-      Enum.reduce(session_ids, {zero_stats(), state.archived_seq_cache}, fn session_id,
-                                                                            {stats_acc, cache_acc} ->
-        {session_stats, cache_next} =
+    stats =
+      Enum.reduce(session_ids, zero_stats(), fn session_id, stats_acc ->
+        session_stats =
           flush_session(
             session_id,
             state.adapter,
-            cache_acc,
             state.single_local_write_node
           )
 
-        {merge_stats(stats_acc, session_stats), cache_next}
+        merge_stats(stats_acc, session_stats)
       end)
-
-    archived_seq_cache = Map.take(archived_seq_cache, session_ids)
 
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
@@ -80,35 +75,32 @@ defmodule Starcite.Archive do
     )
 
     schedule_flush(state.interval)
-    {:noreply, %{state | archived_seq_cache: archived_seq_cache}}
+    {:noreply, state}
   end
 
   defp flush_session(
          session_id,
          adapter,
-         archived_seq_cache,
          single_local_write_node
        )
-       when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) and
-              is_boolean(single_local_write_node) do
+       when is_binary(session_id) and session_id != "" and is_boolean(single_local_write_node) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
-         {:ok, archived_seq, archived_seq_cache} <-
-           load_archived_seq(session_id, archived_seq_cache) do
+         {:ok, archived_seq} <- load_archived_seq(session_id) do
       pending_before = max(max_seq - archived_seq, 0)
 
       cond do
         pending_before == 0 ->
-          {zero_stats(), archived_seq_cache}
+          zero_stats()
 
         ensure_local_group_leader(session_id, single_local_write_node) != :ok ->
-          {zero_stats(), archived_seq_cache}
+          zero_stats()
 
         true ->
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
 
-          {session_stats, next_archived_seq} =
+          {session_stats, _next_archived_seq} =
             persist_rows(
               rows,
               session_id,
@@ -117,10 +109,10 @@ defmodule Starcite.Archive do
               adapter
             )
 
-          {session_stats, put_archived_seq(archived_seq_cache, session_id, next_archived_seq)}
+          session_stats
       end
     else
-      _ -> {zero_stats(), Map.delete(archived_seq_cache, session_id)}
+      _ -> zero_stats()
     end
   end
 
@@ -258,28 +250,14 @@ defmodule Starcite.Archive do
     end
   end
 
-  defp load_archived_seq(session_id, archived_seq_cache)
-       when is_binary(session_id) and is_map(archived_seq_cache) do
-    case Map.fetch(archived_seq_cache, session_id) do
+  defp load_archived_seq(session_id) when is_binary(session_id) and session_id != "" do
+    case RaftAccess.fetch_archived_seq(session_id) do
       {:ok, archived_seq} when is_integer(archived_seq) and archived_seq >= 0 ->
-        {:ok, archived_seq, archived_seq_cache}
+        {:ok, archived_seq}
 
       _ ->
-        with {:ok, min_seq} <- EventStore.min_seq(session_id) do
-          archived_seq = min_seq - 1
-          {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
-        else
-          _ -> {:error, :session_lookup_failed}
-        end
+        {:error, :session_lookup_failed}
     end
-  end
-
-  defp put_archived_seq(cache, _session_id, nil), do: cache
-
-  defp put_archived_seq(cache, session_id, archived_seq)
-       when is_map(cache) and is_binary(session_id) and is_integer(archived_seq) and
-              archived_seq >= 0 do
-    Map.put(cache, session_id, archived_seq)
   end
 
   defp zero_stats do

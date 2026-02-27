@@ -60,6 +60,29 @@ defmodule Starcite.DataPlane.RaftAccess do
     end
   end
 
+  @spec fetch_archived_seq(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def fetch_archived_seq(id) when is_binary(id) and id != "" do
+    with {:ok, server_id, _group_id} <- locate_and_ensure_started(id) do
+      fetch_archived_seq(server_id, id)
+    end
+  end
+
+  @spec fetch_archived_seq(atom(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def fetch_archived_seq(server_id, id)
+      when is_atom(server_id) and is_binary(id) and id != "" do
+    case query_session(server_id, id) do
+      {:ok, %Session{archived_seq: archived_seq}}
+      when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq}
+
+      {:ok, _session} ->
+        {:error, :invalid_archived_seq}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp ensure_group_started(server_id, group_id)
        when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
     if Process.whereis(server_id) != nil do
