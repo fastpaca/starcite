@@ -3,67 +3,39 @@ defmodule StarciteWeb.Auth.Config do
 
   @default_jwt_leeway_seconds 1
   @default_jwks_refresh_ms :timer.seconds(60)
-  @default_principal_token_salt "principal-token-v1"
-  @default_principal_token_default_ttl_seconds 5
-  @default_principal_token_max_ttl_seconds 15
-
-  @type mode :: :none | :jwt
 
   @type t :: %{
-          mode: mode(),
-          issuer: String.t() | nil,
-          audience: String.t() | nil,
-          jwks_url: String.t() | nil,
+          issuer: String.t(),
+          audience: String.t(),
+          jwks_url: String.t(),
           jwt_leeway_seconds: non_neg_integer(),
-          jwks_refresh_ms: pos_integer(),
-          principal_token_salt: String.t(),
-          principal_token_default_ttl_seconds: pos_integer(),
-          principal_token_max_ttl_seconds: pos_integer()
+          jwks_refresh_ms: pos_integer()
         }
 
   @spec load() :: t()
   def load do
     opts = opts_map(Application.get_env(:starcite, StarciteWeb.Auth, []))
 
-    mode =
-      case Map.get(opts, :mode, :none) do
-        mode when mode in [:none, :jwt] -> mode
-        other -> raise ArgumentError, "invalid Starcite auth mode: #{inspect(other)}"
-      end
-
-    base = %{
-      mode: mode,
-      issuer: nil,
-      audience: nil,
-      jwks_url: nil,
+    %{
+      issuer: required_non_empty(opts, :issuer),
+      audience: required_non_empty(opts, :audience),
+      jwks_url: required_non_empty(opts, :jwks_url),
       jwt_leeway_seconds: Map.get(opts, :jwt_leeway_seconds, @default_jwt_leeway_seconds),
-      jwks_refresh_ms: Map.get(opts, :jwks_refresh_ms, @default_jwks_refresh_ms),
-      principal_token_salt: Map.get(opts, :principal_token_salt, @default_principal_token_salt),
-      principal_token_default_ttl_seconds:
-        Map.get(
-          opts,
-          :principal_token_default_ttl_seconds,
-          @default_principal_token_default_ttl_seconds
-        ),
-      principal_token_max_ttl_seconds:
-        Map.get(opts, :principal_token_max_ttl_seconds, @default_principal_token_max_ttl_seconds)
+      jwks_refresh_ms: Map.get(opts, :jwks_refresh_ms, @default_jwks_refresh_ms)
     }
-
-    case mode do
-      :none ->
-        base
-
-      :jwt ->
-        %{
-          base
-          | issuer: Map.get(opts, :issuer),
-            audience: Map.get(opts, :audience),
-            jwks_url: Map.get(opts, :jwks_url)
-        }
-    end
   end
 
   defp opts_map(opts) when is_list(opts), do: Map.new(opts)
   defp opts_map(opts) when is_map(opts), do: opts
   defp opts_map(_opts), do: %{}
+
+  defp required_non_empty(opts, key) when is_map(opts) and is_atom(key) do
+    case Map.get(opts, key) do
+      value when is_binary(value) and value != "" ->
+        value
+
+      _other ->
+        raise ArgumentError, "missing Starcite auth config #{inspect(key)}"
+    end
+  end
 end

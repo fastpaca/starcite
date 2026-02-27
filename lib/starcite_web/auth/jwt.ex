@@ -18,7 +18,7 @@ defmodule StarciteWeb.Auth.JWT do
   def verify(_token, _config), do: {:error, :invalid_jwt}
 
   defp peek_header(token) when is_binary(token) do
-    # Non-JWT bearer tokens must fail closed here so layered auth can fallback safely.
+    # Non-JWT bearer tokens must fail closed here and return unauthorized.
     try do
       case Joken.peek_header(token) do
         {:ok, header} when is_map(header) -> {:ok, header}

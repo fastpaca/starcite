@@ -191,7 +191,16 @@ defmodule Starcite.Archive.Adapter.Postgres do
   defp apply_tenant_filter(query, nil), do: query
 
   defp apply_tenant_filter(query, tenant_id) when is_binary(tenant_id) and tenant_id != "" do
-    where(query, [s], fragment("?->>'tenant_id' = ?", s.creator_principal, ^tenant_id))
+    where(
+      query,
+      [s],
+      fragment(
+        "COALESCE(?->>'tenant_id', ?->>'tenant_id') = ?",
+        s.metadata,
+        s.creator_principal,
+        ^tenant_id
+      )
+    )
   end
 
   defp apply_tenant_filter(query, _invalid_filter), do: where(query, [s], false)

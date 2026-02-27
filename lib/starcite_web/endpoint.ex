@@ -8,6 +8,7 @@ defmodule StarciteWeb.Endpoint do
 
   plug Plug.MethodOverride
   plug Plug.Head
+  plug StarciteWeb.Plugs.RedactSensitiveQuery
   # Expose Prometheus metrics at /metrics via PromEx
   plug PromEx.Plug,
     prom_ex_module: Starcite.Observability.PromEx,

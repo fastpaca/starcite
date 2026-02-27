@@ -4,31 +4,34 @@ All endpoints are under `/v1`.
 
 ## Authentication
 
-In `STARCITE_AUTH_MODE=jwt`, Starcite accepts two bearer token types:
-
-- service JWTs (customer/backend credentials)
-- Starcite-issued principal tokens (short-lived, scoped)
-
-Service JWT format:
+Every `/v1` request requires a bearer JWT:
 
 ```
 Authorization: Bearer <jwt>
 ```
 
-Service JWT requirements in `jwt` mode:
+Starcite validates JWT signatures against configured JWKS keys and enforces claims directly.
 
-- required claims: `iss`, `aud`, `exp`, `tenant_id`
-- required scope claim: `scope` (space-delimited) or `scopes` (array)
-- service endpoints enforce explicit scopes:
-  - `session:create` for `POST /v1/sessions`
-  - `session:read` for `GET /v1/sessions`
-  - `auth:issue` for `POST /v1/auth/issue`
+Required JWT claims:
 
-Principal token format:
+- `iss`
+- `aud`
+- `exp`
+- `tenant_id`
+- `sub`
+- `scope` (space-delimited) or `scopes` (array)
 
-```
-Authorization: Bearer <starcite_principal_token>
-```
+Optional JWT claim:
+
+- `session_id`
+  - when omitted: token is tenant-wide
+  - when present: token is locked to that one session
+
+Scopes:
+
+- `session:create` for `POST /v1/sessions`
+- `session:read` for `GET /v1/sessions` and `GET /v1/sessions/:id/tail`
+- `session:append` for `POST /v1/sessions/:id/append`
 
 Unauthorized requests fail with `401`.
 
@@ -36,46 +39,33 @@ Unauthorized requests fail with `401`.
 
 - `POST /v1/sessions`
   - create a session
-  - service token or user principal token
-  - agent principal tokens are forbidden
-  - principal tokens require `session:create` scope
-  - required fields for service tokens: `creator_principal: {tenant_id, id, type}`
-  - service token tenant and `creator_principal.tenant_id` must match
-  - principal tokens cannot override `creator_principal`; creator defaults to the authenticated principal
-  - server enforces `metadata.tenant_id` to match `creator_principal.tenant_id` (mismatch is forbidden)
-  - server injects `metadata.tenant_id` when omitted
+  - requires `session:create`
   - optional fields: `id`, `title`, `metadata`
-
-- `POST /v1/auth/issue`
-  - issue short-lived principal token from service auth
-  - service token only
-  - disabled when `STARCITE_AUTH_MODE=none`
-  - required: `principal: {tenant_id, id, type}`, `scopes`
-  - service token tenant and requested `principal.tenant_id` must match
-  - optional: `session_ids`, `owner_principal_ids`, `ttl_seconds`
-  - default principal token TTL: `5` seconds
-  - max principal token TTL: `15` seconds
+  - if token has `session_id`, `id` must match it (or be omitted)
+  - `metadata.tenant_id` is enforced to match JWT `tenant_id` (injected when omitted)
 
 - `GET /v1/sessions`
   - list sessions
-  - service token: tenant-fenced to the authenticated service token tenant
-  - user principal token: requires `session:read` scope and is tenant-fenced to the authenticated principal tenant
-  - user principal token: lists sessions whose `creator_principal.id` is the authenticated principal id or one of `owner_principal_ids`
-  - agent principal token: forbidden
-  - tenant-scoped auth always enforces `metadata.tenant_id=<auth tenant>` on list filters
-  - supports `limit`, `cursor`, and metadata filters (for exact matching)
+  - requires `session:read`
+  - always tenant-fenced by JWT `tenant_id`
+  - if JWT has `session_id`, result set is constrained to that session id
+  - supports `limit`, `cursor`, and metadata filters (exact matching)
 
 - `POST /v1/sessions/:id/append`
   - append one event to a session
-  - principal token only (service tokens are forbidden)
+  - requires `session:append`
+  - session must match JWT `tenant_id`
+  - if JWT has `session_id`, `:id` must match it
   - required: `type`, `payload`, `producer_id`, `producer_seq`
-  - `actor` optional/derived for principal tokens
   - optional: `source`, `metadata`, `refs`, `idempotency_key`, `expected_seq`
+  - `actor` is derived from JWT `sub` when omitted; if provided, it must equal JWT `sub`
   - response: `{"seq", "last_seq", "deduped"}`
 
 - `GET /v1/sessions/:id/tail?cursor=N`
   - WebSocket channel for replay + live stream
-  - principal token only (service tokens are forbidden)
+  - requires `session:read`
+  - session must match JWT `tenant_id`
+  - if JWT has `session_id`, `:id` must match it
 
 - `GET /health/live`
 - `GET /health/ready`

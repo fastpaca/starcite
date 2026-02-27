@@ -69,11 +69,11 @@ config :starcite, StarciteWeb.Endpoint,
   pubsub_server: Starcite.PubSub
 
 config :starcite, StarciteWeb.Auth,
-  mode: :none,
+  issuer: "https://issuer.example",
+  audience: "starcite-api",
+  jwks_url: "http://localhost:4000/.well-known/jwks.json",
   jwt_leeway_seconds: 1,
-  jwks_refresh_ms: :timer.seconds(60),
-  principal_token_default_ttl_seconds: 5,
-  principal_token_max_ttl_seconds: 15
+  jwks_refresh_ms: :timer.seconds(60)
 
 # Configures Elixir's Logger
 config :logger, :default_formatter,
@@ -82,6 +82,7 @@ config :logger, :default_formatter,
 
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
+config :phoenix, :filter_parameters, ["password", "access_token"]
 
 config :ex_aws,
   http_client: ExAws.Request.Req,

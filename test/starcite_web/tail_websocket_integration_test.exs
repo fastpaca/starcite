@@ -3,11 +3,17 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
 
   import Bitwise
 
+  alias Starcite.AuthTestSupport
   alias Starcite.WritePath
+  alias StarciteWeb.Auth.JWKS
 
+  @auth_env_key StarciteWeb.Auth
   @host ~c"127.0.0.1"
   @port 4105
-  @ws_timeout 2_000
+  @ws_timeout 2_500
+  @issuer "https://issuer.example"
+  @audience "starcite-api"
+  @jwks_path "/.well-known/jwks.json"
 
   setup_all do
     {:ok, _pid} =
@@ -26,7 +32,40 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     Process.put(:producer_seq_counters, %{})
-    :ok
+
+    previous_auth = Application.get_env(:starcite, @auth_env_key)
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(200, Jason.encode!(jwks))
+    end)
+
+    Application.put_env(
+      :starcite,
+      @auth_env_key,
+      issuer: @issuer,
+      audience: @audience,
+      jwks_url: "http://localhost:#{bypass.port}#{@jwks_path}",
+      jwt_leeway_seconds: 0,
+      jwks_refresh_ms: 1_000
+    )
+
+    on_exit(fn ->
+      if is_nil(previous_auth) do
+        Application.delete_env(:starcite, @auth_env_key)
+      else
+        Application.put_env(:starcite, @auth_env_key, previous_auth)
+      end
+
+      :ok = JWKS.clear_cache()
+    end)
+
+    {:ok, private_key: private_key, kid: kid}
   end
 
   defp unique_id(prefix) do
@@ -34,9 +73,12 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  test "tail websocket replays from cursor and streams live committed events" do
+  test "tail websocket replays from cursor and streams live committed events", %{
+    private_key: private_key,
+    kid: kid
+  } do
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
 
     {:ok, _reply} =
       append_event(session_id, %{
@@ -45,7 +87,16 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
         actor: "agent:test"
       })
 
-    {:ok, socket, response_headers, buffer} = connect_tail_ws(session_id, 0)
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{"sub" => "user:user-42", "scopes" => ["session:read"], "tenant_id" => "acme"}
+      )
+
+    {:ok, socket, response_headers, buffer} =
+      connect_tail_ws(session_id, 0, [], %{"access_token" => token})
+
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
     {frame_one, buffer} = recv_text_frame(socket, buffer)
@@ -74,6 +125,35 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     :ok = :gen_tcp.close(socket)
   end
 
+  test "tail websocket closes with token_expired at JWT exp", %{
+    private_key: private_key,
+    kid: kid
+  } do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{
+          "sub" => "user:user-42",
+          "tenant_id" => "acme",
+          "scopes" => ["session:read"],
+          "session_id" => session_id,
+          "exp" => System.system_time(:second) + 1
+        }
+      )
+
+    {:ok, socket, response_headers, buffer} =
+      connect_tail_ws(session_id, 0, [], %{"access_token" => token})
+
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
+
+    {{4001, "token_expired"}, _rest} = recv_close_frame(socket, buffer)
+    :ok = :gen_tcp.close(socket)
+  end
+
   defp append_event(id, event, opts \\ [])
        when is_binary(id) and is_map(event) and is_list(opts) do
     producer_id = Map.get(event, :producer_id, "writer:test")
@@ -95,19 +175,23 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     seq
   end
 
-  defp connect_tail_ws(session_id, cursor) do
+  defp connect_tail_ws(session_id, cursor, headers, query_params)
+       when is_binary(session_id) and is_integer(cursor) and cursor >= 0 and is_list(headers) and
+              is_map(query_params) do
     {:ok, socket} =
       :gen_tcp.connect(@host, @port, [:binary, active: false, packet: :raw], @ws_timeout)
 
     key = :crypto.strong_rand_bytes(16) |> Base.encode64()
+    query = build_tail_query(cursor, query_params)
 
     request = [
-      "GET /v1/sessions/#{session_id}/tail?cursor=#{cursor} HTTP/1.1\r\n",
+      "GET /v1/sessions/#{session_id}/tail?#{query} HTTP/1.1\r\n",
       "Host: localhost:#{@port}\r\n",
       "Connection: Upgrade\r\n",
       "Upgrade: websocket\r\n",
       "Sec-WebSocket-Version: 13\r\n",
       "Sec-WebSocket-Key: #{key}\r\n",
+      Enum.map(headers, fn {name, value} -> "#{name}: #{value}\r\n" end),
       "\r\n"
     ]
 
@@ -121,6 +205,13 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
         :gen_tcp.close(socket)
         {:error, reason}
     end
+  end
+
+  defp build_tail_query(cursor, query_params)
+       when is_integer(cursor) and cursor >= 0 and is_map(query_params) do
+    query_params
+    |> Map.put("cursor", Integer.to_string(cursor))
+    |> URI.encode_query()
   end
 
   defp recv_until_headers(socket, buffer) do
@@ -154,6 +245,22 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     end
   end
 
+  defp recv_close_frame(socket, buffer) do
+    case parse_ws_frame(buffer) do
+      {:ok, %{opcode: 0x8, payload: payload}, rest} ->
+        {decode_close_payload(payload), rest}
+
+      {:ok, %{opcode: _opcode}, _rest} ->
+        raise "expected close frame"
+
+      :more ->
+        case :gen_tcp.recv(socket, 0, @ws_timeout) do
+          {:ok, bytes} -> recv_close_frame(socket, buffer <> bytes)
+          {:error, reason} -> raise "failed to receive websocket close frame: #{inspect(reason)}"
+        end
+    end
+  end
+
   defp parse_ws_frame(<<b1, b2, rest::binary>>) when (b2 &&& 0x80) == 0 and (b2 &&& 0x7F) < 126 do
     length = b2 &&& 0x7F
 
@@ -174,4 +281,28 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   defp parse_ws_frame(_buffer), do: :more
+
+  defp decode_close_payload(<<code::16, reason::binary>>), do: {code, reason}
+  defp decode_close_payload(<<code::16>>), do: {code, ""}
+  defp decode_close_payload(_payload), do: {1006, "invalid_close_payload"}
+
+  defp token_for(private_key, kid, overrides)
+       when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
+    now = System.system_time(:second)
+
+    claims =
+      %{
+        "iss" => @issuer,
+        "aud" => @audience,
+        "sub" => "user:user-42",
+        "tenant_id" => "acme",
+        "scopes" => ["session:read"],
+        "exp" => now + 300
+      }
+      |> Map.merge(overrides)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    AuthTestSupport.sign_rs256(private_key, claims, kid)
+  end
 end

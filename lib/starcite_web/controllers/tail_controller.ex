@@ -12,7 +12,6 @@ defmodule StarciteWeb.TailController do
 
   alias Starcite.ReadPath
   alias StarciteWeb.Auth.Policy
-  alias StarciteWeb.Plugs.ServiceAuth
 
   action_fallback StarciteWeb.FallbackController
 
@@ -30,9 +29,7 @@ defmodule StarciteWeb.TailController do
         %{
           session_id: id,
           cursor: cursor,
-          auth_bearer_token: auth_bearer_token(auth),
-          auth_expires_at: auth_expires_at(auth),
-          auth_check_interval_ms: auth_check_interval_ms()
+          auth_expires_at: auth_expires_at(auth)
         },
         timeout: 120_000
       )
@@ -86,15 +83,4 @@ defmodule StarciteWeb.TailController do
        do: expires_at
 
   defp auth_expires_at(_auth), do: nil
-
-  defp auth_bearer_token(%{bearer_token: bearer_token})
-       when is_binary(bearer_token) and bearer_token != "",
-       do: bearer_token
-
-  defp auth_bearer_token(_auth), do: nil
-
-  defp auth_check_interval_ms do
-    config = ServiceAuth.config()
-    config.jwks_refresh_ms
-  end
 end

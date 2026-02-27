@@ -201,16 +201,6 @@ parse_size_bytes! = fn env_name, raw ->
   end
 end
 
-required_non_empty_env! = fn env_name ->
-  case System.get_env(env_name) do
-    value when is_binary(value) and value != "" ->
-      value
-
-    _ ->
-      raise ArgumentError, "missing required environment variable #{env_name}"
-  end
-end
-
 put_env_opt = fn opts, key, env_name, parser ->
   case System.get_env(env_name) do
     nil ->
@@ -362,62 +352,96 @@ if session_store_touch_on_read = System.get_env("STARCITE_SESSION_STORE_TOUCH_ON
          )
 end
 
-# Auth mode is intentionally explicit:
-# - `jwt`: signed service/principal tokens enforced
-# - `none`: no bearer-token verification; intended for local/dev workflows only
-auth_mode =
-  case System.get_env("STARCITE_AUTH_MODE", "none") |> String.downcase() |> String.trim() do
-    "none" ->
-      :none
+default_auth_opts = Application.get_env(:starcite, StarciteWeb.Auth, []) |> Keyword.new()
 
-    "jwt" ->
+auth_mode =
+  case System.get_env("STARCITE_AUTH_MODE") do
+    nil ->
       :jwt
 
-    other ->
-      raise ArgumentError, "invalid STARCITE_AUTH_MODE: #{inspect(other)} (expected none|jwt)"
+    raw ->
+      case raw |> String.downcase() |> String.trim() do
+        "" ->
+          :jwt
+
+        "jwt" ->
+          :jwt
+
+        "none" ->
+          :none
+
+        other ->
+          raise ArgumentError, "invalid STARCITE_AUTH_MODE: #{inspect(other)} (expected none|jwt)"
+      end
   end
 
 jwt_leeway_seconds =
   case System.get_env("STARCITE_AUTH_JWT_LEEWAY_SECONDS") do
-    nil -> 1
-    raw -> parse_non_neg_integer!.("STARCITE_AUTH_JWT_LEEWAY_SECONDS", raw)
+    nil ->
+      Keyword.get(default_auth_opts, :jwt_leeway_seconds, 1)
+
+    raw ->
+      parse_non_neg_integer!.("STARCITE_AUTH_JWT_LEEWAY_SECONDS", raw)
   end
 
 jwks_refresh_ms =
   case System.get_env("STARCITE_AUTH_JWKS_REFRESH_MS") do
-    nil -> 60_000
-    raw -> parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
+    nil ->
+      Keyword.get(default_auth_opts, :jwks_refresh_ms, 60_000)
+
+    raw ->
+      parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
   end
 
-principal_token_salt =
-  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_SALT") do
-    nil -> "principal-token-v1"
-    raw -> String.trim(raw)
-  end
+missing_auth_value! = fn auth_mode, env_name ->
+  case auth_mode do
+    :jwt ->
+      raise ArgumentError,
+            "missing required environment variable #{env_name} when STARCITE_AUTH_MODE=jwt"
 
-if principal_token_salt == "" do
-  raise ArgumentError, "invalid STARCITE_AUTH_PRINCIPAL_TOKEN_SALT: cannot be empty"
+    :none ->
+      raise ArgumentError, "missing required environment variable #{env_name}"
+  end
 end
 
-# Default expiry for issued principal tokens when request omits `ttl_seconds`.
-# Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS.
-principal_token_default_ttl_seconds =
-  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS") do
-    nil -> 5
-    raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS", raw)
-  end
+read_non_empty_env = fn env_name ->
+  case System.get_env(env_name) do
+    value when is_binary(value) ->
+      case String.trim(value) do
+        "" -> :missing
+        trimmed -> {:ok, trimmed}
+      end
 
-# Hard upper bound for issued principal token expiry, even when caller supplies `ttl_seconds`.
-# Configurable via STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS.
-principal_token_max_ttl_seconds =
-  case System.get_env("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS") do
-    nil -> 15
-    raw -> parse_positive_integer!.("STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS", raw)
+    _ ->
+      :missing
   end
+end
 
-if principal_token_default_ttl_seconds > principal_token_max_ttl_seconds do
-  raise ArgumentError,
-        "invalid principal token ttl settings: STARCITE_AUTH_PRINCIPAL_TOKEN_DEFAULT_TTL_SECONDS exceeds STARCITE_AUTH_PRINCIPAL_TOKEN_MAX_TTL_SECONDS"
+read_non_empty_default = fn default_opts, default_key ->
+  case Keyword.get(default_opts, default_key) do
+    value when is_binary(value) ->
+      case String.trim(value) do
+        "" -> :missing
+        trimmed -> {:ok, trimmed}
+      end
+
+    _ ->
+      :missing
+  end
+end
+
+require_auth_value! = fn auth_mode, default_opts, default_key, env_name ->
+  case {read_non_empty_env.(env_name), auth_mode,
+        read_non_empty_default.(default_opts, default_key)} do
+    {{:ok, value}, _mode, _default_value} ->
+      value
+
+    {:missing, :jwt, {:ok, value}} ->
+      value
+
+    _other ->
+      missing_auth_value!.(auth_mode, env_name)
+  end
 end
 
 auth_config =
@@ -426,23 +450,31 @@ auth_config =
       [
         mode: :none,
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms,
-        principal_token_salt: principal_token_salt,
-        principal_token_default_ttl_seconds: principal_token_default_ttl_seconds,
-        principal_token_max_ttl_seconds: principal_token_max_ttl_seconds
+        jwks_refresh_ms: jwks_refresh_ms
       ]
 
     :jwt ->
+      issuer =
+        require_auth_value!.(auth_mode, default_auth_opts, :issuer, "STARCITE_AUTH_JWT_ISSUER")
+
+      audience =
+        require_auth_value!.(
+          auth_mode,
+          default_auth_opts,
+          :audience,
+          "STARCITE_AUTH_JWT_AUDIENCE"
+        )
+
+      jwks_url =
+        require_auth_value!.(auth_mode, default_auth_opts, :jwks_url, "STARCITE_AUTH_JWKS_URL")
+
       [
         mode: :jwt,
-        issuer: required_non_empty_env!.("STARCITE_AUTH_JWT_ISSUER"),
-        audience: required_non_empty_env!.("STARCITE_AUTH_JWT_AUDIENCE"),
-        jwks_url: required_non_empty_env!.("STARCITE_AUTH_JWKS_URL"),
+        issuer: issuer,
+        audience: audience,
+        jwks_url: jwks_url,
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms,
-        principal_token_salt: principal_token_salt,
-        principal_token_default_ttl_seconds: principal_token_default_ttl_seconds,
-        principal_token_max_ttl_seconds: principal_token_max_ttl_seconds
+        jwks_refresh_ms: jwks_refresh_ms
       ]
   end
 

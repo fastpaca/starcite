@@ -4,15 +4,58 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
+  alias Starcite.AuthTestSupport
   alias Starcite.{Repo, WritePath}
+  alias StarciteWeb.Auth.JWKS
 
+  @auth_env_key StarciteWeb.Auth
   @endpoint StarciteWeb.Endpoint
+  @issuer "https://issuer.example"
+  @audience "starcite-api"
+  @jwks_path "/.well-known/jwks.json"
 
   setup do
     Starcite.Runtime.TestHelper.reset()
     :ok = ensure_repo_started()
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
     Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+    previous_auth = Application.get_env(:starcite, @auth_env_key)
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    Application.put_env(
+      :starcite,
+      @auth_env_key,
+      issuer: @issuer,
+      audience: @audience,
+      jwks_url: "http://localhost:#{bypass.port}#{@jwks_path}",
+      jwt_leeway_seconds: 0,
+      jwks_refresh_ms: 1_000
+    )
+
+    token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
+    Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
+
+    on_exit(fn ->
+      if is_nil(previous_auth) do
+        Application.delete_env(:starcite, @auth_env_key)
+      else
+        Application.put_env(:starcite, @auth_env_key, previous_auth)
+      end
+
+      :ok = JWKS.clear_cache()
+      Process.delete(:default_auth_header)
+    end)
+
     :ok
   end
 
@@ -43,10 +86,17 @@ defmodule StarciteWeb.SessionControllerTest do
     )
   end
 
-  defp json_conn(method, path, body) do
+  defp json_conn(method, path, body, headers \\ []) do
+    auth_headers =
+      case Process.get(:default_auth_header) do
+        nil -> headers
+        default_header -> [default_header | headers]
+      end
+
     conn =
       conn(method, path)
       |> put_req_header("content-type", "application/json")
+      |> put_headers(auth_headers)
 
     conn =
       if body do
@@ -56,6 +106,12 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
     @endpoint.call(conn, @endpoint.init([]))
+  end
+
+  defp put_headers(conn, headers) when is_list(headers) do
+    Enum.reduce(headers, conn, fn {name, value}, acc ->
+      put_req_header(acc, name, value)
+    end)
   end
 
   describe "POST /v1/sessions" do
@@ -135,7 +191,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "duplicate id returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       conn = json_conn(:post, "/v1/sessions", service_create_body(%{"id" => id}))
 
@@ -177,17 +233,11 @@ defmodule StarciteWeb.SessionControllerTest do
                  "metadata" => %{"user_id" => "u2", "tenant_id" => "acme", "marker" => marker}
                }).status
 
-      assert 201 ==
-               json_conn(:post, "/v1/sessions", %{
-                 "creator_principal" => %{
-                   "tenant_id" => "beta",
-                   "id" => "user-test",
-                   "type" => "user"
-                 },
-                 "id" => id3,
-                 "title" => "C",
-                 "metadata" => %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
-               }).status
+      assert {:ok, _} =
+               WritePath.create_session(
+                 id: id3,
+                 metadata: %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
+               )
 
       conn =
         json_conn(
@@ -200,8 +250,8 @@ defmodule StarciteWeb.SessionControllerTest do
       body = Jason.decode!(conn.resp_body)
       ids = body["sessions"] |> Enum.map(& &1["id"]) |> Enum.sort()
 
-      assert ids == Enum.sort([id1, id3])
-      assert body["next_cursor"] in [nil, id1, id3]
+      assert ids == [id1]
+      assert body["next_cursor"] in [nil, id1]
     end
 
     test "supports cursor pagination" do
@@ -265,13 +315,13 @@ defmodule StarciteWeb.SessionControllerTest do
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test",
+          "actor" => "user:user-test",
           "producer_id" => "writer-1",
           "producer_seq" => 1
         })
@@ -285,7 +335,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "expected_seq conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       {:ok, _} =
         WritePath.append_event(id, %{
@@ -300,7 +350,7 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "two"},
-          "actor" => "agent:test",
+          "actor" => "user:user-test",
           "producer_id" => "writer-1",
           "producer_seq" => 2,
           "expected_seq" => 0
@@ -314,12 +364,12 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer replay conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       body = %{
         "type" => "state",
         "payload" => %{"state" => "running"},
-        "actor" => "agent:test",
+        "actor" => "user:user-test",
         "producer_id" => "writer-1",
         "producer_seq" => 1
       }
@@ -332,7 +382,7 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "state",
           "payload" => %{"state" => "completed"},
-          "actor" => "agent:test",
+          "actor" => "user:user-test",
           "producer_id" => "writer-1",
           "producer_seq" => 1
         })
@@ -345,12 +395,12 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "same producer sequence and payload dedupes" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       body = %{
         "type" => "state",
         "payload" => %{"state" => "running"},
-        "actor" => "agent:test",
+        "actor" => "user:user-test",
         "producer_id" => "writer-1",
         "producer_seq" => 1
       }
@@ -370,13 +420,13 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer sequence conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "state",
           "payload" => %{"state" => "running"},
-          "actor" => "agent:test",
+          "actor" => "user:user-test",
           "producer_id" => "writer-1",
           "producer_seq" => 2
         })
@@ -389,7 +439,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "missing required fields returns 400" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id)
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
       conn = json_conn(:post, "/v1/sessions/#{id}/append", %{"payload" => %{"text" => "hi"}})
 
@@ -406,7 +456,7 @@ defmodule StarciteWeb.SessionControllerTest do
         json_conn(:post, "/v1/sessions/#{id}/append", %{
           "type" => "content",
           "payload" => %{"text" => "hello"},
-          "actor" => "agent:test",
+          "actor" => "user:user-test",
           "producer_id" => "writer-1",
           "producer_seq" => 1
         })
@@ -416,5 +466,23 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["error"] == "session_not_found"
       assert is_binary(body["message"])
     end
+  end
+
+  defp token_for(private_key, kid, overrides)
+       when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
+    claims =
+      %{
+        "iss" => @issuer,
+        "aud" => @audience,
+        "sub" => "user:user-test",
+        "tenant_id" => "acme",
+        "scope" => "session:create session:read session:append",
+        "exp" => System.system_time(:second) + 300
+      }
+      |> Map.merge(overrides)
+      |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+      |> Map.new()
+
+    AuthTestSupport.sign_rs256(private_key, claims, kid)
   end
 end
