@@ -8,6 +8,10 @@ Starcite exposes `tail` as a WebSocket endpoint.
 ws://HOST/v1/sessions/:id/tail?cursor=41
 ```
 
+Optional query params:
+
+- `batch_size` (`1..1000`, default `1`) controls how many events are included per text frame.
+
 Token transport during WebSocket upgrade:
 
 - non-browser clients: `Authorization: Bearer <jwt>` header
@@ -47,7 +51,7 @@ On connect:
 
 ## Server frames
 
-Starcite emits one JSON event object per WebSocket text frame:
+When `batch_size=1` (default), Starcite emits one JSON event object per WebSocket text frame:
 
 ```json
 {
@@ -63,6 +67,26 @@ Starcite emits one JSON event object per WebSocket text frame:
   "idempotency_key": "run_123-step_8",
   "inserted_at": "2026-02-08T15:00:01Z"
 }
+```
+
+When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batch_size` event objects:
+
+```json
+[
+  {
+    "seq": 42,
+    "type": "state",
+    "payload": { "state": "running" },
+    "actor": "agent:researcher",
+    "producer_id": "writer_123",
+    "producer_seq": 8,
+    "source": "agent",
+    "metadata": { "role": "worker", "identity": { "provider": "codex" } },
+    "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
+    "idempotency_key": "run_123-step_8",
+    "inserted_at": "2026-02-08T15:00:01Z"
+  }
+]
 ```
 
 Notes:

@@ -128,6 +128,24 @@ defmodule StarciteWeb.TailControllerTest do
       assert body["error"] == "invalid_cursor"
       assert is_binary(body["message"])
     end
+
+    test "returns 400 for invalid tail batch size" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+
+      conn =
+        conn_get("/v1/sessions/#{id}/tail?cursor=0&batch_size=bad", [
+          {"connection", "upgrade"},
+          {"upgrade", "websocket"},
+          {"sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="},
+          {"sec-websocket-version", "13"}
+        ])
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_tail_batch_size"
+      assert is_binary(body["message"])
+    end
   end
 
   defp token_for(private_key, kid, overrides)
