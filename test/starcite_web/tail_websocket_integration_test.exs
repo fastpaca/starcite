@@ -9,24 +9,25 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
 
   @auth_env_key StarciteWeb.Auth
   @host ~c"127.0.0.1"
-  @port 4105
   @ws_timeout 2_500
   @issuer "https://issuer.example"
   @audience "starcite-api"
   @jwks_path "/.well-known/jwks.json"
 
   setup_all do
+    port = pick_available_port()
+
     {:ok, _pid} =
       start_supervised(
         {Bandit,
          plug: StarciteWeb.Endpoint,
          scheme: :http,
          ip: {127, 0, 0, 1},
-         port: @port,
+         port: port,
          startup_log: false}
       )
 
-    :ok
+    {:ok, port: port}
   end
 
   setup do
@@ -74,6 +75,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   test "tail websocket replays from cursor and streams live committed events", %{
+    port: port,
     private_key: private_key,
     kid: kid
   } do
@@ -95,7 +97,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(session_id, 0, [], %{"access_token" => token})
+      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
@@ -126,6 +128,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   test "tail websocket emits array frames when batch_size is greater than one", %{
+    port: port,
     private_key: private_key,
     kid: kid
   } do
@@ -149,7 +152,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(session_id, 0, [], %{"access_token" => token, "batch_size" => "2"})
+      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token, "batch_size" => "2"})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
@@ -176,6 +179,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   test "tail websocket closes with token_expired at JWT exp", %{
+    port: port,
     private_key: private_key,
     kid: kid
   } do
@@ -196,7 +200,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(session_id, 0, [], %{"access_token" => token})
+      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
@@ -225,18 +229,18 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     seq
   end
 
-  defp connect_tail_ws(session_id, cursor, headers, query_params)
-       when is_binary(session_id) and is_integer(cursor) and cursor >= 0 and is_list(headers) and
-              is_map(query_params) do
+  defp connect_tail_ws(port, session_id, cursor, headers, query_params)
+       when is_integer(port) and port > 0 and is_binary(session_id) and is_integer(cursor) and
+              cursor >= 0 and is_list(headers) and is_map(query_params) do
     {:ok, socket} =
-      :gen_tcp.connect(@host, @port, [:binary, active: false, packet: :raw], @ws_timeout)
+      :gen_tcp.connect(@host, port, [:binary, active: false, packet: :raw], @ws_timeout)
 
     key = :crypto.strong_rand_bytes(16) |> Base.encode64()
     query = build_tail_query(cursor, query_params)
 
     request = [
       "GET /v1/sessions/#{session_id}/tail?#{query} HTTP/1.1\r\n",
-      "Host: localhost:#{@port}\r\n",
+      "Host: localhost:#{port}\r\n",
       "Connection: Upgrade\r\n",
       "Upgrade: websocket\r\n",
       "Sec-WebSocket-Version: 13\r\n",
@@ -354,5 +358,12 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       |> Map.new()
 
     AuthTestSupport.sign_rs256(private_key, claims, kid)
+  end
+
+  defp pick_available_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, {:active, false}, {:ip, {127, 0, 0, 1}}])
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 end

@@ -509,6 +509,7 @@ defmodule Starcite.RuntimeTest do
       Enum.map(events, fn event ->
         %{
           session_id: session_id,
+          tenant_id: event_tenant_id!(event),
           seq: event.seq,
           type: event.type,
           payload: event.payload,
@@ -532,6 +533,15 @@ defmodule Starcite.RuntimeTest do
       )
 
     assert count == length(rows)
+  end
+
+  defp event_tenant_id!(%{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_tenant_id!(event) when is_map(event) do
+    raise ArgumentError,
+          "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
   end
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")

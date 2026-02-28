@@ -75,6 +75,66 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one write request outcome.
+
+  Measurements:
+    - `:count` – fixed at 1 per request
+    - `:duration_ms` – elapsed request time in milliseconds
+
+  Metadata:
+    - `:operation` (`:append_event` or `:append_events`)
+    - `:phase` (`:ack`)
+    - `:outcome` (`:ok`, `:error`, or `:timeout`)
+  """
+  @spec request(
+          :append_event | :append_events,
+          :ack,
+          :ok | :error | :timeout,
+          non_neg_integer()
+        ) :: :ok
+  def request(operation, phase, outcome, duration_ms)
+      when operation in [:append_event, :append_events] and phase in [:ack] and
+             outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 do
+    execute_if_enabled(
+      [:starcite, :request],
+      %{count: 1, duration_ms: duration_ms},
+      %{operation: operation, phase: phase, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one tail read delivery outcome.
+
+  Measurements:
+    - `:count` – fixed at 1 per delivery attempt
+    - `:duration_ms` – elapsed delivery time in milliseconds
+
+  Metadata:
+    - `:operation` (`:tail_catchup` or `:tail_live`)
+    - `:phase` (`:deliver`)
+    - `:outcome` (`:ok`, `:error`, or `:timeout`)
+  """
+  @spec read(
+          :tail_catchup | :tail_live,
+          :deliver,
+          :ok | :error | :timeout,
+          non_neg_integer()
+        ) :: :ok
+  def read(operation, phase, outcome, duration_ms)
+      when operation in [:tail_catchup, :tail_live] and phase in [:deliver] and
+             outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 do
+    execute_if_enabled(
+      [:starcite, :read],
+      %{count: 1, duration_ms: duration_ms},
+      %{operation: operation, phase: phase, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one event-store write.
 
   Measurements:
