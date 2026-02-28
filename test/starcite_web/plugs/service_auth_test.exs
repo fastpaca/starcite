@@ -162,6 +162,24 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
              ServiceAuth.authenticate_token(token)
   end
 
+  test "authenticate_token extracts a service principal from org subject" do
+    {private_key, kid} = jwt_signing_fixture!()
+
+    token =
+      private_key
+      |> sign_token(kid, %{
+        "tenant_id" => "anor-ai",
+        "sub" => "org:anor-ai",
+        "scopes" => ["session:read"]
+      })
+
+    assert {:ok,
+            %Context{
+              principal: %Principal{tenant_id: "anor-ai", id: "anor-ai", type: :service}
+            }} =
+             ServiceAuth.authenticate_token(token)
+  end
+
   test "authenticate_token rejects unsupported subject principal types" do
     {private_key, kid} = jwt_signing_fixture!()
 

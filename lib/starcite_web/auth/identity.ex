@@ -67,6 +67,7 @@ defmodule StarciteWeb.Auth.Identity do
   defp principal_type_from_subject("agent"), do: {:ok, :agent}
   defp principal_type_from_subject("service"), do: {:ok, :service}
   defp principal_type_from_subject("svc"), do: {:ok, :service}
+  defp principal_type_from_subject("org"), do: {:ok, :service}
   defp principal_type_from_subject(_principal_type), do: {:error, :invalid_jwt_claims}
 
   defp scope_values(nil), do: {:ok, []}
