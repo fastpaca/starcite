@@ -52,20 +52,16 @@ defmodule Starcite.DataPlane.EventStore do
   @spec put_event(String.t(), Event.t()) :: :ok
   def put_event(session_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    telemetry_enabled? = Telemetry.enabled?()
-
-    tenant_id =
-      if telemetry_enabled?, do: Tenancy.label_from_event(event), else: Tenancy.label(nil)
+    tenant_id = Tenancy.label_from_event(event)
 
     maybe_emit_backpressure(
       ensure_capacity_for_put_event(session_id, event),
       session_id,
-      tenant_id,
-      telemetry_enabled?
+      tenant_id
     )
 
     :ok = EventQueue.put_event(session_id, seq, event)
-    :ok = emit_event_store_write_telemetry(session_id, tenant_id, event, telemetry_enabled?)
+    :ok = emit_event_store_write_telemetry(session_id, tenant_id, event)
     :ok
   end
 
@@ -78,20 +74,11 @@ defmodule Starcite.DataPlane.EventStore do
   @spec put_events(String.t(), [Event.t()]) :: :ok
   def put_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
-    telemetry_enabled? = Telemetry.enabled?()
-
-    tenant_id =
-      if telemetry_enabled?, do: tenant_label_from_events(events), else: Tenancy.label(nil)
-
-    maybe_emit_backpressure(
-      ensure_capacity_for_puts(session_id, events),
-      session_id,
-      tenant_id,
-      telemetry_enabled?
-    )
+    tenant_id = tenant_label_from_events(events)
+    maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id, tenant_id)
 
     :ok = EventQueue.put_events(session_id, events)
-    :ok = emit_event_store_write_telemetry(session_id, tenant_id, events, telemetry_enabled?)
+    :ok = emit_event_store_write_telemetry(session_id, tenant_id, events)
     :ok
   end
 
@@ -249,8 +236,7 @@ defmodule Starcite.DataPlane.EventStore do
   defp maybe_emit_backpressure(
          {:error, :event_store_backpressure, metadata},
          session_id,
-         tenant_id,
-         true
+         tenant_id
        )
        when is_binary(session_id) and is_binary(tenant_id) and is_map(metadata) do
     Telemetry.event_store_backpressure(
@@ -264,7 +250,7 @@ defmodule Starcite.DataPlane.EventStore do
     :ok
   end
 
-  defp maybe_emit_backpressure(_result, _session_id, _tenant_id, _enabled), do: :ok
+  defp maybe_emit_backpressure(_result, _session_id, _tenant_id), do: :ok
 
   defp max_memory_bytes_limit do
     raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)
@@ -355,7 +341,7 @@ defmodule Starcite.DataPlane.EventStore do
   defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
   defp payload_bytes(_event), do: 0
 
-  defp emit_event_store_write_telemetry(session_id, tenant_id, %{seq: seq} = event, true)
+  defp emit_event_store_write_telemetry(session_id, tenant_id, %{seq: seq} = event)
        when is_binary(session_id) and is_binary(tenant_id) and is_integer(seq) and seq > 0 and
               is_map(event) do
     :ok = Telemetry.event_store_write(session_id, tenant_id, seq, payload_bytes(event))
@@ -363,7 +349,7 @@ defmodule Starcite.DataPlane.EventStore do
     :ok
   end
 
-  defp emit_event_store_write_telemetry(session_id, tenant_id, events, true)
+  defp emit_event_store_write_telemetry(session_id, tenant_id, events)
        when is_binary(session_id) and is_binary(tenant_id) and is_list(events) do
     Enum.each(events, fn %{seq: seq} = event ->
       :ok = Telemetry.event_store_write(session_id, tenant_id, seq, payload_bytes(event))
@@ -371,8 +357,6 @@ defmodule Starcite.DataPlane.EventStore do
 
     :ok
   end
-
-  defp emit_event_store_write_telemetry(_session_id, _tenant_id, _events, false), do: :ok
 
   defp tenant_label_from_events([first_event | _rest]) when is_map(first_event) do
     Tenancy.label_from_event(first_event)

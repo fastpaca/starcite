@@ -89,13 +89,11 @@ defmodule Starcite.DataPlane.RaftFSM do
       :ok = put_appended_event(session_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
-      if Telemetry.enabled?() do
-        emit_appended_event_telemetry(
-          session_id,
-          Tenancy.label_from_session(session),
-          event_to_store
-        )
-      end
+      emit_appended_event_telemetry(
+        session_id,
+        Tenancy.label_from_session(session),
+        event_to_store
+      )
 
       effect = build_effect_for_event(session_id, event_to_store)
       reply = {:reply, {:ok, reply}}
@@ -121,10 +119,7 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
       :ok = put_appended_events(session_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-
-      if Telemetry.enabled?() do
-        emit_appended_telemetry(session_id, Tenancy.label_from_session(session), events_to_store)
-      end
+      emit_appended_telemetry(session_id, Tenancy.label_from_session(session), events_to_store)
 
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}

@@ -161,16 +161,14 @@ defmodule Starcite.Archive do
             pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
-            if Telemetry.enabled?() do
-              Telemetry.archive_batch(
-                session_id,
-                tenant_label_for_rows(session_id, rows),
-                attempted,
-                bytes_attempted,
-                avg_event_bytes,
-                pending_after
-              )
-            end
+            Telemetry.archive_batch(
+              session_id,
+              tenant_label_for_rows(session_id, rows),
+              attempted,
+              bytes_attempted,
+              avg_event_bytes,
+              pending_after
+            )
 
             bytes_inserted =
               if attempted > 0 do

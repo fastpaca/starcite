@@ -41,20 +41,12 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       when is_integer(group_id) and group_id >= 0 and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    telemetry_enabled? = Telemetry.enabled?()
-
-    tenant_id =
-      if telemetry_enabled? do
-        tenant_id_for_route(route_opts, local_args, remote_args)
-      else
-        Tenancy.label(nil)
-      end
+    tenant_id = tenant_id_for_route(route_opts, local_args, remote_args)
 
     {target, route_meta} = route_target_with_meta(group_id, route_opts)
 
     :ok =
       maybe_emit_routing_decision(
-        telemetry_enabled?,
         group_id,
         tenant_id,
         route_meta.target,
@@ -70,7 +62,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         :ok =
           maybe_emit_routing_result(
-            telemetry_enabled?,
             group_id,
             tenant_id,
             :local,
@@ -85,7 +76,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       {:remote, []} ->
         :ok =
           maybe_emit_routing_result(
-            telemetry_enabled?,
             group_id,
             tenant_id,
             :remote,
@@ -116,7 +106,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         :ok =
           maybe_emit_routing_result(
-            telemetry_enabled?,
             group_id,
             tenant_id,
             :remote,
@@ -568,7 +557,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
   defp node_hint?(_value), do: false
 
   defp maybe_emit_routing_decision(
-         true,
          group_id,
          tenant_id,
          target,
@@ -588,20 +576,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     )
   end
 
-  defp maybe_emit_routing_decision(
-         false,
-         _group_id,
-         _tenant_id,
-         _target,
-         _prefer_leader,
-         _leader_hint,
-         _replica_count,
-         _ready_count
-       ),
-       do: :ok
-
   defp maybe_emit_routing_result(
-         true,
          group_id,
          tenant_id,
          path,
@@ -621,20 +596,8 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     )
   end
 
-  defp maybe_emit_routing_result(
-         false,
-         _group_id,
-         _tenant_id,
-         _path,
-         _outcome,
-         _attempts,
-         _retries,
-         _leader_redirects
-       ),
-       do: :ok
-
-  defp tenant_id_for_route(route_opts, local_args, remote_args)
-       when is_list(route_opts) and is_list(local_args) and is_list(remote_args) do
+  defp tenant_id_for_route(route_opts, _local_args, _remote_args)
+       when is_list(route_opts) do
     case Keyword.get(route_opts, :tenant_id) do
       tenant_id when is_binary(tenant_id) and tenant_id != "" ->
         Tenancy.label(tenant_id)

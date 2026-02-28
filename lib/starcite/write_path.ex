@@ -228,12 +228,7 @@ defmodule Starcite.WritePath do
 
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
-    route_opts =
-      if Telemetry.enabled?() do
-        [prefer_leader: false, tenant_id: tenant_id_for_remote_call(fun, args)]
-      else
-        [prefer_leader: false]
-      end
+    route_opts = [prefer_leader: false, tenant_id: tenant_id_for_remote_call(fun, args)]
 
     ReplicaRouter.call_on_replica(
       group_id,
@@ -312,13 +307,11 @@ defmodule Starcite.WritePath do
               :leader_retry_error,
               :leader_retry_timeout
             ] do
-    if Telemetry.enabled?() do
-      Telemetry.raft_command_result(
-        command_type(command),
-        outcome,
-        tenant_id_for_command(command)
-      )
-    end
+    Telemetry.raft_command_result(
+      command_type(command),
+      outcome,
+      tenant_id_for_command(command)
+    )
 
     :ok
   end
