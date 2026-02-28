@@ -2,6 +2,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   use ExUnit.Case, async: true
 
   alias Starcite.Auth.Principal
+  alias Starcite.Session
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
@@ -22,12 +23,12 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "none mode allows create/list/read/append without jwt claims" do
-    session = %{id: "ses-1", metadata: %{"tenant_id" => "acme"}, creator_principal: nil}
+    session = Session.new("ses-1", metadata: %{"tenant_id" => "acme"})
     none = Context.none()
 
     assert {:ok, nil} = Policy.can_create_session(none, %{})
     assert {:ok, "ses-1"} = Policy.resolve_create_session_id(none, "ses-1")
-    assert {:ok, :all} = Policy.can_list_sessions(none)
+    assert :ok = Policy.can_list_sessions(none)
     assert :ok = Policy.allowed_to_access_session(none, "ses-1")
     assert :ok = Policy.allowed_to_read_session(none, session)
     assert :ok = Policy.allowed_to_append_session(none, session)
@@ -46,17 +47,11 @@ defmodule StarciteWeb.Auth.PolicyTest do
              Policy.resolve_create_session_id(jwt_ctx(%{session_id: "ses-1"}), "ses-2")
   end
 
-  test "can_list_sessions returns tenant and optional session filter" do
-    assert {:ok, %{tenant_id: "acme", session_id: nil}} =
-             Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:read"]}))
+  test "can_list_sessions enforces read scope" do
+    assert :ok = Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:read"]}))
 
-    assert {:ok, %{tenant_id: "acme", session_id: "ses-42"}} =
-             Policy.can_list_sessions(
-               jwt_ctx(%{
-                 session_id: "ses-42",
-                 scopes: ["session:read"]
-               })
-             )
+    assert :ok =
+             Policy.can_list_sessions(jwt_ctx(%{session_id: "ses-42", scopes: ["session:read"]}))
 
     assert {:error, :forbidden_scope} =
              Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:append"]}))
@@ -71,7 +66,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "allowed_to_append_session enforces scope, tenant, and session lock" do
-    session = %{id: "ses-1", metadata: %{"tenant_id" => "acme"}, creator_principal: nil}
+    session = Session.new("ses-1", metadata: %{"tenant_id" => "acme"})
 
     assert :ok =
              Policy.allowed_to_append_session(
@@ -99,7 +94,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "allowed_to_read_session enforces scope, tenant, and session lock" do
-    session = %{id: "ses-9", metadata: %{"tenant_id" => "acme"}, creator_principal: nil}
+    session = Session.new("ses-9", metadata: %{"tenant_id" => "acme"})
 
     assert :ok =
              Policy.allowed_to_read_session(

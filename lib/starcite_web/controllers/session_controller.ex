@@ -71,8 +71,8 @@ defmodule StarciteWeb.SessionController do
   def index(conn, params) do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, opts} <- validate_list(params),
-         {:ok, scope} <- Policy.can_list_sessions(auth),
-         {:ok, page} <- list_sessions(scope, opts) do
+         :ok <- Policy.can_list_sessions(auth),
+         {:ok, page} <- list_sessions(auth, opts) do
       json(conn, page)
     end
   end
@@ -197,7 +197,11 @@ defmodule StarciteWeb.SessionController do
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
 
-  defp list_sessions(%{tenant_id: tenant_id, session_id: nil}, opts)
+  defp list_sessions(%Context{kind: :none}, opts) when is_map(opts) do
+    Starcite.Archive.Store.list_sessions(opts)
+  end
+
+  defp list_sessions(%Context{tenant_id: tenant_id, session_id: nil}, opts)
        when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
     metadata_filters =
       opts
@@ -211,7 +215,7 @@ defmodule StarciteWeb.SessionController do
     )
   end
 
-  defp list_sessions(%{tenant_id: tenant_id, session_id: session_id}, opts)
+  defp list_sessions(%Context{tenant_id: tenant_id, session_id: session_id}, opts)
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
               session_id != "" and is_map(opts) do
     metadata_filters =
@@ -227,11 +231,7 @@ defmodule StarciteWeb.SessionController do
     )
   end
 
-  defp list_sessions(:all, opts) when is_map(opts) do
-    Starcite.Archive.Store.list_sessions(opts)
-  end
-
-  defp list_sessions(_scope, _opts), do: {:error, :forbidden}
+  defp list_sessions(_auth, _opts), do: {:error, :forbidden}
 
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}

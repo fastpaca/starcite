@@ -160,8 +160,15 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   defp claim_session_id(%{"session_id" => _invalid}), do: {:error, :invalid_jwt_claims}
   defp claim_session_id(_claims), do: {:ok, nil}
 
-  defp claim_subject(%{"sub" => subject}) when is_binary(subject) and subject != "",
-    do: {:ok, subject}
+  defp claim_subject(%{"sub" => subject}) when is_binary(subject) and subject != "" do
+    case String.split(subject, ":", parts: 2) do
+      [principal_type, principal_id] when principal_type != "" and principal_id != "" ->
+        {:ok, subject}
+
+      _other ->
+        {:error, :invalid_jwt_claims}
+    end
+  end
 
   defp claim_subject(_claims), do: {:error, :invalid_jwt_claims}
 

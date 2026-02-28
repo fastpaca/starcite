@@ -28,9 +28,8 @@ defmodule StarciteWeb.TailController do
          {:ok, frame_batch_size} <- parse_frame_batch_size_param(params),
          :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- ReadPath.get_session(id),
-         :ok <- Policy.allowed_to_read_session(auth, session) do
-      tenant_id = Tenancy.label_from_session(session)
-
+         :ok <- Policy.allowed_to_read_session(auth, session),
+         {:ok, tenant_id} <- tail_tenant_id(auth, session) do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
@@ -39,7 +38,7 @@ defmodule StarciteWeb.TailController do
           cursor: cursor,
           frame_batch_size: frame_batch_size,
           tenant_id: tenant_id,
-          auth_expires_at: auth_expires_at(auth)
+          auth_context: auth
         },
         timeout: 120_000
       )
@@ -111,9 +110,14 @@ defmodule StarciteWeb.TailController do
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
   end
 
-  defp auth_expires_at(%Context{expires_at: expires_at})
-       when is_integer(expires_at) and expires_at > 0,
-       do: expires_at
+  defp tail_tenant_id(%Context{kind: :none}, session) do
+    {:ok, Tenancy.label_from_session(session)}
+  end
 
-  defp auth_expires_at(_auth), do: nil
+  defp tail_tenant_id(%Context{kind: :jwt, tenant_id: tenant_id}, _session)
+       when is_binary(tenant_id) and tenant_id != "" do
+    {:ok, Tenancy.label(tenant_id)}
+  end
+
+  defp tail_tenant_id(_auth, _session), do: {:error, :forbidden_tenant}
 end

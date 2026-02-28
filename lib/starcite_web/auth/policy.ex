@@ -4,6 +4,7 @@ defmodule StarciteWeb.Auth.Policy do
   """
 
   alias Starcite.Auth.Principal
+  alias Starcite.Session
   alias StarciteWeb.Auth.Context
 
   @type auth :: Context.t()
@@ -38,26 +39,23 @@ defmodule StarciteWeb.Auth.Policy do
 
   def resolve_create_session_id(_auth, _requested_id), do: {:error, :invalid_session}
 
-  @spec can_list_sessions(auth()) ::
-          {:ok, :all | %{tenant_id: String.t(), session_id: String.t() | nil}} | {:error, atom()}
-  def can_list_sessions(%Context{kind: :none}), do: {:ok, :all}
+  @spec can_list_sessions(auth()) :: :ok | {:error, atom()}
+  def can_list_sessions(%Context{kind: :none}), do: :ok
 
   def can_list_sessions(%Context{tenant_id: tenant_id} = auth)
       when is_binary(tenant_id) and tenant_id != "" do
-    with :ok <- has_scope(auth, "session:read") do
-      {:ok, %{tenant_id: tenant_id, session_id: auth.session_id}}
-    end
+    has_scope(auth, "session:read")
   end
 
   def can_list_sessions(_auth), do: {:error, :forbidden}
 
-  @spec allowed_to_append_session(auth(), map()) :: :ok | {:error, atom()}
-  def allowed_to_append_session(%Context{} = auth, session) when is_map(session) do
+  @spec allowed_to_append_session(auth(), Session.t()) :: :ok | {:error, atom()}
+  def allowed_to_append_session(%Context{} = auth, %Session{} = session) do
     session_permission(auth, session, "session:append")
   end
 
-  @spec allowed_to_read_session(auth(), map()) :: :ok | {:error, atom()}
-  def allowed_to_read_session(%Context{} = auth, session) when is_map(session) do
+  @spec allowed_to_read_session(auth(), Session.t()) :: :ok | {:error, atom()}
+  def allowed_to_read_session(%Context{} = auth, %Session{} = session) do
     session_permission(auth, session, "session:read")
   end
 
@@ -96,8 +94,11 @@ defmodule StarciteWeb.Auth.Policy do
   def resolve_event_actor(_auth, _requested_actor), do: {:error, :invalid_event}
 
   @spec attach_principal_metadata(auth(), map()) :: map()
+  def attach_principal_metadata(%Context{kind: :none}, metadata) when is_map(metadata),
+    do: metadata
+
   def attach_principal_metadata(
-        %Context{tenant_id: tenant_id, subject: subject} = auth,
+        %Context{kind: :jwt, tenant_id: tenant_id, subject: subject} = auth,
         metadata
       )
       when is_binary(tenant_id) and tenant_id != "" and is_binary(subject) and subject != "" and
@@ -116,7 +117,9 @@ defmodule StarciteWeb.Auth.Policy do
     end)
   end
 
-  def attach_principal_metadata(_auth, metadata) when is_map(metadata), do: metadata
+  def attach_principal_metadata(%Context{kind: :jwt}, _metadata) do
+    raise ArgumentError, "invalid jwt auth context for principal metadata"
+  end
 
   @spec has_scope(auth(), String.t()) :: :ok | {:error, :forbidden_scope}
   def has_scope(%Context{scopes: scopes}, scope)
@@ -128,7 +131,7 @@ defmodule StarciteWeb.Auth.Policy do
 
   defp session_permission(
          %Context{kind: :none},
-         %{id: session_id},
+         %Session{id: session_id},
          _scope
        )
        when is_binary(session_id) and session_id != "",
@@ -136,7 +139,7 @@ defmodule StarciteWeb.Auth.Policy do
 
   defp session_permission(
          %Context{tenant_id: tenant_id} = auth,
-         %{id: session_id} = session,
+         %Session{id: session_id} = session,
          scope
        )
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
@@ -151,39 +154,17 @@ defmodule StarciteWeb.Auth.Policy do
 
   defp session_permission(_auth, _session, _scope), do: {:error, :forbidden_session}
 
-  defp session_tenant_id(%{metadata: metadata, creator_principal: creator_principal}) do
-    case metadata_tenant_id(metadata) || principal_tenant_id(creator_principal) do
-      tenant_id when is_binary(tenant_id) and tenant_id != "" ->
-        {:ok, tenant_id}
-
-      _other ->
-        {:error, :forbidden_tenant}
-    end
+  defp session_tenant_id(%Session{metadata: %{"tenant_id" => tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "" do
+    {:ok, tenant_id}
   end
 
-  defp session_tenant_id(_session), do: {:error, :forbidden_tenant}
-
-  defp metadata_tenant_id(metadata) when is_map(metadata) do
-    case Map.get(metadata, "tenant_id") || Map.get(metadata, :tenant_id) do
-      tenant_id when is_binary(tenant_id) and tenant_id != "" -> tenant_id
-      _other -> nil
-    end
+  defp session_tenant_id(%Session{creator_principal: %Principal{tenant_id: tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "" do
+    {:ok, tenant_id}
   end
 
-  defp metadata_tenant_id(_metadata), do: nil
-
-  defp principal_tenant_id(%Principal{tenant_id: tenant_id})
-       when is_binary(tenant_id) and tenant_id != "",
-       do: tenant_id
-
-  defp principal_tenant_id(principal) when is_map(principal) do
-    case Map.get(principal, "tenant_id") || Map.get(principal, :tenant_id) do
-      tenant_id when is_binary(tenant_id) and tenant_id != "" -> tenant_id
-      _other -> nil
-    end
-  end
-
-  defp principal_tenant_id(_principal), do: nil
+  defp session_tenant_id(%Session{}), do: {:error, :forbidden_tenant}
 
   defp require_same_tenant(tenant_id, tenant_id), do: :ok
   defp require_same_tenant(_expected_tenant, _actual_tenant), do: {:error, :forbidden_tenant}
@@ -205,9 +186,7 @@ defmodule StarciteWeb.Auth.Policy do
         })
 
       _other ->
-        metadata
+        raise ArgumentError, "invalid jwt subject format for principal metadata"
     end
   end
-
-  defp attach_principal_identity(metadata, _auth), do: metadata
 end
