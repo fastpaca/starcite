@@ -13,7 +13,7 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   alias Plug.Conn
   alias Starcite.Auth.Principal
-  alias StarciteWeb.Auth.{Config, JWT}
+  alias StarciteWeb.Auth.{Config, Context, JWT}
   alias StarciteWeb.Plugs.RedactSensitiveQuery
 
   @impl true
@@ -40,11 +40,11 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
     config().mode
   end
 
-  @spec authenticate_conn(Conn.t()) :: {:ok, map()} | {:error, atom()}
+  @spec authenticate_conn(Conn.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_conn(%Conn{} = conn) do
     case mode() do
       :none ->
-        {:ok, %{kind: :none}}
+        {:ok, Context.none()}
 
       :jwt ->
         with {:ok, token} <- bearer_token(conn),
@@ -54,11 +54,11 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
     end
   end
 
-  @spec authenticate_token(String.t()) :: {:ok, map()} | {:error, atom()}
+  @spec authenticate_token(String.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_token(token) when is_binary(token) and token != "" do
     case mode() do
       :none ->
-        {:ok, %{kind: :none}}
+        {:ok, Context.none()}
 
       :jwt ->
         cfg = config()
@@ -71,7 +71,7 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
              {:ok, subject} <- claim_subject(claims),
              {:ok, principal} <- principal_from_subject(subject, tenant_id) do
           {:ok,
-           %{
+           %Context{
              kind: :jwt,
              claims: claims,
              tenant_id: tenant_id,

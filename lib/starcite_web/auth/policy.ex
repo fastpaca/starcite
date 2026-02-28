@@ -4,16 +4,17 @@ defmodule StarciteWeb.Auth.Policy do
   """
 
   alias Starcite.Auth.Principal
+  alias StarciteWeb.Auth.Context
 
-  @type auth :: map()
+  @type auth :: Context.t()
 
   @spec can_create_session(auth(), map()) :: {:ok, Principal.t() | nil} | {:error, atom()}
-  def can_create_session(%{kind: :none}, _params), do: {:ok, nil}
+  def can_create_session(%Context{kind: :none}, _params), do: {:ok, nil}
 
-  def can_create_session(%{tenant_id: tenant_id} = auth, _params)
+  def can_create_session(%Context{tenant_id: tenant_id} = auth, _params)
       when is_binary(tenant_id) and tenant_id != "" do
     with :ok <- has_scope(auth, "session:create") do
-      {:ok, Map.get(auth, :principal)}
+      {:ok, auth.principal}
     end
   end
 
@@ -21,15 +22,15 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec resolve_create_session_id(auth(), String.t() | nil) ::
           {:ok, String.t() | nil} | {:error, atom()}
-  def resolve_create_session_id(%{kind: :none}, requested_id), do: {:ok, requested_id}
+  def resolve_create_session_id(%Context{kind: :none}, requested_id), do: {:ok, requested_id}
 
-  def resolve_create_session_id(%{session_id: nil}, requested_id), do: {:ok, requested_id}
+  def resolve_create_session_id(%Context{session_id: nil}, requested_id), do: {:ok, requested_id}
 
-  def resolve_create_session_id(%{session_id: session_id}, nil)
+  def resolve_create_session_id(%Context{session_id: session_id}, nil)
       when is_binary(session_id) and session_id != "",
       do: {:ok, session_id}
 
-  def resolve_create_session_id(%{session_id: session_id}, requested_id)
+  def resolve_create_session_id(%Context{session_id: session_id}, requested_id)
       when is_binary(session_id) and session_id != "" and is_binary(requested_id) and
              requested_id != "" do
     if requested_id == session_id, do: {:ok, requested_id}, else: {:error, :forbidden_session}
@@ -39,41 +40,41 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec can_list_sessions(auth()) ::
           {:ok, :all | %{tenant_id: String.t(), session_id: String.t() | nil}} | {:error, atom()}
-  def can_list_sessions(%{kind: :none}), do: {:ok, :all}
+  def can_list_sessions(%Context{kind: :none}), do: {:ok, :all}
 
-  def can_list_sessions(%{tenant_id: tenant_id} = auth)
+  def can_list_sessions(%Context{tenant_id: tenant_id} = auth)
       when is_binary(tenant_id) and tenant_id != "" do
     with :ok <- has_scope(auth, "session:read") do
-      {:ok, %{tenant_id: tenant_id, session_id: Map.get(auth, :session_id)}}
+      {:ok, %{tenant_id: tenant_id, session_id: auth.session_id}}
     end
   end
 
   def can_list_sessions(_auth), do: {:error, :forbidden}
 
   @spec allowed_to_append_session(auth(), map()) :: :ok | {:error, atom()}
-  def allowed_to_append_session(auth, session) when is_map(auth) and is_map(session) do
+  def allowed_to_append_session(%Context{} = auth, session) when is_map(session) do
     session_permission(auth, session, "session:append")
   end
 
   @spec allowed_to_read_session(auth(), map()) :: :ok | {:error, atom()}
-  def allowed_to_read_session(auth, session) when is_map(auth) and is_map(session) do
+  def allowed_to_read_session(%Context{} = auth, session) when is_map(session) do
     session_permission(auth, session, "session:read")
   end
 
   @spec allowed_to_access_session(auth(), String.t()) :: :ok | {:error, :forbidden_session}
-  def allowed_to_access_session(%{kind: :none}, session_id)
+  def allowed_to_access_session(%Context{kind: :none}, session_id)
       when is_binary(session_id) and session_id != "",
       do: :ok
 
-  def allowed_to_access_session(%{session_id: nil}, session_id)
+  def allowed_to_access_session(%Context{session_id: nil}, session_id)
       when is_binary(session_id) and session_id != "",
       do: :ok
 
-  def allowed_to_access_session(%{session_id: session_id}, session_id)
+  def allowed_to_access_session(%Context{session_id: session_id}, session_id)
       when is_binary(session_id) and session_id != "",
       do: :ok
 
-  def allowed_to_access_session(%{session_id: session_id}, _session_id)
+  def allowed_to_access_session(%Context{session_id: session_id}, _session_id)
       when is_binary(session_id) and session_id != "",
       do: {:error, :forbidden_session}
 
@@ -81,12 +82,12 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec resolve_event_actor(auth(), String.t() | nil) ::
           {:ok, String.t()} | {:error, :invalid_event}
-  def resolve_event_actor(%{subject: subject}, nil)
+  def resolve_event_actor(%Context{subject: subject}, nil)
       when is_binary(subject) and subject != "" do
     {:ok, subject}
   end
 
-  def resolve_event_actor(%{subject: subject}, requested_actor)
+  def resolve_event_actor(%Context{subject: subject}, requested_actor)
       when is_binary(subject) and subject != "" and is_binary(requested_actor) and
              requested_actor != "" do
     if requested_actor == subject, do: {:ok, subject}, else: {:error, :invalid_event}
@@ -96,7 +97,7 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec attach_principal_metadata(auth(), map()) :: map()
   def attach_principal_metadata(
-        %{tenant_id: tenant_id, subject: subject} = auth,
+        %Context{tenant_id: tenant_id, subject: subject} = auth,
         metadata
       )
       when is_binary(tenant_id) and tenant_id != "" and is_binary(subject) and subject != "" and
@@ -118,7 +119,7 @@ defmodule StarciteWeb.Auth.Policy do
   def attach_principal_metadata(_auth, metadata) when is_map(metadata), do: metadata
 
   @spec has_scope(auth(), String.t()) :: :ok | {:error, :forbidden_scope}
-  def has_scope(%{scopes: scopes}, scope)
+  def has_scope(%Context{scopes: scopes}, scope)
       when is_binary(scope) and scope != "" and is_list(scopes) do
     if Enum.member?(scopes, scope), do: :ok, else: {:error, :forbidden_scope}
   end
@@ -126,7 +127,7 @@ defmodule StarciteWeb.Auth.Policy do
   def has_scope(_auth, _scope), do: {:error, :forbidden_scope}
 
   defp session_permission(
-         %{kind: :none},
+         %Context{kind: :none},
          %{id: session_id},
          _scope
        )
@@ -134,7 +135,7 @@ defmodule StarciteWeb.Auth.Policy do
        do: :ok
 
   defp session_permission(
-         %{tenant_id: tenant_id} = auth,
+         %Context{tenant_id: tenant_id} = auth,
          %{id: session_id} = session,
          scope
        )
@@ -187,14 +188,14 @@ defmodule StarciteWeb.Auth.Policy do
   defp require_same_tenant(tenant_id, tenant_id), do: :ok
   defp require_same_tenant(_expected_tenant, _actual_tenant), do: {:error, :forbidden_tenant}
 
-  defp attach_principal_identity(metadata, %{principal: %Principal{} = principal}) do
+  defp attach_principal_identity(metadata, %Context{principal: %Principal{} = principal}) do
     Map.merge(metadata, %{
       "principal_type" => Atom.to_string(principal.type),
       "principal_id" => principal.id
     })
   end
 
-  defp attach_principal_identity(metadata, %{subject: subject})
+  defp attach_principal_identity(metadata, %Context{subject: subject})
        when is_binary(subject) and subject != "" do
     case String.split(subject, ":", parts: 2) do
       [principal_type, principal_id] when principal_type != "" and principal_id != "" ->

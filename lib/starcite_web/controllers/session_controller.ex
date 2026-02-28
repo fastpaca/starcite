@@ -11,6 +11,7 @@ defmodule StarciteWeb.SessionController do
 
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Observability.{Telemetry, Tenancy}
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
@@ -232,10 +233,10 @@ defmodule StarciteWeb.SessionController do
 
   defp list_sessions(_scope, _opts), do: {:error, :forbidden}
 
-  defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
+  defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
-  defp tenant_label_for_auth(%{tenant_id: tenant_id})
+  defp tenant_label_for_auth(%Context{tenant_id: tenant_id})
        when is_binary(tenant_id) and tenant_id != "" do
     Tenancy.label(tenant_id)
   end

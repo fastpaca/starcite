@@ -6,6 +6,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.AuthTestSupport
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.JWKS
   alias StarciteWeb.Plugs.ServiceAuth
 
@@ -111,7 +112,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     Application.put_env(:starcite, @auth_env_key, mode: :none)
     conn = conn(:get, "/")
 
-    assert {:ok, %{kind: :none}} = ServiceAuth.authenticate_conn(conn)
+    assert {:ok, %Context{kind: :none}} = ServiceAuth.authenticate_conn(conn)
   end
 
   test "authenticate_token rejects non-binary token values" do
@@ -153,7 +154,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
         "scopes" => ["session:read"]
       })
 
-    assert {:ok, %{subject: "svc:customer-a", principal: nil}} =
+    assert {:ok, %Context{subject: "svc:customer-a", principal: nil}} =
              ServiceAuth.authenticate_token(token)
   end
 
