@@ -8,6 +8,14 @@ defmodule Starcite.Observability.Telemetry do
   """
 
   @doc """
+  Returns whether telemetry emission is globally enabled.
+  """
+  @spec enabled?() :: boolean()
+  def enabled? do
+    Application.get_env(:starcite, :telemetry_enabled, true) == true
+  end
+
+  @doc """
   Emit an event when an event is appended to a session.
 
   Measurements:
@@ -15,20 +23,52 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id` – session identifier
+    - `:tenant_id` – normalized tenancy label
     - `:type` – event type
     - `:actor` – producer identifier
     - `:source` – optional producer class (for example `agent`, `user`, `system`)
   """
-  @spec event_appended(String.t(), String.t(), String.t(), String.t() | nil, non_neg_integer()) ::
-          :ok
-  def event_appended(session_id, type, actor, source, payload_bytes)
-      when is_binary(session_id) and is_binary(type) and type != "" and is_binary(actor) and
+  @spec event_appended(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t() | nil,
+          non_neg_integer()
+        ) :: :ok
+  def event_appended(session_id, tenant_id, type, actor, source, payload_bytes)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_binary(type) and type != "" and is_binary(actor) and
              actor != "" and (is_binary(source) or is_nil(source)) and is_integer(payload_bytes) and
              payload_bytes >= 0 do
-    :telemetry.execute(
+    execute_if_enabled(
       [:starcite, :events, :append],
       %{payload_bytes: payload_bytes},
-      %{session_id: session_id, type: type, actor: actor, source: source}
+      %{session_id: session_id, tenant_id: tenant_id, type: type, actor: actor, source: source}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit one ingestion-edge request event.
+
+  Measurements:
+    - `:count` – fixed at 1 per request
+
+  Metadata:
+    - `:operation` (`:create_session` or `:append_event`)
+    - `:tenant_id` – normalized tenancy label
+    - `:outcome` (`:ok` or `:error`)
+  """
+  @spec ingest_edge(:create_session | :append_event, String.t(), :ok | :error) :: :ok
+  def ingest_edge(operation, tenant_id, outcome)
+      when operation in [:create_session, :append_event] and is_binary(tenant_id) and
+             tenant_id != "" and outcome in [:ok, :error] do
+    execute_if_enabled(
+      [:starcite, :ingest, :edge],
+      %{count: 1},
+      %{operation: operation, tenant_id: tenant_id, outcome: outcome}
     )
 
     :ok
@@ -43,20 +83,23 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
     - `:seq`
   """
   @spec event_store_write(
           String.t(),
+          String.t(),
           pos_integer(),
           non_neg_integer()
         ) :: :ok
-  def event_store_write(session_id, seq, payload_bytes)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_integer(payload_bytes) and payload_bytes >= 0 do
-    :telemetry.execute(
+  def event_store_write(session_id, tenant_id, seq, payload_bytes)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(seq) and seq > 0 and is_integer(payload_bytes) and
+             payload_bytes >= 0 do
+    execute_if_enabled(
       [:starcite, :event_store, :write],
       %{count: 1, payload_bytes: payload_bytes},
-      %{session_id: session_id, seq: seq}
+      %{session_id: session_id, tenant_id: tenant_id, seq: seq}
     )
 
     :ok
@@ -71,10 +114,12 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
     - `:max_memory_bytes`
     - `:reason` (`:memory_limit`)
   """
   @spec event_store_backpressure(
+          String.t(),
           String.t(),
           non_neg_integer(),
           pos_integer(),
@@ -82,14 +127,15 @@ defmodule Starcite.Observability.Telemetry do
         ) :: :ok
   def event_store_backpressure(
         session_id,
+        tenant_id,
         current_memory_bytes,
         max_memory_bytes,
         reason
       )
-      when is_binary(session_id) and session_id != "" and is_integer(current_memory_bytes) and
-             current_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
-             reason in [:memory_limit] do
-    :telemetry.execute(
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(current_memory_bytes) and current_memory_bytes >= 0 and
+             is_integer(max_memory_bytes) and max_memory_bytes > 0 and reason in [:memory_limit] do
+    execute_if_enabled(
       [:starcite, :event_store, :backpressure],
       %{
         count: 1,
@@ -97,6 +143,7 @@ defmodule Starcite.Observability.Telemetry do
       },
       %{
         session_id: session_id,
+        tenant_id: tenant_id,
         max_memory_bytes: max_memory_bytes,
         reason: reason
       }
@@ -114,15 +161,17 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
   """
-  @spec cursor_update_emitted(String.t(), non_neg_integer(), non_neg_integer()) :: :ok
-  def cursor_update_emitted(session_id, seq, last_seq)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq >= 0 and
-             is_integer(last_seq) and last_seq >= seq do
-    :telemetry.execute(
+  @spec cursor_update_emitted(String.t(), String.t(), non_neg_integer(), non_neg_integer()) :: :ok
+  def cursor_update_emitted(session_id, tenant_id, seq, last_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(seq) and seq >= 0 and is_integer(last_seq) and
+             last_seq >= seq do
+    execute_if_enabled(
       [:starcite, :cursor, :update],
       %{count: 1, lag: last_seq - seq},
-      %{session_id: session_id}
+      %{session_id: session_id, tenant_id: tenant_id}
     )
 
     :ok
@@ -136,18 +185,26 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
     - `:seq`
     - `:source` (`:ets` or `:storage`)
     - `:result` (`:hit` or `:miss`)
   """
-  @spec tail_cursor_lookup(String.t(), pos_integer(), :ets | :storage, :hit | :miss) :: :ok
-  def tail_cursor_lookup(session_id, seq, source, result)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             source in [:ets, :storage] and result in [:hit, :miss] do
-    :telemetry.execute(
+  @spec tail_cursor_lookup(
+          String.t(),
+          String.t(),
+          pos_integer(),
+          :ets | :storage,
+          :hit | :miss
+        ) :: :ok
+  def tail_cursor_lookup(session_id, tenant_id, seq, source, result)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(seq) and seq > 0 and source in [:ets, :storage] and
+             result in [:hit, :miss] do
+    execute_if_enabled(
       [:starcite, :tail, :cursor_lookup],
       %{count: 1},
-      %{session_id: session_id, seq: seq, source: source, result: result}
+      %{session_id: session_id, tenant_id: tenant_id, seq: seq, source: source, result: result}
     )
 
     :ok
@@ -161,6 +218,7 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:command` (`:create_session`, `:append_event`, `:append_events`, `:ack_archived`, `:other`)
+    - `:tenant_id` – normalized tenancy label
     - `:outcome`
       (`:local_ok`, `:local_error`, `:local_timeout`, `:leader_retry_ok`,
       `:leader_retry_error`, or `:leader_retry_timeout`)
@@ -172,9 +230,10 @@ defmodule Starcite.Observability.Telemetry do
           | :local_timeout
           | :leader_retry_ok
           | :leader_retry_error
-          | :leader_retry_timeout
+          | :leader_retry_timeout,
+          String.t()
         ) :: :ok
-  def raft_command_result(command, outcome)
+  def raft_command_result(command, outcome, tenant_id)
       when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
              outcome in [
                :local_ok,
@@ -183,11 +242,11 @@ defmodule Starcite.Observability.Telemetry do
                :leader_retry_ok,
                :leader_retry_error,
                :leader_retry_timeout
-             ] do
-    :telemetry.execute(
+             ] and is_binary(tenant_id) and tenant_id != "" do
+    execute_if_enabled(
       [:starcite, :raft, :command],
       %{count: 1},
-      %{command: command, outcome: outcome}
+      %{command: command, outcome: outcome, tenant_id: tenant_id}
     )
 
     :ok
@@ -203,12 +262,14 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:group_id`
+    - `:tenant_id`
     - `:target` (`:local` or `:remote`)
     - `:prefer_leader` (`true` or `false`)
     - `:leader_hint` (`:disabled`, `:hit`, or `:miss`)
   """
   @spec routing_decision(
           non_neg_integer(),
+          String.t(),
           :local | :remote,
           boolean(),
           :disabled | :hit | :miss,
@@ -217,21 +278,23 @@ defmodule Starcite.Observability.Telemetry do
         ) :: :ok
   def routing_decision(
         group_id,
+        tenant_id,
         target,
         prefer_leader,
         leader_hint,
         replica_count,
         ready_count
       )
-      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
-             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
-             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
-             ready_count >= 0 do
-    :telemetry.execute(
+      when is_integer(group_id) and group_id >= 0 and is_binary(tenant_id) and tenant_id != "" and
+             target in [:local, :remote] and is_boolean(prefer_leader) and
+             leader_hint in [:disabled, :hit, :miss] and is_integer(replica_count) and
+             replica_count >= 0 and is_integer(ready_count) and ready_count >= 0 do
+    execute_if_enabled(
       [:starcite, :routing, :decision],
       %{count: 1, replica_count: replica_count, ready_count: ready_count},
       %{
         group_id: group_id,
+        tenant_id: tenant_id,
         target: target,
         prefer_leader: prefer_leader,
         leader_hint: leader_hint
@@ -252,23 +315,26 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:group_id`
+    - `:tenant_id`
     - `:path` (`:local` or `:remote`)
     - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)
   """
   @spec routing_result(
           non_neg_integer(),
+          String.t(),
           :local | :remote,
           :ok | :error | :timeout | :badrpc | :no_candidates | :other,
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
-      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
+  def routing_result(group_id, tenant_id, path, outcome, attempts, retries, leader_redirects)
+      when is_integer(group_id) and group_id >= 0 and is_binary(tenant_id) and tenant_id != "" and
+             path in [:local, :remote] and
              outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
              is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
              is_integer(leader_redirects) and leader_redirects >= 0 do
-    :telemetry.execute(
+    execute_if_enabled(
       [:starcite, :routing, :result],
       %{
         count: 1,
@@ -276,7 +342,7 @@ defmodule Starcite.Observability.Telemetry do
         retries: retries,
         leader_redirects: leader_redirects
       },
-      %{group_id: group_id, path: path, outcome: outcome}
+      %{group_id: group_id, tenant_id: tenant_id, path: path, outcome: outcome}
     )
 
     :ok
@@ -314,7 +380,7 @@ defmodule Starcite.Observability.Telemetry do
              is_integer(inserted) and inserted >= 0 and is_integer(pending_events) and
              pending_events >= 0 and
              is_integer(pending_sessions) and pending_sessions >= 0 do
-    :telemetry.execute(
+    execute_if_enabled(
       [:starcite, :archive, :flush],
       %{
         elapsed_ms: elapsed_ms,
@@ -341,11 +407,13 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
     - `:archived_seq`
     - `:last_seq`
     - `:tail_keep`
   """
   @spec archive_ack_applied(
+          String.t(),
           String.t(),
           non_neg_integer(),
           non_neg_integer(),
@@ -355,23 +423,26 @@ defmodule Starcite.Observability.Telemetry do
         ) :: :ok
   def archive_ack_applied(
         session_id,
+        tenant_id,
         last_seq,
         archived_seq,
         trimmed,
         tail_keep,
         tail_size
       )
-      when is_binary(session_id) and is_integer(last_seq) and last_seq >= 0 and
-             is_integer(archived_seq) and
-             archived_seq >= 0 and is_integer(trimmed) and trimmed >= 0 and is_integer(tail_keep) and
-             tail_keep > 0 do
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(last_seq) and last_seq >= 0 and
+             is_integer(archived_seq) and archived_seq >= 0 and is_integer(trimmed) and
+             trimmed >= 0 and is_integer(tail_keep) and tail_keep > 0 and
+             is_integer(tail_size) and tail_size >= 0 do
     lag = max(last_seq - archived_seq, 0)
 
-    :telemetry.execute(
+    execute_if_enabled(
       [:starcite, :archive, :ack],
       %{lag: lag, trimmed: trimmed, tail_size: tail_size},
       %{
         session_id: session_id,
+        tenant_id: tenant_id,
         archived_seq: archived_seq,
         last_seq: last_seq,
         tail_keep: tail_keep
@@ -392,19 +463,29 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
+    - `:tenant_id`
   """
   @spec archive_batch(
+          String.t(),
           String.t(),
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def archive_batch(session_id, batch_rows, batch_bytes, avg_event_bytes, pending_after)
-      when is_binary(session_id) and is_integer(batch_rows) and batch_rows >= 0 and
-             is_integer(batch_bytes) and batch_bytes >= 0 and is_integer(avg_event_bytes) and
-             avg_event_bytes >= 0 and is_integer(pending_after) and pending_after >= 0 do
-    :telemetry.execute(
+  def archive_batch(
+        session_id,
+        tenant_id,
+        batch_rows,
+        batch_bytes,
+        avg_event_bytes,
+        pending_after
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_integer(batch_rows) and batch_rows >= 0 and is_integer(batch_bytes) and
+             batch_bytes >= 0 and is_integer(avg_event_bytes) and avg_event_bytes >= 0 and
+             is_integer(pending_after) and pending_after >= 0 do
+    execute_if_enabled(
       [:starcite, :archive, :batch],
       %{
         batch_rows: batch_rows,
@@ -412,7 +493,7 @@ defmodule Starcite.Observability.Telemetry do
         avg_event_bytes: avg_event_bytes,
         pending_after: pending_after
       },
-      %{session_id: session_id}
+      %{session_id: session_id, tenant_id: tenant_id}
     )
 
     :ok
@@ -423,11 +504,20 @@ defmodule Starcite.Observability.Telemetry do
   """
   @spec archive_queue_age(non_neg_integer()) :: :ok
   def archive_queue_age(seconds) when is_integer(seconds) and seconds >= 0 do
-    :telemetry.execute(
+    execute_if_enabled(
       [:starcite, :archive, :queue_age],
       %{seconds: seconds},
       %{}
     )
+
+    :ok
+  end
+
+  defp execute_if_enabled(event_name, measurements, metadata)
+       when is_list(event_name) and is_map(measurements) and is_map(metadata) do
+    if enabled?() do
+      :telemetry.execute(event_name, measurements, metadata)
+    end
 
     :ok
   end

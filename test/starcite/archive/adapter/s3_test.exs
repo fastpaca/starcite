@@ -2,6 +2,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.Adapter.S3
+  alias Starcite.Auth.Principal
 
   defmodule FakeClient do
     @store __MODULE__.Store
@@ -102,8 +103,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-a",
                title: "A",
-               creator_principal: nil,
-               metadata: %{"tenant_id" => "acme"},
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
                created_at: created_at
              })
 
@@ -111,8 +113,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-b",
                title: "B",
-               creator_principal: nil,
-               metadata: %{"tenant_id" => "acme"},
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
                created_at: created_at
              })
 
@@ -120,8 +123,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-c",
                title: "C",
-               creator_principal: nil,
-               metadata: %{"tenant_id" => "beta"},
+               tenant_id: "beta",
+               creator_principal: principal_for_tenant("beta"),
+               metadata: %{},
                created_at: created_at
              })
 
@@ -129,13 +133,14 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.upsert_session(%{
                id: "ses-a",
                title: "A-overwrite-attempt",
-               creator_principal: nil,
-               metadata: %{"tenant_id" => "wrong"},
+               tenant_id: "wrong",
+               creator_principal: principal_for_tenant("wrong"),
+               metadata: %{},
                created_at: created_at
              })
 
     assert {:ok, page_1} =
-             S3.list_sessions(%{limit: 1, cursor: nil, metadata: %{"tenant_id" => "acme"}})
+             S3.list_sessions(%{limit: 1, cursor: nil, metadata: %{}, tenant_id: "acme"})
 
     assert length(page_1.sessions) == 1
     assert is_binary(page_1.next_cursor)
@@ -144,7 +149,8 @@ defmodule Starcite.Archive.Adapter.S3Test do
              S3.list_sessions(%{
                limit: 2,
                cursor: page_1.next_cursor,
-               metadata: %{"tenant_id" => "acme"}
+               metadata: %{},
+               tenant_id: "acme"
              })
 
     listed_ids =
@@ -159,7 +165,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
       |> Enum.find(&(&1.id == "ses-a"))
 
     assert session_a.title == "A"
-    assert session_a.metadata == %{"tenant_id" => "acme"}
+    assert session_a.tenant_id == "acme"
 
     assert {:ok, by_ids} =
              S3.list_sessions_by_ids(
@@ -187,5 +193,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
         inserted_at: inserted_at
       }
     end)
+  end
+
+  defp principal_for_tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "" do
+    %Principal{tenant_id: tenant_id, id: "s3-test", type: :service}
   end
 end

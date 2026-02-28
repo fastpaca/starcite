@@ -18,6 +18,16 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
+    get_events_from_cursor(id, cursor, limit, false)
+  end
+
+  def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
+
+  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer(), boolean()) ::
+          {:ok, [map()]} | {:error, term()}
+  def get_events_from_cursor(id, cursor, limit, prefer_leader)
+      when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
+             limit > 0 and is_boolean(prefer_leader) do
     group = RaftAccess.group_for_session(id)
 
     ReplicaRouter.call_on_replica(
@@ -28,11 +38,11 @@ defmodule Starcite.ReadPath do
       __MODULE__,
       :rpc_get_events_from_cursor,
       [id, cursor, limit],
-      prefer_leader: false
+      prefer_leader: prefer_leader
     )
   end
 
-  def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
+  def get_events_from_cursor(_id, _cursor, _limit, _prefer_leader), do: {:error, :invalid_cursor}
 
   @doc false
   def rpc_get_events_from_cursor(id, cursor, limit)

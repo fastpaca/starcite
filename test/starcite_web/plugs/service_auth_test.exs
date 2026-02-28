@@ -6,6 +6,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.AuthTestSupport
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.JWKS
   alias StarciteWeb.Plugs.ServiceAuth
 
@@ -111,7 +112,11 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     Application.put_env(:starcite, @auth_env_key, mode: :none)
     conn = conn(:get, "/")
 
-    assert {:ok, %{kind: :none}} = ServiceAuth.authenticate_conn(conn)
+    assert {:ok,
+            %Context{
+              kind: :none,
+              principal: %Principal{tenant_id: "service", id: "service", type: :service}
+            }} = ServiceAuth.authenticate_conn(conn)
   end
 
   test "authenticate_token rejects non-binary token values" do
@@ -133,16 +138,13 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
     assert {:ok, auth_context} = ServiceAuth.authenticate_token(token)
     assert auth_context.kind == :jwt
-    assert auth_context.tenant_id == "acme"
-    assert auth_context.subject == "user:user-42"
     assert auth_context.session_id == "ses-1"
     assert auth_context.scopes == ["session:create", "session:read", "session:append"]
     assert auth_context.principal == %Principal{tenant_id: "acme", id: "user-42", type: :user}
-    assert auth_context.bearer_token == token
     assert is_integer(auth_context.expires_at)
   end
 
-  test "authenticate_token accepts non user/agent sub without principal struct" do
+  test "authenticate_token extracts a service principal from svc subject" do
     {private_key, kid} = jwt_signing_fixture!()
 
     token =
@@ -153,8 +155,43 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
         "scopes" => ["session:read"]
       })
 
-    assert {:ok, %{subject: "svc:customer-a", principal: nil}} =
+    assert {:ok,
+            %Context{
+              principal: %Principal{tenant_id: "acme", id: "customer-a", type: :service}
+            }} =
              ServiceAuth.authenticate_token(token)
+  end
+
+  test "authenticate_token extracts a service principal from org subject" do
+    {private_key, kid} = jwt_signing_fixture!()
+
+    token =
+      private_key
+      |> sign_token(kid, %{
+        "tenant_id" => "anor-ai",
+        "sub" => "org:anor-ai",
+        "scopes" => ["session:read"]
+      })
+
+    assert {:ok,
+            %Context{
+              principal: %Principal{tenant_id: "anor-ai", id: "anor-ai", type: :service}
+            }} =
+             ServiceAuth.authenticate_token(token)
+  end
+
+  test "authenticate_token rejects unsupported subject principal types" do
+    {private_key, kid} = jwt_signing_fixture!()
+
+    token =
+      private_key
+      |> sign_token(kid, %{
+        "tenant_id" => "acme",
+        "sub" => "device:edge-1",
+        "scopes" => ["session:read"]
+      })
+
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
   test "authenticate_token rejects jwt missing tenant_id claim" do

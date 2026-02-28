@@ -9,12 +9,10 @@ defmodule Starcite.DataPlane.ReplicaRouter do
   require Logger
 
   alias Starcite.ControlPlane.Observer
-  alias Starcite.Observability.Telemetry
   alias Starcite.DataPlane.RaftManager
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache
-  @emit_routing_telemetry Application.compile_env(:starcite, :emit_routing_telemetry, false)
   @leader_cache_ttl_ms Application.compile_env(:starcite, :route_leader_cache_ttl_ms, 10_000)
   @leader_probe_timeout_ms 50
 
@@ -41,42 +39,19 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       when is_integer(group_id) and group_id >= 0 and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    {target, route_meta} = route_target_with_meta(group_id, route_opts)
-
-    :ok =
-      maybe_emit_routing_decision(
-        group_id,
-        route_meta.target,
-        route_meta.prefer_leader,
-        route_meta.leader_hint,
-        route_meta.replica_count,
-        route_meta.ready_count
-      )
+    target = route_target(group_id, route_opts)
 
     case target do
       {:local, _node} ->
-        result = apply(local_module, local_fun, local_args)
-
-        :ok =
-          maybe_emit_routing_result(
-            group_id,
-            :local,
-            result_outcome(result),
-            1,
-            0,
-            0
-          )
-
-        result
+        apply(local_module, local_fun, local_args)
 
       {:remote, []} ->
-        :ok = maybe_emit_routing_result(group_id, :remote, :no_candidates, 0, 0, 0)
         {:error, {:no_available_replicas, []}}
 
       {:remote, nodes} ->
         allowed_nodes = MapSet.new(nodes)
 
-        {result, stats} =
+        {result, _stats} =
           try_remote(
             nodes,
             remote_module,
@@ -86,18 +61,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             %{},
             [],
             %{attempts: 0, leader_redirects: 0}
-          )
-
-        retries = max(stats.attempts - 1, 0)
-
-        :ok =
-          maybe_emit_routing_result(
-            group_id,
-            :remote,
-            result_outcome(result),
-            stats.attempts,
-            retries,
-            stats.leader_redirects
           )
 
         result
@@ -530,51 +493,6 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     %{stats | leader_redirects: count + 1}
   end
 
-  defp result_outcome({:ok, _}), do: :ok
-  defp result_outcome(:ok), do: :ok
-  defp result_outcome({:timeout, _}), do: :timeout
-  defp result_outcome({:badrpc, _}), do: :badrpc
-  defp result_outcome({:error, {:no_available_replicas, _}}), do: :no_candidates
-  defp result_outcome({:error, _}), do: :error
-  defp result_outcome(_), do: :other
-
   defp node_hint?(value) when is_atom(value) and not is_nil(value), do: true
   defp node_hint?(_value), do: false
-
-  defp maybe_emit_routing_decision(
-         group_id,
-         target,
-         prefer_leader,
-         leader_hint,
-         replica_count,
-         ready_count
-       ) do
-    if @emit_routing_telemetry do
-      Telemetry.routing_decision(
-        group_id,
-        target,
-        prefer_leader,
-        leader_hint,
-        replica_count,
-        ready_count
-      )
-    else
-      :ok
-    end
-  end
-
-  defp maybe_emit_routing_result(
-         group_id,
-         path,
-         outcome,
-         attempts,
-         retries,
-         leader_redirects
-       ) do
-    if @emit_routing_telemetry do
-      Telemetry.routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
-    else
-      :ok
-    end
-  end
 end

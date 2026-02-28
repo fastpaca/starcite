@@ -72,12 +72,14 @@ defmodule Starcite.Archive.Adapter.Postgres do
   def upsert_session(%{
         id: id,
         title: title,
+        tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
         created_at: %DateTime{} = created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
+             is_binary(tenant_id) and tenant_id != "" and
+             is_struct(creator_principal, Principal) and
              is_map(metadata) do
     {_inserted, _} =
       Repo.insert_all(
@@ -86,6 +88,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
           %{
             id: id,
             title: title,
+            tenant_id: tenant_id,
             creator_principal: creator_principal,
             metadata: metadata,
             created_at: created_at
@@ -191,16 +194,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   defp apply_tenant_filter(query, nil), do: query
 
   defp apply_tenant_filter(query, tenant_id) when is_binary(tenant_id) and tenant_id != "" do
-    where(
-      query,
-      [s],
-      fragment(
-        "COALESCE(?->>'tenant_id', ?->>'tenant_id') = ?",
-        s.metadata,
-        s.creator_principal,
-        ^tenant_id
-      )
-    )
+    where(query, [s], s.tenant_id == ^tenant_id)
   end
 
   defp apply_tenant_filter(query, _invalid_filter), do: where(query, [s], false)
@@ -268,6 +262,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
     %{
       id: session.id,
       title: session.title,
+      tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
       created_at: DateTime.to_iso8601(session.created_at)

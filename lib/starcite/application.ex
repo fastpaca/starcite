@@ -42,14 +42,9 @@ defmodule Starcite.Application do
 
   defp prom_ex_spec do
     prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
-    metrics_server = Keyword.get(prom_ex_opts, :metrics_server, :disabled)
-    grafana_agent = Keyword.get(prom_ex_opts, :grafana_agent, :disabled)
+    enabled = Keyword.get(prom_ex_opts, :enabled, true)
 
-    if metrics_server == :disabled and grafana_agent == :disabled do
-      nil
-    else
-      Starcite.Observability.PromEx
-    end
+    if enabled == true, do: Starcite.Observability.PromEx, else: nil
   end
 
   defp repo_spec do

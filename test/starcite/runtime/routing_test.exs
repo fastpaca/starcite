@@ -83,8 +83,8 @@ defmodule Starcite.Runtime.RoutingTest do
     end
   end
 
-  describe "call_on_replica/8 telemetry" do
-    test "emits routing decision and result for local execution" do
+  describe "call_on_replica/8 hot-path behavior" do
+    test "does not emit routing telemetry for local execution" do
       group_id = unique_group_id()
       handler_id = attach_routing_handler()
 
@@ -106,28 +106,10 @@ defmodule Starcite.Runtime.RoutingTest do
                  prefer_leader: false
                )
 
-      events = collect_routing_events(group_id, 2)
-
-      assert {[:starcite, :routing, :decision], decision_measurements, decision_metadata} =
-               Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :decision] end)
-
-      assert decision_measurements.count == 1
-      assert decision_metadata.target == :local
-      assert decision_metadata.leader_hint == :disabled
-      assert decision_metadata.prefer_leader == false
-
-      assert {[:starcite, :routing, :result], result_measurements, result_metadata} =
-               Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :result] end)
-
-      assert result_measurements.count == 1
-      assert result_measurements.attempts == 1
-      assert result_measurements.retries == 0
-      assert result_measurements.leader_redirects == 0
-      assert result_metadata.path == :local
-      assert result_metadata.outcome == :ok
+      refute_receive {:routing_event, _event, _measurements, _metadata}, 100
     end
 
-    test "emits retry statistics for remote fallback execution" do
+    test "does not emit routing telemetry for remote fallback execution" do
       group_id = unique_group_id()
       handler_id = attach_routing_handler()
 
@@ -154,24 +136,7 @@ defmodule Starcite.Runtime.RoutingTest do
                )
 
       assert length(failures) == 2
-
-      events = collect_routing_events(group_id, 2)
-
-      assert {[:starcite, :routing, :decision], _decision_measurements, decision_metadata} =
-               Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :decision] end)
-
-      assert decision_metadata.target == :remote
-      assert decision_metadata.prefer_leader == true
-      assert decision_metadata.leader_hint in [:miss, :hit]
-
-      assert {[:starcite, :routing, :result], result_measurements, result_metadata} =
-               Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :result] end)
-
-      assert result_measurements.attempts == 2
-      assert result_measurements.retries == 1
-      assert result_measurements.leader_redirects >= 0
-      assert result_metadata.path == :remote
-      assert result_metadata.outcome == :no_candidates
+      refute_receive {:routing_event, _event, _measurements, _metadata}, 100
     end
   end
 
@@ -214,24 +179,5 @@ defmodule Starcite.Runtime.RoutingTest do
       :starcite_replica_router_leader_cache,
       {group_id, node, System.monotonic_time(:millisecond)}
     )
-  end
-
-  defp collect_routing_events(group_id, count) when is_integer(count) and count > 0 do
-    do_collect_routing_events(group_id, count, [])
-  end
-
-  defp do_collect_routing_events(_group_id, 0, acc), do: Enum.reverse(acc)
-
-  defp do_collect_routing_events(group_id, remaining, acc) do
-    receive do
-      {:routing_event, event, measurements, %{group_id: ^group_id} = metadata} ->
-        do_collect_routing_events(group_id, remaining - 1, [{event, measurements, metadata} | acc])
-
-      {:routing_event, _event, _measurements, _metadata} ->
-        do_collect_routing_events(group_id, remaining, acc)
-    after
-      1_000 ->
-        flunk("timed out waiting for routing telemetry events")
-    end
   end
 end

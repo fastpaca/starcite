@@ -11,6 +11,7 @@ defmodule StarciteWeb.TailController do
   use StarciteWeb, :controller
 
   alias Starcite.ReadPath
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
@@ -34,7 +35,8 @@ defmodule StarciteWeb.TailController do
           session_id: id,
           cursor: cursor,
           frame_batch_size: frame_batch_size,
-          auth_expires_at: auth_expires_at(auth)
+          principal: auth.principal,
+          auth_context: auth
         },
         timeout: 120_000
       )
@@ -44,7 +46,7 @@ defmodule StarciteWeb.TailController do
 
   def tail(_conn, _params), do: {:error, :invalid_session_id}
 
-  defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
+  defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
   defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
@@ -105,10 +107,4 @@ defmodule StarciteWeb.TailController do
 
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
   end
-
-  defp auth_expires_at(%{expires_at: expires_at})
-       when is_integer(expires_at) and expires_at > 0,
-       do: expires_at
-
-  defp auth_expires_at(_auth), do: nil
 end

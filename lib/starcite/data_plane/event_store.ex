@@ -19,12 +19,6 @@ defmodule Starcite.DataPlane.EventStore do
   alias Starcite.DataPlane.EventStore.EventQueue
   alias Starcite.Session.Event
 
-  @emit_event_store_write_telemetry Application.compile_env(
-                                      :starcite,
-                                      :emit_event_store_write_telemetry,
-                                      false
-                                    )
-
   @default_max_memory_bytes 2_147_483_648
   @default_capacity_check_interval 4
   @default_cache_reclaim_fraction 0.25
@@ -54,13 +48,17 @@ defmodule Starcite.DataPlane.EventStore do
   This path does not reject committed writes under pressure; it emits
   backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_event(String.t(), Event.t()) :: :ok
-  def put_event(session_id, %{seq: seq} = event)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    maybe_emit_backpressure(ensure_capacity_for_put_event(session_id, event), session_id)
+  @spec put_event(String.t(), String.t(), Event.t()) :: :ok
+  def put_event(session_id, tenant_id, %{seq: seq} = event)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(seq) and seq > 0 do
+    maybe_emit_backpressure(
+      ensure_capacity_for_put_event(session_id, event),
+      session_id,
+      tenant_id
+    )
 
     :ok = EventQueue.put_event(session_id, seq, event)
-    :ok = emit_event_store_write_telemetry(session_id, event)
     :ok
   end
 
@@ -70,13 +68,13 @@ defmodule Starcite.DataPlane.EventStore do
   This path does not reject committed writes under pressure; it emits
   backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_events(String.t(), [Event.t()]) :: :ok
-  def put_events(session_id, events)
-      when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
-    maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id)
+  @spec put_events(String.t(), String.t(), [Event.t()]) :: :ok
+  def put_events(session_id, tenant_id, events)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_list(events) and events != [] do
+    maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id, tenant_id)
 
     :ok = EventQueue.put_events(session_id, events)
-    :ok = emit_event_store_write_telemetry(session_id, events)
     :ok
   end
 
@@ -233,11 +231,13 @@ defmodule Starcite.DataPlane.EventStore do
 
   defp maybe_emit_backpressure(
          {:error, :event_store_backpressure, metadata},
-         session_id
+         session_id,
+         tenant_id
        )
-       when is_binary(session_id) and is_map(metadata) do
+       when is_binary(session_id) and is_binary(tenant_id) and is_map(metadata) do
     Telemetry.event_store_backpressure(
       session_id,
+      tenant_id,
       metadata.current_memory_bytes,
       metadata.max_memory_bytes,
       metadata.reason
@@ -246,7 +246,7 @@ defmodule Starcite.DataPlane.EventStore do
     :ok
   end
 
-  defp maybe_emit_backpressure(_result, _session_id), do: :ok
+  defp maybe_emit_backpressure(_result, _session_id, _tenant_id), do: :ok
 
   defp max_memory_bytes_limit do
     raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)
@@ -332,28 +332,6 @@ defmodule Starcite.DataPlane.EventStore do
       _ ->
         @default_cache_reclaim_fraction
     end
-  end
-
-  if @emit_event_store_write_telemetry do
-    defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
-    defp payload_bytes(_event), do: 0
-
-    defp emit_event_store_write_telemetry(session_id, %{seq: seq} = event)
-         when is_binary(session_id) and is_integer(seq) and seq > 0 and is_map(event) do
-      :ok = Telemetry.event_store_write(session_id, seq, payload_bytes(event))
-      :ok
-    end
-
-    defp emit_event_store_write_telemetry(session_id, events)
-         when is_binary(session_id) and is_list(events) do
-      Enum.each(events, fn %{seq: seq} = event ->
-        :ok = Telemetry.event_store_write(session_id, seq, payload_bytes(event))
-      end)
-
-      :ok
-    end
-  else
-    defp emit_event_store_write_telemetry(_session_id, _event_or_events), do: :ok
   end
 
   defp archive_cache_memory_bytes do

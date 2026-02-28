@@ -11,14 +11,10 @@ defmodule Starcite.WritePath do
     SessionStore
   }
 
+  alias Starcite.Auth.Principal
   alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
-  @emit_raft_command_result_telemetry Application.compile_env(
-                                        :starcite,
-                                        :emit_raft_command_result_telemetry,
-                                        false
-                                      )
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -29,8 +25,82 @@ defmodule Starcite.WritePath do
       end
 
     title = Keyword.get(opts, :title)
-    creator_principal = Keyword.get(opts, :creator_principal)
     metadata = Keyword.get(opts, :metadata, %{})
+
+    if is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and is_map(metadata) do
+      dispatch_create_session(
+        id,
+        title,
+        Keyword.get(opts, :creator_principal),
+        Keyword.get(opts, :tenant_id),
+        metadata
+      )
+    else
+      {:error, :invalid_session}
+    end
+  end
+
+  @doc false
+  def create_session_local(id, title, creator_principal, tenant_id, metadata)
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
+             is_map(metadata) do
+    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
+      process_command_with_leader_retry(
+        server_id,
+        {:create_session, id, title, creator_principal, tenant_id, metadata}
+      )
+    end
+  end
+
+  def create_session_local(_id, _title, _creator_principal, _tenant_id, _metadata),
+    do: {:error, :invalid_session}
+
+  defp dispatch_create_session(
+         id,
+         title,
+         %Principal{tenant_id: tenant_id} = creator_principal,
+         tenant_id,
+         metadata
+       )
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
+    do_create_session(id, title, creator_principal, tenant_id, metadata)
+  end
+
+  defp dispatch_create_session(
+         id,
+         title,
+         %Principal{tenant_id: tenant_id} = creator_principal,
+         nil,
+         metadata
+       )
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
+    do_create_session(id, title, creator_principal, tenant_id, metadata)
+  end
+
+  defp dispatch_create_session(id, title, nil, tenant_id, metadata)
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
+    {:ok, creator_principal} = Principal.new(tenant_id, "service", :service)
+    do_create_session(id, title, creator_principal, tenant_id, metadata)
+  end
+
+  defp dispatch_create_session(id, title, nil, nil, metadata)
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) do
+    {:ok, creator_principal} = Principal.new("service", "service", :service)
+    do_create_session(id, title, creator_principal, "service", metadata)
+  end
+
+  defp dispatch_create_session(_id, _title, _creator_principal, _tenant_id, _metadata),
+    do: {:error, :invalid_session}
+
+  defp do_create_session(id, title, creator_principal, tenant_id, metadata)
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
+              is_map(metadata) do
     group = RaftAccess.group_for_session(id)
 
     result =
@@ -38,42 +108,29 @@ defmodule Starcite.WritePath do
         {:ok, server_id} ->
           process_command_with_leader_retry(
             server_id,
-            {:create_session, id, title, creator_principal, metadata}
+            {:create_session, id, title, creator_principal, tenant_id, metadata}
           )
 
         :error ->
-          call_remote(group, :create_session_local, [id, title, creator_principal, metadata])
+          call_remote(
+            group,
+            :create_session_local,
+            [id, title, creator_principal, tenant_id, metadata]
+          )
       end
 
     case result do
       {:ok, session} = ok ->
         # Keep archive session catalog in sync for list/get lookups backed by cold storage.
-        _ = maybe_index_session(session, creator_principal)
+        _ = maybe_index_session(session, creator_principal, tenant_id)
         # Warm local session cache so immediate same-node reads stay on the RAM path.
-        _ = maybe_cache_session(id, title, creator_principal, metadata)
+        _ = maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
         ok
 
       other ->
         other
     end
   end
-
-  @doc false
-  def create_session_local(id, title, creator_principal, metadata)
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             (is_struct(creator_principal, Starcite.Auth.Principal) or
-                is_nil(creator_principal)) and
-             is_map(metadata) do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command_with_leader_retry(
-        server_id,
-        {:create_session, id, title, creator_principal, metadata}
-      )
-    end
-  end
-
-  def create_session_local(_id, _title, _creator_principal, _metadata),
-    do: {:error, :invalid_session}
 
   @spec append_event(String.t(), map()) ::
           {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
@@ -106,7 +163,11 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
 
       :error ->
-        call_remote(group, :append_event_local, [id, event, opts])
+        call_remote(
+          group,
+          :append_event_local,
+          [id, event, opts]
+        )
     end
   end
 
@@ -191,16 +252,17 @@ defmodule Starcite.WritePath do
            metadata: metadata,
            created_at: created_at
          },
-         creator_principal
+         creator_principal,
+         tenant_id
        )
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-              (is_struct(creator_principal, Starcite.Auth.Principal) or
-                 is_nil(creator_principal)) and
+              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
               is_map(metadata) do
     row = %{
       id: id,
       title: title,
       creator_principal: creator_principal,
+      tenant_id: tenant_id,
       metadata: metadata,
       created_at: parse_utc_datetime!(created_at)
     }
@@ -211,27 +273,29 @@ defmodule Starcite.WritePath do
     end
   end
 
-  defp maybe_index_session(_session, _creator_principal), do: :ok
+  defp maybe_index_session(_session, _creator_principal, _tenant_id), do: :ok
 
-  defp maybe_cache_session(id, title, creator_principal, metadata)
+  defp maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-              (is_struct(creator_principal, Starcite.Auth.Principal) or
-                 is_nil(creator_principal)) and
+              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
               is_map(metadata) do
     session =
       Session.new(id,
         title: title,
         creator_principal: creator_principal,
+        tenant_id: tenant_id,
         metadata: metadata
       )
 
     SessionStore.put_session(session)
   end
 
-  defp maybe_cache_session(_id, _title, _creator_principal, _metadata), do: :ok
+  defp maybe_cache_session(_id, _title, _creator_principal, _tenant_id, _metadata), do: :ok
 
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
+    route_opts = [prefer_leader: false]
+
     ReplicaRouter.call_on_replica(
       group_id,
       __MODULE__,
@@ -240,7 +304,7 @@ defmodule Starcite.WritePath do
       __MODULE__,
       fun,
       args,
-      prefer_leader: false
+      route_opts
     )
   end
 
@@ -264,7 +328,6 @@ defmodule Starcite.WritePath do
       end
 
     :ok = RaftBootstrap.record_write_outcome(outcome)
-    :ok = maybe_emit_raft_command_result(command, outcome)
     final_result
   end
 
@@ -299,30 +362,6 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
-
-  if @emit_raft_command_result_telemetry do
-    defp maybe_emit_raft_command_result(command, outcome)
-         when outcome in [
-                :local_ok,
-                :local_error,
-                :local_timeout,
-                :leader_retry_ok,
-                :leader_retry_error,
-                :leader_retry_timeout
-              ] do
-      Starcite.Observability.Telemetry.raft_command_result(command_type(command), outcome)
-      :ok
-    end
-
-    defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
-      do: :create_session
-
-    defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
-    defp command_type({:append_events, _id, _events, _opts}), do: :append_events
-    defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
-  else
-    defp maybe_emit_raft_command_result(_command, _outcome), do: :ok
-  end
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

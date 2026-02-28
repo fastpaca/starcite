@@ -267,7 +267,7 @@ defmodule Starcite.RuntimeTest do
       missing_id = unique_id("missing")
 
       :ok =
-        EventStore.put_event(missing_id, %{
+        EventStore.put_event(missing_id, "acme", %{
           seq: 1,
           type: "content",
           payload: %{text: "rogue"},

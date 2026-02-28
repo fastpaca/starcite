@@ -1,6 +1,7 @@
 defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.WritePath
   alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
@@ -18,10 +19,11 @@ defmodule StarciteWeb.TailSocketTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  defp base_state(session_id, cursor) do
+  defp base_state(session_id, cursor, principal \\ nil) do
     %{
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
+      principal: principal,
       cursor: cursor,
       frame_batch_size: 1,
       replay_queue: :queue.new(),
@@ -67,7 +69,7 @@ defmodule StarciteWeb.TailSocketTest do
   describe "replay/live boundary" do
     test "replays first, then flushes buffered live events in order without duplicates" do
       session_id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
       {:ok, _} =
         append_event(session_id, %{
@@ -208,9 +210,6 @@ defmodule StarciteWeb.TailSocketTest do
       assert 1 == EventStore.delete_below(session_id, 2)
       assert :error = EventStore.get_event(session_id, 1)
 
-      handler_id = attach_tail_lookup_handler()
-      on_exit(fn -> detach_tail_lookup_handler(handler_id) end)
-
       state = %{base_state(session_id, 0) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
@@ -220,7 +219,6 @@ defmodule StarciteWeb.TailSocketTest do
       assert frame["seq"] == 1
       assert frame["payload"] == %{"state" => "running"}
       assert next_state.cursor == 1
-      refute_receive {:tail_lookup, _metadata}, 100
     end
 
     test "falls back to storage when a live cursor update misses ETS" do
@@ -229,7 +227,7 @@ defmodule StarciteWeb.TailSocketTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       session_id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
       {:ok, _} =
         append_event(session_id, %{
@@ -243,9 +241,6 @@ defmodule StarciteWeb.TailSocketTest do
       assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
       assert :error = EventStore.get_event(session_id, 1)
 
-      handler_id = attach_tail_lookup_handler()
-      on_exit(fn -> detach_tail_lookup_handler(handler_id) end)
-
       update = %{
         version: 1,
         session_id: session_id,
@@ -257,20 +252,15 @@ defmodule StarciteWeb.TailSocketTest do
         inserted_at: NaiveDateTime.utc_now()
       }
 
-      state = %{base_state(session_id, 0) | replay_done: true}
+      state = %{base_state(session_id, 0, principal_for_tenant("acme")) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
                TailSocket.handle_info({:cursor_update, update}, state)
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
+      assert frame["payload"] == %{"text" => "one"}
       assert next_state.cursor == 1
-
-      assert_receive {:tail_lookup,
-                      %{session_id: ^session_id, seq: 1, source: :ets, result: :miss}}
-
-      assert_receive {:tail_lookup,
-                      %{session_id: ^session_id, seq: 1, source: :storage, result: :hit}}
     end
 
     test "handles delayed cursor updates after archive compaction race" do
@@ -343,27 +333,6 @@ defmodule StarciteWeb.TailSocketTest do
     end
   end
 
-  defp attach_tail_lookup_handler do
-    handler_id = "tail-lookup-#{System.unique_integer([:positive, :monotonic])}"
-    test_pid = self()
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:starcite, :tail, :cursor_lookup],
-        fn _event, _measurements, metadata, pid ->
-          send(pid, {:tail_lookup, metadata})
-        end,
-        test_pid
-      )
-
-    handler_id
-  end
-
-  defp detach_tail_lookup_handler(handler_id) when is_binary(handler_id) do
-    :telemetry.detach(handler_id)
-  end
-
   defp with_archive_adapter(adapter_mod) when is_atom(adapter_mod) do
     previous = Application.get_env(:starcite, :archive_adapter)
     Application.put_env(:starcite, :archive_adapter, adapter_mod)
@@ -417,6 +386,10 @@ defmodule StarciteWeb.TailSocketTest do
     seq = Map.get(counters, key, 0) + 1
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
+  end
+
+  defp principal_for_tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "" do
+    %Principal{tenant_id: tenant_id, id: "tail-test", type: :service}
   end
 
   describe "auth lifetime" do

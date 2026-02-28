@@ -7,9 +7,10 @@ defmodule StarciteWeb.TailSocket do
 
   @behaviour WebSock
 
-  alias Starcite.Observability.Telemetry
+  alias Starcite.Auth.Principal
   alias Starcite.ReadPath
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias StarciteWeb.Auth.Context
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
@@ -17,15 +18,26 @@ defmodule StarciteWeb.TailSocket do
   @default_frame_batch_size 1
 
   @impl true
-  def init(%{session_id: session_id, cursor: cursor} = params) do
+  def init(
+        %{
+          session_id: session_id,
+          cursor: cursor,
+          principal: principal,
+          auth_context: %Context{} = auth_context
+        } = params
+      )
+      when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
+             (is_struct(principal, Principal) or is_nil(principal)) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
-    auth_expires_at = Map.get(params, :auth_expires_at)
+    auth_expires_at = auth_expires_at(auth_context)
     frame_batch_size = Map.get(params, :frame_batch_size, @default_frame_batch_size)
 
     state = %{
       session_id: session_id,
       topic: topic,
+      principal: principal,
+      auth_context: auth_context,
       cursor: cursor,
       frame_batch_size: frame_batch_size,
       replay_queue: :queue.new(),
@@ -96,7 +108,7 @@ defmodule StarciteWeb.TailSocket do
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        case resolve_cursor_update_event(state.session_id, update) do
+        case resolve_cursor_update_event(state.session_id, state.principal, update) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
             push_events_frame([event], next_state)
@@ -188,21 +200,26 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp resolve_buffered_value(%{session_id: session_id}, {:cursor_update, %{seq: seq} = update})
-       when is_integer(seq) and seq > 0 do
-    resolve_cursor_update_event(session_id, update)
+  defp resolve_buffered_value(
+         %{session_id: session_id, principal: principal},
+         {:cursor_update, %{seq: seq} = update}
+       )
+       when is_binary(session_id) and is_integer(seq) and seq > 0 and
+              (is_struct(principal, Principal) or is_nil(principal)) do
+    resolve_cursor_update_event(session_id, principal, update)
   end
 
   defp resolve_buffered_value(_state, _value), do: :error
 
-  defp resolve_cursor_update_event(session_id, %{seq: seq} = update)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp resolve_cursor_update_event(session_id, principal, %{seq: seq} = update)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+              (is_struct(principal, Principal) or is_nil(principal)) do
     case event_from_cursor_update(update, seq) do
       {:ok, event} ->
         {:ok, event}
 
       :error ->
-        read_event_for_tail(session_id, seq)
+        read_event_for_tail(session_id, principal, seq)
     end
   end
 
@@ -213,28 +230,26 @@ defmodule StarciteWeb.TailSocket do
 
   defp event_from_cursor_update(_update, _seq), do: :error
 
-  defp read_event_for_tail(session_id, seq)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp read_event_for_tail(session_id, principal, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+              (is_struct(principal, Principal) or is_nil(principal)) do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :hit)
         {:ok, event}
 
       :error ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :ets, :miss)
-        read_event_from_storage(session_id, seq)
+        read_event_from_storage(session_id, principal, seq)
     end
   end
 
-  defp read_event_from_storage(session_id, seq)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp read_event_from_storage(session_id, principal, seq)
+       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+              (is_struct(principal, Principal) or is_nil(principal)) do
     case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :hit)
         {:ok, event}
 
       _ ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, seq, :storage, :miss)
         :error
     end
   end
@@ -285,6 +300,12 @@ defmodule StarciteWeb.TailSocket do
   defp close_for_auth_error(:token_expired, state) do
     {:stop, :token_expired, {4001, "token_expired"}, state}
   end
+
+  defp auth_expires_at(%Context{expires_at: expires_at})
+       when is_integer(expires_at) and expires_at > 0,
+       do: expires_at
+
+  defp auth_expires_at(%Context{}), do: nil
 
   defp take_replay_events(queue, max_count)
        when is_integer(max_count) and max_count >= @default_frame_batch_size do

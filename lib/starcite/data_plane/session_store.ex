@@ -220,13 +220,21 @@ defmodule Starcite.DataPlane.SessionStore do
 
   defp session_from_archive_row(
          session_id,
-         %{id: session_id, title: title, creator_principal: creator_principal, metadata: metadata}
+         %{
+           id: session_id,
+           title: title,
+           tenant_id: tenant_id,
+           creator_principal: creator_principal,
+           metadata: metadata
+         }
        )
-       when (is_binary(title) or is_nil(title)) and is_map(metadata) and
+       when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) and
               (is_map(creator_principal) or is_nil(creator_principal)) do
     {:ok,
      Session.new(session_id,
        title: title,
+       tenant_id: tenant_id,
        creator_principal: creator_principal,
        metadata: metadata
      )}

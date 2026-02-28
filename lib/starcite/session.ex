@@ -16,6 +16,7 @@ defmodule Starcite.Session do
 
   @enforce_keys [
     :id,
+    :tenant_id,
     :last_seq,
     :archived_seq,
     :inserted_at,
@@ -24,6 +25,7 @@ defmodule Starcite.Session do
   ]
   defstruct [
     :id,
+    :tenant_id,
     :title,
     :creator_principal,
     :metadata,
@@ -36,6 +38,7 @@ defmodule Starcite.Session do
 
   @type t :: %Session{
           id: String.t(),
+          tenant_id: String.t(),
           title: String.t() | nil,
           creator_principal: Principal.t() | nil,
           metadata: map(),
@@ -56,6 +59,11 @@ defmodule Starcite.Session do
   def new(id, opts \\ []) when is_binary(id) do
     now = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
 
+    creator_principal =
+      optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal)
+
+    tenant_id = resolve_tenant_id!(Keyword.get(opts, :tenant_id), creator_principal)
+
     tail_keep =
       Keyword.get(
         opts,
@@ -72,9 +80,9 @@ defmodule Starcite.Session do
 
     %Session{
       id: id,
+      tenant_id: tenant_id,
       title: Keyword.get(opts, :title),
-      creator_principal:
-        optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal),
+      creator_principal: creator_principal,
       metadata: Keyword.get(opts, :metadata, %{}),
       last_seq: 0,
       archived_seq: 0,
@@ -212,6 +220,7 @@ defmodule Starcite.Session do
           idempotency_key: idempotency_key,
           producer_id: producer_id,
           producer_seq: producer_seq,
+          tenant_id: session.tenant_id,
           inserted_at: now
         }
 
@@ -347,8 +356,24 @@ defmodule Starcite.Session do
 
   defp principal_type!("user", _field), do: :user
   defp principal_type!("agent", _field), do: :agent
+  defp principal_type!("service", _field), do: :service
+  defp principal_type!("svc", _field), do: :service
 
   defp principal_type!(value, field) do
     raise ArgumentError, "invalid session #{field} type: #{inspect(value)}"
+  end
+
+  defp resolve_tenant_id!(tenant_id, _creator_principal)
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp resolve_tenant_id!(nil, %Principal{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp resolve_tenant_id!(nil, nil), do: "service"
+
+  defp resolve_tenant_id!(value, _creator_principal) do
+    raise ArgumentError, "invalid session tenant_id: #{inspect(value)}"
   end
 end

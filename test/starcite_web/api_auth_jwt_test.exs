@@ -123,14 +123,16 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     configure_jwt_auth!(bypass)
 
+    session_id = unique_id("ses")
+
     token =
       token_for(private_key, kid, %{
         "sub" => "user:user-42",
-        "scope" => "session:create session:read session:append"
+        "scope" => "session:create session:read session:append",
+        "session_id" => session_id
       })
 
     auth_header = {"authorization", "Bearer #{token}"}
-    session_id = unique_id("ses")
 
     create_conn = json_conn(:post, "/v1/sessions", %{"id" => session_id}, [auth_header])
     assert create_conn.status == 201
@@ -153,14 +155,11 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     {:ok, [event]} = ReadPath.get_events_from_cursor(session_id, 0, 10)
     assert event.actor == "user:user-42"
     assert event.metadata["starcite_principal"]["tenant_id"] == "acme"
-    assert event.metadata["starcite_principal"]["subject"] == "user:user-42"
+    assert event.metadata["starcite_principal"]["actor"] == "user:user-42"
     assert event.metadata["starcite_principal"]["principal_type"] == "user"
     assert event.metadata["starcite_principal"]["principal_id"] == "user-42"
 
-    list_conn = json_conn(:get, "/v1/sessions", nil, [auth_header])
-    assert list_conn.status == 200
-    ids = Jason.decode!(list_conn.resp_body)["sessions"] |> Enum.map(& &1["id"])
-    assert session_id in ids
+    assert_session_list_contains(auth_header, session_id)
   end
 
   test "enforces scope checks for append and list" do
@@ -177,7 +176,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     configure_jwt_auth!(bypass)
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     read_only_token = token_for(private_key, kid, %{"scope" => "session:read"})
 
@@ -220,7 +219,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     configure_jwt_auth!(bypass)
     beta_session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: beta_session_id, metadata: %{"tenant_id" => "beta"})
+    {:ok, _} = WritePath.create_session(id: beta_session_id, tenant_id: "beta")
 
     token =
       token_for(private_key, kid, %{
@@ -350,7 +349,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     configure_jwt_auth!(bypass)
 
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     without_auth = conn_get("/v1/sessions/#{session_id}/tail?cursor=0", websocket_headers())
     assert without_auth.status == 401
@@ -454,6 +453,40 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     Enum.reduce(headers, conn, fn {name, value}, acc ->
       put_req_header(acc, name, value)
     end)
+  end
+
+  defp assert_session_list_contains(auth_header, session_id)
+       when is_tuple(auth_header) and is_binary(session_id) and session_id != "" do
+    eventually(
+      fn ->
+        list_conn = json_conn(:get, "/v1/sessions", nil, [auth_header])
+        assert list_conn.status == 200
+
+        ids = Jason.decode!(list_conn.resp_body)["sessions"] |> Enum.map(& &1["id"])
+        assert session_id in ids
+      end,
+      timeout: 2_000,
+      interval: 50
+    )
+  end
+
+  defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
+    timeout = Keyword.get(opts, :timeout, 1_000)
+    interval = Keyword.get(opts, :interval, 50)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline, interval)
+  end
+
+  defp do_eventually(fun, deadline, interval) do
+    fun.()
+  rescue
+    error in [ExUnit.AssertionError] ->
+      if System.monotonic_time(:millisecond) < deadline do
+        Process.sleep(interval)
+        do_eventually(fun, deadline, interval)
+      else
+        reraise(error, __STACKTRACE__)
+      end
   end
 
   defp unique_id(prefix) do

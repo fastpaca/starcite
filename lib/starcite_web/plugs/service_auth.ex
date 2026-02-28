@@ -12,8 +12,7 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   import Plug.Conn
 
   alias Plug.Conn
-  alias Starcite.Auth.Principal
-  alias StarciteWeb.Auth.{Config, JWT}
+  alias StarciteWeb.Auth.{Config, Context, Identity, JWT}
   alias StarciteWeb.Plugs.RedactSensitiveQuery
 
   @impl true
@@ -40,11 +39,11 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
     config().mode
   end
 
-  @spec authenticate_conn(Conn.t()) :: {:ok, map()} | {:error, atom()}
+  @spec authenticate_conn(Conn.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_conn(%Conn{} = conn) do
     case mode() do
       :none ->
-        {:ok, %{kind: :none}}
+        {:ok, Context.none()}
 
       :jwt ->
         with {:ok, token} <- bearer_token(conn),
@@ -54,34 +53,18 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
     end
   end
 
-  @spec authenticate_token(String.t()) :: {:ok, map()} | {:error, atom()}
+  @spec authenticate_token(String.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_token(token) when is_binary(token) and token != "" do
     case mode() do
       :none ->
-        {:ok, %{kind: :none}}
+        {:ok, Context.none()}
 
       :jwt ->
         cfg = config()
 
         with {:ok, claims} <- JWT.verify(token, cfg),
-             {:ok, exp} <- claim_exp(claims),
-             {:ok, tenant_id} <- claim_tenant_id(claims),
-             {:ok, scopes} <- claim_scopes(claims),
-             {:ok, session_id} <- claim_session_id(claims),
-             {:ok, subject} <- claim_subject(claims),
-             {:ok, principal} <- principal_from_subject(subject, tenant_id) do
-          {:ok,
-           %{
-             kind: :jwt,
-             claims: claims,
-             tenant_id: tenant_id,
-             scopes: scopes,
-             session_id: session_id,
-             subject: subject,
-             principal: principal,
-             expires_at: exp,
-             bearer_token: token
-           }}
+             {:ok, auth_context} <- Identity.from_jwt_claims(claims) do
+          {:ok, auth_context}
         end
     end
   end
@@ -130,77 +113,6 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   defp unauthorized_header(_reason) do
     ~s(Bearer realm="starcite", error="invalid_token")
   end
-
-  defp claim_exp(%{"exp" => exp}) when is_integer(exp) and exp >= 0, do: {:ok, exp}
-  defp claim_exp(_claims), do: {:error, :invalid_jwt_claims}
-
-  defp claim_tenant_id(%{"tenant_id" => tenant_id})
-       when is_binary(tenant_id) and tenant_id != "",
-       do: {:ok, tenant_id}
-
-  defp claim_tenant_id(_claims), do: {:error, :invalid_jwt_claims}
-
-  defp claim_scopes(claims) when is_map(claims) do
-    with {:ok, scope_values} <- scope_values(Map.get(claims, "scope")),
-         {:ok, scopes_values} <- scopes_values(Map.get(claims, "scopes")) do
-      scopes = Enum.uniq(scope_values ++ scopes_values)
-
-      if scopes == [] do
-        {:error, :invalid_jwt_claims}
-      else
-        {:ok, scopes}
-      end
-    end
-  end
-
-  defp claim_session_id(%{"session_id" => session_id})
-       when is_binary(session_id) and session_id != "", do: {:ok, session_id}
-
-  defp claim_session_id(%{"session_id" => nil}), do: {:ok, nil}
-  defp claim_session_id(%{"session_id" => _invalid}), do: {:error, :invalid_jwt_claims}
-  defp claim_session_id(_claims), do: {:ok, nil}
-
-  defp claim_subject(%{"sub" => subject}) when is_binary(subject) and subject != "",
-    do: {:ok, subject}
-
-  defp claim_subject(_claims), do: {:error, :invalid_jwt_claims}
-
-  defp principal_from_subject("user:" <> id, tenant_id)
-       when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
-    Principal.new(tenant_id, id, :user)
-  end
-
-  defp principal_from_subject("agent:" <> id, tenant_id)
-       when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
-    Principal.new(tenant_id, id, :agent)
-  end
-
-  defp principal_from_subject(_subject, _tenant_id), do: {:ok, nil}
-
-  defp scope_values(nil), do: {:ok, []}
-
-  defp scope_values(scope) when is_binary(scope) do
-    scope_values = String.split(scope, ~r/\s+/, trim: true)
-    {:ok, scope_values}
-  end
-
-  defp scope_values(_scope), do: {:error, :invalid_jwt_claims}
-
-  defp scopes_values(nil), do: {:ok, []}
-
-  defp scopes_values(scopes) when is_list(scopes) do
-    normalized = Enum.uniq(scopes)
-
-    if Enum.all?(normalized, &is_non_empty_string/1) do
-      {:ok, normalized}
-    else
-      {:error, :invalid_jwt_claims}
-    end
-  end
-
-  defp scopes_values(_scopes), do: {:error, :invalid_jwt_claims}
-
-  defp is_non_empty_string(value), do: is_binary(value) and value != ""
 
   defp authorization_token(%Conn{} = conn) do
     case Conn.get_req_header(conn, "authorization") do

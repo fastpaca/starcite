@@ -14,6 +14,7 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
+  alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
   alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
 
@@ -67,9 +68,9 @@ defmodule Starcite.Archive do
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
     # Queue age tracking is intentionally disabled for now; keep metric shape stable.
-    Starcite.Observability.Telemetry.archive_queue_age(0)
+    Telemetry.archive_queue_age(0)
 
-    Starcite.Observability.Telemetry.archive_flush(
+    Telemetry.archive_flush(
       elapsed_ms,
       stats.attempted,
       stats.inserted,
@@ -142,6 +143,7 @@ defmodule Starcite.Archive do
          pending_before,
          adapter
        ) do
+    tenant_id = archive_batch_tenant_id!(session_id, rows)
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
@@ -160,8 +162,9 @@ defmodule Starcite.Archive do
             pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
-            Starcite.Observability.Telemetry.archive_batch(
+            Telemetry.archive_batch(
               session_id,
+              tenant_id,
               attempted,
               bytes_attempted,
               avg_event_bytes,
@@ -207,6 +210,21 @@ defmodule Starcite.Archive do
       {:error, reason} ->
         raise "archive write failed for #{session_id}: #{inspect(reason)}"
     end
+  end
+
+  defp archive_batch_tenant_id!(session_id, [%{tenant_id: tenant_id} | rest])
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    if Enum.all?(rest, fn %{tenant_id: row_tenant_id} -> row_tenant_id == tenant_id end) do
+      tenant_id
+    else
+      raise "archive batch tenant mismatch for #{session_id}"
+    end
+  end
+
+  defp archive_batch_tenant_id!(session_id, rows)
+       when is_binary(session_id) and session_id != "" and is_list(rows) do
+    raise "archive batch missing tenant metadata for #{session_id}"
   end
 
   defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do

@@ -149,7 +149,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     pending_session_id = "ses-pending-pressure-#{System.unique_integer([:positive, :monotonic])}"
 
     assert :ok =
-             EventStore.put_event(pending_session_id, %{
+             EventStore.put_event(pending_session_id, "acme", %{
                seq: 1,
                type: "content",
                payload: %{n: 1},
@@ -169,7 +169,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     inserted_at = NaiveDateTime.utc_now()
 
     :ok =
-      EventStore.put_event(session_id, %{
+      EventStore.put_event(session_id, "acme", %{
         seq: 1,
         type: "content",
         payload: %{text: "hello"},
@@ -197,7 +197,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     for seq <- 1..5 do
       :ok =
-        EventStore.put_event(session_id, %{
+        EventStore.put_event(session_id, "acme", %{
           seq: seq,
           type: "content",
           payload: %{n: seq},
@@ -218,7 +218,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     for seq <- 1..4 do
       :ok =
-        EventStore.put_event(session_id, %{
+        EventStore.put_event(session_id, "acme", %{
           seq: seq,
           type: "content",
           payload: %{n: seq},
@@ -230,7 +230,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     end
 
     :ok =
-      EventStore.put_event(other_session, %{
+      EventStore.put_event(other_session, "acme", %{
         seq: 1,
         type: "content",
         payload: %{n: 1},
@@ -253,7 +253,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     session_b = "ses-index-b-#{System.unique_integer([:positive, :monotonic])}"
 
     :ok =
-      EventStore.put_event(session_a, %{
+      EventStore.put_event(session_a, "acme", %{
         seq: 1,
         type: "content",
         payload: %{n: 1},
@@ -264,7 +264,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
       })
 
     :ok =
-      EventStore.put_event(session_a, %{
+      EventStore.put_event(session_a, "acme", %{
         seq: 2,
         type: "content",
         payload: %{n: 2},
@@ -275,7 +275,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
       })
 
     :ok =
-      EventStore.put_event(session_b, %{
+      EventStore.put_event(session_b, "acme", %{
         seq: 1,
         type: "content",
         payload: %{n: 1},
@@ -297,7 +297,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     session_id = "ses-index-clean-#{System.unique_integer([:positive, :monotonic])}"
 
     :ok =
-      EventStore.put_event(session_id, %{
+      EventStore.put_event(session_id, "acme", %{
         seq: 1,
         type: "content",
         payload: %{n: 1},
@@ -308,7 +308,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
       })
 
     :ok =
-      EventStore.put_event(session_id, %{
+      EventStore.put_event(session_id, "acme", %{
         seq: 2,
         type: "content",
         payload: %{n: 2},
@@ -331,7 +331,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     inserted_at = NaiveDateTime.utc_now()
 
     assert :ok =
-             EventStore.put_event(session_id, %{
+             EventStore.put_event(session_id, "acme", %{
                seq: 1,
                type: "content",
                payload: %{n: 1},
@@ -342,7 +342,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
 
     assert :ok =
-             EventStore.put_event(session_id, %{
+             EventStore.put_event(session_id, "acme", %{
                seq: 2,
                type: "content",
                payload: %{n: 2},
@@ -359,7 +359,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     session_id = "ses-size-#{System.unique_integer([:positive, :monotonic])}"
 
     assert :ok =
-             EventStore.put_event(session_id, %{
+             EventStore.put_event(session_id, "acme", %{
                seq: 1,
                type: "content",
                payload: %{n: 1},
@@ -370,7 +370,7 @@ defmodule Starcite.DataPlane.EventStoreTest do
     with_env(:starcite, :event_store_max_bytes, 4_294_967_296)
 
     assert :ok =
-             EventStore.put_event(session_id, %{
+             EventStore.put_event(session_id, "acme", %{
                seq: 2,
                type: "content",
                payload: %{n: 2},
