@@ -94,8 +94,7 @@ defmodule Starcite.Archive do
               is_boolean(single_local_write_node) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
-           load_archived_seq(session_id, archived_seq_cache),
-         {:ok, tenant_id} <- RaftAccess.fetch_session_tenant_id(session_id) do
+           load_archived_seq(session_id, archived_seq_cache) do
       pending_before = max(max_seq - archived_seq, 0)
 
       cond do
@@ -114,7 +113,6 @@ defmodule Starcite.Archive do
             persist_rows(
               rows,
               session_id,
-              tenant_id,
               max_seq,
               pending_before,
               adapter
@@ -130,7 +128,6 @@ defmodule Starcite.Archive do
   defp persist_rows(
          [],
          _session_id,
-         _tenant_id,
          _max_seq,
          pending_before,
          _adapter
@@ -142,11 +139,11 @@ defmodule Starcite.Archive do
   defp persist_rows(
          rows,
          session_id,
-         tenant_id,
          max_seq,
          pending_before,
          adapter
        ) do
+    tenant_id = archive_batch_tenant_id!(session_id, rows)
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
@@ -213,6 +210,21 @@ defmodule Starcite.Archive do
       {:error, reason} ->
         raise "archive write failed for #{session_id}: #{inspect(reason)}"
     end
+  end
+
+  defp archive_batch_tenant_id!(session_id, [%{tenant_id: tenant_id} | rest])
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    if Enum.all?(rest, fn %{tenant_id: row_tenant_id} -> row_tenant_id == tenant_id end) do
+      tenant_id
+    else
+      raise "archive batch tenant mismatch for #{session_id}"
+    end
+  end
+
+  defp archive_batch_tenant_id!(session_id, rows)
+       when is_binary(session_id) and session_id != "" and is_list(rows) do
+    raise "archive batch missing tenant metadata for #{session_id}"
   end
 
   defp approx_bytes(%{payload: payload, metadata: metadata, refs: refs}) do
