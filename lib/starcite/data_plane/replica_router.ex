@@ -41,12 +41,12 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       when is_integer(group_id) and group_id >= 0 and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    tenant_id = tenant_id_for_route(route_opts, local_args, remote_args)
+    tenant_id = tenant_id_for_route(route_opts)
 
     {target, route_meta} = route_target_with_meta(group_id, route_opts)
 
     :ok =
-      maybe_emit_routing_decision(
+      Telemetry.routing_decision(
         group_id,
         tenant_id,
         route_meta.target,
@@ -61,7 +61,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         result = apply(local_module, local_fun, local_args)
 
         :ok =
-          maybe_emit_routing_result(
+          Telemetry.routing_result(
             group_id,
             tenant_id,
             :local,
@@ -75,7 +75,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
       {:remote, []} ->
         :ok =
-          maybe_emit_routing_result(
+          Telemetry.routing_result(
             group_id,
             tenant_id,
             :remote,
@@ -105,7 +105,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         retries = max(stats.attempts - 1, 0)
 
         :ok =
-          maybe_emit_routing_result(
+          Telemetry.routing_result(
             group_id,
             tenant_id,
             :remote,
@@ -556,48 +556,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
   defp node_hint?(value) when is_atom(value) and not is_nil(value), do: true
   defp node_hint?(_value), do: false
 
-  defp maybe_emit_routing_decision(
-         group_id,
-         tenant_id,
-         target,
-         prefer_leader,
-         leader_hint,
-         replica_count,
-         ready_count
-       ) do
-    Telemetry.routing_decision(
-      group_id,
-      tenant_id,
-      target,
-      prefer_leader,
-      leader_hint,
-      replica_count,
-      ready_count
-    )
-  end
-
-  defp maybe_emit_routing_result(
-         group_id,
-         tenant_id,
-         path,
-         outcome,
-         attempts,
-         retries,
-         leader_redirects
-       ) do
-    Telemetry.routing_result(
-      group_id,
-      tenant_id,
-      path,
-      outcome,
-      attempts,
-      retries,
-      leader_redirects
-    )
-  end
-
-  defp tenant_id_for_route(route_opts, _local_args, _remote_args)
-       when is_list(route_opts) do
+  defp tenant_id_for_route(route_opts) when is_list(route_opts) do
     case Keyword.get(route_opts, :tenant_id) do
       tenant_id when is_binary(tenant_id) and tenant_id != "" ->
         Tenancy.label(tenant_id)

@@ -262,7 +262,14 @@ defmodule Starcite.WritePath do
       end
 
     :ok = RaftBootstrap.record_write_outcome(outcome)
-    :ok = maybe_emit_raft_command_result(command, outcome)
+
+    :ok =
+      Telemetry.raft_command_result(
+        command_type(command),
+        outcome,
+        tenant_id_for_command(command)
+      )
+
     final_result
   end
 
@@ -297,24 +304,6 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
-
-  defp maybe_emit_raft_command_result(command, outcome)
-       when outcome in [
-              :local_ok,
-              :local_error,
-              :local_timeout,
-              :leader_retry_ok,
-              :leader_retry_error,
-              :leader_retry_timeout
-            ] do
-    Telemetry.raft_command_result(
-      command_type(command),
-      outcome,
-      tenant_id_for_command(command)
-    )
-
-    :ok
-  end
 
   defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
     do: :create_session

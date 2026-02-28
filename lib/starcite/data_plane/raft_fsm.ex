@@ -88,12 +88,18 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
       :ok = put_appended_event(session_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+      tenant_id = Tenancy.label_from_session(session)
 
-      emit_appended_event_telemetry(
-        session_id,
-        Tenancy.label_from_session(session),
-        event_to_store
-      )
+      if event_to_store do
+        Telemetry.event_appended(
+          session_id,
+          tenant_id,
+          event_to_store.type,
+          event_to_store.actor,
+          event_to_store.source,
+          payload_bytes(event_to_store.payload)
+        )
+      end
 
       effect = build_effect_for_event(session_id, event_to_store)
       reply = {:reply, {:ok, reply}}
@@ -119,7 +125,18 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
       :ok = put_appended_events(session_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-      emit_appended_telemetry(session_id, Tenancy.label_from_session(session), events_to_store)
+      tenant_id = Tenancy.label_from_session(session)
+
+      Enum.each(events_to_store, fn event ->
+        Telemetry.event_appended(
+          session_id,
+          tenant_id,
+          event.type,
+          event.actor,
+          event.source,
+          payload_bytes(event.payload)
+        )
+      end)
 
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
@@ -342,45 +359,6 @@ defmodule Starcite.DataPlane.RaftFSM do
       true -> state
       false -> Map.put(state, :last_checkpoint_index, nil)
     end
-  end
-
-  defp emit_appended_telemetry(_session_id, _tenant_id, []), do: :ok
-
-  defp emit_appended_telemetry(session_id, tenant_id, events)
-       when is_binary(session_id) and is_binary(tenant_id) and is_list(events) do
-    Enum.each(events, fn %{type: type, actor: actor, payload: payload} = event ->
-      Telemetry.event_appended(
-        session_id,
-        tenant_id,
-        type,
-        actor,
-        Map.get(event, :source),
-        payload_bytes(payload)
-      )
-    end)
-
-    :ok
-  end
-
-  defp emit_appended_event_telemetry(_session_id, _tenant_id, nil), do: :ok
-
-  defp emit_appended_event_telemetry(
-         session_id,
-         tenant_id,
-         %{type: type, actor: actor, payload: payload} = event
-       )
-       when is_binary(session_id) and is_binary(tenant_id) and is_binary(type) and
-              is_binary(actor) do
-    Telemetry.event_appended(
-      session_id,
-      tenant_id,
-      type,
-      actor,
-      Map.get(event, :source),
-      payload_bytes(payload)
-    )
-
-    :ok
   end
 
   defp build_effects_for_events(_session_id, []), do: []
