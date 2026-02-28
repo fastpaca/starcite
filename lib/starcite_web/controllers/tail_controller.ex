@@ -10,6 +10,7 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
+  alias Starcite.Observability.Tenancy
   alias Starcite.ReadPath
   alias StarciteWeb.Auth.Policy
 
@@ -27,6 +28,8 @@ defmodule StarciteWeb.TailController do
          :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- ReadPath.get_session(id),
          :ok <- Policy.allowed_to_read_session(auth, session) do
+      tenant_id = Tenancy.label_from_session(session)
+
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
@@ -34,6 +37,7 @@ defmodule StarciteWeb.TailController do
           session_id: id,
           cursor: cursor,
           frame_batch_size: frame_batch_size,
+          tenant_id: tenant_id,
           auth_expires_at: auth_expires_at(auth)
         },
         timeout: 120_000

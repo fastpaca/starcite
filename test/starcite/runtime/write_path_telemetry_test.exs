@@ -29,18 +29,19 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
   test "append emits local_ok command telemetry" do
     id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id)
+    assert {:ok, _session} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
     assert {:ok, _reply} =
              WritePath.append_event(id, %{
                type: "content",
                payload: %{text: "hello"},
                actor: "agent:1",
+               metadata: %{"tenant_id" => "acme"},
                producer_id: "writer:test",
                producer_seq: 1
              })
 
-    assert_receive_raft_command(:append_event, :local_ok)
+    assert_receive_raft_command(:append_event, :local_ok, "acme")
   end
 
   test "append missing session emits local_error command telemetry" do
@@ -51,33 +52,47 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                type: "content",
                payload: %{text: "hello"},
                actor: "agent:1",
+               metadata: %{"tenant_id" => "acme"},
                producer_id: "writer:test",
                producer_seq: 1
              })
 
-    assert_receive_raft_command(:append_event, :local_error)
+    assert_receive_raft_command(:append_event, :local_error, "acme")
   end
 
   test "telemetry helper exposes leader_retry outcome dimension" do
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout)
 
-    assert_receive_raft_command(:append_event, :leader_retry_timeout)
+    assert_receive_raft_command(:append_event, :leader_retry_timeout, "unknown")
   end
 
-  defp assert_receive_raft_command(command, outcome) do
+  test "global telemetry flag disables raft command events" do
+    original = Application.get_env(:starcite, :telemetry_enabled, false)
+    Application.put_env(:starcite, :telemetry_enabled, false)
+
+    on_exit(fn ->
+      Application.put_env(:starcite, :telemetry_enabled, original)
+    end)
+
+    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
+    refute_receive {:raft_command_event, _measurements, _metadata}, 100
+  end
+
+  defp assert_receive_raft_command(command, outcome, tenant_id) do
     deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_raft_command(command, outcome, deadline)
+    do_assert_receive_raft_command(command, outcome, tenant_id, deadline)
   end
 
-  defp do_assert_receive_raft_command(command, outcome, deadline) do
+  defp do_assert_receive_raft_command(command, outcome, tenant_id, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
-      {:raft_command_event, %{count: 1}, %{command: ^command, outcome: ^outcome}} ->
+      {:raft_command_event, %{count: 1},
+       %{command: ^command, outcome: ^outcome, tenant_id: ^tenant_id}} ->
         :ok
 
       {:raft_command_event, _measurements, _metadata} ->
-        do_assert_receive_raft_command(command, outcome, deadline)
+        do_assert_receive_raft_command(command, outcome, tenant_id, deadline)
     after
       remaining ->
         flunk(

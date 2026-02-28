@@ -8,15 +8,11 @@ defmodule Starcite.DataPlane.RaftFSM do
   @behaviour :ra_machine
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.Observability.{Telemetry, Tenancy}
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
   @machine_version 1
 
-  @emit_event_append_telemetry Application.compile_env(
-                                 :starcite,
-                                 :emit_event_append_telemetry,
-                                 false
-                               )
   @checkpoint_interval_entries Application.compile_env(
                                  :starcite,
                                  :raft_checkpoint_interval_entries,
@@ -92,7 +88,15 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
       :ok = put_appended_event(session_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-      emit_appended_event_telemetry(session_id, event_to_store)
+
+      if Telemetry.enabled?() do
+        emit_appended_event_telemetry(
+          session_id,
+          Tenancy.label_from_session(session),
+          event_to_store
+        )
+      end
+
       effect = build_effect_for_event(session_id, event_to_store)
       reply = {:reply, {:ok, reply}}
       effects = if is_nil(effect), do: [], else: [effect]
@@ -117,7 +121,11 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
       :ok = put_appended_events(session_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-      emit_appended_telemetry(session_id, events_to_store)
+
+      if Telemetry.enabled?() do
+        emit_appended_telemetry(session_id, Tenancy.label_from_session(session), events_to_store)
+      end
+
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
       reply_with_optional_effects(meta, new_state, reply, effects)
@@ -138,9 +146,11 @@ defmodule Starcite.DataPlane.RaftFSM do
         evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
 
       tail_size = Session.tail_size(updated_session)
+      tenant_id = Tenancy.label_from_session(updated_session)
 
       Starcite.Observability.Telemetry.archive_ack_applied(
         session_id,
+        tenant_id,
         updated_session.last_seq,
         updated_session.archived_seq,
         evicted,
@@ -339,44 +349,43 @@ defmodule Starcite.DataPlane.RaftFSM do
     end
   end
 
-  if @emit_event_append_telemetry do
-    defp emit_appended_telemetry(_session_id, []), do: :ok
+  defp emit_appended_telemetry(_session_id, _tenant_id, []), do: :ok
 
-    defp emit_appended_telemetry(session_id, events)
-         when is_binary(session_id) and is_list(events) do
-      Enum.each(events, fn %{type: type, actor: actor, payload: payload} = event ->
-        Starcite.Observability.Telemetry.event_appended(
-          session_id,
-          type,
-          actor,
-          Map.get(event, :source),
-          payload_bytes(payload)
-        )
-      end)
-
-      :ok
-    end
-
-    defp emit_appended_event_telemetry(_session_id, nil), do: :ok
-
-    defp emit_appended_event_telemetry(
-           session_id,
-           %{type: type, actor: actor, payload: payload} = event
-         )
-         when is_binary(session_id) and is_binary(type) and is_binary(actor) do
-      Starcite.Observability.Telemetry.event_appended(
+  defp emit_appended_telemetry(session_id, tenant_id, events)
+       when is_binary(session_id) and is_binary(tenant_id) and is_list(events) do
+    Enum.each(events, fn %{type: type, actor: actor, payload: payload} = event ->
+      Telemetry.event_appended(
         session_id,
+        tenant_id,
         type,
         actor,
         Map.get(event, :source),
         payload_bytes(payload)
       )
+    end)
 
-      :ok
-    end
-  else
-    defp emit_appended_telemetry(_session_id, _events), do: :ok
-    defp emit_appended_event_telemetry(_session_id, _event), do: :ok
+    :ok
+  end
+
+  defp emit_appended_event_telemetry(_session_id, _tenant_id, nil), do: :ok
+
+  defp emit_appended_event_telemetry(
+         session_id,
+         tenant_id,
+         %{type: type, actor: actor, payload: payload} = event
+       )
+       when is_binary(session_id) and is_binary(tenant_id) and is_binary(type) and
+              is_binary(actor) do
+    Telemetry.event_appended(
+      session_id,
+      tenant_id,
+      type,
+      actor,
+      Map.get(event, :source),
+      payload_bytes(payload)
+    )
+
+    :ok
   end
 
   defp build_effects_for_events(_session_id, []), do: []
@@ -413,7 +422,5 @@ defmodule Starcite.DataPlane.RaftFSM do
     }
   end
 
-  if @emit_event_append_telemetry do
-    defp payload_bytes(payload), do: :erlang.external_size(payload)
-  end
+  defp payload_bytes(payload), do: :erlang.external_size(payload)
 end

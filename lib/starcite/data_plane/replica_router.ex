@@ -10,11 +10,11 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.Observability.Telemetry
+  alias Starcite.Observability.Tenancy
   alias Starcite.DataPlane.RaftManager
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache
-  @emit_routing_telemetry Application.compile_env(:starcite, :emit_routing_telemetry, false)
   @leader_cache_ttl_ms Application.compile_env(:starcite, :route_leader_cache_ttl_ms, 10_000)
   @leader_probe_timeout_ms 50
 
@@ -41,11 +41,22 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       when is_integer(group_id) and group_id >= 0 and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
+    telemetry_enabled? = Telemetry.enabled?()
+
+    tenant_id =
+      if telemetry_enabled? do
+        tenant_id_for_route(route_opts, local_args, remote_args)
+      else
+        Tenancy.label(nil)
+      end
+
     {target, route_meta} = route_target_with_meta(group_id, route_opts)
 
     :ok =
       maybe_emit_routing_decision(
+        telemetry_enabled?,
         group_id,
+        tenant_id,
         route_meta.target,
         route_meta.prefer_leader,
         route_meta.leader_hint,
@@ -59,7 +70,9 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         :ok =
           maybe_emit_routing_result(
+            telemetry_enabled?,
             group_id,
+            tenant_id,
             :local,
             result_outcome(result),
             1,
@@ -70,7 +83,18 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         result
 
       {:remote, []} ->
-        :ok = maybe_emit_routing_result(group_id, :remote, :no_candidates, 0, 0, 0)
+        :ok =
+          maybe_emit_routing_result(
+            telemetry_enabled?,
+            group_id,
+            tenant_id,
+            :remote,
+            :no_candidates,
+            0,
+            0,
+            0
+          )
+
         {:error, {:no_available_replicas, []}}
 
       {:remote, nodes} ->
@@ -92,7 +116,9 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
         :ok =
           maybe_emit_routing_result(
+            telemetry_enabled?,
             group_id,
+            tenant_id,
             :remote,
             result_outcome(result),
             stats.attempts,
@@ -542,39 +568,82 @@ defmodule Starcite.DataPlane.ReplicaRouter do
   defp node_hint?(_value), do: false
 
   defp maybe_emit_routing_decision(
+         true,
          group_id,
+         tenant_id,
          target,
          prefer_leader,
          leader_hint,
          replica_count,
          ready_count
        ) do
-    if @emit_routing_telemetry do
-      Telemetry.routing_decision(
-        group_id,
-        target,
-        prefer_leader,
-        leader_hint,
-        replica_count,
-        ready_count
-      )
-    else
-      :ok
-    end
+    Telemetry.routing_decision(
+      group_id,
+      tenant_id,
+      target,
+      prefer_leader,
+      leader_hint,
+      replica_count,
+      ready_count
+    )
   end
 
+  defp maybe_emit_routing_decision(
+         false,
+         _group_id,
+         _tenant_id,
+         _target,
+         _prefer_leader,
+         _leader_hint,
+         _replica_count,
+         _ready_count
+       ),
+       do: :ok
+
   defp maybe_emit_routing_result(
+         true,
          group_id,
+         tenant_id,
          path,
          outcome,
          attempts,
          retries,
          leader_redirects
        ) do
-    if @emit_routing_telemetry do
-      Telemetry.routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
-    else
-      :ok
+    Telemetry.routing_result(
+      group_id,
+      tenant_id,
+      path,
+      outcome,
+      attempts,
+      retries,
+      leader_redirects
+    )
+  end
+
+  defp maybe_emit_routing_result(
+         false,
+         _group_id,
+         _tenant_id,
+         _path,
+         _outcome,
+         _attempts,
+         _retries,
+         _leader_redirects
+       ),
+       do: :ok
+
+  defp tenant_id_for_route(route_opts, local_args, remote_args)
+       when is_list(route_opts) and is_list(local_args) and is_list(remote_args) do
+    case Keyword.get(route_opts, :tenant_id) do
+      tenant_id when is_binary(tenant_id) and tenant_id != "" ->
+        Tenancy.label(tenant_id)
+
+      nil ->
+        Tenancy.label(nil)
+
+      invalid ->
+        Tenancy.label(invalid)
     end
   end
 end

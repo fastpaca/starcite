@@ -120,28 +120,13 @@ if write_replication_factor = System.get_env("STARCITE_WRITE_REPLICATION_FACTOR"
          )
 end
 
-if emit_routing_telemetry = System.get_env("STARCITE_EMIT_ROUTING_TELEMETRY") do
-  config :starcite,
-         :emit_routing_telemetry,
-         Starcite.Env.parse_bool!(emit_routing_telemetry, "STARCITE_EMIT_ROUTING_TELEMETRY")
-end
+if enable_telemetry = System.get_env("STARCITE_ENABLE_TELEMETRY") do
+  enabled = Starcite.Env.parse_bool!(enable_telemetry, "STARCITE_ENABLE_TELEMETRY")
 
-if emit_event_append_telemetry = System.get_env("STARCITE_EMIT_EVENT_APPEND_TELEMETRY") do
-  config :starcite,
-         :emit_event_append_telemetry,
-         Starcite.Env.parse_bool!(
-           emit_event_append_telemetry,
-           "STARCITE_EMIT_EVENT_APPEND_TELEMETRY"
-         )
-end
+  config :starcite, :telemetry_enabled, enabled
 
-if emit_event_store_write_telemetry = System.get_env("STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY") do
-  config :starcite,
-         :emit_event_store_write_telemetry,
-         Starcite.Env.parse_bool!(
-           emit_event_store_write_telemetry,
-           "STARCITE_EMIT_EVENT_STORE_WRITE_TELEMETRY"
-         )
+  prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
+  config :starcite, Starcite.Observability.PromEx, Keyword.put(prom_ex_opts, :enabled, enabled)
 end
 
 if route_leader_probe_on_miss = System.get_env("STARCITE_ROUTE_LEADER_PROBE_ON_MISS") do

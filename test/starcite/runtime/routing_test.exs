@@ -115,6 +115,7 @@ defmodule Starcite.Runtime.RoutingTest do
       assert decision_metadata.target == :local
       assert decision_metadata.leader_hint == :disabled
       assert decision_metadata.prefer_leader == false
+      assert decision_metadata.tenant_id == "unknown"
 
       assert {[:starcite, :routing, :result], result_measurements, result_metadata} =
                Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :result] end)
@@ -125,6 +126,7 @@ defmodule Starcite.Runtime.RoutingTest do
       assert result_measurements.leader_redirects == 0
       assert result_metadata.path == :local
       assert result_metadata.outcome == :ok
+      assert result_metadata.tenant_id == "unknown"
     end
 
     test "emits retry statistics for remote fallback execution" do
@@ -150,7 +152,8 @@ defmodule Starcite.Runtime.RoutingTest do
                  ready_nodes: [missing_a],
                  local_running: false,
                  allow_local: false,
-                 prefer_leader: true
+                 prefer_leader: true,
+                 tenant_id: "acme"
                )
 
       assert length(failures) == 2
@@ -163,6 +166,7 @@ defmodule Starcite.Runtime.RoutingTest do
       assert decision_metadata.target == :remote
       assert decision_metadata.prefer_leader == true
       assert decision_metadata.leader_hint in [:miss, :hit]
+      assert decision_metadata.tenant_id == "acme"
 
       assert {[:starcite, :routing, :result], result_measurements, result_metadata} =
                Enum.find(events, fn {event, _, _} -> event == [:starcite, :routing, :result] end)
@@ -172,6 +176,7 @@ defmodule Starcite.Runtime.RoutingTest do
       assert result_measurements.leader_redirects >= 0
       assert result_metadata.path == :remote
       assert result_metadata.outcome == :no_candidates
+      assert result_metadata.tenant_id == "acme"
     end
   end
 

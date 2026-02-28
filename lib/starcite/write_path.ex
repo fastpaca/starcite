@@ -12,13 +12,9 @@ defmodule Starcite.WritePath do
   }
 
   alias Starcite.Session
+  alias Starcite.Observability.{Telemetry, Tenancy}
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
-  @emit_raft_command_result_telemetry Application.compile_env(
-                                        :starcite,
-                                        :emit_raft_command_result_telemetry,
-                                        false
-                                      )
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -232,6 +228,13 @@ defmodule Starcite.WritePath do
 
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
+    route_opts =
+      if Telemetry.enabled?() do
+        [prefer_leader: false, tenant_id: tenant_id_for_remote_call(fun, args)]
+      else
+        [prefer_leader: false]
+      end
+
     ReplicaRouter.call_on_replica(
       group_id,
       __MODULE__,
@@ -240,7 +243,7 @@ defmodule Starcite.WritePath do
       __MODULE__,
       fun,
       args,
-      prefer_leader: false
+      route_opts
     )
   end
 
@@ -300,29 +303,115 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
 
-  if @emit_raft_command_result_telemetry do
-    defp maybe_emit_raft_command_result(command, outcome)
-         when outcome in [
-                :local_ok,
-                :local_error,
-                :local_timeout,
-                :leader_retry_ok,
-                :leader_retry_error,
-                :leader_retry_timeout
-              ] do
-      Starcite.Observability.Telemetry.raft_command_result(command_type(command), outcome)
-      :ok
+  defp maybe_emit_raft_command_result(command, outcome)
+       when outcome in [
+              :local_ok,
+              :local_error,
+              :local_timeout,
+              :leader_retry_ok,
+              :leader_retry_error,
+              :leader_retry_timeout
+            ] do
+    if Telemetry.enabled?() do
+      Telemetry.raft_command_result(
+        command_type(command),
+        outcome,
+        tenant_id_for_command(command)
+      )
     end
 
-    defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
-      do: :create_session
-
-    defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
-    defp command_type({:append_events, _id, _events, _opts}), do: :append_events
-    defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
-  else
-    defp maybe_emit_raft_command_result(_command, _outcome), do: :ok
+    :ok
   end
+
+  defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
+    do: :create_session
+
+  defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
+  defp command_type({:append_events, _id, _events, _opts}), do: :append_events
+  defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
+
+  defp tenant_id_for_command({:create_session, _id, _title, creator_principal, metadata})
+       when is_map(metadata) do
+    Tenancy.label(
+      Tenancy.from_session(%{metadata: metadata, creator_principal: creator_principal})
+    )
+  end
+
+  defp tenant_id_for_command({:append_event, session_id, %{tenant_id: tenant_id}, _expected_seq})
+       when is_binary(session_id) and is_binary(tenant_id) do
+    Tenancy.label(tenant_id)
+  end
+
+  defp tenant_id_for_command({:append_event, session_id, event, _expected_seq})
+       when is_binary(session_id) and is_map(event) do
+    Tenancy.from_event(event)
+    |> case do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_id_for_command({:append_events, session_id, [first_event | _rest], _opts})
+       when is_binary(session_id) and is_map(first_event) do
+    Tenancy.from_event(first_event)
+    |> case do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_id_for_command({:ack_archived, session_id, _upto_seq})
+       when is_binary(session_id) do
+    Tenancy.label(nil)
+  end
+
+  defp tenant_id_for_command(_command), do: Tenancy.label(nil)
+
+  defp tenant_id_for_remote_call(:create_session_local, [_id, _title, creator_principal, metadata])
+       when is_map(metadata) do
+    Tenancy.label(
+      Tenancy.from_session(%{metadata: metadata, creator_principal: creator_principal})
+    )
+  end
+
+  defp tenant_id_for_remote_call(:append_event_local, [session_id, %{tenant_id: tenant_id}])
+       when is_binary(session_id) and is_binary(tenant_id) do
+    Tenancy.label(tenant_id)
+  end
+
+  defp tenant_id_for_remote_call(:append_event_local, [session_id, event])
+       when is_binary(session_id) and is_map(event) do
+    Tenancy.from_event(event)
+    |> case do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_id_for_remote_call(:append_event_local, [session_id, event, _opts])
+       when is_binary(session_id) and is_map(event) do
+    Tenancy.from_event(event)
+    |> case do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_id_for_remote_call(:append_events_local, [session_id, [first_event | _rest], _opts])
+       when is_binary(session_id) and is_map(first_event) do
+    Tenancy.from_event(first_event)
+    |> case do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_id_for_remote_call(:ack_archived_local, [session_id, _upto_seq])
+       when is_binary(session_id) do
+    Tenancy.label(nil)
+  end
+
+  defp tenant_id_for_remote_call(_fun, _args), do: Tenancy.label(nil)
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

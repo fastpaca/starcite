@@ -14,6 +14,7 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
+  alias Starcite.Observability.{Telemetry, Tenancy}
   alias Starcite.{WritePath}
   alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
 
@@ -67,9 +68,9 @@ defmodule Starcite.Archive do
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
     # Queue age tracking is intentionally disabled for now; keep metric shape stable.
-    Starcite.Observability.Telemetry.archive_queue_age(0)
+    Telemetry.archive_queue_age(0)
 
-    Starcite.Observability.Telemetry.archive_flush(
+    Telemetry.archive_flush(
       elapsed_ms,
       stats.attempted,
       stats.inserted,
@@ -160,13 +161,16 @@ defmodule Starcite.Archive do
             pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 
-            Starcite.Observability.Telemetry.archive_batch(
-              session_id,
-              attempted,
-              bytes_attempted,
-              avg_event_bytes,
-              pending_after
-            )
+            if Telemetry.enabled?() do
+              Telemetry.archive_batch(
+                session_id,
+                tenant_label_for_rows(session_id, rows),
+                attempted,
+                bytes_attempted,
+                avg_event_bytes,
+                pending_after
+              )
+            end
 
             bytes_inserted =
               if attempted > 0 do
@@ -279,6 +283,18 @@ defmodule Starcite.Archive do
        when is_map(cache) and is_binary(session_id) and is_integer(archived_seq) and
               archived_seq >= 0 do
     Map.put(cache, session_id, archived_seq)
+  end
+
+  defp tenant_label_for_rows(session_id, [first_row | _rest])
+       when is_binary(session_id) and is_map(first_row) do
+    case Tenancy.from_event(first_row) do
+      nil -> Tenancy.label(nil)
+      tenant_id -> Tenancy.label(tenant_id)
+    end
+  end
+
+  defp tenant_label_for_rows(session_id, _rows) when is_binary(session_id) do
+    Tenancy.label(nil)
   end
 
   defp zero_stats do

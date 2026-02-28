@@ -18,10 +18,11 @@ defmodule StarciteWeb.TailSocketTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  defp base_state(session_id, cursor) do
+  defp base_state(session_id, cursor, tenant_id \\ "unknown") do
     %{
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
+      tenant_id: tenant_id,
       cursor: cursor,
       frame_batch_size: 1,
       replay_queue: :queue.new(),
@@ -67,7 +68,7 @@ defmodule StarciteWeb.TailSocketTest do
   describe "replay/live boundary" do
     test "replays first, then flushes buffered live events in order without duplicates" do
       session_id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
 
       {:ok, _} =
         append_event(session_id, %{
@@ -229,7 +230,7 @@ defmodule StarciteWeb.TailSocketTest do
       Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
       session_id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: session_id)
+      {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
 
       {:ok, _} =
         append_event(session_id, %{
@@ -257,7 +258,7 @@ defmodule StarciteWeb.TailSocketTest do
         inserted_at: NaiveDateTime.utc_now()
       }
 
-      state = %{base_state(session_id, 0) | replay_done: true}
+      state = %{base_state(session_id, 0, "acme") | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
                TailSocket.handle_info({:cursor_update, update}, state)
@@ -267,10 +268,22 @@ defmodule StarciteWeb.TailSocketTest do
       assert next_state.cursor == 1
 
       assert_receive {:tail_lookup,
-                      %{session_id: ^session_id, seq: 1, source: :ets, result: :miss}}
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :ets,
+                        result: :miss
+                      }}
 
       assert_receive {:tail_lookup,
-                      %{session_id: ^session_id, seq: 1, source: :storage, result: :hit}}
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :storage,
+                        result: :hit
+                      }}
     end
 
     test "handles delayed cursor updates after archive compaction race" do

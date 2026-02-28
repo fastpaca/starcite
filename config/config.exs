@@ -19,10 +19,7 @@ config :starcite,
   # Periodic RA checkpoint hint so persistence progress does not depend on archiver acks.
   raft_checkpoint_interval_entries: 2_048,
   raft_flush_interval_ms: 5000,
-  emit_routing_telemetry: false,
-  emit_event_append_telemetry: false,
-  emit_event_store_write_telemetry: false,
-  emit_raft_command_result_telemetry: false,
+  telemetry_enabled: true,
   use_ra_pipeline: true,
   route_leader_probe_on_miss: false,
   route_leader_cache_ttl_ms: 10_000,
@@ -95,6 +92,7 @@ config :ex_aws, :req_opts, receive_timeout: 30_000
 config :libcluster, topologies: []
 
 config :starcite, Starcite.Observability.PromEx,
+  enabled: true,
   metrics_server: :disabled,
   grafana_agent: :disabled
 

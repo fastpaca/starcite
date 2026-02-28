@@ -200,6 +200,7 @@ defmodule Starcite.Session do
 
       {:append, updated_index} ->
         now = NaiveDateTime.utc_now()
+        tenant_id = session_tenant_id(session)
 
         event = %{
           seq: next_seq,
@@ -212,6 +213,7 @@ defmodule Starcite.Session do
           idempotency_key: idempotency_key,
           producer_id: producer_id,
           producer_seq: producer_seq,
+          tenant_id: tenant_id,
           inserted_at: now
         }
 
@@ -351,4 +353,30 @@ defmodule Starcite.Session do
   defp principal_type!(value, field) do
     raise ArgumentError, "invalid session #{field} type: #{inspect(value)}"
   end
+
+  defp session_tenant_id(%Session{metadata: metadata, creator_principal: creator_principal}) do
+    metadata_tenant_id(metadata) || principal_tenant_id(creator_principal)
+  end
+
+  defp metadata_tenant_id(metadata) when is_map(metadata) do
+    case Map.get(metadata, "tenant_id") || Map.get(metadata, :tenant_id) do
+      tenant_id when is_binary(tenant_id) and tenant_id != "" -> tenant_id
+      _other -> nil
+    end
+  end
+
+  defp metadata_tenant_id(_metadata), do: nil
+
+  defp principal_tenant_id(%Principal{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp principal_tenant_id(principal) when is_map(principal) do
+    case Map.get(principal, "tenant_id") || Map.get(principal, :tenant_id) do
+      tenant_id when is_binary(tenant_id) and tenant_id != "" -> tenant_id
+      _other -> nil
+    end
+  end
+
+  defp principal_tenant_id(_principal), do: nil
 end
