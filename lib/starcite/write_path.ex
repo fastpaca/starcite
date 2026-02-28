@@ -12,7 +12,7 @@ defmodule Starcite.WritePath do
   }
 
   alias Starcite.Session
-  alias Starcite.Observability.{Telemetry, Tenancy}
+  alias Starcite.Observability.Tenancy
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -262,14 +262,6 @@ defmodule Starcite.WritePath do
       end
 
     :ok = RaftBootstrap.record_write_outcome(outcome)
-
-    :ok =
-      Telemetry.raft_command_result(
-        command_type(command),
-        outcome,
-        tenant_id_for_command(command)
-      )
-
     final_result
   end
 
@@ -304,50 +296,6 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
-
-  defp command_type({:create_session, _id, _title, _creator_principal, _metadata}),
-    do: :create_session
-
-  defp command_type({:append_event, _id, _event, _expected_seq}), do: :append_event
-  defp command_type({:append_events, _id, _events, _opts}), do: :append_events
-  defp command_type({:ack_archived, _id, _upto_seq}), do: :ack_archived
-
-  defp tenant_id_for_command({:create_session, _id, _title, creator_principal, metadata})
-       when is_map(metadata) do
-    Tenancy.label(
-      Tenancy.from_session(%{metadata: metadata, creator_principal: creator_principal})
-    )
-  end
-
-  defp tenant_id_for_command({:append_event, session_id, %{tenant_id: tenant_id}, _expected_seq})
-       when is_binary(session_id) and is_binary(tenant_id) do
-    Tenancy.label(tenant_id)
-  end
-
-  defp tenant_id_for_command({:append_event, session_id, event, _expected_seq})
-       when is_binary(session_id) and is_map(event) do
-    Tenancy.from_event(event)
-    |> case do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_id_for_command({:append_events, session_id, [first_event | _rest], _opts})
-       when is_binary(session_id) and is_map(first_event) do
-    Tenancy.from_event(first_event)
-    |> case do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_id_for_command({:ack_archived, session_id, _upto_seq})
-       when is_binary(session_id) do
-    Tenancy.label(nil)
-  end
-
-  defp tenant_id_for_command(_command), do: Tenancy.label(nil)
 
   defp tenant_id_for_remote_call(:create_session_local, [_id, _title, creator_principal, metadata])
        when is_map(metadata) do

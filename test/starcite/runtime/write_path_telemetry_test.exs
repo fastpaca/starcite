@@ -27,7 +27,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     :ok
   end
 
-  test "append emits local_ok command telemetry" do
+  test "append does not emit per-command telemetry from write path" do
     id = unique_id("ses")
     assert {:ok, _session} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
 
@@ -41,10 +41,10 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    assert_receive_raft_command(:append_event, :local_ok, "acme")
+    refute_receive {:raft_command_event, _measurements, _metadata}, 100
   end
 
-  test "append missing session emits local_error command telemetry" do
+  test "append missing session does not emit per-command telemetry from write path" do
     id = unique_id("missing")
 
     assert {:error, :session_not_found} =
@@ -57,7 +57,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    assert_receive_raft_command(:append_event, :local_error, "acme")
+    refute_receive {:raft_command_event, _measurements, _metadata}, 100
   end
 
   test "telemetry helper exposes leader_retry outcome dimension" do
