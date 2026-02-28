@@ -113,6 +113,16 @@ defmodule StarciteWeb.Auth.PolicyTest do
                jwt_ctx(%{session_id: "ses-9", scopes: ["session:append"]}),
                session
              )
+
+    assert {:error, :forbidden_tenant} =
+             Policy.allowed_to_read_session(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
+                 session_id: "ses-9",
+                 scopes: ["session:read"]
+               }),
+               session
+             )
   end
 
   test "resolve_event_actor requires actor to match principal identity" do
