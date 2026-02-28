@@ -14,7 +14,7 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
-  alias Starcite.Observability.{Telemetry, Tenancy}
+  alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
   alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
 
@@ -94,7 +94,8 @@ defmodule Starcite.Archive do
               is_boolean(single_local_write_node) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
-           load_archived_seq(session_id, archived_seq_cache) do
+           load_archived_seq(session_id, archived_seq_cache),
+         {:ok, tenant_id} <- RaftAccess.fetch_session_tenant_id(session_id) do
       pending_before = max(max_seq - archived_seq, 0)
 
       cond do
@@ -113,6 +114,7 @@ defmodule Starcite.Archive do
             persist_rows(
               rows,
               session_id,
+              tenant_id,
               max_seq,
               pending_before,
               adapter
@@ -128,6 +130,7 @@ defmodule Starcite.Archive do
   defp persist_rows(
          [],
          _session_id,
+         _tenant_id,
          _max_seq,
          pending_before,
          _adapter
@@ -139,6 +142,7 @@ defmodule Starcite.Archive do
   defp persist_rows(
          rows,
          session_id,
+         tenant_id,
          max_seq,
          pending_before,
          adapter
@@ -163,7 +167,7 @@ defmodule Starcite.Archive do
 
             Telemetry.archive_batch(
               session_id,
-              tenant_label_for_rows(session_id, rows),
+              tenant_id,
               attempted,
               bytes_attempted,
               avg_event_bytes,
@@ -281,18 +285,6 @@ defmodule Starcite.Archive do
        when is_map(cache) and is_binary(session_id) and is_integer(archived_seq) and
               archived_seq >= 0 do
     Map.put(cache, session_id, archived_seq)
-  end
-
-  defp tenant_label_for_rows(session_id, [first_row | _rest])
-       when is_binary(session_id) and is_map(first_row) do
-    case Tenancy.from_event(first_row) do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_label_for_rows(session_id, _rows) when is_binary(session_id) do
-    Tenancy.label(nil)
   end
 
   defp zero_stats do

@@ -8,7 +8,6 @@ defmodule Starcite.DataPlane.RaftFSM do
   @behaviour :ra_machine
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
-  alias Starcite.Observability.Tenancy
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
   @machine_version 1
@@ -52,7 +51,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(
         meta,
-        {:create_session, session_id, title, creator_principal, metadata},
+        {:create_session, session_id, title, creator_principal, tenant_id, metadata},
         state
       ) do
     case Map.get(state.sessions, session_id) do
@@ -61,6 +60,7 @@ defmodule Starcite.DataPlane.RaftFSM do
           Session.new(session_id,
             title: title,
             creator_principal: creator_principal,
+            tenant_id: tenant_id,
             metadata: metadata
           )
 
@@ -86,7 +86,7 @@ defmodule Starcite.DataPlane.RaftFSM do
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq),
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
-      :ok = put_appended_event(session_id, event_to_store)
+      :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
       effect = build_effect_for_event(session_id, event_to_store)
@@ -111,7 +111,7 @@ defmodule Starcite.DataPlane.RaftFSM do
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
-      :ok = put_appended_events(session_id, events_to_store)
+      :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
       effects = build_effects_for_events(session_id, events_to_store)
@@ -134,7 +134,7 @@ defmodule Starcite.DataPlane.RaftFSM do
         evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
 
       tail_size = Session.tail_size(updated_session)
-      tenant_id = Tenancy.label_from_session(updated_session)
+      tenant_id = updated_session.tenant_id
 
       Starcite.Observability.Telemetry.archive_ack_applied(
         session_id,
@@ -276,17 +276,18 @@ defmodule Starcite.DataPlane.RaftFSM do
     {:ok, session, Enum.reverse(replies), Enum.reverse(events)}
   end
 
-  defp put_appended_events(_session_id, []), do: :ok
+  defp put_appended_events(_session_id, _tenant_id, []), do: :ok
 
-  defp put_appended_events(session_id, events) when is_binary(session_id) and is_list(events) do
-    EventStore.put_events(session_id, events)
+  defp put_appended_events(session_id, tenant_id, events)
+       when is_binary(session_id) and is_binary(tenant_id) and is_list(events) do
+    EventStore.put_events(session_id, tenant_id, events)
   end
 
-  defp put_appended_event(_session_id, nil), do: :ok
+  defp put_appended_event(_session_id, _tenant_id, nil), do: :ok
 
-  defp put_appended_event(session_id, %{seq: seq} = event)
-       when is_binary(session_id) and is_integer(seq) and seq > 0 do
-    EventStore.put_event(session_id, event)
+  defp put_appended_event(session_id, tenant_id, %{seq: seq} = event)
+       when is_binary(session_id) and is_binary(tenant_id) and is_integer(seq) and seq > 0 do
+    EventStore.put_event(session_id, tenant_id, event)
   end
 
   defp reply_with_optional_effects(meta, %__MODULE__{} = state, reply, effects \\ [])

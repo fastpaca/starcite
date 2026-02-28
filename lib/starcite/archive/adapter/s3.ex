@@ -50,18 +50,21 @@ defmodule Starcite.Archive.Adapter.S3 do
   def upsert_session(%{
         id: id,
         title: title,
+        tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
+             is_binary(tenant_id) and tenant_id != "" and
+             is_struct(creator_principal, Principal) and
              is_map(metadata) do
     config = config!()
 
     session = %{
       id: id,
       title: title,
+      tenant_id: tenant_id,
       creator_principal: creator_principal,
       metadata: metadata,
       created_at: created_at
@@ -75,20 +78,22 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   @impl true
-  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata}) do
+  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata} = query) do
     config = config!()
+    tenant_id = Map.get(query, :tenant_id)
 
     with {:ok, keys} <- list_session_keys(config) do
-      list_sessions_for_keys(keys, limit, cursor, metadata, config)
+      list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config)
     end
   end
 
   @impl true
-  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata}) do
+  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata} = query) do
     config = config!()
+    tenant_id = Map.get(query, :tenant_id)
     keys = ids |> Enum.uniq() |> Enum.map(&Layout.session_key(config, &1))
 
-    list_sessions_for_keys(keys, limit, cursor, metadata, config)
+    list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config)
   end
 
   defp write_events([], _config), do: {:ok, 0}
@@ -215,9 +220,9 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
-  defp list_sessions_for_keys(keys, limit, cursor, metadata, config) do
+  defp list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config) do
     with {:ok, sessions} <- load_sessions(keys, config) do
-      {:ok, session_page(sessions, limit, cursor, metadata)}
+      {:ok, session_page(sessions, limit, cursor, metadata, tenant_id)}
     end
   end
 
@@ -243,17 +248,20 @@ defmodule Starcite.Archive.Adapter.S3 do
            %{
              "id" => id,
              "title" => title,
+             "tenant_id" => tenant_id,
              "creator_principal" => creator_principal,
              "metadata" => metadata,
              "created_at" => created_at
            }}
           when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-                 (is_map(creator_principal) or is_nil(creator_principal)) and is_map(metadata) and
+                 is_binary(tenant_id) and tenant_id != "" and is_map(creator_principal) and
+                 is_map(metadata) and
                  is_binary(created_at) ->
             {:ok,
              %{
                id: id,
                title: title,
+               tenant_id: tenant_id,
                creator_principal: creator_principal,
                metadata: metadata,
                created_at: created_at
@@ -268,12 +276,13 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
-  defp session_page(sessions, limit, cursor, metadata_filters) do
+  defp session_page(sessions, limit, cursor, metadata_filters, tenant_id_filter) do
     filtered =
       sessions
       |> Enum.sort_by(& &1.id)
       |> Enum.filter(fn session ->
         (is_nil(cursor) or session.id > cursor) and
+          (is_nil(tenant_id_filter) or session.tenant_id == tenant_id_filter) and
           Enum.all?(metadata_filters, fn {key, expected} -> session.metadata[key] == expected end)
       end)
 

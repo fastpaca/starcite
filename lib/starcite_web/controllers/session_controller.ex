@@ -26,7 +26,7 @@ defmodule StarciteWeb.SessionController do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, opts} <- validate_create(params, auth),
          {:ok, session} <- WritePath.create_session(opts) do
-      :ok = Telemetry.ingest_edge(:create_session, auth.principal, :ok)
+      :ok = Telemetry.ingest_edge(:create_session, auth.principal.tenant_id, :ok)
 
       conn
       |> put_status(:created)
@@ -43,7 +43,7 @@ defmodule StarciteWeb.SessionController do
          :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_event(id, event, expected_seq) do
-      :ok = Telemetry.ingest_edge(:append_event, auth.principal, :ok)
+      :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
 
       conn
       |> put_status(:created)
@@ -80,17 +80,18 @@ defmodule StarciteWeb.SessionController do
   # Validation
 
   defp validate_create(params, %Context{} = auth) when is_map(params) do
-    with {:ok, creator_principal} <- Policy.can_create_session(auth, params),
+    with {:ok, %Starcite.Auth.Principal{} = creator_principal} <-
+           Policy.can_create_session(auth, params),
          {:ok, requested_id} <- optional_non_empty_string(params["id"]),
          {:ok, id} <- Policy.resolve_create_session_id(auth, requested_id),
          {:ok, title} <- optional_string(params["title"]),
-         {:ok, metadata} <- optional_object(params["metadata"]),
-         {:ok, metadata} <- ensure_session_metadata_tenant(metadata, auth) do
+         {:ok, metadata} <- optional_object(params["metadata"]) do
       {:ok,
        [
          id: id,
          title: title,
          creator_principal: creator_principal,
+         tenant_id: creator_principal.tenant_id,
          metadata: metadata
        ]}
     end
@@ -201,33 +202,35 @@ defmodule StarciteWeb.SessionController do
     Starcite.Archive.Store.list_sessions(opts)
   end
 
-  defp list_sessions(%Context{tenant_id: tenant_id, session_id: nil}, opts)
+  defp list_sessions(
+         %Context{
+           kind: :jwt,
+           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
+           session_id: nil
+         },
+         opts
+       )
        when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
-    metadata_filters =
-      opts
-      |> Map.get(:metadata, %{})
-      |> Map.put("tenant_id", tenant_id)
-
     Starcite.Archive.Store.list_sessions(
       opts
       |> Map.put(:tenant_id, tenant_id)
-      |> Map.put(:metadata, metadata_filters)
     )
   end
 
-  defp list_sessions(%Context{tenant_id: tenant_id, session_id: session_id}, opts)
+  defp list_sessions(
+         %Context{
+           kind: :jwt,
+           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
+           session_id: session_id
+         },
+         opts
+       )
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
               session_id != "" and is_map(opts) do
-    metadata_filters =
-      opts
-      |> Map.get(:metadata, %{})
-      |> Map.put("tenant_id", tenant_id)
-
     Starcite.Archive.Store.list_sessions_by_ids(
       [session_id],
       opts
       |> Map.put(:tenant_id, tenant_id)
-      |> Map.put(:metadata, metadata_filters)
     )
   end
 
@@ -257,21 +260,6 @@ defmodule StarciteWeb.SessionController do
   defp optional_object(nil), do: {:ok, %{}}
   defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
   defp optional_object(_value), do: {:error, :invalid_metadata}
-
-  defp ensure_session_metadata_tenant(metadata, %Context{kind: :none}) when is_map(metadata) do
-    {:ok, metadata}
-  end
-
-  defp ensure_session_metadata_tenant(metadata, %Context{tenant_id: tenant_id})
-       when is_map(metadata) and is_binary(tenant_id) and tenant_id != "" do
-    case Map.get(metadata, "tenant_id") do
-      nil -> {:ok, Map.put(metadata, "tenant_id", tenant_id)}
-      ^tenant_id -> {:ok, metadata}
-      _other -> {:error, :forbidden_tenant}
-    end
-  end
-
-  defp ensure_session_metadata_tenant(_metadata, _tenant_id), do: {:error, :forbidden_tenant}
 
   defp optional_refs(nil), do: {:ok, %{}}
 

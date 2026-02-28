@@ -80,22 +80,6 @@ defmodule Starcite.DataPlane.SessionStore do
   def get_session(_session_id), do: {:error, :invalid_session_id}
 
   @doc """
-  Read one session by id from local cache only.
-
-  This helper never falls back to archive reads and is safe for low-latency
-  metadata extraction paths such as telemetry labeling.
-  """
-  @spec peek_session(String.t()) :: {:ok, Session.t()} | :error
-  def peek_session(session_id) when is_binary(session_id) and session_id != "" do
-    case Cachex.get(@cache, session_id) do
-      {:ok, %Session{} = session} -> {:ok, session}
-      _ -> :error
-    end
-  end
-
-  def peek_session(_session_id), do: :error
-
-  @doc """
   Delete one session by id.
   """
   @spec delete_session(String.t()) :: :ok
@@ -236,13 +220,21 @@ defmodule Starcite.DataPlane.SessionStore do
 
   defp session_from_archive_row(
          session_id,
-         %{id: session_id, title: title, creator_principal: creator_principal, metadata: metadata}
+         %{
+           id: session_id,
+           title: title,
+           tenant_id: tenant_id,
+           creator_principal: creator_principal,
+           metadata: metadata
+         }
        )
-       when (is_binary(title) or is_nil(title)) and is_map(metadata) and
+       when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) and
               (is_map(creator_principal) or is_nil(creator_principal)) do
     {:ok,
      Session.new(session_id,
        title: title,
+       tenant_id: tenant_id,
        creator_principal: creator_principal,
        metadata: metadata
      )}

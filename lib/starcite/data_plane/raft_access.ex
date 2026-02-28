@@ -83,6 +83,29 @@ defmodule Starcite.DataPlane.RaftAccess do
     end
   end
 
+  @spec fetch_session_tenant_id(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_session_tenant_id(id) when is_binary(id) and id != "" do
+    with {:ok, server_id, _group_id} <- locate_and_ensure_started(id) do
+      fetch_session_tenant_id(server_id, id)
+    end
+  end
+
+  @spec fetch_session_tenant_id(atom(), String.t()) :: {:ok, String.t()} | {:error, term()}
+  def fetch_session_tenant_id(server_id, id)
+      when is_atom(server_id) and is_binary(id) and id != "" do
+    case query_session(server_id, id) do
+      {:ok, %Session{tenant_id: tenant_id}}
+      when is_binary(tenant_id) and tenant_id != "" ->
+        {:ok, tenant_id}
+
+      {:ok, _session} ->
+        {:error, :invalid_session_tenant}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp ensure_group_started(server_id, group_id)
        when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
     if Process.whereis(server_id) != nil do

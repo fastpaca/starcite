@@ -131,7 +131,6 @@ defmodule StarciteWeb.SessionControllerTest do
       assert String.starts_with?(body["id"], "ses_")
       assert body["title"] == "Draft"
       assert body["metadata"]["workflow"] == "legal"
-      assert body["metadata"]["tenant_id"] == "acme"
       assert body["last_seq"] == 0
       assert String.ends_with?(body["created_at"], "Z")
       assert String.ends_with?(body["updated_at"], "Z")
@@ -155,7 +154,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["id"] == id
     end
 
-    test "rejects metadata tenant_id mismatch with creator principal tenant" do
+    test "accepts metadata tenant_id mismatch because tenancy comes from principal" do
       conn =
         json_conn(
           :post,
@@ -165,9 +164,7 @@ defmodule StarciteWeb.SessionControllerTest do
           })
         )
 
-      assert conn.status == 403
-      body = Jason.decode!(conn.resp_body)
-      assert body["error"] == "forbidden_tenant"
+      assert conn.status == 201
     end
 
     test "accepts empty title string" do
@@ -191,7 +188,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "duplicate id returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn = json_conn(:post, "/v1/sessions", service_create_body(%{"id" => id}))
 
@@ -254,6 +251,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert {:ok, _} =
                WritePath.create_session(
                  id: id3,
+                 tenant_id: "beta",
                  metadata: %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
                )
 
@@ -333,7 +331,7 @@ defmodule StarciteWeb.SessionControllerTest do
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -353,7 +351,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "expected_seq conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       {:ok, _} =
         WritePath.append_event(id, %{
@@ -382,7 +380,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer replay conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       body = %{
         "type" => "state",
@@ -413,7 +411,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "same producer sequence and payload dedupes" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       body = %{
         "type" => "state",
@@ -438,7 +436,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "producer sequence conflict returns 409" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -457,7 +455,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
     test "missing required fields returns 400" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn = json_conn(:post, "/v1/sessions/#{id}/append", %{"payload" => %{"text" => "hi"}})
 

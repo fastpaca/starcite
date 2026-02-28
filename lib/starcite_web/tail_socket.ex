@@ -8,7 +8,6 @@ defmodule StarciteWeb.TailSocket do
   @behaviour WebSock
 
   alias Starcite.Auth.Principal
-  alias Starcite.Observability.Telemetry
   alias Starcite.ReadPath
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias StarciteWeb.Auth.Context
@@ -229,11 +228,9 @@ defmodule StarciteWeb.TailSocket do
               (is_struct(principal, Principal) or is_nil(principal)) do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, principal, seq, :ets, :hit)
         {:ok, event}
 
       :error ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, principal, seq, :ets, :miss)
         read_event_from_storage(session_id, principal, seq)
     end
   end
@@ -243,11 +240,9 @@ defmodule StarciteWeb.TailSocket do
               (is_struct(principal, Principal) or is_nil(principal)) do
     case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, principal, seq, :storage, :hit)
         {:ok, event}
 
       _ ->
-        :ok = Telemetry.tail_cursor_lookup(session_id, principal, seq, :storage, :miss)
         :error
     end
   end

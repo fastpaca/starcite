@@ -23,10 +23,12 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "none mode allows create/list/read/append without jwt claims" do
-    session = Session.new("ses-1", metadata: %{"tenant_id" => "acme"})
+    session = Session.new("ses-1", tenant_id: "acme")
     none = Context.none()
 
-    assert {:ok, nil} = Policy.can_create_session(none, %{})
+    assert {:ok, %Principal{tenant_id: "service", id: "service", type: :service}} =
+             Policy.can_create_session(none, %{})
+
     assert {:ok, "ses-1"} = Policy.resolve_create_session_id(none, "ses-1")
     assert :ok = Policy.can_list_sessions(none)
     assert :ok = Policy.allowed_to_access_session(none, "ses-1")
@@ -66,7 +68,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "allowed_to_append_session enforces scope, tenant, and session lock" do
-    session = Session.new("ses-1", metadata: %{"tenant_id" => "acme"})
+    session = Session.new("ses-1", tenant_id: "acme")
 
     assert :ok =
              Policy.allowed_to_append_session(
@@ -82,7 +84,11 @@ defmodule StarciteWeb.Auth.PolicyTest do
 
     assert {:error, :forbidden_tenant} =
              Policy.allowed_to_append_session(
-               jwt_ctx(%{tenant_id: "beta", session_id: nil, scopes: ["session:append"]}),
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
+                 session_id: nil,
+                 scopes: ["session:append"]
+               }),
                session
              )
 
@@ -94,7 +100,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "allowed_to_read_session enforces scope, tenant, and session lock" do
-    session = Session.new("ses-9", metadata: %{"tenant_id" => "acme"})
+    session = Session.new("ses-9", tenant_id: "acme")
 
     assert :ok =
              Policy.allowed_to_read_session(
@@ -109,29 +115,22 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
   end
 
-  test "resolve_event_actor requires actor to match JWT sub" do
-    auth = jwt_ctx(%{subject: "user:user-1"})
+  test "resolve_event_actor requires actor to match principal identity" do
+    auth = jwt_ctx(%{principal: %Principal{tenant_id: "acme", id: "user-1", type: :user}})
 
     assert {:ok, "user:user-1"} = Policy.resolve_event_actor(auth, nil)
     assert {:ok, "user:user-1"} = Policy.resolve_event_actor(auth, "user:user-1")
     assert {:error, :invalid_event} = Policy.resolve_event_actor(auth, "user:other")
   end
 
-  test "attach_principal_metadata includes tenant and subject" do
+  test "attach_principal_metadata includes canonical principal identity" do
     principal = %Principal{tenant_id: "acme", id: "user-1", type: :user}
-
-    auth =
-      jwt_ctx(%{
-        tenant_id: "acme",
-        subject: "user:user-1",
-        principal: principal
-      })
+    auth = jwt_ctx(%{principal: principal})
 
     metadata = Policy.attach_principal_metadata(auth, %{"request_id" => "r-1"})
 
     assert metadata["request_id"] == "r-1"
     assert metadata["starcite_principal"]["tenant_id"] == "acme"
-    assert metadata["starcite_principal"]["subject"] == "user:user-1"
     assert metadata["starcite_principal"]["actor"] == "user:user-1"
     assert metadata["starcite_principal"]["principal_type"] == "user"
     assert metadata["starcite_principal"]["principal_id"] == "user-1"
@@ -140,11 +139,10 @@ defmodule StarciteWeb.Auth.PolicyTest do
   defp jwt_ctx(attrs) when is_map(attrs) do
     defaults = %Context{
       kind: :jwt,
-      tenant_id: "acme",
-      subject: "user:user-1",
+      principal: %Principal{tenant_id: "acme", id: "user-1", type: :user},
       scopes: [],
       session_id: nil,
-      principal: nil
+      expires_at: nil
     }
 
     defaults

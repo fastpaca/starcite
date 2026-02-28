@@ -78,7 +78,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     kid: kid
   } do
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     {:ok, _reply} =
       append_event(session_id, %{
@@ -180,7 +180,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     kid: kid
   } do
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     token =
       token_for(

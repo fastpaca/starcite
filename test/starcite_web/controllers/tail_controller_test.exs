@@ -86,7 +86,7 @@ defmodule StarciteWeb.TailControllerTest do
   describe "GET /v1/sessions/:id/tail" do
     test "returns 400 without websocket upgrade headers" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn = conn_get("/v1/sessions/#{id}/tail?cursor=0")
 
@@ -113,7 +113,7 @@ defmodule StarciteWeb.TailControllerTest do
 
     test "returns 400 for invalid cursor" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn =
         conn_get("/v1/sessions/#{id}/tail?cursor=bad", [

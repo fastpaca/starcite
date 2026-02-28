@@ -16,7 +16,6 @@ defmodule Starcite.DataPlane.EventStore do
 
   alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
-  alias Starcite.Observability.Tenancy
   alias Starcite.DataPlane.EventStore.EventQueue
   alias Starcite.Session.Event
 
@@ -49,11 +48,10 @@ defmodule Starcite.DataPlane.EventStore do
   This path does not reject committed writes under pressure; it emits
   backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_event(String.t(), Event.t()) :: :ok
-  def put_event(session_id, %{seq: seq} = event)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
-    tenant_id = Tenancy.label_from_event(event)
-
+  @spec put_event(String.t(), String.t(), Event.t()) :: :ok
+  def put_event(session_id, tenant_id, %{seq: seq} = event)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(seq) and seq > 0 do
     maybe_emit_backpressure(
       ensure_capacity_for_put_event(session_id, event),
       session_id,
@@ -70,10 +68,10 @@ defmodule Starcite.DataPlane.EventStore do
   This path does not reject committed writes under pressure; it emits
   backpressure telemetry when capacity cannot be reclaimed.
   """
-  @spec put_events(String.t(), [Event.t()]) :: :ok
-  def put_events(session_id, events)
-      when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
-    tenant_id = tenant_label_from_events(events)
+  @spec put_events(String.t(), String.t(), [Event.t()]) :: :ok
+  def put_events(session_id, tenant_id, events)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_list(events) and events != [] do
     maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id, tenant_id)
 
     :ok = EventQueue.put_events(session_id, events)
@@ -334,10 +332,6 @@ defmodule Starcite.DataPlane.EventStore do
       _ ->
         @default_cache_reclaim_fraction
     end
-  end
-
-  defp tenant_label_from_events([first_event | _rest]) when is_map(first_event) do
-    Tenancy.label_from_event(first_event)
   end
 
   defp archive_cache_memory_bytes do

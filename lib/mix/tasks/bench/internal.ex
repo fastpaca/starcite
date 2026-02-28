@@ -70,7 +70,7 @@ defmodule Mix.Tasks.Bench.Internal do
       session_id = elem(sessions, rem(seq - 1, session_count))
       event = Map.put(stored_event_template, :seq, seq)
 
-      :ok = EventStore.put_event(session_id, event)
+      :ok = EventStore.put_event(session_id, "service", event)
     end
 
     raw_ets_insert = fn ->
@@ -298,7 +298,9 @@ defmodule Mix.Tasks.Bench.Internal do
   end
 
   defp stored_event_template(input_event_template) when is_map(input_event_template) do
-    Map.put(input_event_template, :inserted_at, NaiveDateTime.utc_now())
+    input_event_template
+    |> Map.put(:tenant_id, "service")
+    |> Map.put(:inserted_at, NaiveDateTime.utc_now())
   end
 
   defp archived_cached_events_template(window_size)
@@ -312,6 +314,7 @@ defmodule Mix.Tasks.Bench.Internal do
         type: "content",
         payload: %{text: "cache-#{seq}"},
         actor: "agent:benchee",
+        tenant_id: "service",
         source: "benchmark",
         metadata: %{bench: true, scenario: "internal_cached_read"},
         refs: %{},

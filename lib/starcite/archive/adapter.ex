@@ -24,8 +24,9 @@ defmodule Starcite.Archive.Adapter do
 
   @type session_row :: %{
           required(:id) => String.t(),
+          required(:tenant_id) => String.t(),
           optional(:title) => String.t() | nil,
-          required(:creator_principal) => Principal.t() | map() | nil,
+          required(:creator_principal) => Principal.t() | map(),
           optional(:metadata) => map(),
           required(:created_at) => DateTime.t() | String.t()
         }

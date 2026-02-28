@@ -7,11 +7,6 @@ defmodule Starcite.Observability.Telemetry do
   Note: This is an event substrate - no LLM token budgets or compaction metrics.
   """
 
-  alias Starcite.Auth.Principal
-  alias Starcite.Observability.Tenancy
-
-  @unknown_tenant_id "unknown"
-
   @doc """
   Returns whether telemetry emission is globally enabled.
   """
@@ -55,15 +50,6 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
-  @spec event_appended(String.t(), String.t(), String.t(), String.t() | nil, non_neg_integer()) ::
-          :ok
-  def event_appended(session_id, type, actor, source, payload_bytes)
-      when is_binary(session_id) and is_binary(type) and type != "" and is_binary(actor) and
-             actor != "" and (is_binary(source) or is_nil(source)) and is_integer(payload_bytes) and
-             payload_bytes >= 0 do
-    event_appended(session_id, @unknown_tenant_id, type, actor, source, payload_bytes)
-  end
-
   @doc """
   Emit one ingestion-edge request event.
 
@@ -86,23 +72,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec ingest_edge(:create_session | :append_event, Principal.t() | nil, :ok | :error) :: :ok
-  def ingest_edge(operation, %Principal{} = principal, outcome)
-      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
-    ingest_edge(operation, Tenancy.label_from_principal(principal), outcome)
-  end
-
-  def ingest_edge(operation, nil, outcome)
-      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
-    ingest_edge(operation, @unknown_tenant_id, outcome)
-  end
-
-  @spec ingest_edge(:create_session | :append_event, :ok | :error) :: :ok
-  def ingest_edge(operation, outcome)
-      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
-    ingest_edge(operation, @unknown_tenant_id, outcome)
   end
 
   @doc """
@@ -134,17 +103,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec event_store_write(
-          String.t(),
-          pos_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def event_store_write(session_id, seq, payload_bytes)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             is_integer(payload_bytes) and payload_bytes >= 0 do
-    event_store_write(session_id, @unknown_tenant_id, seq, payload_bytes)
   end
 
   @doc """
@@ -194,30 +152,6 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
-  @spec event_store_backpressure(
-          String.t(),
-          non_neg_integer(),
-          pos_integer(),
-          :memory_limit
-        ) :: :ok
-  def event_store_backpressure(
-        session_id,
-        current_memory_bytes,
-        max_memory_bytes,
-        reason
-      )
-      when is_binary(session_id) and session_id != "" and is_integer(current_memory_bytes) and
-             current_memory_bytes >= 0 and is_integer(max_memory_bytes) and max_memory_bytes > 0 and
-             reason in [:memory_limit] do
-    event_store_backpressure(
-      session_id,
-      @unknown_tenant_id,
-      current_memory_bytes,
-      max_memory_bytes,
-      reason
-    )
-  end
-
   @doc """
   Emit telemetry when a cursor update is published on PubSub.
 
@@ -241,13 +175,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec cursor_update_emitted(String.t(), non_neg_integer(), non_neg_integer()) :: :ok
-  def cursor_update_emitted(session_id, seq, last_seq)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq >= 0 and
-             is_integer(last_seq) and last_seq >= seq do
-    cursor_update_emitted(session_id, @unknown_tenant_id, seq, last_seq)
   end
 
   @doc """
@@ -281,32 +208,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec tail_cursor_lookup(
-          String.t(),
-          Principal.t() | nil,
-          pos_integer(),
-          :ets | :storage,
-          :hit | :miss
-        ) :: :ok
-  def tail_cursor_lookup(session_id, %Principal{} = principal, seq, source, result)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             source in [:ets, :storage] and result in [:hit, :miss] do
-    tail_cursor_lookup(session_id, Tenancy.label_from_principal(principal), seq, source, result)
-  end
-
-  def tail_cursor_lookup(session_id, nil, seq, source, result)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             source in [:ets, :storage] and result in [:hit, :miss] do
-    tail_cursor_lookup(session_id, @unknown_tenant_id, seq, source, result)
-  end
-
-  @spec tail_cursor_lookup(String.t(), pos_integer(), :ets | :storage, :hit | :miss) :: :ok
-  def tail_cursor_lookup(session_id, seq, source, result)
-      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
-             source in [:ets, :storage] and result in [:hit, :miss] do
-    tail_cursor_lookup(session_id, @unknown_tenant_id, seq, source, result)
   end
 
   @doc """
@@ -349,28 +250,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec raft_command_result(
-          :create_session | :append_event | :append_events | :ack_archived | :other,
-          :local_ok
-          | :local_error
-          | :local_timeout
-          | :leader_retry_ok
-          | :leader_retry_error
-          | :leader_retry_timeout
-        ) :: :ok
-  def raft_command_result(command, outcome)
-      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
-             outcome in [
-               :local_ok,
-               :local_error,
-               :local_timeout,
-               :leader_retry_ok,
-               :leader_retry_error,
-               :leader_retry_timeout
-             ] do
-    raft_command_result(command, outcome, @unknown_tenant_id)
   end
 
   @doc """
@@ -425,37 +304,6 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
-  @spec routing_decision(
-          non_neg_integer(),
-          :local | :remote,
-          boolean(),
-          :disabled | :hit | :miss,
-          non_neg_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def routing_decision(
-        group_id,
-        target,
-        prefer_leader,
-        leader_hint,
-        replica_count,
-        ready_count
-      )
-      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
-             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
-             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
-             ready_count >= 0 do
-    routing_decision(
-      group_id,
-      @unknown_tenant_id,
-      target,
-      prefer_leader,
-      leader_hint,
-      replica_count,
-      ready_count
-    )
-  end
-
   @doc """
   Emit telemetry for one routing execution result after request execution.
 
@@ -498,30 +346,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec routing_result(
-          non_neg_integer(),
-          :local | :remote,
-          :ok | :error | :timeout | :badrpc | :no_candidates | :other,
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
-      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
-             outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
-             is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
-             is_integer(leader_redirects) and leader_redirects >= 0 do
-    routing_result(
-      group_id,
-      @unknown_tenant_id,
-      path,
-      outcome,
-      attempts,
-      retries,
-      leader_redirects
-    )
   end
 
   @doc """
@@ -628,37 +452,6 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
-  @spec archive_ack_applied(
-          String.t(),
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer(),
-          pos_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def archive_ack_applied(
-        session_id,
-        last_seq,
-        archived_seq,
-        trimmed,
-        tail_keep,
-        tail_size
-      )
-      when is_binary(session_id) and is_integer(last_seq) and last_seq >= 0 and
-             is_integer(archived_seq) and
-             archived_seq >= 0 and is_integer(trimmed) and trimmed >= 0 and is_integer(tail_keep) and
-             tail_keep > 0 do
-    archive_ack_applied(
-      session_id,
-      @unknown_tenant_id,
-      last_seq,
-      archived_seq,
-      trimmed,
-      tail_keep,
-      tail_size
-    )
-  end
-
   @doc """
   Emit an event per archived batch (per session).
 
@@ -704,28 +497,6 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
-  end
-
-  @spec archive_batch(
-          String.t(),
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def archive_batch(session_id, batch_rows, batch_bytes, avg_event_bytes, pending_after)
-      when is_binary(session_id) and session_id != "" and is_integer(batch_rows) and
-             batch_rows >= 0 and
-             is_integer(batch_bytes) and batch_bytes >= 0 and is_integer(avg_event_bytes) and
-             avg_event_bytes >= 0 and is_integer(pending_after) and pending_after >= 0 do
-    archive_batch(
-      session_id,
-      @unknown_tenant_id,
-      batch_rows,
-      batch_bytes,
-      avg_event_bytes,
-      pending_after
-    )
   end
 
   @doc """

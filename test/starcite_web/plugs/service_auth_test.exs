@@ -112,7 +112,11 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     Application.put_env(:starcite, @auth_env_key, mode: :none)
     conn = conn(:get, "/")
 
-    assert {:ok, %Context{kind: :none}} = ServiceAuth.authenticate_conn(conn)
+    assert {:ok,
+            %Context{
+              kind: :none,
+              principal: %Principal{tenant_id: "service", id: "service", type: :service}
+            }} = ServiceAuth.authenticate_conn(conn)
   end
 
   test "authenticate_token rejects non-binary token values" do
@@ -134,12 +138,9 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
     assert {:ok, auth_context} = ServiceAuth.authenticate_token(token)
     assert auth_context.kind == :jwt
-    assert auth_context.tenant_id == "acme"
-    assert auth_context.subject == "user:user-42"
     assert auth_context.session_id == "ses-1"
     assert auth_context.scopes == ["session:create", "session:read", "session:append"]
     assert auth_context.principal == %Principal{tenant_id: "acme", id: "user-42", type: :user}
-    assert auth_context.bearer_token == token
     assert is_integer(auth_context.expires_at)
   end
 
@@ -156,7 +157,6 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
     assert {:ok,
             %Context{
-              subject: "svc:customer-a",
               principal: %Principal{tenant_id: "acme", id: "customer-a", type: :service}
             }} =
              ServiceAuth.authenticate_token(token)

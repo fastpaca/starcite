@@ -29,7 +29,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
   test "append does not emit per-command telemetry from write path" do
     id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
 
     assert {:ok, _reply} =
              WritePath.append_event(id, %{
@@ -61,9 +61,9 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
   end
 
   test "telemetry helper exposes leader_retry outcome dimension" do
-    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout)
+    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
 
-    assert_receive_raft_command(:append_event, :leader_retry_timeout, "unknown")
+    assert_receive_raft_command(:append_event, :leader_retry_timeout, "acme")
   end
 
   test "global telemetry flag disables raft command events" do

@@ -331,7 +331,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
       RaftFSM.apply(
         nil,
         {:create_session, session_id, nil,
-         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, %{}},
+         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme", %{}},
         state
       )
 
