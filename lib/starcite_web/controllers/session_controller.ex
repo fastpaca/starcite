@@ -241,7 +241,7 @@ defmodule StarciteWeb.SessionController do
     Tenancy.label(tenant_id)
   end
 
-  defp tenant_label_for_auth(_auth), do: Tenancy.label(nil)
+  defp tenant_label_for_auth(%Context{kind: :none}), do: Tenancy.label(nil)
 
   defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp required_non_empty_string(_value), do: {:error, :invalid_event}

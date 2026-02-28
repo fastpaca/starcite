@@ -308,10 +308,19 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
 
-  defp tenant_id_for_create_session(metadata, creator_principal) when is_map(metadata) do
-    Tenancy.label(
-      Tenancy.from_session(%{metadata: metadata, creator_principal: creator_principal})
-    )
+  defp tenant_id_for_create_session(%{"tenant_id" => tenant_id}, _creator_principal)
+       when is_binary(tenant_id) and tenant_id != "" do
+    Tenancy.label(tenant_id)
+  end
+
+  defp tenant_id_for_create_session(%{tenant_id: tenant_id}, _creator_principal)
+       when is_binary(tenant_id) and tenant_id != "" do
+    Tenancy.label(tenant_id)
+  end
+
+  defp tenant_id_for_create_session(_metadata, %Starcite.Auth.Principal{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "" do
+    Tenancy.label(tenant_id)
   end
 
   defp tenant_id_for_create_session(_metadata, _creator_principal), do: Tenancy.label(nil)

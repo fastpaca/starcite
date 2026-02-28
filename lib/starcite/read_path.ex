@@ -18,28 +18,32 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    get_events_from_cursor(id, cursor, limit, [])
+    get_events_from_cursor(id, cursor, limit, %{})
   end
 
   def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
-  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer(), keyword()) ::
+  @type route_opts :: %{optional(:prefer_leader) => boolean()}
+
+  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer(), route_opts()) ::
           {:ok, [map()]} | {:error, term()}
   def get_events_from_cursor(id, cursor, limit, opts)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
-             limit > 0 and is_list(opts) do
-    group = RaftAccess.group_for_session(id)
+             limit > 0 and is_map(opts) do
+    with {:ok, prefer_leader} <- prefer_leader_from_opts(opts) do
+      group = RaftAccess.group_for_session(id)
 
-    ReplicaRouter.call_on_replica(
-      group,
-      __MODULE__,
-      :rpc_get_events_from_cursor,
-      [id, cursor, limit],
-      __MODULE__,
-      :rpc_get_events_from_cursor,
-      [id, cursor, limit],
-      Keyword.merge([prefer_leader: false], opts)
-    )
+      ReplicaRouter.call_on_replica(
+        group,
+        __MODULE__,
+        :rpc_get_events_from_cursor,
+        [id, cursor, limit],
+        __MODULE__,
+        :rpc_get_events_from_cursor,
+        [id, cursor, limit],
+        prefer_leader: prefer_leader
+      )
+    end
   end
 
   def get_events_from_cursor(_id, _cursor, _limit, _opts), do: {:error, :invalid_cursor}
@@ -129,4 +133,12 @@ defmodule Starcite.ReadPath do
       {:ok, events}
     end
   end
+
+  defp prefer_leader_from_opts(%{} = opts) when map_size(opts) == 0, do: {:ok, false}
+
+  defp prefer_leader_from_opts(%{prefer_leader: prefer_leader} = opts)
+       when map_size(opts) == 1 and is_boolean(prefer_leader),
+       do: {:ok, prefer_leader}
+
+  defp prefer_leader_from_opts(_opts), do: {:error, :invalid_cursor}
 end

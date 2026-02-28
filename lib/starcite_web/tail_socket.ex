@@ -142,12 +142,7 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp fetch_replay_batch(state) do
-    case ReadPath.get_events_from_cursor(
-           state.session_id,
-           state.cursor,
-           @replay_batch_size,
-           tenant_id: state.tenant_id
-         ) do
+    case ReadPath.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
       {:ok, []} ->
         state
         |> Map.put(:replay_done, true)
@@ -244,7 +239,7 @@ defmodule StarciteWeb.TailSocket do
   defp read_event_from_storage(session_id, tenant_id, seq)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" and is_integer(seq) and seq > 0 do
-    case ReadPath.get_events_from_cursor(session_id, seq - 1, 1, tenant_id: tenant_id) do
+    case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
         :ok = Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :hit)
         {:ok, event}
