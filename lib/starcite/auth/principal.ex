@@ -10,7 +10,7 @@ defmodule Starcite.Auth.Principal do
   @derive {Jason.Encoder, only: [:tenant_id, :id, :type]}
   defstruct [:tenant_id, :id, :type]
 
-  @type type :: :user | :agent
+  @type type :: :user | :agent | :service
 
   @type t :: %__MODULE__{
           tenant_id: String.t(),
@@ -21,7 +21,7 @@ defmodule Starcite.Auth.Principal do
   @spec new(String.t(), String.t(), type()) :: {:ok, t()} | {:error, :invalid_principal}
   def new(tenant_id, id, type)
       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
-             type in [:user, :agent] do
+             type in [:user, :agent, :service] do
     {:ok, %__MODULE__{tenant_id: tenant_id, id: id, type: type}}
   end
 

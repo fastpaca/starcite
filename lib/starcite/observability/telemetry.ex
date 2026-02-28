@@ -7,6 +7,9 @@ defmodule Starcite.Observability.Telemetry do
   Note: This is an event substrate - no LLM token budgets or compaction metrics.
   """
 
+  alias Starcite.Auth.Principal
+  alias Starcite.Observability.Tenancy
+
   @unknown_tenant_id "unknown"
 
   @doc """
@@ -83,6 +86,17 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
+  end
+
+  @spec ingest_edge(:create_session | :append_event, Principal.t() | nil, :ok | :error) :: :ok
+  def ingest_edge(operation, %Principal{} = principal, outcome)
+      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
+    ingest_edge(operation, Tenancy.label_from_principal(principal), outcome)
+  end
+
+  def ingest_edge(operation, nil, outcome)
+      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
+    ingest_edge(operation, @unknown_tenant_id, outcome)
   end
 
   @spec ingest_edge(:create_session | :append_event, :ok | :error) :: :ok
@@ -267,6 +281,25 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
+  end
+
+  @spec tail_cursor_lookup(
+          String.t(),
+          Principal.t() | nil,
+          pos_integer(),
+          :ets | :storage,
+          :hit | :miss
+        ) :: :ok
+  def tail_cursor_lookup(session_id, %Principal{} = principal, seq, source, result)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+             source in [:ets, :storage] and result in [:hit, :miss] do
+    tail_cursor_lookup(session_id, Tenancy.label_from_principal(principal), seq, source, result)
+  end
+
+  def tail_cursor_lookup(session_id, nil, seq, source, result)
+      when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
+             source in [:ets, :storage] and result in [:hit, :miss] do
+    tail_cursor_lookup(session_id, @unknown_tenant_id, seq, source, result)
   end
 
   @spec tail_cursor_lookup(String.t(), pos_integer(), :ets | :storage, :hit | :miss) :: :ok

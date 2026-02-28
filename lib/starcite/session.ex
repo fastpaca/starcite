@@ -349,6 +349,8 @@ defmodule Starcite.Session do
 
   defp principal_type!("user", _field), do: :user
   defp principal_type!("agent", _field), do: :agent
+  defp principal_type!("service", _field), do: :service
+  defp principal_type!("svc", _field), do: :service
 
   defp principal_type!(value, field) do
     raise ArgumentError, "invalid session #{field} type: #{inspect(value)}"

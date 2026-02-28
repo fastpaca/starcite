@@ -20,12 +20,15 @@ defmodule Starcite.Observability.Tenancy do
   @spec label_from_event(map()) :: String.t()
   def label_from_event(event), do: event |> from_event() |> label()
 
+  @spec label_from_principal(Principal.t() | map() | nil) :: String.t()
+  def label_from_principal(principal), do: principal |> from_principal() |> label()
+
   @spec label_from_session_id(term()) :: String.t()
   def label_from_session_id(session_id), do: session_id |> from_session_id() |> label()
 
   @spec from_session(Session.t()) :: String.t() | nil
   def from_session(%Session{metadata: metadata, creator_principal: creator_principal}) do
-    metadata_tenant_id(metadata) || principal_tenant_id(creator_principal)
+    metadata_tenant_id(metadata) || from_principal(creator_principal)
   end
 
   def from_session(_session), do: nil
@@ -57,6 +60,21 @@ defmodule Starcite.Observability.Tenancy do
 
   def from_session_id(_session_id), do: nil
 
+  @spec from_principal(Principal.t() | map() | nil) :: String.t() | nil
+  def from_principal(%Principal{tenant_id: tenant_id})
+      when is_binary(tenant_id) and tenant_id != "",
+      do: tenant_id
+
+  def from_principal(%{"tenant_id" => tenant_id})
+      when is_binary(tenant_id) and tenant_id != "",
+      do: tenant_id
+
+  def from_principal(%{tenant_id: tenant_id})
+      when is_binary(tenant_id) and tenant_id != "",
+      do: tenant_id
+
+  def from_principal(_principal), do: nil
+
   defp principal_metadata_tenant_id(%{"starcite_principal" => principal_metadata})
        when is_map(principal_metadata),
        do: metadata_tenant_id(principal_metadata)
@@ -76,10 +94,4 @@ defmodule Starcite.Observability.Tenancy do
        do: tenant_id
 
   defp metadata_tenant_id(_metadata), do: nil
-
-  defp principal_tenant_id(%Principal{tenant_id: tenant_id})
-       when is_binary(tenant_id) and tenant_id != "",
-       do: tenant_id
-
-  defp principal_tenant_id(_principal), do: nil
 end

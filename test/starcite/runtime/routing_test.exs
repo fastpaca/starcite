@@ -132,8 +132,7 @@ defmodule Starcite.Runtime.RoutingTest do
                  ready_nodes: [missing_a],
                  local_running: false,
                  allow_local: false,
-                 prefer_leader: true,
-                 tenant_id: "acme"
+                 prefer_leader: true
                )
 
       assert length(failures) == 2

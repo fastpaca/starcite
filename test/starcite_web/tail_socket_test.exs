@@ -1,6 +1,7 @@
 defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.WritePath
   alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
@@ -18,11 +19,11 @@ defmodule StarciteWeb.TailSocketTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  defp base_state(session_id, cursor, tenant_id \\ "unknown") do
+  defp base_state(session_id, cursor, principal \\ nil) do
     %{
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
-      tenant_id: tenant_id,
+      principal: principal,
       cursor: cursor,
       frame_batch_size: 1,
       replay_queue: :queue.new(),
@@ -258,7 +259,7 @@ defmodule StarciteWeb.TailSocketTest do
         inserted_at: NaiveDateTime.utc_now()
       }
 
-      state = %{base_state(session_id, 0, "acme") | replay_done: true}
+      state = %{base_state(session_id, 0, principal_for_tenant("acme")) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
                TailSocket.handle_info({:cursor_update, update}, state)
@@ -430,6 +431,10 @@ defmodule StarciteWeb.TailSocketTest do
     seq = Map.get(counters, key, 0) + 1
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
+  end
+
+  defp principal_for_tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "" do
+    %Principal{tenant_id: tenant_id, id: "tail-test", type: :service}
   end
 
   describe "auth lifetime" do

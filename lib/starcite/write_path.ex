@@ -12,7 +12,6 @@ defmodule Starcite.WritePath do
   }
 
   alias Starcite.Session
-  alias Starcite.Observability.Tenancy
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -41,8 +40,7 @@ defmodule Starcite.WritePath do
           call_remote(
             group,
             :create_session_local,
-            [id, title, creator_principal, metadata],
-            tenant_id_for_create_session(metadata, creator_principal)
+            [id, title, creator_principal, metadata]
           )
       end
 
@@ -88,7 +86,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
 
       :error ->
-        call_remote(group, :append_event_local, [id, event], Tenancy.label_from_event(event))
+        call_remote(group, :append_event_local, [id, event])
     end
   end
 
@@ -110,8 +108,7 @@ defmodule Starcite.WritePath do
         call_remote(
           group,
           :append_event_local,
-          [id, event, opts],
-          Tenancy.label_from_event(event)
+          [id, event, opts]
         )
     end
   end
@@ -154,7 +151,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
 
       :error ->
-        call_remote(group, :append_events_local, [id, events, opts], tenant_id_for_events(events))
+        call_remote(group, :append_events_local, [id, events, opts])
     end
   end
 
@@ -178,7 +175,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
 
       :error ->
-        call_remote(group, :ack_archived_local, [id, upto_seq], Tenancy.label(nil))
+        call_remote(group, :ack_archived_local, [id, upto_seq])
     end
   end
 
@@ -236,10 +233,9 @@ defmodule Starcite.WritePath do
 
   defp maybe_cache_session(_id, _title, _creator_principal, _metadata), do: :ok
 
-  defp call_remote(group_id, fun, args, tenant_id)
-       when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) and
-              is_binary(tenant_id) do
-    route_opts = [prefer_leader: false, tenant_id: tenant_id]
+  defp call_remote(group_id, fun, args)
+       when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
+    route_opts = [prefer_leader: false]
 
     ReplicaRouter.call_on_replica(
       group_id,
@@ -307,29 +303,6 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:ok, _reply}), do: :leader_retry_ok
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
-
-  defp tenant_id_for_create_session(%{"tenant_id" => tenant_id}, _creator_principal)
-       when is_binary(tenant_id) and tenant_id != "" do
-    Tenancy.label(tenant_id)
-  end
-
-  defp tenant_id_for_create_session(%{tenant_id: tenant_id}, _creator_principal)
-       when is_binary(tenant_id) and tenant_id != "" do
-    Tenancy.label(tenant_id)
-  end
-
-  defp tenant_id_for_create_session(_metadata, %Starcite.Auth.Principal{tenant_id: tenant_id})
-       when is_binary(tenant_id) and tenant_id != "" do
-    Tenancy.label(tenant_id)
-  end
-
-  defp tenant_id_for_create_session(_metadata, _creator_principal), do: Tenancy.label(nil)
-
-  defp tenant_id_for_events([first_event | _rest]) when is_map(first_event) do
-    Tenancy.label_from_event(first_event)
-  end
-
-  defp tenant_id_for_events(_events), do: Tenancy.label(nil)
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

@@ -10,34 +10,27 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Observability.Tenancy
   alias Starcite.ReadPath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
 
-  @default_tail_frame_batch_size 1
-  @max_tail_frame_batch_size 1_000
-
   plug :ensure_websocket_upgrade_plug when action in [:tail]
 
   def tail(conn, %{"id" => id} = params) do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, cursor} <- parse_cursor_param(params),
-         {:ok, frame_batch_size} <- parse_frame_batch_size_param(params),
          :ok <- Policy.allowed_to_access_session(auth, id),
          {:ok, session} <- ReadPath.get_session(id),
-         :ok <- Policy.allowed_to_read_session(auth, session),
-         {:ok, tenant_id} <- tail_tenant_id(auth, session) do
+         :ok <- Policy.allowed_to_read_session(auth, session) do
       conn
       |> WebSockAdapter.upgrade(
         StarciteWeb.TailSocket,
         %{
           session_id: id,
           cursor: cursor,
-          frame_batch_size: frame_batch_size,
-          tenant_id: tenant_id,
+          principal: auth.principal,
           auth_context: auth
         },
         timeout: 120_000
@@ -54,11 +47,6 @@ defmodule StarciteWeb.TailController do
   defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
   defp parse_cursor_param(%{}), do: {:ok, 0}
 
-  defp parse_frame_batch_size_param(%{"batch_size" => batch_size}),
-    do: parse_frame_batch_size(batch_size)
-
-  defp parse_frame_batch_size_param(%{}), do: {:ok, @default_tail_frame_batch_size}
-
   defp parse_cursor(nil), do: {:ok, 0}
   defp parse_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: {:ok, cursor}
 
@@ -70,24 +58,6 @@ defmodule StarciteWeb.TailController do
   end
 
   defp parse_cursor(_), do: {:error, :invalid_cursor}
-
-  defp parse_frame_batch_size(batch_size)
-       when is_integer(batch_size) and batch_size >= @default_tail_frame_batch_size and
-              batch_size <= @max_tail_frame_batch_size,
-       do: {:ok, batch_size}
-
-  defp parse_frame_batch_size(batch_size) when is_binary(batch_size) do
-    case Integer.parse(batch_size) do
-      {parsed, ""}
-      when parsed >= @default_tail_frame_batch_size and parsed <= @max_tail_frame_batch_size ->
-        {:ok, parsed}
-
-      _ ->
-        {:error, :invalid_tail_batch_size}
-    end
-  end
-
-  defp parse_frame_batch_size(_batch_size), do: {:error, :invalid_tail_batch_size}
 
   defp ensure_websocket_upgrade_plug(conn, _opts) do
     case ensure_websocket_upgrade(conn) do
@@ -109,15 +79,4 @@ defmodule StarciteWeb.TailController do
 
     if has_upgrade?, do: :ok, else: {:error, :invalid_websocket_upgrade}
   end
-
-  defp tail_tenant_id(%Context{kind: :none}, session) do
-    {:ok, Tenancy.label_from_session(session)}
-  end
-
-  defp tail_tenant_id(%Context{kind: :jwt, tenant_id: tenant_id}, _session)
-       when is_binary(tenant_id) and tenant_id != "" do
-    {:ok, Tenancy.label(tenant_id)}
-  end
-
-  defp tail_tenant_id(_auth, _session), do: {:error, :forbidden_tenant}
 end

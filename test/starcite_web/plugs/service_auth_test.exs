@@ -143,7 +143,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     assert is_integer(auth_context.expires_at)
   end
 
-  test "authenticate_token accepts non user/agent sub without principal struct" do
+  test "authenticate_token extracts a service principal from svc subject" do
     {private_key, kid} = jwt_signing_fixture!()
 
     token =
@@ -154,8 +154,26 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
         "scopes" => ["session:read"]
       })
 
-    assert {:ok, %Context{subject: "svc:customer-a", principal: nil}} =
+    assert {:ok,
+            %Context{
+              subject: "svc:customer-a",
+              principal: %Principal{tenant_id: "acme", id: "customer-a", type: :service}
+            }} =
              ServiceAuth.authenticate_token(token)
+  end
+
+  test "authenticate_token rejects unsupported subject principal types" do
+    {private_key, kid} = jwt_signing_fixture!()
+
+    token =
+      private_key
+      |> sign_token(kid, %{
+        "tenant_id" => "acme",
+        "sub" => "device:edge-1",
+        "scopes" => ["session:read"]
+      })
+
+    assert {:error, :invalid_jwt_claims} = ServiceAuth.authenticate_token(token)
   end
 
   test "authenticate_token rejects jwt missing tenant_id claim" do

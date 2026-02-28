@@ -172,17 +172,25 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   defp claim_subject(_claims), do: {:error, :invalid_jwt_claims}
 
-  defp principal_from_subject("user:" <> id, tenant_id)
-       when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
-    Principal.new(tenant_id, id, :user)
+  defp principal_from_subject(subject, tenant_id)
+       when is_binary(subject) and subject != "" and is_binary(tenant_id) and tenant_id != "" do
+    with [principal_type, principal_id] <- String.split(subject, ":", parts: 2),
+         true <- principal_type != "" and principal_id != "",
+         {:ok, type} <- principal_type_from_subject(principal_type),
+         {:ok, principal} <- Principal.new(tenant_id, principal_id, type) do
+      {:ok, principal}
+    else
+      _other -> {:error, :invalid_jwt_claims}
+    end
   end
 
-  defp principal_from_subject("agent:" <> id, tenant_id)
-       when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
-    Principal.new(tenant_id, id, :agent)
-  end
+  defp principal_from_subject(_subject, _tenant_id), do: {:error, :invalid_jwt_claims}
 
-  defp principal_from_subject(_subject, _tenant_id), do: {:ok, nil}
+  defp principal_type_from_subject("user"), do: {:ok, :user}
+  defp principal_type_from_subject("agent"), do: {:ok, :agent}
+  defp principal_type_from_subject("service"), do: {:ok, :service}
+  defp principal_type_from_subject("svc"), do: {:ok, :service}
+  defp principal_type_from_subject(_principal_type), do: {:error, :invalid_jwt_claims}
 
   defp scope_values(nil), do: {:ok, []}
 
