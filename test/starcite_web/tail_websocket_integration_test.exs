@@ -130,7 +130,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     kid: kid
   } do
     session_id = unique_id("ses")
-    {:ok, _} = WritePath.create_session(id: session_id, metadata: %{"tenant_id" => "acme"})
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     for n <- 1..3 do
       {:ok, _reply} =

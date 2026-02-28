@@ -2,7 +2,7 @@ defmodule StarciteWeb.TailSocket do
   @moduledoc """
   Raw WebSocket handler for session tails.
 
-  Emits one JSON event per WebSocket text frame.
+  Emits JSON text frames for replay and live events.
   """
 
   @behaviour WebSock
@@ -15,19 +15,23 @@ defmodule StarciteWeb.TailSocket do
 
   @replay_batch_size 1_000
   @catchup_interval_ms 5_000
+  @default_frame_batch_size 1
 
   @impl true
-  def init(%{
-        session_id: session_id,
-        cursor: cursor,
-        principal: principal,
-        auth_context: %Context{} = auth_context
-      })
+  def init(
+        %{
+          session_id: session_id,
+          cursor: cursor,
+          principal: principal,
+          auth_context: %Context{} = auth_context
+        } = params
+      )
       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
              (is_struct(principal, Principal) or is_nil(principal)) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
     auth_expires_at = auth_expires_at(auth_context)
+    frame_batch_size = Map.get(params, :frame_batch_size, @default_frame_batch_size)
 
     state = %{
       session_id: session_id,
@@ -35,6 +39,7 @@ defmodule StarciteWeb.TailSocket do
       principal: principal,
       auth_context: auth_context,
       cursor: cursor,
+      frame_batch_size: frame_batch_size,
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
@@ -106,7 +111,7 @@ defmodule StarciteWeb.TailSocket do
         case resolve_cursor_update_event(state.session_id, state.principal, update) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
-            {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+            push_events_frame([event], next_state)
 
           :error ->
             buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
@@ -122,17 +127,19 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp drain_replay(state) do
-    case :queue.out(state.replay_queue) do
-      {{:value, event}, replay_queue} ->
+    case take_replay_events(state.replay_queue, state.frame_batch_size) do
+      {events, replay_queue} when events != [] ->
+        last_event = List.last(events)
+
         next_state =
           state
           |> Map.put(:replay_queue, replay_queue)
-          |> Map.put(:cursor, max(state.cursor, event.seq))
+          |> Map.put(:cursor, max(state.cursor, last_event.seq))
           |> maybe_schedule_drain()
 
-        {:push, {:text, Jason.encode!(render_event(event))}, next_state}
+        push_events_frame(events, next_state)
 
-      {:empty, _queue} ->
+      {[], _queue} ->
         if state.replay_done do
           flush_buffered(state)
         else
@@ -288,6 +295,8 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
+  defp schedule_auth_expiry(state), do: state
+
   defp close_for_auth_error(:token_expired, state) do
     {:stop, :token_expired, {4001, "token_expired"}, state}
   end
@@ -297,6 +306,43 @@ defmodule StarciteWeb.TailSocket do
        do: expires_at
 
   defp auth_expires_at(%Context{}), do: nil
+
+  defp take_replay_events(queue, max_count)
+       when is_integer(max_count) and max_count >= @default_frame_batch_size do
+    do_take_replay_events(queue, max_count, [])
+  end
+
+  defp do_take_replay_events(queue, 0, events), do: {Enum.reverse(events), queue}
+
+  defp do_take_replay_events(queue, remaining, events) when remaining > 0 do
+    case :queue.out(queue) do
+      {{:value, event}, replay_queue} ->
+        do_take_replay_events(replay_queue, remaining - 1, [event | events])
+
+      {:empty, replay_queue} ->
+        {Enum.reverse(events), replay_queue}
+    end
+  end
+
+  defp push_events_frame(events, %{frame_batch_size: frame_batch_size} = state)
+       when is_list(events) and events != [] and is_integer(frame_batch_size) and
+              frame_batch_size >= @default_frame_batch_size do
+    payload = encode_events_payload(events, frame_batch_size)
+    {:push, {:text, payload}, state}
+  end
+
+  defp encode_events_payload(events, frame_batch_size)
+       when is_list(events) and events != [] and is_integer(frame_batch_size) and
+              frame_batch_size >= @default_frame_batch_size do
+    rendered_events = Enum.map(events, &render_event/1)
+
+    if frame_batch_size > @default_frame_batch_size do
+      Jason.encode!(rendered_events)
+    else
+      [rendered_event] = rendered_events
+      Jason.encode!(rendered_event)
+    end
+  end
 
   defp render_event(event) when is_map(event) do
     Map.update(event, :inserted_at, nil, &iso8601_utc/1)

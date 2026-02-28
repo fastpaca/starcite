@@ -131,7 +131,7 @@ defmodule StarciteWeb.TailControllerTest do
 
     test "returns 400 for invalid tail batch size" do
       id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, metadata: %{"tenant_id" => "acme"})
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
       conn =
         conn_get("/v1/sessions/#{id}/tail?cursor=0&batch_size=bad", [
