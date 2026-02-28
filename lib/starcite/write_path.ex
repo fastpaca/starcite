@@ -38,7 +38,12 @@ defmodule Starcite.WritePath do
           )
 
         :error ->
-          call_remote(group, :create_session_local, [id, title, creator_principal, metadata])
+          call_remote(
+            group,
+            :create_session_local,
+            [id, title, creator_principal, metadata],
+            tenant_id_for_create_session(metadata, creator_principal)
+          )
       end
 
     case result do
@@ -83,7 +88,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
 
       :error ->
-        call_remote(group, :append_event_local, [id, event])
+        call_remote(group, :append_event_local, [id, event], Tenancy.label_from_event(event))
     end
   end
 
@@ -102,7 +107,12 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
 
       :error ->
-        call_remote(group, :append_event_local, [id, event, opts])
+        call_remote(
+          group,
+          :append_event_local,
+          [id, event, opts],
+          Tenancy.label_from_event(event)
+        )
     end
   end
 
@@ -144,7 +154,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
 
       :error ->
-        call_remote(group, :append_events_local, [id, events, opts])
+        call_remote(group, :append_events_local, [id, events, opts], tenant_id_for_events(events))
     end
   end
 
@@ -168,7 +178,7 @@ defmodule Starcite.WritePath do
         process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
 
       :error ->
-        call_remote(group, :ack_archived_local, [id, upto_seq])
+        call_remote(group, :ack_archived_local, [id, upto_seq], Tenancy.label(nil))
     end
   end
 
@@ -226,9 +236,10 @@ defmodule Starcite.WritePath do
 
   defp maybe_cache_session(_id, _title, _creator_principal, _metadata), do: :ok
 
-  defp call_remote(group_id, fun, args)
-       when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
-    route_opts = [prefer_leader: false, tenant_id: tenant_id_for_remote_call(fun, args)]
+  defp call_remote(group_id, fun, args, tenant_id)
+       when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) and
+              is_binary(tenant_id) do
+    route_opts = [prefer_leader: false, tenant_id: tenant_id]
 
     ReplicaRouter.call_on_replica(
       group_id,
@@ -297,51 +308,19 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
 
-  defp tenant_id_for_remote_call(:create_session_local, [_id, _title, creator_principal, metadata])
-       when is_map(metadata) do
+  defp tenant_id_for_create_session(metadata, creator_principal) when is_map(metadata) do
     Tenancy.label(
       Tenancy.from_session(%{metadata: metadata, creator_principal: creator_principal})
     )
   end
 
-  defp tenant_id_for_remote_call(:append_event_local, [session_id, %{tenant_id: tenant_id}])
-       when is_binary(session_id) and is_binary(tenant_id) do
-    Tenancy.label(tenant_id)
+  defp tenant_id_for_create_session(_metadata, _creator_principal), do: Tenancy.label(nil)
+
+  defp tenant_id_for_events([first_event | _rest]) when is_map(first_event) do
+    Tenancy.label_from_event(first_event)
   end
 
-  defp tenant_id_for_remote_call(:append_event_local, [session_id, event])
-       when is_binary(session_id) and is_map(event) do
-    Tenancy.from_event(event)
-    |> case do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_id_for_remote_call(:append_event_local, [session_id, event, _opts])
-       when is_binary(session_id) and is_map(event) do
-    Tenancy.from_event(event)
-    |> case do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_id_for_remote_call(:append_events_local, [session_id, [first_event | _rest], _opts])
-       when is_binary(session_id) and is_map(first_event) do
-    Tenancy.from_event(first_event)
-    |> case do
-      nil -> Tenancy.label(nil)
-      tenant_id -> Tenancy.label(tenant_id)
-    end
-  end
-
-  defp tenant_id_for_remote_call(:ack_archived_local, [session_id, _upto_seq])
-       when is_binary(session_id) do
-    Tenancy.label(nil)
-  end
-
-  defp tenant_id_for_remote_call(_fun, _args), do: Tenancy.label(nil)
+  defp tenant_id_for_events(_events), do: Tenancy.label(nil)
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

@@ -10,6 +10,7 @@ defmodule StarciteWeb.SessionController do
   use StarciteWeb, :controller
 
   alias Starcite.{ReadPath, WritePath}
+  alias Starcite.Observability.{Telemetry, Tenancy}
   alias StarciteWeb.Auth.Policy
 
   action_fallback StarciteWeb.FallbackController
@@ -24,6 +25,8 @@ defmodule StarciteWeb.SessionController do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, opts} <- validate_create(params, auth),
          {:ok, session} <- WritePath.create_session(opts) do
+      :ok = Telemetry.ingest_edge(:create_session, tenant_label_for_auth(auth), :ok)
+
       conn
       |> put_status(:created)
       |> json(session)
@@ -39,6 +42,8 @@ defmodule StarciteWeb.SessionController do
          :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_event(id, event, expected_seq) do
+      :ok = Telemetry.ingest_edge(:append_event, tenant_label_for_auth(auth), :ok)
+
       conn
       |> put_status(:created)
       |> json(reply)
@@ -229,6 +234,13 @@ defmodule StarciteWeb.SessionController do
 
   defp fetch_auth(%Plug.Conn{assigns: %{auth: auth}}) when is_map(auth), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
+
+  defp tenant_label_for_auth(%{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "" do
+    Tenancy.label(tenant_id)
+  end
+
+  defp tenant_label_for_auth(_auth), do: Tenancy.label(nil)
 
   defp required_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
   defp required_non_empty_string(_value), do: {:error, :invalid_event}

@@ -61,7 +61,6 @@ defmodule Starcite.DataPlane.EventStore do
     )
 
     :ok = EventQueue.put_event(session_id, seq, event)
-    :ok = Telemetry.event_store_write(session_id, tenant_id, seq, payload_bytes(event))
     :ok
   end
 
@@ -78,11 +77,6 @@ defmodule Starcite.DataPlane.EventStore do
     maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id, tenant_id)
 
     :ok = EventQueue.put_events(session_id, events)
-
-    Enum.each(events, fn event ->
-      :ok = Telemetry.event_store_write(session_id, tenant_id, event.seq, payload_bytes(event))
-    end)
-
     :ok
   end
 
@@ -341,9 +335,6 @@ defmodule Starcite.DataPlane.EventStore do
         @default_cache_reclaim_fraction
     end
   end
-
-  defp payload_bytes(%{payload: payload}), do: :erlang.external_size(payload)
-  defp payload_bytes(_event), do: 0
 
   defp tenant_label_from_events([first_event | _rest]) when is_map(first_event) do
     Tenancy.label_from_event(first_event)

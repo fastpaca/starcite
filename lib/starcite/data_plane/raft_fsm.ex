@@ -8,7 +8,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   @behaviour :ra_machine
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
-  alias Starcite.Observability.{Telemetry, Tenancy}
+  alias Starcite.Observability.Tenancy
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
   @machine_version 1
@@ -88,18 +88,6 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
       :ok = put_appended_event(session_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-      tenant_id = Tenancy.label_from_session(session)
-
-      if event_to_store do
-        Telemetry.event_appended(
-          session_id,
-          tenant_id,
-          event_to_store.type,
-          event_to_store.actor,
-          event_to_store.source,
-          payload_bytes(event_to_store.payload)
-        )
-      end
 
       effect = build_effect_for_event(session_id, event_to_store)
       reply = {:reply, {:ok, reply}}
@@ -125,18 +113,6 @@ defmodule Starcite.DataPlane.RaftFSM do
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
       :ok = put_appended_events(session_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
-      tenant_id = Tenancy.label_from_session(session)
-
-      Enum.each(events_to_store, fn event ->
-        Telemetry.event_appended(
-          session_id,
-          tenant_id,
-          event.type,
-          event.actor,
-          event.source,
-          payload_bytes(event.payload)
-        )
-      end)
 
       effects = build_effects_for_events(session_id, events_to_store)
       reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
@@ -394,6 +370,4 @@ defmodule Starcite.DataPlane.RaftFSM do
       ]
     }
   end
-
-  defp payload_bytes(payload), do: :erlang.external_size(payload)
 end

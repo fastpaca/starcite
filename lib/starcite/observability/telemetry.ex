@@ -62,6 +62,36 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit one ingestion-edge request event.
+
+  Measurements:
+    - `:count` – fixed at 1 per request
+
+  Metadata:
+    - `:operation` (`:create_session` or `:append_event`)
+    - `:tenant_id` – normalized tenancy label
+    - `:outcome` (`:ok` or `:error`)
+  """
+  @spec ingest_edge(:create_session | :append_event, String.t(), :ok | :error) :: :ok
+  def ingest_edge(operation, tenant_id, outcome)
+      when operation in [:create_session, :append_event] and is_binary(tenant_id) and
+             tenant_id != "" and outcome in [:ok, :error] do
+    execute_if_enabled(
+      [:starcite, :ingest, :edge],
+      %{count: 1},
+      %{operation: operation, tenant_id: tenant_id, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @spec ingest_edge(:create_session | :append_event, :ok | :error) :: :ok
+  def ingest_edge(operation, outcome)
+      when operation in [:create_session, :append_event] and outcome in [:ok, :error] do
+    ingest_edge(operation, @unknown_tenant_id, outcome)
+  end
+
+  @doc """
   Emit telemetry for one event-store write.
 
   Measurements:

@@ -8,30 +8,21 @@ defmodule Starcite.Observability.PromEx.Metrics do
   @impl true
   def event_metrics(_opts) do
     [
-      events_metrics(),
+      ingestion_metrics(),
       archive_metrics(),
-      event_store_metrics(),
-      raft_command_metrics(),
-      routing_metrics()
+      event_store_metrics()
     ]
   end
 
-  defp events_metrics do
+  defp ingestion_metrics do
     Event.build(
-      :starcite_events_metrics,
+      :starcite_ingestion_edge_metrics,
       [
-        counter("starcite_events_append_total",
-          event_name: [:starcite, :events, :append],
-          description: "Total events appended",
-          tags: [:type, :source, :tenant_id]
-        ),
-        distribution("starcite_events_payload_bytes",
-          event_name: [:starcite, :events, :append],
-          measurement: :payload_bytes,
-          description: "Payload bytes per appended event",
-          unit: :byte,
-          tags: [:type, :source, :tenant_id],
-          reporter_options: [buckets: [128, 512, 1024, 4096, 16384, 65536, 262_144, 1_048_576]]
+        counter("starcite_ingest_edge_total",
+          event_name: [:starcite, :ingest, :edge],
+          measurement: :count,
+          description: "Total ingestion-edge requests by operation and outcome",
+          tags: [:operation, :outcome, :tenant_id]
         )
       ]
     )
@@ -132,19 +123,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_event_store_metrics,
       [
-        counter("starcite_event_store_writes_total",
-          event_name: [:starcite, :event_store, :write],
-          description: "Total events mirrored into ETS event store",
-          tags: [:tenant_id]
-        ),
-        distribution("starcite_event_store_payload_bytes",
-          event_name: [:starcite, :event_store, :write],
-          measurement: :payload_bytes,
-          description: "Payload bytes per ETS event-store write",
-          unit: :byte,
-          tags: [:tenant_id],
-          reporter_options: [buckets: [128, 512, 1024, 4096, 16384, 65536, 262_144, 1_048_576]]
-        ),
         counter("starcite_event_store_backpressure_total",
           event_name: [:starcite, :event_store, :backpressure],
           measurement: :count,
@@ -174,74 +152,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Tail cursor lookups by source and result",
           tags: [:source, :result, :tenant_id]
-        )
-      ]
-    )
-  end
-
-  defp routing_metrics do
-    Event.build(
-      :starcite_routing_metrics,
-      [
-        counter("starcite_routing_decision_total",
-          event_name: [:starcite, :routing, :decision],
-          measurement: :count,
-          description: "Routing decisions by target and leader-hint usage",
-          tags: [:target, :leader_hint, :tenant_id]
-        ),
-        distribution("starcite_routing_replica_count",
-          event_name: [:starcite, :routing, :decision],
-          measurement: :replica_count,
-          description: "Replica count observed at routing decision time",
-          tags: [:tenant_id],
-          reporter_options: [buckets: [1, 2, 3, 5, 7]]
-        ),
-        distribution("starcite_routing_ready_count",
-          event_name: [:starcite, :routing, :decision],
-          measurement: :ready_count,
-          description: "Ready replica count observed at routing decision time",
-          tags: [:tenant_id],
-          reporter_options: [buckets: [0, 1, 2, 3, 5, 7]]
-        ),
-        counter("starcite_routing_result_total",
-          event_name: [:starcite, :routing, :result],
-          measurement: :count,
-          description: "Routing execution outcomes by path and outcome",
-          tags: [:path, :outcome, :tenant_id]
-        ),
-        distribution("starcite_routing_attempts",
-          event_name: [:starcite, :routing, :result],
-          measurement: :attempts,
-          description: "Replica attempts per routed request",
-          tags: [:tenant_id],
-          reporter_options: [buckets: [0, 1, 2, 3, 5, 8]]
-        ),
-        distribution("starcite_routing_retries",
-          event_name: [:starcite, :routing, :result],
-          measurement: :retries,
-          description: "Retries per routed request (attempts-1)",
-          tags: [:tenant_id],
-          reporter_options: [buckets: [0, 1, 2, 3, 5, 8]]
-        ),
-        counter("starcite_routing_leader_redirects_total",
-          event_name: [:starcite, :routing, :result],
-          measurement: :leader_redirects,
-          description: "Leader redirect hints observed while routing",
-          tags: [:tenant_id]
-        )
-      ]
-    )
-  end
-
-  defp raft_command_metrics do
-    Event.build(
-      :starcite_raft_command_metrics,
-      [
-        counter("starcite_raft_command_total",
-          event_name: [:starcite, :raft, :command],
-          measurement: :count,
-          description: "Raft command outcomes by command type and local/retry path",
-          tags: [:command, :outcome, :tenant_id]
         )
       ]
     )
