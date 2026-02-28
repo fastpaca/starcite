@@ -479,11 +479,12 @@ defmodule StarciteWeb.TailSocketTest do
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+    include_tenant_id? = events_table_has_tenant_id?()
+
     rows =
       Enum.map(events, fn event ->
         %{
           session_id: session_id,
-          tenant_id: event_tenant_id!(event),
           seq: event.seq,
           type: event.type,
           payload: event.payload,
@@ -496,6 +497,7 @@ defmodule StarciteWeb.TailSocketTest do
           idempotency_key: event.idempotency_key,
           inserted_at: as_datetime(event.inserted_at)
         }
+        |> maybe_put_tenant_id(event, include_tenant_id?)
       end)
 
     {count, _} =
@@ -516,6 +518,23 @@ defmodule StarciteWeb.TailSocketTest do
   defp event_tenant_id!(event) when is_map(event) do
     raise ArgumentError,
           "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
+  end
+
+  defp maybe_put_tenant_id(row, event, true) when is_map(row) and is_map(event) do
+    Map.put(row, :tenant_id, event_tenant_id!(event))
+  end
+
+  defp maybe_put_tenant_id(row, _event, false) when is_map(row), do: row
+
+  defp events_table_has_tenant_id? do
+    result =
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'tenant_id' LIMIT 1",
+        []
+      )
+
+    result.num_rows > 0
   end
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
