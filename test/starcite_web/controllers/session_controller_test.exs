@@ -114,6 +114,27 @@ defmodule StarciteWeb.SessionControllerTest do
     end)
   end
 
+  defp attach_request_telemetry do
+    handler_id = "session-request-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :request],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:request_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    :ok
+  end
+
   describe "POST /v1/sessions" do
     test "creates session with server-generated id" do
       conn =
@@ -329,6 +350,53 @@ defmodule StarciteWeb.SessionControllerTest do
   end
 
   describe "POST /v1/sessions/:id/append" do
+    test "emits write request telemetry at the web edge for success" do
+      :ok = attach_request_telemetry()
+
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+
+      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :append_event, phase: :ack, outcome: :ok}},
+                     1_000
+
+      assert is_integer(duration_ms) and duration_ms >= 0
+    end
+
+    test "emits write request telemetry at the web edge for errors" do
+      :ok = attach_request_telemetry()
+
+      id = unique_id("missing")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 404
+
+      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :append_event, phase: :ack, outcome: :error}},
+                     1_000
+
+      assert is_integer(duration_ms) and duration_ms >= 0
+    end
+
     test "appends an event" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")

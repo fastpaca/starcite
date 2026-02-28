@@ -12,7 +12,6 @@ defmodule Starcite.WritePath do
   }
 
   alias Starcite.Auth.Principal
-  alias Starcite.Observability.Telemetry
   alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
@@ -138,17 +137,15 @@ defmodule Starcite.WritePath do
           | {:error, term()}
           | {:timeout, term()}
   def append_event(id, event) when is_binary(id) and id != "" and is_map(event) do
-    measure_write_request(:append_event, fn ->
-      group = RaftAccess.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
-      case RaftAccess.local_server_for_group(group) do
-        {:ok, server_id} ->
-          process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
+    case RaftAccess.local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
 
-        :error ->
-          call_remote(group, :append_event_local, [id, event])
-      end
-    end)
+      :error ->
+        call_remote(group, :append_event_local, [id, event])
+    end
   end
 
   def append_event(_id, _event), do: {:error, :invalid_event}
@@ -158,22 +155,20 @@ defmodule Starcite.WritePath do
           | {:error, term()}
           | {:timeout, term()}
   def append_event(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
-    measure_write_request(:append_event, fn ->
-      group = RaftAccess.group_for_session(id)
-      expected_seq = expected_seq_from_opts(opts)
+    group = RaftAccess.group_for_session(id)
+    expected_seq = expected_seq_from_opts(opts)
 
-      case RaftAccess.local_server_for_group(group) do
-        {:ok, server_id} ->
-          process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
+    case RaftAccess.local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
 
-        :error ->
-          call_remote(
-            group,
-            :append_event_local,
-            [id, event, opts]
-          )
-      end
-    end)
+      :error ->
+        call_remote(
+          group,
+          :append_event_local,
+          [id, event, opts]
+        )
+    end
   end
 
   def append_event(_id, _event, _opts), do: {:error, :invalid_event}
@@ -207,17 +202,15 @@ defmodule Starcite.WritePath do
 
   def append_events(id, events, opts)
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    measure_write_request(:append_events, fn ->
-      group = RaftAccess.group_for_session(id)
+    group = RaftAccess.group_for_session(id)
 
-      case RaftAccess.local_server_for_group(group) do
-        {:ok, server_id} ->
-          process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
+    case RaftAccess.local_server_for_group(group) do
+      {:ok, server_id} ->
+        process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
 
-        :error ->
-          call_remote(group, :append_events_local, [id, events, opts])
-      end
-    end)
+      :error ->
+        call_remote(group, :append_events_local, [id, events, opts])
+    end
   end
 
   def append_events(_id, _events, _opts), do: {:error, :invalid_event}
@@ -370,28 +363,8 @@ defmodule Starcite.WritePath do
   defp classify_leader_retry_outcome({:error, _reason}), do: :leader_retry_error
   defp classify_leader_retry_outcome({:timeout, _leader}), do: :leader_retry_timeout
 
-  defp measure_write_request(operation, fun)
-       when operation in [:append_event, :append_events] and is_function(fun, 0) do
-    started_at = System.monotonic_time()
-    result = fun.()
-    duration_ms = elapsed_ms_since(started_at)
-    :ok = Telemetry.request(operation, :ack, write_request_outcome(result), duration_ms)
-    result
-  end
-
-  defp write_request_outcome({:ok, _result}), do: :ok
-  defp write_request_outcome({:timeout, _reason}), do: :timeout
-  defp write_request_outcome(_result), do: :error
-
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)
-  end
-
-  defp elapsed_ms_since(started_at) when is_integer(started_at) do
-    System.monotonic_time()
-    |> Kernel.-(started_at)
-    |> System.convert_time_unit(:native, :millisecond)
-    |> max(0)
   end
 
   defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
