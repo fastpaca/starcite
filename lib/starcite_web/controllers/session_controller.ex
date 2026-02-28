@@ -58,7 +58,7 @@ defmodule StarciteWeb.SessionController do
   defp append_event(id, event, expected_seq),
     do: WritePath.append_event(id, event, expected_seq: expected_seq)
 
-  defp authorize_append(auth, id) when is_map(auth) and is_binary(id) and id != "" do
+  defp authorize_append(%Context{} = auth, id) when is_binary(id) and id != "" do
     with {:ok, session} <- ReadPath.get_session(id),
          :ok <- Policy.allowed_to_append_session(auth, session) do
       :ok
@@ -79,7 +79,7 @@ defmodule StarciteWeb.SessionController do
 
   # Validation
 
-  defp validate_create(params, auth) when is_map(params) and is_map(auth) do
+  defp validate_create(params, %Context{} = auth) when is_map(params) do
     with {:ok, creator_principal} <- Policy.can_create_session(auth, params),
          {:ok, requested_id} <- optional_non_empty_string(params["id"]),
          {:ok, id} <- Policy.resolve_create_session_id(auth, requested_id),
@@ -107,11 +107,11 @@ defmodule StarciteWeb.SessionController do
            "source" => source,
            "metadata" => metadata
          } = params,
-         auth
+         %Context{} = auth
        )
        when is_binary(type) and type != "" and is_map(payload) and is_binary(producer_id) and
               producer_id != "" and is_integer(producer_seq) and producer_seq > 0 and
-              is_binary(source) and source != "" and is_map(metadata) and is_map(auth) do
+              is_binary(source) and source != "" and is_map(metadata) do
     case {Map.get(params, "refs"), Map.get(params, "idempotency_key"),
           Map.get(params, "expected_seq")} do
       {nil, nil, nil} ->
@@ -141,9 +141,9 @@ defmodule StarciteWeb.SessionController do
            "type" => type,
            "payload" => payload
          } = params,
-         auth
+         %Context{} = auth
        )
-       when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
+       when is_binary(type) and type != "" and is_map(payload) do
     validate_append_slow(params, auth)
   end
 
@@ -156,9 +156,9 @@ defmodule StarciteWeb.SessionController do
            "producer_id" => producer_id,
            "producer_seq" => producer_seq
          } = params,
-         auth
+         %Context{} = auth
        )
-       when is_binary(type) and type != "" and is_map(payload) and is_map(auth) do
+       when is_binary(type) and type != "" and is_map(payload) do
     with {:ok, validated_producer_id} <- required_non_empty_string(producer_id),
          {:ok, validated_producer_seq} <- required_positive_integer(producer_seq),
          {:ok, actor} <- Policy.resolve_event_actor(auth, params["actor"]),
@@ -265,11 +265,11 @@ defmodule StarciteWeb.SessionController do
   defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
   defp optional_object(_value), do: {:error, :invalid_metadata}
 
-  defp ensure_session_metadata_tenant(metadata, %{kind: :none}) when is_map(metadata) do
+  defp ensure_session_metadata_tenant(metadata, %Context{kind: :none}) when is_map(metadata) do
     {:ok, metadata}
   end
 
-  defp ensure_session_metadata_tenant(metadata, %{tenant_id: tenant_id})
+  defp ensure_session_metadata_tenant(metadata, %Context{tenant_id: tenant_id})
        when is_map(metadata) and is_binary(tenant_id) and tenant_id != "" do
     case Map.get(metadata, "tenant_id") do
       nil -> {:ok, Map.put(metadata, "tenant_id", tenant_id)}
