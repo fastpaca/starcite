@@ -107,8 +107,7 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
 - [Architecture](docs/architecture.md)
-- [Deployment](docs/deployment.md)
-- [Benchmarks](docs/benchmarks.md)
+- [Self-hosting](docs/self-hosting.md)
 
 ## Development
 
