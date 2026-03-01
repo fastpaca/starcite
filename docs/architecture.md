@@ -4,224 +4,233 @@ Starcite is a clustered session-stream service. Each session is an ordered,
 append-only event log. The system is optimized for one thing: low-latency durable
 appends with cursor-based replay.
 
-This page explains how it works internally.
+This page explains how the internals work, anchored to the architecture diagram
+below.
 
 ![Starcite Architecture](img/architecture.png)
 
-## Cluster topology
+The system is split into three layers: **edge**, **data plane**, and **control
+plane**.
 
-A Starcite cluster consists of a fixed set of write nodes (typically 3 or 5) and
-optional stateless router nodes for read scaling.
+## Edge
 
-Write nodes hold all the state. Sessions are deterministically sharded across a
-configurable number of groups (256 by default, controlled by `STARCITE_NUM_GROUPS`),
-and each group is replicated across 3 write nodes using
-[Raft](https://raft.github.io/) consensus (via Erlang's
-[Ra](https://github.com/rabbitmq/ra) library). One replica is elected leader; the
-others are followers.
+The edge handles client connections, auth, and protocol translation.
 
-Router nodes are stateless — they accept API traffic and forward commands to the
-correct write node. You can scale these independently.
+**Session API** — REST controller for `POST /v1/sessions` (create), `POST
+/v1/sessions/:id/append` (append), and `GET /v1/sessions` (list). Validates input,
+enforces tenant fencing, and delegates to WritePath or ReadPath on the data plane.
 
-```mermaid
-graph TD
-    R["Router (N)"] --> W1["Write Node 1<br/>leader for ~1/3 of groups<br/>follower for the rest"]
-    R --> W2["Write Node 2<br/>leader for ~1/3 of groups<br/>follower for the rest"]
-    R --> W3["Write Node 3<br/>leader for ~1/3 of groups<br/>follower for the rest"]
-```
+**Tailer** — WebSocket handler for `GET /v1/sessions/:id/tail?cursor=N`. Upgrades
+the HTTP connection to a long-lived WebSocket process (TailSocket) that manages
+replay and live streaming. The tailer is the only stateful process per client
+connection.
 
-The group count is set at deploy time and stays fixed for the life of the cluster.
-Sessions are assigned to groups by hashing the session ID — this is deterministic, so
-any node can compute the group for any session without coordination.
+**Auth** — A plug pipeline that validates bearer JWTs on every `/v1` request.
+Verifies signatures against JWKS keys fetched from a configured URL (cached with
+TTL), validates standard claims (`iss`, `aud`, `exp`, `tenant_id`, `sub`, scopes),
+and builds an auth context with a principal and scope set. WebSocket connections
+accept the token as either an `Authorization` header or an `access_token` query
+param.
 
-## Write path (append)
+## Data plane
 
-The append path is the critical path. Target: sub-150ms p99.
+The data plane owns session state, event ordering, and durable storage. Writes run on
+consensus (write nodes only). Reads run on every node.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant A as Router / API
-    participant L as Raft Leader
-    participant F as Followers (2)
+### Router
 
-    C->>A: POST /append
-    A->>L: route to leader
-    L->>F: replicate log entry
-    F-->>L: ack (quorum: 2 of 3)
-    L-->>A: committed (seq)
-    A-->>C: {"seq": N}
-```
+Every request needs to reach the right Raft group. The Router computes the group for
+a session by hashing the session ID (`phash2(session_id, num_groups)`), then looks up
+the replica set for that group. Replica assignment is deterministic — for each group,
+every write node gets a score via `phash2({group_id, node})`, and the top N nodes by
+score become replicas (where N is the replication factor, typically 3).
 
-Step by step:
+The ReplicaRouter picks a target: local node if it's a replica and ready, otherwise
+RPC to a remote replica. For writes, it routes to the Raft leader (with a leader hint
+cache, 10s TTL). For reads, any ready replica works. If the target returns
+`:not_leader`, the router retries with the leader hint from the response.
 
-1. Client sends `POST /v1/sessions/:id/append`.
-2. The API layer validates the request (JWT, payload shape, tenant fencing).
-3. The request is routed to the Raft leader for this session's group.
-4. The leader assigns the next monotonic `seq`, appends to its log, and replicates
-   to followers.
-5. Once a quorum (2 of 3 replicas) acknowledges, the append is committed.
-6. The client receives the committed `seq`. Tail subscribers are notified.
+### WritePath
 
-**What's NOT on this path:** database writes, archive flushes, snapshots. The entire
-write path operates on in-memory Raft state. This is why appends are fast.
+Handles `create_session` and `append_event`. Sends Raft commands to the leader via
+Ra's pipeline command interface — the caller enqueues the command and blocks waiting
+for the `:ra_event` reply with the committed result. No intermediate helper process.
 
-**Deduplication:** If the client retries with the same `(producer_id, producer_seq)`,
-the leader returns the previously committed `seq` with `deduped: true` instead of
-creating a duplicate entry.
+On commit, the Raft FSM applies the command, assigns the next monotonic `seq`, and
+produces a side effect: a PubSub broadcast to the session's cursor update topic. This
+is how tail subscribers learn about new events.
 
-**Optimistic concurrency:** If the client sends `expected_seq` and it doesn't match
-the session's current `seq`, the append is rejected with a `409`.
+After a successful append, the write path also upserts the session in the archive
+index and warms the local SessionStore cache. Neither of these is on the critical
+path — if they fail, the append still succeeds.
 
-## Read path (tail)
+**Deduplication:** The FSM tracks `(producer_id, producer_seq)` pairs per session. A
+retry with the same pair returns the previously committed `seq` with `deduped: true`.
 
-Tail is a WebSocket endpoint that replays committed events from a cursor, then
-streams new commits live. There are two distinct phases: replay and live streaming.
+**Optimistic concurrency:** If `expected_seq` doesn't match the session's current
+`seq`, the append is rejected with a `409`.
 
-### Replay phase
+### ReadPath
 
-On connect, the server fetches historical events using a two-tier read path:
+Serves session metadata and event queries. Reads are routed to any available replica
+(not necessarily the leader) via RPC.
 
-```mermaid
-sequenceDiagram
-    participant C as Client
-    participant T as TailSocket
-    participant E as EventStore (ETS)
-    participant A as Archive (S3/Postgres)
+Event reads use a two-tier model:
 
-    C->>T: WS /tail?cursor=41
-    T->>E: events where seq > 41
-    E-->>T: [seq 42, 43, 44]
-    Note right of T: Gap from cursor? Check archive.
-    T->>A: events where seq > 41 (cold)
-    A-->>T: [seq 42, 43, 44]
-    Note right of T: Merge, deduplicate, verify gap-free
-    T-->>C: {"seq":42}, {"seq":43}, {"seq":44}
-```
+1. **Hot tier** — the EventStore's pending event queue, an ETS table holding events
+   that haven't been archived yet. This is the fast path.
+2. **Cold tier** — the archive backend (S3 or Postgres), queried only when there's a
+   gap between the cursor and the oldest hot event (i.e., older events were archived
+   and evicted from memory).
 
-The **hot tier** is the in-memory EventStore — an ETS table holding events that are
-still in the Raft log. This is the fast path. If there's a gap between the cursor and
-the oldest hot event (because the Raft log was compacted), the server falls back to
-the **cold tier** — the archive backend (S3 or Postgres). Results are merged,
-deduplicated by `seq`, and verified to be gap-free before sending.
+Results from both tiers are merged, deduplicated by `seq`, and verified to be
+gap-free. If the archive is unavailable, the read path falls back to hot events only.
 
-Events are drained to the client in batches (configurable via `batch_size` query
-param, default 1, max 1000 events per WebSocket frame).
+### Raft FSM
 
-### Live streaming phase
-
-While replay is in progress, the TailSocket subscribes to a PubSub topic for the
-session. When the write path commits an event, the Raft state machine broadcasts it
-via PubSub:
-
-```mermaid
-sequenceDiagram
-    participant W as Writer (Raft FSM)
-    participant P as PubSub
-    participant T as TailSocket
-    participant C as Client
-
-    W->>P: broadcast {:cursor_update, event}
-    P->>T: {:cursor_update, event}
-    alt replay still in progress
-        Note right of T: Buffer event for later
-    else fully caught up
-        T-->>C: {"seq":45} (live)
-    end
-```
-
-Events that arrive via PubSub during replay are buffered. Once replay is complete,
-buffered events are resolved and flushed to the client before switching to pure live
-mode.
-
-### Gap detection
-
-PubSub messages can be missed during Raft leadership transitions. A catchup timer
-runs every 5 seconds — if it detects that the EventStore has events beyond the
-socket's cursor, it re-enters replay mode to close the gap. This acts as a safety net
-so clients never silently miss events.
-
-### Reconnection
-
-Clients recover from disconnects by reconnecting with their last processed `seq` as
-the cursor. No client-side bookkeeping beyond remembering one integer.
-
-## Archival
-
-A background archiver flushes committed events to the configured storage backend (S3
-or Postgres) on a ~5 second interval. This is fully asynchronous — archive writes
-never block appends or tail delivery.
-
-```mermaid
-graph LR
-    RS["Raft State<br/>(in-memory, hot path)"] --> AR["Archiver<br/>(background, ~5s interval)"] --> ST["S3 / Postgres<br/>(durable store)"]
-```
-
-The archiver is idempotent: it writes events keyed by `(session_id, seq)`, so
-retries and overlapping flushes are safe.
-
-**Why this design:** Synchronous archive writes would add tens of milliseconds to
-every append. Since Raft replication already guarantees durability across node
-failures, the archive serves as a secondary durability layer and a source for
-historical queries. The trade-off is that the archive lags the live cluster by a few
-seconds.
-
-After events are archived, the Raft log can be compacted — archived events no longer
-need to live in memory.
-
-## Snapshots and recovery
-
-Raft snapshots capture the full state of a group at a point in time. They're used for
-two things:
-
-1. **Log compaction** — without snapshots, the Raft log would grow unbounded.
-   Snapshots are triggered after ~100k appends per group.
-2. **Node recovery** — when a node restarts or falls behind, it can load the latest
-   snapshot and replay only the log entries after it, instead of replaying the entire
-   history.
-
-Snapshots are taken asynchronously and don't block the write path.
-
-## What's in Raft state
-
-Each Raft group holds the state for its assigned sessions:
+The state machine at the heart of the data plane. Each Raft group runs one FSM
+instance holding state for all sessions assigned to that group:
 
 - Session metadata (id, title, tenant, creation time)
-- The ordered event log (seq, type, payload, actor, producer info, etc.)
-- Producer deduplication state (last seen `producer_seq` per `producer_id`)
+- Ordered event log per session
+- Producer deduplication state (`producer_id` → last seen `producer_seq`)
 - Archive progress (`archived_seq` — how far the archiver has flushed)
 
-This is why Starcite doesn't need synchronous database reads on the hot path — all
-the data needed to serve appends and tail is in Raft memory.
+The FSM handles four commands: `create_session`, `append_event` (single),
+`append_events` (batch), and `ack_archived` (advance the archive cursor and allow
+EventStore eviction).
+
+Checkpoints are taken every 2048 log entries for log compaction and recovery.
+
+### Event Store
+
+An in-memory two-tier event facade:
+
+- **EventQueue** — two ETS tables: one mapping `{session_id, seq}` → event, and an
+  index tracking the max `seq` per session. This holds unarchived ("pending") events.
+- **Archive read cache** — a Cachex cache that holds recently read archived events,
+  so repeated cold reads don't hit the archive backend every time.
+
+The EventStore has memory pressure management. A configurable byte limit (default 2GB)
+triggers LRU eviction of the archive read cache when exceeded.
+
+### Session Store
+
+A Cachex cache holding session metadata (title, creator, tenant, etc.) with a 6-hour
+TTL and touch-on-read. On cache miss, loads from the archive backend. This avoids
+hitting the archive on every session access for the read path and tail connections.
+
+Does not cache event data — that's the EventStore's job.
+
+### Archiver
+
+A background GenServer that pulls committed events from the EventStore and flushes
+them to the archive backend on a ~5 second tick. Pull-based, not push-based.
+
+On each tick, the archiver scans active sessions, compares the EventStore's max `seq`
+against the Raft FSM's `archived_seq`, and flushes any pending events in batches
+(5000 events per cycle). Only the Raft leader for a group archives its sessions —
+this prevents duplicate writes across replicas.
+
+After a successful flush, the archiver sends an `ack_archived` command back through
+Raft, which advances `archived_seq` and allows the EventStore to evict those events
+from the hot tier.
+
+Archive writes are idempotent: S3 uses ETag-based conditional writes, Postgres uses
+`ON CONFLICT DO NOTHING` on `(session_id, seq)`.
+
+### Adapter
+
+The archive backend abstraction. Two implementations:
+
+**S3** — stores events as NDJSON objects (one line per event, 256 events per chunk)
+under a session-scoped prefix. Session metadata is a single JSON object per session.
+Uses conditional PUTs with ETags for idempotency. Works with any S3-compatible
+storage.
+
+**Postgres** — stores events in a table with a `(session_id, seq)` composite primary
+key. Inserts in batches of 5000 rows. Session metadata in a separate table.
+
+## Control plane
+
+The control plane manages cluster topology, node liveness, and operational tooling.
+It does not touch the request path — it only affects routing eligibility.
+
+### Write Nodes
+
+Static configuration. The set of write node identities is defined at deploy time via
+`STARCITE_WRITE_NODE_IDS` and cached in `persistent_term`. The group count
+(`STARCITE_NUM_GROUPS`, default 256) and replication factor
+(`STARCITE_WRITE_REPLICATION_FACTOR`, default 3) are also static.
+
+Group-to-replica assignment is fully deterministic from this configuration — no
+coordination needed, no rebalancing, every node computes the same answer.
+
+### Observer
+
+A GenServer that tracks write-node liveness via Erlang distribution events
+(`:nodeup` / `:nodedown`). Each node has a status:
+
+- **ready** — visible and eligible for routing
+- **suspect** — lost visibility (nodedown event)
+- **lost** — suspect for more than 120 seconds
+- **draining** — operator-initiated drain (sticky, survives nodeup)
+
+The Observer provides `route_candidates(replicas)` to the ReplicaRouter — the
+intersection of observer-ready, Raft-ready, and configured write nodes.
+
+### Ops
+
+Operator-facing commands for cluster management. Available via `mix starcite.ops`
+(development) or `bin/starcite rpc` (production releases).
+
+- `status` — full diagnostic snapshot
+- `ready-nodes` — which write nodes are currently eligible for routing
+- `drain` / `undrain` — mark a node as draining (excluded from routing) or ready
+- `wait-ready` / `wait-drained` — blocking gates for rolling restart scripts
+
+Drain is non-destructive. It excludes a node from routing but doesn't remove it from
+Raft groups. Undrain restores routing immediately.
+
+### Cluster discovery
+
+Nodes discover each other via [libcluster](https://github.com/bitwalker/libcluster).
+Two strategies are supported:
+
+- **EPMD** (static) — configured via `CLUSTER_NODES` env var. Nodes connect via
+  Erlang's built-in port mapper.
+- **DNS polling** (Kubernetes) — configured via `DNS_CLUSTER_QUERY` env var. Polls a
+  headless service DNS record every 5 seconds.
+
+Once connected, Erlang distribution handles the transport. The Observer subscribes to
+distribution events to track liveness.
+
+### Raft bootstrap
+
+On startup, each write node computes which groups it should participate in (based on
+the deterministic replica assignment), starts a Ra server for each local group, and
+triggers leader election. A readiness probe caches consensus health (quorum
+availability, leader presence) with a 3-second TTL — the node reports as not-ready
+until all local groups are healthy.
 
 ## Failure modes
 
 **Single node failure:** The remaining 2 of 3 replicas maintain quorum. Appends
 continue. Leaders on the failed node are re-elected on surviving nodes within
-seconds. Clients see a brief latency spike during leader election, not data loss.
+seconds. The Observer marks the failed node as suspect, then lost after 120 seconds.
+Clients see a brief latency spike during leader election, not data loss.
 
-**Two node failure (3-node cluster):** Quorum is lost. Groups that had leaders on the
-surviving node can still serve reads (tail replay from local state), but new appends
-are rejected until quorum is restored.
+**Two-node failure (3-node cluster):** Quorum is lost for affected groups. Tail
+replay from local state may still work on the surviving node, but new appends are
+rejected. Priority: restore the failed nodes.
 
-**Network partition:** Raft's leader election prevents split-brain. A leader that
-can't reach a quorum steps down. Appends are unavailable on the minority side of the
-partition.
+**Network partition:** Raft leader election prevents split-brain. A leader that can't
+reach quorum steps down. Appends are unavailable on the minority side.
 
-**Full cluster restart:** Nodes recover from their local Raft log and snapshots. No
-data is lost as long as persistent volumes survive.
+**Full cluster restart:** Nodes recover from their local Raft log and checkpoints. No
+data is lost as long as persistent volumes survive. The bootstrap process restarts all
+local Raft groups and waits for leader election before reporting ready.
 
-## Static topology
-
-Starcite uses a static cluster topology — the set of write nodes is configured at
-deploy time and doesn't change automatically. This is a deliberate choice:
-
-- Static membership is simpler to reason about than dynamic membership protocols.
-- There's no risk of accidental split-brain from a membership change during a
-  partition.
-- Adding or removing nodes is an explicit maintenance operation, not something that
-  happens by surprise.
-
-The cost: scaling the write tier requires a maintenance window. In practice, 3-5
-write nodes handle substantial throughput because the bottleneck is typically network
-and disk, not CPU.
+**PubSub gap during leader transition:** If a tail subscriber misses a PubSub message
+during a leadership change, the 5-second catchup timer detects the gap and re-enters
+replay mode. Clients never silently miss events.
