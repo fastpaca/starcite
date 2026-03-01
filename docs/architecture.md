@@ -76,26 +76,72 @@ the session's current `seq`, the append is rejected with a `409`.
 ## Read path (tail)
 
 Tail is a WebSocket endpoint that replays committed events from a cursor, then
-streams new commits live.
+streams new commits live. There are two distinct phases: replay and live streaming.
+
+### Replay phase
+
+On connect, the server fetches historical events using a two-tier read path:
 
 ```mermaid
 sequenceDiagram
     participant C as Client
-    participant A as API Node
-    participant R as Raft Group
+    participant T as TailSocket
+    participant E as EventStore (ETS)
+    participant A as Archive (S3/Postgres)
 
-    C->>A: WS /tail?cursor=41
-    A->>R: read events where seq > 41
-    R-->>A: [seq 42, 43, 44]
-    A-->>C: {"seq":42}, {"seq":43}, {"seq":44}
-    A->>R: subscribe to new commits
-    R-->>A: seq 45 committed
-    A-->>C: {"seq":45} (live)
+    C->>T: WS /tail?cursor=41
+    T->>E: events where seq > 41
+    E-->>T: [seq 42, 43, 44]
+    Note right of T: Gap from cursor? Check archive.
+    T->>A: events where seq > 41 (cold)
+    A-->>T: [seq 42, 43, 44]
+    Note right of T: Merge, deduplicate, verify gap-free
+    T-->>C: {"seq":42}, {"seq":43}, {"seq":44}
 ```
 
-On connect, the server reads all committed events with `seq > cursor` and sends them
-in order. After the replay is complete, the socket stays open and streams new commits
-as they happen.
+The **hot tier** is the in-memory EventStore — an ETS table holding events that are
+still in the Raft log. This is the fast path. If there's a gap between the cursor and
+the oldest hot event (because the Raft log was compacted), the server falls back to
+the **cold tier** — the archive backend (S3 or Postgres). Results are merged,
+deduplicated by `seq`, and verified to be gap-free before sending.
+
+Events are drained to the client in batches (configurable via `batch_size` query
+param, default 1, max 1000 events per WebSocket frame).
+
+### Live streaming phase
+
+While replay is in progress, the TailSocket subscribes to a PubSub topic for the
+session. When the write path commits an event, the Raft state machine broadcasts it
+via PubSub:
+
+```mermaid
+sequenceDiagram
+    participant W as Writer (Raft FSM)
+    participant P as PubSub
+    participant T as TailSocket
+    participant C as Client
+
+    W->>P: broadcast {:cursor_update, event}
+    P->>T: {:cursor_update, event}
+    alt replay still in progress
+        Note right of T: Buffer event for later
+    else fully caught up
+        T-->>C: {"seq":45} (live)
+    end
+```
+
+Events that arrive via PubSub during replay are buffered. Once replay is complete,
+buffered events are resolved and flushed to the client before switching to pure live
+mode.
+
+### Gap detection
+
+PubSub messages can be missed during Raft leadership transitions. A catchup timer
+runs every 5 seconds — if it detects that the EventStore has events beyond the
+socket's cursor, it re-enters replay mode to close the gap. This acts as a safety net
+so clients never silently miss events.
+
+### Reconnection
 
 Clients recover from disconnects by reconnecting with their last processed `seq` as
 the cursor. No client-side bookkeeping beyond remembering one integer.

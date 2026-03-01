@@ -1,8 +1,8 @@
 # Self-hosting Starcite
 
 > **Want to skip the ops work?** [starcite.ai](https://starcite.ai) is the hosted
-> alternative — zero infrastructure, free tier, same API. Everything below is for
-> teams who want full control over their deployment.
+> alternative — same API, no infrastructure to manage. Everything below is for teams
+> who want full control over their deployment.
 
 ## How it works
 

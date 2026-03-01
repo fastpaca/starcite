@@ -79,8 +79,8 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 
 ### Hosted (starcite.ai)
 
-[starcite.ai](https://starcite.ai) runs Starcite for you — zero infrastructure, free
-tier, same API. If you don't want to operate distributed infrastructure, start here.
+[starcite.ai](https://starcite.ai) runs Starcite for you — same API, no infrastructure
+to manage.
 
 ### Self-hosted
 
