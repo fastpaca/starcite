@@ -84,6 +84,19 @@ Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
 
 **Postgres backend** additionally requires: `DATABASE_URL`.
 
+### S3 schema migration
+
+When upgrading S3 archive payload schemas, run:
+
+- `mix starcite.archive.migrate_s3_schema --dry-run`
+- `mix starcite.archive.migrate_s3_schema`
+
+Run on one node at a time during a maintenance window.
+
+Startup never auto-migrates S3 schema. It validates `<prefix>/schema/meta.json`
+and returns startup errors when migration is required or schema versions are
+unsupported.
+
 ## Bootstrap
 
 First-time cluster setup:

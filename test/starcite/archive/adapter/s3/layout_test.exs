@@ -16,30 +16,53 @@ defmodule Starcite.Archive.Adapter.S3.LayoutTest do
     assert Layout.chunk_starts_for_range(260, 800, 256) == [257, 513, 769]
   end
 
-  test "group_event_rows groups by session id and chunk" do
+  test "group_event_rows groups by tenant, session id, and chunk" do
     rows = [
-      %{session_id: "s1", seq: 1},
-      %{session_id: "s1", seq: 10},
-      %{session_id: "s1", seq: 257},
-      %{session_id: "s2", seq: 1}
+      %{tenant_id: "acme", session_id: "s1", seq: 1},
+      %{tenant_id: "acme", session_id: "s1", seq: 10},
+      %{tenant_id: "acme", session_id: "s1", seq: 257},
+      %{tenant_id: "beta", session_id: "s2", seq: 1}
     ]
 
     grouped = Layout.group_event_rows(rows, 256)
 
-    assert Map.keys(grouped) |> Enum.sort() == [{"s1", 1}, {"s1", 257}, {"s2", 1}]
-    assert Enum.map(grouped[{"s1", 1}], & &1.seq) == [1, 10]
-    assert Enum.map(grouped[{"s1", 257}], & &1.seq) == [257]
-    assert Enum.map(grouped[{"s2", 1}], & &1.seq) == [1]
+    assert Map.keys(grouped) |> Enum.sort() == [
+             {"acme", "s1", 1},
+             {"acme", "s1", 257},
+             {"beta", "s2", 1}
+           ]
+
+    assert Enum.map(grouped[{"acme", "s1", 1}], & &1.seq) == [1, 10]
+    assert Enum.map(grouped[{"acme", "s1", 257}], & &1.seq) == [257]
+    assert Enum.map(grouped[{"beta", "s2", 1}], & &1.seq) == [1]
   end
 
-  test "key layout encodes session ids and extensions" do
+  test "key layout encodes tenant/session ids and extensions" do
     config = %{prefix: "starcite"}
-    encoded = Base.url_encode64("ses-1", padding: false)
+    tenant = Base.url_encode64("acme", padding: false)
+    session = Base.url_encode64("ses-1", padding: false)
 
-    assert Layout.event_chunk_key(config, "ses-1", 257) ==
-             "starcite/events/v1/#{encoded}/257.ndjson"
+    assert Layout.event_chunk_key(config, "acme", "ses-1", 257) ==
+             "starcite/events/v1/#{tenant}/#{session}/257.ndjson"
+
+    assert Layout.legacy_event_chunk_key(config, "ses-1", 257) ==
+             "starcite/events/v1/#{session}/257.ndjson"
+
+    assert Layout.event_prefix(config) == "starcite/events/v1/"
 
     assert Layout.session_prefix(config) == "starcite/sessions/v1/"
-    assert Layout.session_key(config, "ses-1") == "starcite/sessions/v1/#{encoded}.json"
+
+    assert Layout.session_key(config, "acme", "ses-1") ==
+             "starcite/sessions/v1/#{tenant}/#{session}.json"
+
+    assert Layout.legacy_session_key(config, "ses-1") == "starcite/sessions/v1/#{session}.json"
+
+    assert Layout.session_tenant_index_key(config, "ses-1") ==
+             "starcite/session-tenants/v1/#{session}.json"
+
+    assert Layout.session_tenant_index_prefix(config) == "starcite/session-tenants/v1/"
+
+    assert Layout.schema_prefix(config) == "starcite/schema/"
+    assert Layout.schema_meta_key(config) == "starcite/schema/meta.json"
   end
 end
