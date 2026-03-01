@@ -6,6 +6,8 @@ appends with cursor-based replay.
 
 This page explains how it works internally.
 
+![Starcite Architecture](img/architecture.png)
+
 ## Cluster topology
 
 A Starcite cluster consists of a fixed set of write nodes (typically 3 or 5) and
