@@ -21,21 +21,33 @@ the same ordered history. Agents, humans, and UIs all read from the same stream.
 
 ## The problem
 
-It starts with token streaming. Then you need typed events — tool calls, status
-updates, progress indicators. Then users start switching tabs, losing connectivity,
-refreshing mid-stream. Your SSE dies, the agent keeps running, and the UI has no idea
-what happened.
+Single-agent chat hides it. One producer, one consumer, one connection — the
+transport is the source of truth and it works fine. Then you add a second agent, or
+tool calls, or a human in the loop, and things start breaking:
 
-So you add Redis pub/sub for fan-out. Then Redis Streams for durability because
-pub/sub is fire-and-forget. Then a Postgres write-behind because Redis Streams aren't
-your system of record. Then `Last-Event-ID` handling. Then reconnect logic. Then you
-realize two concurrent writers can interleave events and you need sequencing. Then you
-need idempotency for retries.
+- **Messages vanish after reconnect.** SSE and WebSocket streams aren't durable.
+  Network drops silently lose events. The user comes back to a gap in the
+  conversation.
+- **Duplicates on reconnect.** Server replays events the client already rendered.
+  Same message appears twice. No natural dedup key for text chunks.
+- **Tool results without tool calls.** Client reconnects mid-sequence — sees the
+  result of a tool call but not the call itself. Orphaned UI.
+- **Multi-agent messages out of order.** Two agents emit events simultaneously.
+  Network jitter reorders them. Agent B references Agent A's analysis that appears
+  *after* the reference. Timestamps aren't a total order.
+- **Different tabs show different histories.** Each tab opens its own SSE stream from
+  "now." Tab opened 30 seconds later is missing 30 seconds of context.
+- **Every deploy breaks all active sessions.** All connections drop simultaneously.
+  Graceful shutdown doesn't solve the durability gap.
 
-You've now built half a distributed event log inside your application. It probably has
-subtle ordering bugs and doesn't handle deploys gracefully.
+You didn't mean to build a distributed system. But a multi-agent chat UI *is* a
+distributed system — multiple producers, multiple consumers, unreliable networks,
+concurrent state mutations. Every fix that treats it as something simpler addresses a
+symptom, not the cause.
 
-Starcite replaces that stack. Three API calls:
+Starcite is the [ordered, immutable log with cursor-based
+tailing](https://starcite.ai/blog/why-agent-uis-lose-messages-on-refresh) underneath
+your transport layer. Three API calls:
 
 - **`POST /v1/sessions`** — create a session
 - **`POST /v1/sessions/:id/append`** — append an event (persisted before ack)
