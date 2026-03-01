@@ -1,6 +1,12 @@
 defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
+  plug CORSPlug,
+    origin: "*",
+    credentials: false,
+    headers: ["*"],
+    expose: ["*"]
+
   plug Plug.Parsers,
     parsers: [:urlencoded, :multipart, :json],
     pass: ["*/*"],

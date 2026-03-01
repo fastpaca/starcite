@@ -44,6 +44,7 @@ defmodule Starcite.MixProject do
   defp deps do
     [
       {:phoenix, "~> 1.8.1"},
+      {:cors_plug, "~> 3.0"},
       {:phoenix_live_view, "~> 1.0"},
       {:phoenix_ecto, "~> 4.4"},
       {:ecto_sql, "~> 3.10"},
