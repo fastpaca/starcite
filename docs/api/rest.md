@@ -85,7 +85,7 @@ WebSocket upgrade for replay + live stream. See the
 Health checks for load balancers and orchestrators.
 
 - Ready: `{"status":"ok","mode":"write_node|router_node"}`
-- Not ready: `{"status":"starting","mode":"...","reason":"raft_sync|router_sync|draining"}`
+- Not ready: `{"status":"starting","mode":"...","reason":"raft_sync|router_sync|observer_sync|draining"}`
 
 Use `/health/ready` for routing decisions. A node that reports `starting` is still
 syncing state and shouldn't receive traffic yet.

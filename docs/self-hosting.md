@@ -24,12 +24,13 @@ For the full picture of how sharding, replication, and recovery work internally,
 ## Choosing an archive backend
 
 The archive backend stores committed events for long-term durability and historical
-replay. It's important to understand that Starcite's hot path (appends, tail) serves
-entirely from replicated in-memory state — the archive is a secondary durability
-layer, not something the critical path reads from.
+replay. Appends never touch the archive — they commit to replicated in-memory state
+and return immediately. Tail replay reads from a two-tier store: recent events come
+from memory (hot), older evicted events are fetched from the archive (cold).
 
-This means archive latency is irrelevant to runtime performance. Pick your backend
-based on operational simplicity and query needs, not speed.
+In practice, most tail connections replay recent history and never hit the archive.
+But if a client reconnects with a very old cursor, archive read latency matters. Pick
+your backend based on operational simplicity and query needs.
 
 ### S3 (recommended)
 
@@ -37,7 +38,8 @@ Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, Google Cloud
 Storage (via interop), etc.
 
 S3 is the right default because:
-- Archive writes are async, so S3's higher latency doesn't matter
+- Archive writes are async — S3's write latency doesn't affect appends
+- Cold reads (old cursor replay) are rare and tolerate S3's read latency
 - No HA infrastructure to manage — the provider handles it
 - Scales to any data volume without schema migrations or connection pool tuning
 - Cheapest option at every scale
@@ -53,8 +55,8 @@ dashboards, ad-hoc queries across sessions, that kind of thing. It also makes se
 if you already operate a Postgres cluster and want to avoid adding another dependency.
 
 The trade-offs are real though. You're now operating two distributed systems (Starcite
-+ Postgres). Starcite's hot path never reads from the archive, so Postgres query
-speed doesn't improve runtime performance at all. And under write-heavy workloads,
++ Postgres). Postgres gives you faster cold reads when clients replay old history, but
+for most workloads the hot tier serves everything. And under write-heavy workloads,
 you'll need to tune connection pools and potentially deal with Postgres replication
 lag separately from Starcite's own replication.
 
@@ -62,14 +64,19 @@ lag separately from Starcite's own replication.
 
 | Variable | Purpose |
 | --- | --- |
-| `NODE_NAME` | Stable node identity (`name@host`). Must survive restarts. |
+| `RELEASE_NODE` | Erlang node identity (`name@host`). Must survive restarts. |
+| `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
 | `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. |
 | `STARCITE_WRITE_NODE_IDS` | Comma-separated static write-node identities. Same value on every node. |
 | `STARCITE_WRITE_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
-| `STARCITE_ARCHIVE_ADAPTER` | `s3` or `postgres`. |
+| `STARCITE_ARCHIVE_ADAPTER` | `s3` (default) or `postgres`. |
 | `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for development. |
+| `PORT` | HTTP listen port. Default `4000`. |
+
+**JWT auth** (when `STARCITE_AUTH_MODE=jwt`) additionally requires:
+`STARCITE_AUTH_JWT_ISSUER`, `STARCITE_AUTH_JWT_AUDIENCE`, `STARCITE_AUTH_JWKS_URL`.
 
 **S3 backend** additionally requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`.
 Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
@@ -82,7 +89,7 @@ Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
 First-time cluster setup:
 
 1. Provision three write nodes with persistent volumes.
-2. Set a stable `NODE_NAME` on each — this identity must survive restarts.
+2. Set a stable `RELEASE_NODE` on each — this identity must survive restarts.
 3. Set identical `CLUSTER_NODES` and `STARCITE_WRITE_NODE_IDS` on all nodes.
 4. Start all write nodes.
 5. Verify:
@@ -144,7 +151,7 @@ The simplest approach: keep the same logical identity.
 
 1. Drain the node.
 2. Stop the old instance.
-3. Bring up the replacement with the same `NODE_NAME` and the same persistent data
+3. Bring up the replacement with the same `RELEASE_NODE` and the same persistent data
    directory (or a restored backup).
 4. Undrain, wait for readiness.
 5. Verify with `bin/starcite rpc "Starcite.ControlPlane.Ops.status()"`.
