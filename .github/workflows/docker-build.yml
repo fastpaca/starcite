@@ -15,17 +15,9 @@ jobs:
   build:
     name: Build ${{ matrix.platform }}
     runs-on: ${{ matrix.runner }}
-    if: github.event_name != 'pull_request' || matrix.platform == 'linux/amd64'
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - platform: linux/amd64
-            platform_pair: linux-amd64
-            runner: ubuntu-latest
-          - platform: linux/arm64
-            platform_pair: linux-arm64
-            runner: ubuntu-24.04-arm
+      matrix: ${{ fromJSON(github.event_name == 'pull_request' && '{"include":[{"platform":"linux/amd64","platform_pair":"linux-amd64","runner":"ubuntu-latest"}]}' || '{"include":[{"platform":"linux/amd64","platform_pair":"linux-amd64","runner":"ubuntu-latest"},{"platform":"linux/arm64","platform_pair":"linux-arm64","runner":"ubuntu-24.04-arm"}]}') }}
     permissions:
       contents: read
       packages: write
