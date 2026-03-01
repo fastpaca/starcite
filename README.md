@@ -91,39 +91,35 @@ operational runbooks.
 
 ## Trade-offs
 
-Honest comparison against the alternatives engineers typically reach for.
+Starcite is not the right tool for every problem. Here's where it fits and where it
+doesn't.
 
-**Starcite vs. Redis Pub/Sub + your own persistence:**
-Redis pub/sub is fire-and-forget — miss a message, it's gone. Teams end up layering
-Redis Streams, Lua scripts, and a Postgres write-behind on top. Starcite replaces
-that stack: every event is persisted before ack, and any client can replay from a
-cursor. The cost is another service to operate (or use [starcite.ai](https://starcite.ai)).
+**When Starcite makes sense:** You have session-scoped event streams that need
+durable ordered delivery, cursor-based replay, and consistent sequencing across
+multiple consumers. This is the session history problem in AI agent systems —
+Starcite is purpose-built for it.
 
-**Starcite vs. Kafka / Redpanda:**
-Kafka is built for high-throughput cross-service event streaming. Starcite is built
-for session-scoped ordered logs. Kafka's partition model doesn't map cleanly to
-dynamic sessions (topic-per-session doesn't scale, shared partitions lose ordering).
-Kafka gives you consumer groups and stream processing; Starcite gives you a simpler
-model purpose-built for the session replay problem.
+**When something else is better:** If you need cross-service event streaming with
+consumer groups, use Kafka. If your sessions are small and low-throughput, Postgres +
+SSE is simpler and you probably don't need another dependency. If you only need
+ephemeral pub/sub without durability, Redis pub/sub works fine.
 
-**Starcite vs. Postgres + SSE (the common DIY):**
-Works at small scale. Breaks when you need: ordering across concurrent writers,
-reconnect with cursor-based replay, horizontal scaling without sticky sessions, and
-sub-150ms append latency. You end up reimplementing half of Starcite in application
-code. The trade-off: Starcite is another dependency, but it's the dependency that
-replaces the duct tape.
+**What you're taking on:** Starcite is a distributed system. Self-hosting means
+running a multi-node cluster, managing persistent volumes, and understanding
+quorum-based replication. This is operational investment.
+[starcite.ai](https://starcite.ai) exists for teams that don't want that burden.
 
-**Design trade-offs within Starcite itself:**
-- *Consensus replication* adds a small latency floor (~ms) but guarantees no
-  acknowledged event is ever lost, even during node failures.
-- *Async archival* keeps the hot path fast (archive writes don't block appends) but
-  means the archive backend lags behind the live cluster state by seconds.
-- *Session-scoped ordering* keeps things simple and fast but means no cross-session
-  queries — use the archive backend directly for analytics.
-- *Static cluster topology* is simpler to reason about than dynamic membership but
-  means adding/removing nodes requires a maintenance window.
-- *Append-only log* — events cannot be updated or deleted. The log is immutable by
-  design. If you need mutable state, derive it from the event stream.
+**Design trade-offs within Starcite:**
+- *Consensus replication* adds a latency floor (~ms per append) in exchange for
+  guaranteed durability across node failures.
+- *Async archival* means the archive backend lags the live cluster by seconds. The
+  hot path stays fast, but you can't query the archive for the latest events.
+- *Session-scoped ordering* means no cross-session queries at the API level. Use the
+  archive backend directly for analytics.
+- *Static cluster topology* means adding or removing nodes requires a maintenance
+  window. No automatic scaling.
+- *Append-only log* means events cannot be updated or deleted. If you need mutable
+  state, derive it from the event stream.
 
 ## What Starcite does not do
 
