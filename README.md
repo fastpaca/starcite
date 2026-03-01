@@ -19,7 +19,7 @@ That's the problem. Starcite is a session event log where every event is persist
 before acknowledgment, any client can catch up from a cursor, and every consumer sees
 the same ordered history. Agents, humans, and UIs all read from the same stream.
 
-## The problem
+## Why this breaks at multi-agent
 
 Single-agent chat hides it. One producer, one consumer, one connection — the
 transport is the source of truth and it works fine. Then you add a second agent, or
