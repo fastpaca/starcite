@@ -515,6 +515,7 @@ defmodule Starcite.RuntimeTest do
           actor: event.actor,
           producer_id: event.producer_id,
           producer_seq: event.producer_seq,
+          tenant_id: event.tenant_id,
           source: event.source,
           metadata: event.metadata,
           refs: event.refs,

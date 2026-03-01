@@ -2,6 +2,8 @@ defmodule Starcite.Archive.Adapter.S3Test do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.Adapter.S3
+  alias Starcite.Archive.Adapter.S3.SchemaControl
+  alias Starcite.Archive.Adapter.S3.Schema
   alias Starcite.Auth.Principal
 
   defmodule FakeClient do
@@ -76,11 +78,25 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     session_prefix = "s3-test-#{System.unique_integer([:positive, :monotonic])}"
 
+    migration_config = %{
+      bucket: "archive-test",
+      prefix: session_prefix,
+      client_mod: FakeClient,
+      request_opts: []
+    }
+
+    assert {:ok, _stats} = SchemaControl.migrate(migration_config, actor: "test")
+
     start_supervised!(
-      {S3, bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient}
+      {S3,
+       [
+         bucket: "archive-test",
+         prefix: session_prefix,
+         client_mod: FakeClient
+       ]}
     )
 
-    :ok
+    {:ok, prefix: session_prefix, bucket: "archive-test"}
   end
 
   test "write_events is idempotent and reads across chunk boundaries" do
@@ -93,7 +109,112 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     assert {:ok, events} = S3.read_events(session_id, 255, 258)
     assert Enum.map(events, & &1.seq) == [255, 256, 257, 258]
+    assert Enum.all?(events, &(&1.tenant_id == "acme"))
     assert Enum.all?(events, &is_binary(&1.inserted_at))
+  end
+
+  test "stores sessions and event chunks in tenant subfolders", %{prefix: prefix, bucket: bucket} do
+    session_id = "ses-s3-layout-#{System.unique_integer([:positive, :monotonic])}"
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: session_id,
+               title: "Layout",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               created_at: created_at
+             })
+
+    assert {:ok, 1} = S3.write_events(event_rows(session_id, inserted_at, 1..1))
+
+    tenant = Base.url_encode64("acme", padding: false)
+    session = Base.url_encode64(session_id, padding: false)
+
+    assert {:ok, keys} = FakeClient.list_keys(%{bucket: bucket}, "#{prefix}/")
+
+    assert "#{prefix}/sessions/v1/#{tenant}/#{session}.json" in keys
+    assert "#{prefix}/session-tenants/v1/#{session}.json" in keys
+    assert "#{prefix}/events/v1/#{tenant}/#{session}/1.ndjson" in keys
+
+    refute "#{prefix}/sessions/v1/#{session}.json" in keys
+    refute "#{prefix}/events/v1/#{session}/1.ndjson" in keys
+  end
+
+  test "write_events rejects mixed-tenant rows for one session chunk" do
+    session_id = "ses-s3-mixed-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    [first, second] = event_rows(session_id, inserted_at, 1..2)
+
+    assert {:error, :archive_write_unavailable} =
+             S3.write_events([first, %{second | tenant_id: "beta"}])
+  end
+
+  test "read_events fails on unsupported event schema versions", %{prefix: prefix, bucket: bucket} do
+    session_id = "ses-s3-schema-#{System.unique_integer([:positive, :monotonic])}"
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: session_id,
+               title: "Schema",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               created_at: created_at
+             })
+
+    tenant_segment = Base.url_encode64("acme", padding: false)
+    session_segment = Base.url_encode64(session_id, padding: false)
+
+    key = "#{prefix}/events/v1/#{tenant_segment}/#{session_segment}/1.ndjson"
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               key,
+               Jason.encode!(%{
+                 schema_version: Schema.event_schema_version() + 1,
+                 seq: 1,
+                 type: "content",
+                 payload: %{"n" => 1},
+                 actor: "agent:test",
+                 producer_id: "writer:test",
+                 producer_seq: 1,
+                 tenant_id: "acme",
+                 source: nil,
+                 metadata: %{},
+                 refs: %{},
+                 idempotency_key: nil,
+                 inserted_at: "2026-01-01T00:00:00"
+               })
+             )
+
+    assert {:error, :archive_read_unavailable} = S3.read_events(session_id, 1, 1)
+  end
+
+  test "list_sessions_by_ids fails on unsupported tenant-index schema versions", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    session_id = "ses-s3-index-schema-#{System.unique_integer([:positive, :monotonic])}"
+    session_segment = Base.url_encode64(session_id, padding: false)
+    key = "#{prefix}/session-tenants/v1/#{session_segment}.json"
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               key,
+               Jason.encode!(%{
+                 schema_version: Schema.session_tenant_index_schema_version() + 1,
+                 tenant_id: "acme"
+               })
+             )
+
+    assert {:error, :archive_read_unavailable} =
+             S3.list_sessions_by_ids([session_id], %{limit: 10, cursor: nil, metadata: %{}})
   end
 
   test "upserts and lists sessions with metadata filtering and cursor paging" do
@@ -129,7 +250,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
                created_at: created_at
              })
 
-    assert :ok =
+    assert {:error, :archive_write_unavailable} =
              S3.upsert_session(%{
                id: "ses-a",
                title: "A-overwrite-attempt",
@@ -174,6 +295,14 @@ defmodule Starcite.Archive.Adapter.S3Test do
              )
 
     assert by_ids.sessions |> Enum.map(& &1.id) |> Enum.sort() == ["ses-a", "ses-c"]
+
+    assert {:ok, by_ids_tenant_scoped} =
+             S3.list_sessions_by_ids(
+               ["ses-c", "ses-a", "missing"],
+               %{limit: 10, cursor: nil, metadata: %{}, tenant_id: "acme"}
+             )
+
+    assert by_ids_tenant_scoped.sessions |> Enum.map(& &1.id) == ["ses-a"]
   end
 
   defp event_rows(session_id, inserted_at, seqs) do
@@ -186,6 +315,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
         actor: "agent:test",
         producer_id: "writer:test",
         producer_seq: seq,
+        tenant_id: "acme",
         source: nil,
         metadata: %{},
         refs: %{},

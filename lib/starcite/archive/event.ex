@@ -15,6 +15,7 @@ defmodule Starcite.Archive.Event do
     field(:actor, :string)
     field(:producer_id, :string)
     field(:producer_seq, :integer)
+    field(:tenant_id, :string)
     field(:source, :string)
     field(:metadata, :map)
     field(:refs, :map)
@@ -32,6 +33,7 @@ defmodule Starcite.Archive.Event do
       :actor,
       :producer_id,
       :producer_seq,
+      :tenant_id,
       :source,
       :metadata,
       :refs,
@@ -46,6 +48,7 @@ defmodule Starcite.Archive.Event do
       :actor,
       :producer_id,
       :producer_seq,
+      :tenant_id,
       :metadata,
       :refs,
       :inserted_at

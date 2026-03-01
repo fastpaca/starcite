@@ -40,7 +40,8 @@ defmodule Starcite.Archive do
        interval: interval,
        adapter: adapter_mod,
        single_local_write_node: single_local_write_node,
-       archived_seq_cache: %{}
+       archived_seq_cache: %{},
+       tenant_cache: %{}
      }}
   end
 
@@ -48,22 +49,28 @@ defmodule Starcite.Archive do
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
     session_ids = EventStore.session_ids()
+    ordered_session_ids = fair_session_order(session_ids, state.tenant_cache)
 
-    {stats, archived_seq_cache} =
-      Enum.reduce(session_ids, {zero_stats(), state.archived_seq_cache}, fn session_id,
-                                                                            {stats_acc, cache_acc} ->
-        {session_stats, cache_next} =
-          flush_session(
-            session_id,
-            state.adapter,
-            cache_acc,
-            state.single_local_write_node
-          )
+    {stats, archived_seq_cache, tenant_cache} =
+      Enum.reduce(
+        ordered_session_ids,
+        {zero_stats(), state.archived_seq_cache, state.tenant_cache},
+        fn session_id, {stats_acc, archived_seq_cache_acc, tenant_cache_acc} ->
+          {session_stats, archived_seq_cache_next, tenant_cache_next} =
+            flush_session(
+              session_id,
+              state.adapter,
+              archived_seq_cache_acc,
+              tenant_cache_acc,
+              state.single_local_write_node
+            )
 
-        {merge_stats(stats_acc, session_stats), cache_next}
-      end)
+          {merge_stats(stats_acc, session_stats), archived_seq_cache_next, tenant_cache_next}
+        end
+      )
 
     archived_seq_cache = Map.take(archived_seq_cache, session_ids)
+    tenant_cache = Map.take(tenant_cache, session_ids)
 
     elapsed_ms = System.monotonic_time(:millisecond) - start
 
@@ -81,17 +88,18 @@ defmodule Starcite.Archive do
     )
 
     schedule_flush(state.interval)
-    {:noreply, %{state | archived_seq_cache: archived_seq_cache}}
+    {:noreply, %{state | archived_seq_cache: archived_seq_cache, tenant_cache: tenant_cache}}
   end
 
   defp flush_session(
          session_id,
          adapter,
          archived_seq_cache,
+         tenant_cache,
          single_local_write_node
        )
        when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) and
-              is_boolean(single_local_write_node) do
+              is_map(tenant_cache) and is_boolean(single_local_write_node) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
            load_archived_seq(session_id, archived_seq_cache) do
@@ -99,17 +107,17 @@ defmodule Starcite.Archive do
 
       cond do
         pending_before == 0 ->
-          {zero_stats(), archived_seq_cache}
+          {zero_stats(), archived_seq_cache, tenant_cache}
 
         ensure_local_group_leader(session_id, single_local_write_node) != :ok ->
-          {zero_stats(), archived_seq_cache}
+          {zero_stats(), archived_seq_cache, tenant_cache}
 
         true ->
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
 
-          {session_stats, next_archived_seq} =
+          {session_stats, next_archived_seq, tenant_id} =
             persist_rows(
               rows,
               session_id,
@@ -118,10 +126,16 @@ defmodule Starcite.Archive do
               adapter
             )
 
-          {session_stats, put_archived_seq(archived_seq_cache, session_id, next_archived_seq)}
+          {
+            session_stats,
+            put_archived_seq(archived_seq_cache, session_id, next_archived_seq),
+            put_session_tenant(tenant_cache, session_id, tenant_id)
+          }
       end
     else
-      _ -> {zero_stats(), Map.delete(archived_seq_cache, session_id)}
+      _ ->
+        {zero_stats(), Map.delete(archived_seq_cache, session_id),
+         Map.delete(tenant_cache, session_id)}
     end
   end
 
@@ -133,7 +147,7 @@ defmodule Starcite.Archive do
          _adapter
        )
        when is_integer(pending_before) and pending_before > 0 do
-    {%{zero_stats() | pending_after: pending_before, pending_sessions: 1}, nil}
+    {%{zero_stats() | pending_after: pending_before, pending_sessions: 1}, nil, nil}
   end
 
   defp persist_rows(
@@ -187,7 +201,8 @@ defmodule Starcite.Archive do
                 pending_after: pending_after,
                 pending_sessions: if(pending_after > 0, do: 1, else: 0)
               },
-              acked_seq
+              acked_seq,
+              tenant_id
             }
 
           _ack_error ->
@@ -200,7 +215,8 @@ defmodule Starcite.Archive do
                 pending_after: pending_before,
                 pending_sessions: 1
               },
-              nil
+              nil,
+              tenant_id
             }
         end
 
@@ -298,6 +314,63 @@ defmodule Starcite.Archive do
               archived_seq >= 0 do
     Map.put(cache, session_id, archived_seq)
   end
+
+  defp put_session_tenant(cache, _session_id, nil), do: cache
+
+  defp put_session_tenant(cache, session_id, tenant_id)
+       when is_map(cache) and is_binary(session_id) and is_binary(tenant_id) and tenant_id != "" do
+    Map.put(cache, session_id, tenant_id)
+  end
+
+  defp put_session_tenant(cache, _session_id, _tenant_id), do: cache
+
+  defp fair_session_order(session_ids, tenant_cache)
+       when is_list(session_ids) and is_map(tenant_cache) do
+    session_ids
+    |> Enum.group_by(&session_tenant_for_order(&1, tenant_cache))
+    |> Enum.sort_by(fn {tenant_id, _ids} -> tenant_sort_key(tenant_id) end)
+    |> Enum.map(fn {_tenant_id, ids} -> ids end)
+    |> interleave_tenant_groups()
+  end
+
+  defp session_tenant_for_order(session_id, tenant_cache)
+       when is_binary(session_id) and session_id != "" and is_map(tenant_cache) do
+    case Map.fetch(tenant_cache, session_id) do
+      {:ok, tenant_id} when is_binary(tenant_id) and tenant_id != "" ->
+        tenant_id
+
+      _ ->
+        case EventStore.from_cursor(session_id, 0, 1) do
+          [%{tenant_id: tenant_id} | _rest] when is_binary(tenant_id) and tenant_id != "" ->
+            tenant_id
+
+          _ ->
+            :unknown
+        end
+    end
+  end
+
+  defp interleave_tenant_groups([]), do: []
+
+  defp interleave_tenant_groups(groups) when is_list(groups) do
+    max_len =
+      Enum.reduce(groups, 0, fn ids, acc ->
+        max(acc, length(ids))
+      end)
+
+    0..(max_len - 1)
+    |> Enum.flat_map(fn idx ->
+      groups
+      |> Enum.map(&Enum.at(&1, idx))
+      |> Enum.reject(&is_nil/1)
+    end)
+  end
+
+  defp tenant_sort_key(tenant_id) when is_binary(tenant_id) and tenant_id != "",
+    do: {0, tenant_id}
+
+  defp tenant_sort_key(:unknown), do: {1, ""}
+  defp tenant_sort_key(_other), do: {2, ""}
 
   defp zero_stats do
     %{
