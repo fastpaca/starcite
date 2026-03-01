@@ -3,6 +3,7 @@ defmodule StarciteWeb.TailSocketTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
+  alias Starcite.Archive.Store
   alias Starcite.WritePath
   alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
   alias Starcite.Repo
@@ -222,10 +223,6 @@ defmodule StarciteWeb.TailSocketTest do
     end
 
     test "falls back to storage when a live cursor update misses ETS" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
@@ -306,11 +303,7 @@ defmodule StarciteWeb.TailSocketTest do
       assert next_state.cursor == 1
     end
 
-    test "replays across Postgres cold + ETS hot boundary" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-
+    test "replays across archive cold + ETS hot boundary" do
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -479,9 +472,7 @@ defmodule StarciteWeb.TailSocketTest do
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
-    include_tenant_id? = events_table_has_tenant_id?()
-
-    rows =
+    base_rows =
       Enum.map(events, fn event ->
         %{
           session_id: session_id,
@@ -497,18 +488,38 @@ defmodule StarciteWeb.TailSocketTest do
           idempotency_key: event.idempotency_key,
           inserted_at: as_datetime(event.inserted_at)
         }
-        |> maybe_put_tenant_id(event, include_tenant_id?)
       end)
 
-    {count, _} =
-      Repo.insert_all(
-        "events",
-        rows,
-        on_conflict: :nothing,
-        conflict_target: [:session_id, :seq]
-      )
+    case Store.adapter() do
+      Starcite.Archive.Adapter.Postgres ->
+        ensure_repo_sandbox()
 
-    assert count == length(rows)
+        rows =
+          if events_table_has_tenant_id?() do
+            Enum.zip(base_rows, events)
+            |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
+          else
+            base_rows
+          end
+
+        {count, _} =
+          Repo.insert_all(
+            "events",
+            rows,
+            on_conflict: :nothing,
+            conflict_target: [:session_id, :seq]
+          )
+
+        assert count == length(rows)
+
+      _other ->
+        rows =
+          Enum.zip(base_rows, events)
+          |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
+
+        assert {:ok, inserted} = Store.write_events(rows)
+        assert inserted == length(rows)
+    end
   end
 
   defp event_tenant_id!(%{tenant_id: tenant_id})
@@ -519,12 +530,6 @@ defmodule StarciteWeb.TailSocketTest do
     raise ArgumentError,
           "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
   end
-
-  defp maybe_put_tenant_id(row, event, true) when is_map(row) and is_map(event) do
-    Map.put(row, :tenant_id, event_tenant_id!(event))
-  end
-
-  defp maybe_put_tenant_id(row, _event, false) when is_map(row), do: row
 
   defp events_table_has_tenant_id? do
     result =
@@ -540,12 +545,18 @@ defmodule StarciteWeb.TailSocketTest do
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
 
-  defp ensure_repo_started do
-    if Process.whereis(Repo) do
-      :ok
-    else
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
       _pid = start_supervised!(Repo)
       :ok
     end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
   end
 end

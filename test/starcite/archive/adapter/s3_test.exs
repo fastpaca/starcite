@@ -2,6 +2,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.Adapter.S3
+  alias Starcite.Archive.Adapter.S3.Config
   alias Starcite.Auth.Principal
 
   defmodule FakeClient do
@@ -75,10 +76,20 @@ defmodule Starcite.Archive.Adapter.S3Test do
     })
 
     session_prefix = "s3-test-#{System.unique_integer([:positive, :monotonic])}"
+    config_key = {S3, :config}
+    previous_config = :persistent_term.get(config_key, :undefined)
 
-    start_supervised!(
-      {S3, bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient}
+    :persistent_term.put(
+      config_key,
+      Config.build!([], bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient)
     )
+
+    on_exit(fn ->
+      case previous_config do
+        :undefined -> :persistent_term.erase(config_key)
+        config -> :persistent_term.put(config_key, config)
+      end
+    end)
 
     :ok
   end
