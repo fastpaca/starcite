@@ -13,8 +13,9 @@ This page explains how it works internally.
 A Starcite cluster consists of a fixed set of write nodes (typically 3 or 5) and
 optional stateless router nodes for read scaling.
 
-Write nodes hold all the state. Sessions are deterministically sharded across 256
-groups, and each group is replicated across 3 write nodes using
+Write nodes hold all the state. Sessions are deterministically sharded across a
+configurable number of groups (256 by default, controlled by `STARCITE_NUM_GROUPS`),
+and each group is replicated across 3 write nodes using
 [Raft](https://raft.github.io/) consensus (via Erlang's
 [Ra](https://github.com/rabbitmq/ra) library). One replica is elected leader; the
 others are followers.
@@ -24,14 +25,14 @@ correct write node. You can scale these independently.
 
 ```mermaid
 graph TD
-    R["Router (N)"] --> W1["Write Node 1<br/>leader for ~85 groups<br/>follower for ~170"]
-    R --> W2["Write Node 2<br/>leader for ~85 groups<br/>follower for ~170"]
-    R --> W3["Write Node 3<br/>leader for ~86 groups<br/>follower for ~170"]
+    R["Router (N)"] --> W1["Write Node 1<br/>leader for ~1/3 of groups<br/>follower for the rest"]
+    R --> W2["Write Node 2<br/>leader for ~1/3 of groups<br/>follower for the rest"]
+    R --> W3["Write Node 3<br/>leader for ~1/3 of groups<br/>follower for the rest"]
 ```
 
-The 256-group count is fixed. Sessions are assigned to groups by hashing the session
-ID — this is deterministic, so any node can compute the group for any session without
-coordination.
+The group count is set at deploy time and stays fixed for the life of the cluster.
+Sessions are assigned to groups by hashing the session ID — this is deterministic, so
+any node can compute the group for any session without coordination.
 
 ## Write path (append)
 
