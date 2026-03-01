@@ -1,3 +1,5 @@
+# syntax=docker/dockerfile:1.7
+
 ARG ELIXIR_VERSION=1.18.4
 ARG OTP_VERSION=28.0
 ARG DEBIAN_VERSION=trixie-slim
@@ -19,19 +21,31 @@ RUN apt-get update && \
 
 WORKDIR /app
 
-RUN mix local.hex --force && \
+RUN --mount=type=cache,target=/root/.cache/rebar3 \
+    mix local.hex --force && \
     mix local.rebar --force
 
 COPY mix.exs mix.lock ./
-COPY config ./config
+COPY config/config.exs config/prod.exs config/
 
-RUN mix deps.get --only ${MIX_ENV} && \
+RUN --mount=type=cache,target=/root/.hex \
+    --mount=type=cache,target=/root/.cache/rebar3 \
+    --mount=type=cache,target=/app/deps \
+    --mount=type=cache,target=/app/_build \
+    mix deps.get --only ${MIX_ENV} && \
     mix deps.compile
+
+COPY config/runtime.exs config/
 COPY lib lib
+COPY priv priv
 COPY rel rel
 
-RUN mix compile
-RUN mix release
+RUN --mount=type=cache,target=/root/.hex \
+    --mount=type=cache,target=/root/.cache/rebar3 \
+    --mount=type=cache,target=/app/deps \
+    --mount=type=cache,target=/app/_build \
+    mix compile && \
+    mix release
 
 # RUNTIME
 
