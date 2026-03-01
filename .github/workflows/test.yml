@@ -2,28 +2,23 @@ name: Test Suite
 
 on:
   push:
+    branches: [main, master]
   pull_request:
+    branches: [main, master]
 
 jobs:
   test:
     runs-on: ubuntu-latest
 
-    services:
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: postgres
-          POSTGRES_DB: starcite_test
-        options: >-
-          --health-cmd pg_isready
-          --health-interval 10s
-          --health-timeout 5s
-          --health-retries 5
-        ports:
-          - 5432:5432
-
     env:
       MIX_ENV: test
+      STARCITE_ARCHIVE_ADAPTER: s3
+      STARCITE_S3_BUCKET: starcite-test
+      STARCITE_S3_REGION: us-east-1
+      STARCITE_S3_ACCESS_KEY_ID: minioadmin
+      STARCITE_S3_SECRET_ACCESS_KEY: minioadmin
+      STARCITE_S3_ENDPOINT: http://localhost:9000
+      STARCITE_S3_PATH_STYLE: "true"
 
     steps:
     - name: Checkout repository
@@ -45,6 +40,36 @@ jobs:
 
     - name: Install dependencies
       run: mix deps.get
+
+    - name: Start MinIO
+      run: |
+        docker run -d --rm \
+          --name minio \
+          -p 9000:9000 \
+          -e MINIO_ROOT_USER=minioadmin \
+          -e MINIO_ROOT_PASSWORD=minioadmin \
+          minio/minio server /data
+
+    - name: Wait for MinIO and create test bucket
+      run: |
+        ready=false
+        for _ in $(seq 1 30); do
+          if curl -fsS http://localhost:9000/minio/health/live >/dev/null; then
+            ready=true
+            break
+          fi
+          sleep 1
+        done
+        if [ "$ready" != "true" ]; then
+          docker logs minio || true
+          echo "MinIO did not become healthy in time" >&2
+          exit 1
+        fi
+
+        docker run --rm --network host --entrypoint /bin/sh minio/mc -c '
+          mc alias set local http://localhost:9000 minioadmin minioadmin >/dev/null
+          mc mb --ignore-existing local/starcite-test >/dev/null
+        '
 
     # - name: Setup test database
     #   run: mix ecto.setup

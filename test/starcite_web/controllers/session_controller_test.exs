@@ -5,7 +5,7 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.{Repo, WritePath}
+  alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
 
   @auth_env_key StarciteWeb.Auth
@@ -16,10 +16,6 @@ defmodule StarciteWeb.SessionControllerTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
-    :ok = ensure_repo_started()
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-
     previous_auth = Application.get_env(:starcite, @auth_env_key)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
@@ -57,19 +53,6 @@ defmodule StarciteWeb.SessionControllerTest do
     end)
 
     :ok
-  end
-
-  defp ensure_repo_started do
-    case Process.whereis(Repo) do
-      nil ->
-        case Repo.start_link() do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-
-      _pid ->
-        :ok
-    end
   end
 
   defp unique_id(prefix) do

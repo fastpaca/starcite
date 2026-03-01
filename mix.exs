@@ -90,7 +90,7 @@ defmodule Starcite.MixProject do
       setup: ["deps.get", "ecto.setup"],
       "ecto.setup": ["ecto.create", "ecto.migrate"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
-      test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
+      test: ["starcite.test_setup", "test"],
       typecheck: ["compile --force --all-warnings --warnings-as-errors"],
       precommit: [
         "typecheck",

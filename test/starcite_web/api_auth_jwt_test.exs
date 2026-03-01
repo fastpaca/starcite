@@ -5,7 +5,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.{ReadPath, Repo, WritePath}
+  alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
@@ -15,9 +15,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
-    :ok = ensure_repo_started()
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     previous_auth = Application.get_env(:starcite, StarciteWeb.Auth)
 
     on_exit(fn ->
@@ -369,19 +366,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert denied_tail.status == 403
     assert Jason.decode!(denied_tail.resp_body)["error"] == "forbidden_session"
-  end
-
-  defp ensure_repo_started do
-    case Process.whereis(Repo) do
-      nil ->
-        case Repo.start_link() do
-          {:ok, _pid} -> :ok
-          {:error, {:already_started, _pid}} -> :ok
-        end
-
-      _pid ->
-        :ok
-    end
   end
 
   defp configure_jwt_auth!(bypass) do
