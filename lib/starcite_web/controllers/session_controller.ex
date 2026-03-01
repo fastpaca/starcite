@@ -38,17 +38,19 @@ defmodule StarciteWeb.SessionController do
   Append one event to a session.
   """
   def append(conn, %{"id" => id} = params) do
-    with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.allowed_to_access_session(auth, id),
-         :ok <- authorize_append(auth, id),
-         {:ok, event, expected_seq} <- validate_append(params, auth),
-         {:ok, reply} <- append_event(id, event, expected_seq) do
-      :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
+    measure_append_request(fn ->
+      with {:ok, auth} <- fetch_auth(conn),
+           :ok <- Policy.allowed_to_access_session(auth, id),
+           :ok <- authorize_append(auth, id),
+           {:ok, event, expected_seq} <- validate_append(params, auth),
+           {:ok, reply} <- append_event(id, event, expected_seq) do
+        :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
 
-      conn
-      |> put_status(:created)
-      |> json(reply)
-    end
+        conn
+        |> put_status(:created)
+        |> json(reply)
+      end
+    end)
   end
 
   def append(_conn, _params), do: {:error, :invalid_event}
@@ -348,4 +350,23 @@ defmodule StarciteWeb.SessionController do
        do: {:ok, value}
 
   defp metadata_filter_value(_value), do: :error
+
+  defp measure_append_request(fun) when is_function(fun, 0) do
+    started_at = System.monotonic_time()
+    result = fun.()
+    duration_ms = elapsed_ms_since(started_at)
+    :ok = Telemetry.request(:append_event, :ack, request_outcome(result), duration_ms)
+    result
+  end
+
+  defp request_outcome(%Plug.Conn{}), do: :ok
+  defp request_outcome({:timeout, _reason}), do: :timeout
+  defp request_outcome(_result), do: :error
+
+  defp elapsed_ms_since(started_at) when is_integer(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+    |> max(0)
+  end
 end

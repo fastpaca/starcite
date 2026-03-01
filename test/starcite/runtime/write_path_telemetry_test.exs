@@ -8,6 +8,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     Starcite.Runtime.TestHelper.reset()
 
     handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
+    request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
 
     :ok =
@@ -20,8 +21,19 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
         test_pid
       )
 
+    :ok =
+      :telemetry.attach(
+        request_handler_id,
+        [:starcite, :request],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:request_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
     on_exit(fn ->
       :telemetry.detach(handler_id)
+      :telemetry.detach(request_handler_id)
     end)
 
     :ok
@@ -44,6 +56,23 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     refute_receive {:raft_command_event, _measurements, _metadata}, 100
   end
 
+  test "append does not emit write request telemetry from write path" do
+    id = unique_id("ses")
+    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
+
+    assert {:ok, _reply} =
+             WritePath.append_event(id, %{
+               type: "content",
+               payload: %{text: "hello"},
+               actor: "agent:1",
+               metadata: %{"tenant_id" => "acme"},
+               producer_id: "writer:test",
+               producer_seq: 1
+             })
+
+    refute_receive {:request_event, _measurements, _metadata}, 100
+  end
+
   test "append missing session does not emit per-command telemetry from write path" do
     id = unique_id("missing")
 
@@ -60,10 +89,61 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     refute_receive {:raft_command_event, _measurements, _metadata}, 100
   end
 
+  test "append missing session does not emit write request telemetry from write path" do
+    id = unique_id("missing")
+
+    assert {:error, :session_not_found} =
+             WritePath.append_event(id, %{
+               type: "content",
+               payload: %{text: "hello"},
+               actor: "agent:1",
+               metadata: %{"tenant_id" => "acme"},
+               producer_id: "writer:test",
+               producer_seq: 1
+             })
+
+    refute_receive {:request_event, _measurements, _metadata}, 100
+  end
+
+  test "append_events does not emit write request telemetry from write path" do
+    id = unique_id("ses")
+    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
+
+    events = [
+      %{
+        type: "content",
+        payload: %{text: "hello"},
+        actor: "agent:1",
+        metadata: %{"tenant_id" => "acme"},
+        producer_id: "writer:test",
+        producer_seq: 1
+      },
+      %{
+        type: "content",
+        payload: %{text: "world"},
+        actor: "agent:1",
+        metadata: %{"tenant_id" => "acme"},
+        producer_id: "writer:test",
+        producer_seq: 2
+      }
+    ]
+
+    assert {:ok, _reply} = WritePath.append_events(id, events)
+    refute_receive {:request_event, _measurements, _metadata}, 100
+  end
+
   test "telemetry helper exposes leader_retry outcome dimension" do
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
 
     assert_receive_raft_command(:append_event, :leader_retry_timeout, "acme")
+  end
+
+  test "telemetry helper exposes write request dimensions" do
+    assert :ok = Telemetry.request(:append_event, :ack, :timeout, 7)
+
+    assert_receive {:request_event, %{count: 1, duration_ms: 7},
+                    %{operation: :append_event, phase: :ack, outcome: :timeout}},
+                   1_000
   end
 
   test "global telemetry flag disables raft command events" do
@@ -76,6 +156,19 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
     refute_receive {:raft_command_event, _measurements, _metadata}, 100
+  end
+
+  test "global telemetry flag disables write request helper events" do
+    original = Application.get_env(:starcite, :telemetry_enabled, false)
+    Application.put_env(:starcite, :telemetry_enabled, false)
+
+    on_exit(fn ->
+      Application.put_env(:starcite, :telemetry_enabled, original)
+    end)
+
+    assert :ok = Telemetry.request(:append_event, :ack, :ok, 5)
+
+    refute_receive {:request_event, _measurements, _metadata}, 100
   end
 
   defp assert_receive_raft_command(command, outcome, tenant_id) do

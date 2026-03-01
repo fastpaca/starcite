@@ -10,6 +10,7 @@ defmodule StarciteWeb.TailSocket do
   alias Starcite.Auth.Principal
   alias Starcite.ReadPath
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.Context
   alias Phoenix.PubSub
 
@@ -108,7 +109,7 @@ defmodule StarciteWeb.TailSocket do
       buffer_empty? = map_size(state.live_buffer) == 0
 
       if state.replay_done and queue_empty? and buffer_empty? do
-        case resolve_cursor_update_event(state.session_id, state.principal, update) do
+        case resolve_live_cursor_update_event(state.session_id, state.principal, update) do
           {:ok, event} ->
             next_state = %{state | cursor: event.seq}
             push_events_frame([event], next_state)
@@ -149,7 +150,9 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp fetch_replay_batch(state) do
-    case ReadPath.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size) do
+    case measure_read(:tail_catchup, fn ->
+           ReadPath.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size)
+         end) do
       {:ok, []} ->
         state
         |> Map.put(:replay_done, true)
@@ -206,10 +209,18 @@ defmodule StarciteWeb.TailSocket do
        )
        when is_binary(session_id) and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
-    resolve_cursor_update_event(session_id, principal, update)
+    resolve_live_cursor_update_event(session_id, principal, update)
   end
 
   defp resolve_buffered_value(_state, _value), do: :error
+
+  defp resolve_live_cursor_update_event(session_id, principal, update)
+       when is_binary(session_id) and session_id != "" and is_map(update) and
+              (is_struct(principal, Principal) or is_nil(principal)) do
+    measure_read(:tail_live, fn ->
+      resolve_cursor_update_event(session_id, principal, update)
+    end)
+  end
 
   defp resolve_cursor_update_event(session_id, principal, %{seq: seq} = update)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
@@ -356,4 +367,23 @@ defmodule StarciteWeb.TailSocket do
 
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
   defp iso8601_utc(other), do: other
+
+  defp measure_read(operation, fun)
+       when operation in [:tail_catchup, :tail_live] and is_function(fun, 0) do
+    started_at = System.monotonic_time()
+    result = fun.()
+    duration_ms = elapsed_ms_since(started_at)
+    :ok = Telemetry.read(operation, :deliver, read_outcome(result), duration_ms)
+    result
+  end
+
+  defp read_outcome({:ok, _result}), do: :ok
+  defp read_outcome(_result), do: :error
+
+  defp elapsed_ms_since(started_at) when is_integer(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+    |> max(0)
+  end
 end

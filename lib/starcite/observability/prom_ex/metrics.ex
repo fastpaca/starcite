@@ -9,6 +9,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def event_metrics(_opts) do
     [
       ingestion_metrics(),
+      request_slo_metrics(),
       archive_metrics(),
       event_store_metrics()
     ]
@@ -114,6 +115,44 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :trimmed,
           description: "Total entries trimmed from Raft tail",
           tags: [:tenant_id]
+        )
+      ]
+    )
+  end
+
+  defp request_slo_metrics do
+    Event.build(
+      :starcite_request_slo_metrics,
+      [
+        counter("starcite_request_total",
+          event_name: [:starcite, :request],
+          measurement: :count,
+          description: "Write request outcomes by operation",
+          tags: [:operation, :outcome]
+        ),
+        distribution("starcite_request_duration_ms",
+          event_name: [:starcite, :request],
+          measurement: :duration_ms,
+          description: "Write request duration in milliseconds by operation and phase",
+          tags: [:operation, :phase],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        ),
+        counter("starcite_read_total",
+          event_name: [:starcite, :read],
+          measurement: :count,
+          description: "Tail read delivery outcomes by operation",
+          tags: [:operation, :outcome]
+        ),
+        distribution("starcite_read_duration_ms",
+          event_name: [:starcite, :read],
+          measurement: :duration_ms,
+          description: "Tail read delivery duration in milliseconds by operation and phase",
+          tags: [:operation, :phase],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
         )
       ]
     )

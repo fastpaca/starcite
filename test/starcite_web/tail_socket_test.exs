@@ -333,6 +333,74 @@ defmodule StarciteWeb.TailSocketTest do
     end
   end
 
+  describe "read telemetry" do
+    setup do
+      handler_id = "tail-read-#{System.unique_integer([:positive, :monotonic])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:starcite, :read],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:read_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
+      on_exit(fn ->
+        :telemetry.detach(handler_id)
+      end)
+
+      :ok
+    end
+
+    test "catchup fetch emits read telemetry with tail_catchup operation" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      assert {:ok, _state_after_fetch} =
+               TailSocket.handle_info(:drain_replay, base_state(session_id, 0))
+
+      assert_receive {:read_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :tail_catchup, phase: :deliver, outcome: :ok}},
+                     1_000
+
+      assert is_integer(duration_ms) and duration_ms >= 0
+    end
+
+    test "live cursor update emits read telemetry with tail_live operation" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "state",
+          payload: %{state: "running"},
+          actor: "agent:test"
+        })
+
+      {:ok, update} = cursor_update_for(session_id, 1)
+      state = %{base_state(session_id, 0) | replay_done: true}
+
+      assert {:push, {:text, _payload}, _next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      assert_receive {:read_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :tail_live, phase: :deliver, outcome: :ok}},
+                     1_000
+
+      assert is_integer(duration_ms) and duration_ms >= 0
+    end
+  end
+
   defp with_archive_adapter(adapter_mod) when is_atom(adapter_mod) do
     previous = Application.get_env(:starcite, :archive_adapter)
     Application.put_env(:starcite, :archive_adapter, adapter_mod)
@@ -411,6 +479,8 @@ defmodule StarciteWeb.TailSocketTest do
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+    include_tenant_id? = events_table_has_tenant_id?()
+
     rows =
       Enum.map(events, fn event ->
         %{
@@ -427,6 +497,7 @@ defmodule StarciteWeb.TailSocketTest do
           idempotency_key: event.idempotency_key,
           inserted_at: as_datetime(event.inserted_at)
         }
+        |> maybe_put_tenant_id(event, include_tenant_id?)
       end)
 
     {count, _} =
@@ -438,6 +509,32 @@ defmodule StarciteWeb.TailSocketTest do
       )
 
     assert count == length(rows)
+  end
+
+  defp event_tenant_id!(%{tenant_id: tenant_id})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_tenant_id!(event) when is_map(event) do
+    raise ArgumentError,
+          "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
+  end
+
+  defp maybe_put_tenant_id(row, event, true) when is_map(row) and is_map(event) do
+    Map.put(row, :tenant_id, event_tenant_id!(event))
+  end
+
+  defp maybe_put_tenant_id(row, _event, false) when is_map(row), do: row
+
+  defp events_table_has_tenant_id? do
+    result =
+      Ecto.Adapters.SQL.query!(
+        Repo,
+        "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'tenant_id' LIMIT 1",
+        []
+      )
+
+    result.num_rows > 0
   end
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
