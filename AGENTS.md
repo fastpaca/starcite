@@ -13,7 +13,7 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 ## Golden Patterns
 
 - Fail loudly on bad input. Prefer function-head pattern matching or `with` pipelines that enforce required keys. Only provide defaults when the product intentionally supports omissions.
-- Validate telemetry metadata in explicit clauses. Treat unexpected or missing labels as an error path so instrumentation stays trustworthy.
+- Validate telemetry metadata where the metric contract is defined (typically the telemetry helper or boundary module). Do not duplicate the same validation in callers.
 - Destructure known structs/maps and coerce once. Avoid chaining `Map.get/3` with defaults-trust shape where it’s guaranteed, and guard upstream.
 - Honour immutability: produce new assigns/state rather than mutating in place, and prefer small pure helpers for transformations.
 - Design for back-pressure. The runtime assumes at-least-once delivery and sequence numbers; handle drains and retries with clear status signaling.
@@ -26,26 +26,10 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - For storage formats, prefer off-the-shelf encoding/decoding (`Jason` for JSON/JSONL) over custom codecs unless there is a concrete performance or compatibility need.
 - Keep adapters thin: isolate transport/client calls from layout/serialization concerns, but avoid fragmenting logic into many tiny helper modules without clear payoff.
 - Remove generic “just in case” guards in internal paths. Crash loudly on impossible states rather than silently normalizing them.
+- Prefer direct control flow. Avoid `maybe_*`, `normalize_*`, or pass-through helpers that only forward to another function without changing representation or behavior.
 - Minimize bespoke parsing (regexes, hand-rolled XML/date parsing, etc.) unless required by an unavoidable external protocol.
 - Optimize for fewer lines and clearer control flow. Deleting code is preferred to adding abstraction when behavior stays correct.
 - For prototype work, bias toward readability and explicitness over hardening.
-
-## Avoid Defensive Overcoding
-
-- Do not add wrapper helpers that only re-check types/keys already guaranteed by caller context and callee guards.
-- Do not add `normalize_*` helpers unless they perform a real representation change. Renaming, pass-through, or forcing defaults is not a valid normalization.
-- Do not add silent fallback defaults (`:internal`, `:unknown`, `%{}`, `[]`, `nil`) on internal paths unless product behavior explicitly requires that default.
-- In trusted internal flows, pattern match directly in function heads or `with` clauses and let mismatches fail loudly.
-- When adding telemetry labels, avoid broad catch-all coercion. Preserve domain-level reason atoms from the source error unless an explicit mapping is required by a metric contract.
-- Prefer deleting defensive branches over keeping "just in case" logic that hides impossible states.
-
-### Pre-Handoff Self-Check (Required)
-
-- Did I introduce any new `maybe_*`, `normalize_*`, or pass-through helper that only forwards to another function?
-- Did I duplicate guards/validation that already exist at boundaries or in the called function head?
-- Did I add any default/fallback value on an internal path that could mask a real bug?
-- Can this be simplified by inlining logic into the existing `with`/pattern match flow?
-- If a fallback remains, is it explicitly required by product semantics and documented in code/comments?
 
 ## Domain Assumptions
 
@@ -157,3 +141,8 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - Pattern-match inputs, return errors for invalid shapes.
 - Update/invalidate caches when side effects change underlying data.
 - Document new runtime behaviours in `docs/` if you alter process lifecycles or message flow.
+- Remove defensive-overcoding artifacts before handoff.
+- Do not keep pass-through `maybe_*` wrappers that only re-check trusted shapes.
+- Do not keep `normalize_*` helpers without real representation change.
+- Do not keep silent internal fallback defaults unless product semantics explicitly require them.
+- If a fallback/default remains, document why it is required and where the contract is defined.
