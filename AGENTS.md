@@ -30,6 +30,23 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - Optimize for fewer lines and clearer control flow. Deleting code is preferred to adding abstraction when behavior stays correct.
 - For prototype work, bias toward readability and explicitness over hardening.
 
+## Avoid Defensive Overcoding
+
+- Do not add wrapper helpers that only re-check types/keys already guaranteed by caller context and callee guards.
+- Do not add `normalize_*` helpers unless they perform a real representation change. Renaming, pass-through, or forcing defaults is not a valid normalization.
+- Do not add silent fallback defaults (`:internal`, `:unknown`, `%{}`, `[]`, `nil`) on internal paths unless product behavior explicitly requires that default.
+- In trusted internal flows, pattern match directly in function heads or `with` clauses and let mismatches fail loudly.
+- When adding telemetry labels, avoid broad catch-all coercion. Preserve domain-level reason atoms from the source error unless an explicit mapping is required by a metric contract.
+- Prefer deleting defensive branches over keeping "just in case" logic that hides impossible states.
+
+### Pre-Handoff Self-Check (Required)
+
+- Did I introduce any new `maybe_*`, `normalize_*`, or pass-through helper that only forwards to another function?
+- Did I duplicate guards/validation that already exist at boundaries or in the called function head?
+- Did I add any default/fallback value on an internal path that could mask a real bug?
+- Can this be simplified by inlining logic into the existing `with`/pattern match flow?
+- If a fallback remains, is it explicitly required by product semantics and documented in code/comments?
+
 ## Domain Assumptions
 
 - Messages are append-only and replayable with deterministic sequence numbers.
