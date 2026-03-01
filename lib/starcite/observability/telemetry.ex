@@ -66,11 +66,8 @@ defmodule Starcite.Observability.Telemetry do
   @type ingest_edge_outcome :: :ok | :error
   @type ingest_edge_error_reason :: atom()
 
-  @spec ingest_edge(ingest_edge_operation(), String.t(), ingest_edge_outcome()) :: :ok
+  @spec ingest_edge(ingest_edge_operation(), String.t(), :ok) :: :ok
   def ingest_edge(operation, tenant_id, :ok), do: ingest_edge(operation, tenant_id, :ok, :none)
-
-  def ingest_edge(operation, tenant_id, :error),
-    do: ingest_edge(operation, tenant_id, :error, :internal)
 
   @spec ingest_edge(
           ingest_edge_operation(),
