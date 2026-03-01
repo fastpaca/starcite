@@ -45,7 +45,7 @@ RUN --mount=type=cache,target=/root/.hex \
     --mount=type=cache,target=/app/deps \
     --mount=type=cache,target=/app/_build \
     mix compile && \
-    mix release
+    mix release starcite --path /app/release
 
 # RUNTIME
 
@@ -68,7 +68,7 @@ WORKDIR /app
 RUN groupadd --gid 1000 app && \
     useradd --uid 1000 --gid app --home /app --shell /bin/bash app
 
-COPY --from=build /app/_build/prod/rel/starcite ./starcite
+COPY --from=build /app/release ./starcite
 COPY docker-entrypoint.sh /app/entrypoint.sh
 
 RUN chmod +x /app/entrypoint.sh && \
