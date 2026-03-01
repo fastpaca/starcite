@@ -23,14 +23,26 @@ defmodule StarciteWeb.SessionController do
   Create a session.
   """
   def create(conn, params) do
-    with {:ok, auth} <- fetch_auth(conn),
-         {:ok, opts} <- validate_create(params, auth),
-         {:ok, session} <- WritePath.create_session(opts) do
-      :ok = Telemetry.ingest_edge(:create_session, auth.principal.tenant_id, :ok)
+    with {:ok, auth} <- fetch_auth(conn) do
+      with {:ok, opts} <- validate_create(params, auth),
+           {:ok, session} <- WritePath.create_session(opts) do
+        :ok = Telemetry.ingest_edge(:create_session, auth.principal.tenant_id, :ok)
 
-      conn
-      |> put_status(:created)
-      |> json(session)
+        conn
+        |> put_status(:created)
+        |> json(session)
+      else
+        error ->
+          :ok =
+            Telemetry.ingest_edge(
+              :create_session,
+              auth.principal.tenant_id,
+              :error,
+              ingest_edge_error_reason(error)
+            )
+
+          error
+      end
     end
   end
 
@@ -39,16 +51,28 @@ defmodule StarciteWeb.SessionController do
   """
   def append(conn, %{"id" => id} = params) do
     measure_append_request(fn ->
-      with {:ok, auth} <- fetch_auth(conn),
-           :ok <- Policy.allowed_to_access_session(auth, id),
-           :ok <- authorize_append(auth, id),
-           {:ok, event, expected_seq} <- validate_append(params, auth),
-           {:ok, reply} <- append_event(id, event, expected_seq) do
-        :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
+      with {:ok, auth} <- fetch_auth(conn) do
+        with :ok <- Policy.allowed_to_access_session(auth, id),
+             :ok <- authorize_append(auth, id),
+             {:ok, event, expected_seq} <- validate_append(params, auth),
+             {:ok, reply} <- append_event(id, event, expected_seq) do
+          :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
 
-        conn
-        |> put_status(:created)
-        |> json(reply)
+          conn
+          |> put_status(:created)
+          |> json(reply)
+        else
+          error ->
+            :ok =
+              Telemetry.ingest_edge(
+                :append_event,
+                auth.principal.tenant_id,
+                :error,
+                ingest_edge_error_reason(error)
+              )
+
+            error
+        end
       end
     end)
   end
@@ -59,6 +83,56 @@ defmodule StarciteWeb.SessionController do
 
   defp append_event(id, event, expected_seq),
     do: WritePath.append_event(id, event, expected_seq: expected_seq)
+
+  defp ingest_edge_error_reason({:error, {:not_leader, _leader}}), do: :not_leader
+  defp ingest_edge_error_reason({:error, :not_leader}), do: :not_leader
+
+  defp ingest_edge_error_reason({:error, {:expected_seq_conflict, _expected, _current}}),
+    do: :seq_conflict
+
+  defp ingest_edge_error_reason({:error, {:expected_seq_conflict, _current}}), do: :seq_conflict
+
+  defp ingest_edge_error_reason(
+         {:error, {:producer_seq_conflict, _producer_id, _expected, _got}}
+       ),
+       do: :seq_conflict
+
+  defp ingest_edge_error_reason({:error, :producer_replay_conflict}), do: :seq_conflict
+  defp ingest_edge_error_reason({:timeout, _leader}), do: :timeout
+  defp ingest_edge_error_reason({:error, {:timeout, _leader}}), do: :timeout
+  defp ingest_edge_error_reason({:error, {:no_available_replicas, _failures}}), do: :unavailable
+
+  defp ingest_edge_error_reason({:error, reason})
+       when reason in [:archive_read_unavailable, :event_gap_detected, :event_store_backpressure],
+       do: :unavailable
+
+  defp ingest_edge_error_reason({:error, :unauthorized}), do: :unauthorized
+
+  defp ingest_edge_error_reason({:error, reason})
+       when reason in [:forbidden, :forbidden_scope, :forbidden_session, :forbidden_tenant],
+       do: :forbidden
+
+  defp ingest_edge_error_reason({:error, :session_not_found}), do: :session_not_found
+  defp ingest_edge_error_reason({:error, :session_exists}), do: :session_exists
+
+  defp ingest_edge_error_reason({:error, reason})
+       when reason in [
+              :invalid_event,
+              :invalid_metadata,
+              :invalid_refs,
+              :invalid_cursor,
+              :invalid_tail_batch_size,
+              :invalid_limit,
+              :invalid_list_query,
+              :invalid_write_node,
+              :invalid_group_id,
+              :invalid_websocket_upgrade,
+              :invalid_session,
+              :invalid_session_id
+            ],
+       do: :invalid_request
+
+  defp ingest_edge_error_reason({:error, reason}) when is_atom(reason), do: reason
 
   defp authorize_append(%Context{} = auth, id) when is_binary(id) and id != "" do
     with {:ok, session} <- ReadPath.get_session(id),

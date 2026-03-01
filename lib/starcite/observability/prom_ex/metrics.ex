@@ -22,8 +22,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
         counter("starcite_ingest_edge_total",
           event_name: [:starcite, :ingest, :edge],
           measurement: :count,
-          description: "Total ingestion-edge requests by operation and outcome",
-          tags: [:operation, :outcome, :tenant_id]
+          description: "Total ingestion-edge requests by operation, outcome, and error reason",
+          tags: [:operation, :outcome, :error_reason, :tenant_id]
         )
       ]
     )
