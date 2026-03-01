@@ -15,15 +15,19 @@ AI apps get fragile when streams break. Refresh a page, lose connectivity, or re
 
 Every append is persisted before it is acknowledged to the client. Every consumer can resume from a cursor, and every consumer sees the same deterministic sequence.
 
-## Why Starcite?
+## Why Starcite exists
 
-Production LLM systems typically need three guarantees to feel “normal”:
+If you've built an LLM-powered product, you've probably duct-taped together some
+combination of Redis pub/sub, Postgres polling, SSE endpoints, and custom reconnect
+logic. It works — until it doesn't. Events vanish during deploys. Streams diverge
+between tabs. Agents and humans see different histories.
 
-1. **Reliable stream recovery** — keep every event in order, even when sockets and tabs churn.
-2. **Low-latency append path** — sub-150ms p99 commit path with Raft-backed ordering.
-3. **Shared event model** — humans and agents operate against the same authoritative stream.
+Starcite replaces that duct tape. It provides an ordered, durable event log per
+session where every event is persisted before acknowledgment, any client can replay
+from a cursor, and the sequence is the same for every consumer. You stop building
+streaming infrastructure and start building your actual product.
 
-## What You Get
+## What you get
 
 | Capability | Description |
 | --- | --- |
@@ -33,17 +37,14 @@ Production LLM systems typically need three guarantees to feel “normal”:
 | Concurrency safety | Optional `expected_seq` conflict checks |
 | Idempotency | `deduped` responses by `(producer_id, producer_seq)` |
 | Reconnect semantics | Same stream contract across clients, devices, and environments |
-| Scaled durability | Data lives in Raft-backed clusters and archive backends |
 
-## Quick Start
+## Quick start
 
 ```bash
 git clone https://github.com/fastpaca/starcite
 cd starcite
 docker compose up -d
 ```
-
-## Core API
 
 ```bash
 # 1) Create a session
@@ -74,27 +75,57 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
 ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 ```
 
-## Delivery Guarantees
+## Running Starcite
 
-### Consistency
+### Hosted (starcite.ai)
 
-- Deterministic, strictly increasing `seq` per session
-- Cursor-based reads return the complete, gap-free stream
-- Replay works after refreshes, disconnects, and redeploys
+[starcite.ai](https://starcite.ai) runs Starcite for you — zero infrastructure, free
+tier, same API. If you don't want to operate distributed infrastructure, start here.
 
-### Concurrency and safety
+### Self-hosted
 
-- `expected_seq` enables optimistic concurrency checks on append
-- `producer_id` + `producer_seq` provide deterministic de-duplication
-- Archive backends include S3-compatible object storage and Postgres options
+Full control over your data and deployment topology. Requires operating a multi-node
+cluster with persistent storage and an archive backend. See the
+[self-hosting guide](docs/self-hosting.md) for configuration, bootstrap, and
+operational runbooks.
 
-### Client simplicity
+## Trade-offs
 
-- No webhook fan-out required
-- No custom cursor sync layer in the client
-- No session reassembly logic outside the standard API
+Honest comparison against the alternatives engineers typically reach for.
 
-## What Starcite Does Not Do
+**Starcite vs. Redis Pub/Sub + your own persistence:**
+Redis pub/sub is fire-and-forget — miss a message, it's gone. Teams end up layering
+Redis Streams, Lua scripts, and a Postgres write-behind on top. Starcite replaces
+that stack: every event is persisted before ack, and any client can replay from a
+cursor. The cost is another service to operate (or use [starcite.ai](https://starcite.ai)).
+
+**Starcite vs. Kafka / Redpanda:**
+Kafka is built for high-throughput cross-service event streaming. Starcite is built
+for session-scoped ordered logs. Kafka's partition model doesn't map cleanly to
+dynamic sessions (topic-per-session doesn't scale, shared partitions lose ordering).
+Kafka gives you consumer groups and stream processing; Starcite gives you a simpler
+model purpose-built for the session replay problem.
+
+**Starcite vs. Postgres + SSE (the common DIY):**
+Works at small scale. Breaks when you need: ordering across concurrent writers,
+reconnect with cursor-based replay, horizontal scaling without sticky sessions, and
+sub-150ms append latency. You end up reimplementing half of Starcite in application
+code. The trade-off: Starcite is another dependency, but it's the dependency that
+replaces the duct tape.
+
+**Design trade-offs within Starcite itself:**
+- *Consensus replication* adds a small latency floor (~ms) but guarantees no
+  acknowledged event is ever lost, even during node failures.
+- *Async archival* keeps the hot path fast (archive writes don't block appends) but
+  means the archive backend lags behind the live cluster state by seconds.
+- *Session-scoped ordering* keeps things simple and fast but means no cross-session
+  queries — use the archive backend directly for analytics.
+- *Static cluster topology* is simpler to reason about than dynamic membership but
+  means adding/removing nodes requires a maintenance window.
+- *Append-only log* — events cannot be updated or deleted. The log is immutable by
+  design. If you need mutable state, derive it from the event stream.
+
+## What Starcite does not do
 
 - Prompt construction or completion orchestration
 - Token budgeting / window management
@@ -102,13 +133,10 @@ ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
 - Client-side sync inference
 - Cross-system agent lifecycle orchestration
 
-## API & Semantics
+## API reference
 
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
-- [Architecture](docs/architecture.md)
-- [Deployment](docs/deployment.md)
-- [Benchmarks](docs/benchmarks.md)
 
 ## Development
 

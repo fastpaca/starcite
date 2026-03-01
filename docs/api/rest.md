@@ -100,4 +100,4 @@ Common status outcomes:
 - `403` forbidden by scope/session/tenant policy
 - `404` session not found
 - `409` expected sequence or producer conflicts
-- `503` unavailable (routing or quorum related)
+- `503` unavailable (cluster unavailable or routing failure)
