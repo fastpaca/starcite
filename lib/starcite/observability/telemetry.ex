@@ -60,25 +60,11 @@ defmodule Starcite.Observability.Telemetry do
     - `:operation` (`:create_session` or `:append_event`)
     - `:tenant_id` – normalized tenancy label
     - `:outcome` (`:ok` or `:error`)
-    - `:error_reason`
-      (`:none`, `:not_leader`, `:seq_conflict`, `:timeout`, `:unavailable`,
-      `:invalid_request`, `:unauthorized`, `:forbidden`, `:session_not_found`,
-      `:session_exists`, or `:internal`)
+    - `:error_reason` – reason atom for failures (`:none` for success)
   """
   @type ingest_edge_operation :: :create_session | :append_event
   @type ingest_edge_outcome :: :ok | :error
-  @type ingest_edge_error_reason ::
-          :none
-          | :not_leader
-          | :seq_conflict
-          | :timeout
-          | :unavailable
-          | :invalid_request
-          | :unauthorized
-          | :forbidden
-          | :session_not_found
-          | :session_exists
-          | :internal
+  @type ingest_edge_error_reason :: atom()
 
   @spec ingest_edge(ingest_edge_operation(), String.t(), ingest_edge_outcome()) :: :ok
   def ingest_edge(operation, tenant_id, :ok), do: ingest_edge(operation, tenant_id, :ok, :none)
@@ -92,13 +78,18 @@ defmodule Starcite.Observability.Telemetry do
           ingest_edge_outcome(),
           ingest_edge_error_reason()
         ) :: :ok
-  def ingest_edge(operation, tenant_id, :ok, :none)
+  def ingest_edge(operation, tenant_id, :ok, _error_reason)
       when operation in [:create_session, :append_event] and is_binary(tenant_id) and
              tenant_id != "" do
     execute_if_enabled(
       [:starcite, :ingest, :edge],
       %{count: 1},
-      %{operation: operation, tenant_id: tenant_id, outcome: :ok, error_reason: :none}
+      %{
+        operation: operation,
+        tenant_id: tenant_id,
+        outcome: :ok,
+        error_reason: :none
+      }
     )
 
     :ok
@@ -106,23 +97,16 @@ defmodule Starcite.Observability.Telemetry do
 
   def ingest_edge(operation, tenant_id, :error, error_reason)
       when operation in [:create_session, :append_event] and is_binary(tenant_id) and
-             tenant_id != "" and
-             error_reason in [
-               :not_leader,
-               :seq_conflict,
-               :timeout,
-               :unavailable,
-               :invalid_request,
-               :unauthorized,
-               :forbidden,
-               :session_not_found,
-               :session_exists,
-               :internal
-             ] do
+             tenant_id != "" and is_atom(error_reason) do
     execute_if_enabled(
       [:starcite, :ingest, :edge],
       %{count: 1},
-      %{operation: operation, tenant_id: tenant_id, outcome: :error, error_reason: error_reason}
+      %{
+        operation: operation,
+        tenant_id: tenant_id,
+        outcome: :error,
+        error_reason: error_reason
+      }
     )
 
     :ok
