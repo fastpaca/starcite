@@ -1,121 +1,136 @@
 # Self-hosting Starcite
 
 > **Want to skip the ops work?** [starcite.ai](https://starcite.ai) is the hosted
-> alternative — zero infrastructure, free tier, same API.
+> alternative — zero infrastructure, free tier, same API. Everything below is for
+> teams who want full control over their deployment.
 
 ## How it works
 
-Starcite runs as a cluster of N nodes (typically 3 or 5). Appends are replicated
-across multiple nodes before acknowledgment, so no acknowledged event is ever lost —
-even if a node dies mid-write.
+Starcite runs as a cluster of write nodes (typically 3 or 5). When a client appends
+an event, the event is replicated across multiple nodes before the client gets an
+acknowledgment. This means no acknowledged event is ever lost — even if a node dies
+mid-write.
 
-A background archiver flushes committed events to your chosen storage backend. This
-happens asynchronously; archive writes never block the append path.
+A background archiver flushes committed events to your chosen storage backend (S3 or
+Postgres) every few seconds. This is fully asynchronous — it never touches the hot
+path, so archive performance doesn't affect append latency.
 
-Sessions are distributed across the cluster automatically. Reads can be served by any
-node. Clients don't need to know which node owns a session.
+Sessions are distributed across the cluster automatically. Clients don't need to know
+which node owns a session — any node can route the request to the right place.
+
+For the full picture of how sharding, replication, and recovery work internally, see
+[Architecture](architecture.md).
 
 ## Choosing an archive backend
 
-The archive backend is where committed events are durably stored for long-term replay
-and recovery. Starcite's hot path serves from replicated in-memory state, so archive
-latency doesn't affect append or tail performance.
+The archive backend stores committed events for long-term durability and historical
+replay. It's important to understand that Starcite's hot path (appends, tail) serves
+entirely from replicated in-memory state — the archive is a secondary durability
+layer, not something the critical path reads from.
+
+This means archive latency is irrelevant to runtime performance. Pick your backend
+based on operational simplicity and query needs, not speed.
 
 ### S3 (recommended)
 
 Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, Google Cloud
 Storage (via interop), etc.
 
-**Why S3 is the default:**
-- Archive writes are asynchronous — latency doesn't matter
-- Scales without operational overhead
-- No high-availability infrastructure to manage
-- Cheapest option at any data volume
+S3 is the right default because:
+- Archive writes are async, so S3's higher latency doesn't matter
+- No HA infrastructure to manage — the provider handles it
+- Scales to any data volume without schema migrations or connection pool tuning
+- Cheapest option at every scale
 
 Use this unless you have a specific reason not to.
 
 ### Postgres
 
-Supported but not recommended for most deployments.
+Supported, but think carefully before choosing it.
 
-**When to choose Postgres:**
-- You need direct SQL access to archived event data (analytics, ad-hoc queries)
-- You already operate a Postgres cluster and want to consolidate
+Postgres makes sense if you need direct SQL access to archived event data — analytics
+dashboards, ad-hoc queries across sessions, that kind of thing. It also makes sense
+if you already operate a Postgres cluster and want to avoid adding another dependency.
 
-**Trade-offs:**
-- Adds operational complexity — you now have two distributed systems to manage
-- Starcite's hot path never reads from the archive, so Postgres query speed doesn't
-  help runtime performance
-- Requires connection pool tuning under write-heavy workloads
+The trade-offs are real though. You're now operating two distributed systems (Starcite
++ Postgres). Starcite's hot path never reads from the archive, so Postgres query
+speed doesn't improve runtime performance at all. And under write-heavy workloads,
+you'll need to tune connection pools and potentially deal with Postgres replication
+lag separately from Starcite's own replication.
 
-## Configuration reference
+## Configuration
 
 | Variable | Purpose |
 | --- | --- |
-| `NODE_NAME` | Stable node identity (`name@host`) |
-| `CLUSTER_NODES` | Comma-separated cluster peers |
-| `STARCITE_WRITE_NODE_IDS` | Comma-separated static write-node identities |
-| `STARCITE_WRITE_REPLICATION_FACTOR` | Replicas per group (normally `3`) |
-| `STARCITE_NUM_GROUPS` | Session sharding groups (normally `256`) |
-| `STARCITE_RAFT_DATA_DIR` | Persistent state data path |
-| `STARCITE_ARCHIVE_ADAPTER` | Archive backend (`s3` or `postgres`) |
-| `STARCITE_AUTH_MODE` | Optional auth mode override (`jwt` or `none`) |
+| `NODE_NAME` | Stable node identity (`name@host`). Must survive restarts. |
+| `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. |
+| `STARCITE_WRITE_NODE_IDS` | Comma-separated static write-node identities. Same value on every node. |
+| `STARCITE_WRITE_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
+| `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
+| `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
+| `STARCITE_ARCHIVE_ADAPTER` | `s3` or `postgres`. |
+| `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for development. |
 
-**S3 mode** requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, and optionally
-`STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`, `STARCITE_S3_SECRET_ACCESS_KEY`,
-`STARCITE_S3_PATH_STYLE`.
+**S3 backend** additionally requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`.
+Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
+`STARCITE_S3_SECRET_ACCESS_KEY`, `STARCITE_S3_PATH_STYLE`.
 
-**Postgres mode** requires: `DATABASE_URL`.
+**Postgres backend** additionally requires: `DATABASE_URL`.
 
 ## Bootstrap
 
+First-time cluster setup:
+
 1. Provision three write nodes with persistent volumes.
-2. Set stable `NODE_NAME` on each write node.
+2. Set a stable `NODE_NAME` on each — this identity must survive restarts.
 3. Set identical `CLUSTER_NODES` and `STARCITE_WRITE_NODE_IDS` on all nodes.
 4. Start all write nodes.
-5. Verify readiness:
+5. Verify:
 
 ```bash
-# Check node health
 curl -sS http://<node>:4000/health/ready
-
-# Check cluster status via release RPC
 bin/starcite rpc "Starcite.ControlPlane.Ops.status()"
 bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
 ```
 
-Expected result: node reports ready, and the ready write-node set matches the
-configured static set.
+You should see each node report ready, and the ready write-node set should match your
+configured `STARCITE_WRITE_NODE_IDS`. If a node isn't ready, check its logs — the
+most common issue is misconfigured `CLUSTER_NODES` or unreachable peers.
 
 ## Rolling restarts
 
-Run this sequence for each write node, one at a time. Do not restart multiple write
-nodes concurrently.
+The key constraint: never restart more than one write node at a time. Starcite uses
+3-way replication with quorum writes — taking two nodes down simultaneously means
+some groups lose quorum and can't accept writes.
 
-1. **Drain** the target node:
+For each write node, one at a time:
+
+1. **Drain** — tells the cluster to stop routing new requests to this node:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.drain_node()"
    ```
 
-2. **Wait** until drained (waits for drain convergence across visible cluster nodes):
+2. **Wait for drain convergence** — the cluster needs a moment to re-route in-flight
+   traffic. This command blocks until all nodes agree the target is drained:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_drained(30000)"
    ```
 
 3. **Restart/redeploy** the node.
 
-4. **Undrain** the node:
+4. **Undrain** — tells the cluster this node is available again:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.undrain_node()"
    ```
 
-5. **Wait** for local readiness:
+5. **Wait for readiness** — the node needs to sync its Raft state before it can serve
+   traffic. This blocks until sync is complete:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_ready(60000)"
    curl -sS http://<node>:4000/health/ready
    ```
 
-6. **Verify** cluster state:
+6. **Verify** the cluster looks healthy before moving on:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
    bin/starcite rpc "Starcite.ControlPlane.Ops.status()"
@@ -125,30 +140,39 @@ nodes concurrently.
 
 ## Node replacement
 
-Preferred replacement keeps the same logical node identity:
+The simplest approach: keep the same logical identity.
 
 1. Drain the node.
 2. Stop the old instance.
 3. Bring up the replacement with the same `NODE_NAME` and the same persistent data
-   directory (or a restored equivalent).
-4. Undrain, then wait for readiness.
+   directory (or a restored backup).
+4. Undrain, wait for readiness.
 5. Verify with `bin/starcite rpc "Starcite.ControlPlane.Ops.status()"`.
 
-Changing write-node identities is a topology migration. Treat it as an explicit
-maintenance procedure — do not mix it with routine rollouts.
+If you need to change a node's identity (different hostname, different rack), that's a
+topology migration — a more involved procedure. Don't mix it with routine rollouts.
 
 ## Failure scenarios
 
-- **Single node loss:** writes continue as long as quorum (majority) remains.
-- **Two-node loss in a three-node cluster:** write availability is at risk. Restore
-  the failed node before attempting changes.
-- **During incidents:** do not attempt membership changes. Focus on restoring the
-  existing topology.
+**Single node failure:** This is the expected failure mode, and it's handled
+gracefully. The remaining 2 of 3 replicas maintain quorum. Writes continue. Leaders
+on the failed node are re-elected on surviving nodes within seconds. Clients see a
+brief latency spike, not data loss.
+
+**Two-node failure (3-node cluster):** Quorum is lost for affected groups. Reads
+(tail replay from local state) may still work on the surviving node, but new appends
+are rejected. Priority is restoring the failed nodes, not making membership changes.
+
+**During incidents:** Don't attempt membership changes. Focus on getting the existing
+topology back to health. Membership changes during a partition can make things worse.
 
 ## Operational validation
 
-Run these periodically:
+Run these periodically — they're cheap and catch problems before your users do:
 
-1. Single write-node restart under load — confirm no churn in session distribution.
-2. Drain/undrain drill — verify ready-node transitions.
-3. Readiness-gate drill — ensure traffic only reaches ready nodes after restart.
+1. **Restart drill** — restart a single write node under load. Verify no churn in
+   session distribution and that clients reconnect cleanly.
+2. **Drain/undrain drill** — verify the ready-node set transitions correctly and that
+   traffic stops/resumes as expected.
+3. **Readiness gate drill** — after a restart, confirm that the health endpoint
+   returns `starting` until sync is complete, and `ok` after.

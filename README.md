@@ -133,8 +133,9 @@ replaces the duct tape.
 - Client-side sync inference
 - Cross-system agent lifecycle orchestration
 
-## API reference
+## Documentation
 
+- [Architecture](docs/architecture.md)
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
 
