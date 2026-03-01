@@ -228,6 +228,61 @@ defmodule Starcite.ArchiveTest do
   end
 
   describe "pull-mode behavior" do
+    test "interleaves flush order across tenants within a tick" do
+      {:ok, _pid} =
+        start_supervised(
+          {Starcite.Archive,
+           flush_interval_ms: 10_000,
+           adapter: Starcite.Archive.IdempotentTestAdapter,
+           adapter_opts: []}
+        )
+
+      :ok = IdempotentTestAdapter.clear_writes()
+
+      acme_a = "ses-acme-a-#{System.unique_integer([:positive, :monotonic])}"
+      acme_b = "ses-acme-b-#{System.unique_integer([:positive, :monotonic])}"
+      beta_a = "ses-beta-a-#{System.unique_integer([:positive, :monotonic])}"
+      beta_b = "ses-beta-b-#{System.unique_integer([:positive, :monotonic])}"
+
+      tenant_by_session = %{
+        acme_a => "acme",
+        acme_b => "acme",
+        beta_a => "beta",
+        beta_b => "beta"
+      }
+
+      for {session_id, tenant_id} <- tenant_by_session do
+        {:ok, _} = WritePath.create_session(id: session_id, tenant_id: tenant_id)
+
+        {:ok, _} =
+          append_event(session_id, %{
+            type: "content",
+            payload: %{text: "#{tenant_id}:#{session_id}"},
+            actor: "agent:test"
+          })
+      end
+
+      send(Starcite.Archive, :flush_tick)
+
+      eventually(
+        fn ->
+          first_batches =
+            IdempotentTestAdapter.get_write_batches()
+            |> Enum.take(4)
+
+          assert length(first_batches) == 4
+          assert Enum.all?(first_batches, &(length(&1) == 1))
+
+          tenant_sequence =
+            first_batches
+            |> Enum.map(fn [row] -> Map.fetch!(tenant_by_session, row.session_id) end)
+
+          assert tenant_sequence == ["acme", "beta", "acme", "beta"]
+        end,
+        timeout: 2_000
+      )
+    end
+
     test "archives pending work across multiple sessions in one scan loop" do
       {:ok, _pid} =
         start_supervised(

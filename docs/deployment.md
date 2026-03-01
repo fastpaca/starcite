@@ -35,6 +35,20 @@ S3 mode requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`, optional endpoint/
 
 Postgres mode requires: `DATABASE_URL`.
 
+### S3 schema migration
+
+When upgrading S3 archive payload schemas, run:
+
+- `mix starcite.archive.migrate_s3_schema --dry-run`
+- `mix starcite.archive.migrate_s3_schema`
+
+Run on one node at a time during a maintenance window.
+
+Startup schema checks:
+
+The adapter does not auto-migrate on startup. It validates `<prefix>/schema/meta.json`
+and returns startup errors when schema migration is required or unsupported.
+
 ## Bootstrap checklist
 
 1. Provision three write nodes with persistent volumes.
