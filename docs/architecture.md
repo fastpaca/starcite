@@ -22,20 +22,11 @@ others are followers.
 Router nodes are stateless — they accept API traffic and forward commands to the
 correct write node. You can scale these independently.
 
-```
-                     ┌──────────────┐
-          ┌──────────│  Router (N)  │──────────┐
-          │          └──────────────┘           │
-          │                                    │
-          ▼                                    ▼
-┌──────────────────┐   ┌──────────────────┐   ┌──────────────────┐
-│   Write Node 1   │   │   Write Node 2   │   │   Write Node 3   │
-│                  │   │                  │   │                  │
-│  Groups: leader  │   │  Groups: leader  │   │  Groups: leader  │
-│  for ~85 of 256  │   │  for ~85 of 256  │   │  for ~86 of 256  │
-│  follower for    │   │  follower for    │   │  follower for    │
-│  ~170 others     │   │  ~170 others     │   │  ~170 others     │
-└──────────────────┘   └──────────────────┘   └──────────────────┘
+```mermaid
+graph TD
+    R["Router (N)"] --> W1["Write Node 1<br/>leader for ~85 groups<br/>follower for ~170"]
+    R --> W2["Write Node 2<br/>leader for ~85 groups<br/>follower for ~170"]
+    R --> W3["Write Node 3<br/>leader for ~86 groups<br/>follower for ~170"]
 ```
 
 The 256-group count is fixed. Sessions are assigned to groups by hashing the session
@@ -46,21 +37,19 @@ coordination.
 
 The append path is the critical path. Target: sub-150ms p99.
 
-```
-Client                Router/API          Raft Leader         Followers (2)
-  │                      │                    │                    │
-  │  POST /append        │                    │                    │
-  │─────────────────────>│                    │                    │
-  │                      │  route to leader   │                    │
-  │                      │───────────────────>│                    │
-  │                      │                    │  replicate log     │
-  │                      │                    │───────────────────>│
-  │                      │                    │          ack       │
-  │                      │                    │<───────────────────│
-  │                      │  committed (seq)   │   (quorum: 2/3)   │
-  │                      │<───────────────────│                    │
-  │  {"seq": N}          │                    │                    │
-  │<─────────────────────│                    │                    │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as Router / API
+    participant L as Raft Leader
+    participant F as Followers (2)
+
+    C->>A: POST /append
+    A->>L: route to leader
+    L->>F: replicate log entry
+    F-->>L: ack (quorum: 2 of 3)
+    L-->>A: committed (seq)
+    A-->>C: {"seq": N}
 ```
 
 Step by step:
@@ -88,22 +77,19 @@ the session's current `seq`, the append is rejected with a `409`.
 Tail is a WebSocket endpoint that replays committed events from a cursor, then
 streams new commits live.
 
-```
-Client                    API Node              Raft Group
-  │                          │                      │
-  │  WS /tail?cursor=41      │                      │
-  │─────────────────────────>│                      │
-  │                          │  read events > 41    │
-  │                          │─────────────────────>│
-  │                          │  [seq 42, 43, 44]    │
-  │                          │<─────────────────────│
-  │  {"seq":42}, {"seq":43}  │                      │
-  │<─────────────────────────│                      │
-  │  ...                     │                      │
-  │                          │  (subscribe to new)  │
-  │                          │─────────────────────>│
-  │  {"seq":45} (live)       │                      │
-  │<─────────────────────────│                      │
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant A as API Node
+    participant R as Raft Group
+
+    C->>A: WS /tail?cursor=41
+    A->>R: read events where seq > 41
+    R-->>A: [seq 42, 43, 44]
+    A-->>C: {"seq":42}, {"seq":43}, {"seq":44}
+    A->>R: subscribe to new commits
+    R-->>A: seq 45 committed
+    A-->>C: {"seq":45} (live)
 ```
 
 On connect, the server reads all committed events with `seq > cursor` and sends them
@@ -119,9 +105,9 @@ A background archiver flushes committed events to the configured storage backend
 or Postgres) on a ~5 second interval. This is fully asynchronous — archive writes
 never block appends or tail delivery.
 
-```
-Raft State (in-memory)  ───▶  Archiver  ───▶  S3 / Postgres
-     (hot path)              (background)       (durable store)
+```mermaid
+graph LR
+    RS["Raft State<br/>(in-memory, hot path)"] --> AR["Archiver<br/>(background, ~5s interval)"] --> ST["S3 / Postgres<br/>(durable store)"]
 ```
 
 The archiver is idempotent: it writes events keyed by `(session_id, seq)`, so
