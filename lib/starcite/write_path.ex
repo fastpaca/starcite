@@ -3,6 +3,8 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
+  alias Starcite.Archive.Store
+
   alias Starcite.DataPlane.{
     RaftAccess,
     RaftBootstrap,
@@ -12,6 +14,7 @@ defmodule Starcite.WritePath do
   }
 
   alias Starcite.Auth.Principal
+  alias Starcite.Observability.Telemetry
   alias Starcite.Session
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
@@ -141,7 +144,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
+        process_append_with_hydrate_retry(server_id, id, {:append_event, id, event, nil})
 
       :error ->
         call_remote(group, :append_event_local, [id, event])
@@ -160,7 +163,11 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
+        process_append_with_hydrate_retry(
+          server_id,
+          id,
+          {:append_event, id, event, expected_seq}
+        )
 
       :error ->
         call_remote(
@@ -177,7 +184,7 @@ defmodule Starcite.WritePath do
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command_with_leader_retry(server_id, {:append_event, id, event, nil})
+      process_append_with_hydrate_retry(server_id, id, {:append_event, id, event, nil})
     end
   end
 
@@ -186,7 +193,11 @@ defmodule Starcite.WritePath do
     expected_seq = expected_seq_from_opts(opts)
 
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command_with_leader_retry(server_id, {:append_event, id, event, expected_seq})
+      process_append_with_hydrate_retry(
+        server_id,
+        id,
+        {:append_event, id, event, expected_seq}
+      )
     end
   end
 
@@ -206,7 +217,7 @@ defmodule Starcite.WritePath do
 
     case RaftAccess.local_server_for_group(group) do
       {:ok, server_id} ->
-        process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
+        process_append_with_hydrate_retry(server_id, id, {:append_events, id, events, opts})
 
       :error ->
         call_remote(group, :append_events_local, [id, events, opts])
@@ -219,7 +230,7 @@ defmodule Starcite.WritePath do
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
     with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command_with_leader_retry(server_id, {:append_events, id, events, opts})
+      process_append_with_hydrate_retry(server_id, id, {:append_events, id, events, opts})
     end
   end
 
@@ -267,7 +278,7 @@ defmodule Starcite.WritePath do
       created_at: parse_utc_datetime!(created_at)
     }
 
-    case Starcite.Archive.Store.upsert_session(row) do
+    case Store.upsert_session(row) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
@@ -330,6 +341,52 @@ defmodule Starcite.WritePath do
     :ok = RaftBootstrap.record_write_outcome(outcome)
     final_result
   end
+
+  defp process_append_with_hydrate_retry(server_id, session_id, command)
+       when is_atom(server_id) and is_binary(session_id) and session_id != "" do
+    case process_command_with_leader_retry(server_id, command) do
+      {:error, :session_not_found} ->
+        :ok = Telemetry.session_hydrate_attempt(session_id)
+
+        with {:ok, snapshot} <- load_session_snapshot(session_id),
+             {:ok, hydrate_result} <-
+               process_command_with_leader_retry(server_id, {:hydrate_session, snapshot}),
+             true <- hydrate_result in [:hydrated, :already_hot],
+             {:ok, _reply} = append_reply <- process_command_with_leader_retry(server_id, command) do
+          :ok = Telemetry.session_hydrate_success(session_id, hydrate_result)
+          append_reply
+        else
+          {:error, :invalid_snapshot} ->
+            :ok = Telemetry.session_hydrate_error(session_id, :invalid_snapshot)
+            {:error, :archive_read_unavailable}
+
+          {:error, reason} ->
+            :ok = Telemetry.session_hydrate_error(session_id, normalize_hydrate_reason(reason))
+            {:error, reason}
+
+          false ->
+            :ok = Telemetry.session_hydrate_error(session_id, :unexpected_hydrate_result)
+            {:error, :archive_read_unavailable}
+        end
+
+      result ->
+        result
+    end
+  end
+
+  defp load_session_snapshot(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, %{sessions: sessions}} when is_list(sessions) <-
+           Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
+         {:ok, snapshot} <- select_session_snapshot(sessions) do
+      {:ok, snapshot}
+    end
+  end
+
+  defp select_session_snapshot([snapshot | _rest]) when is_map(snapshot), do: {:ok, snapshot}
+  defp select_session_snapshot([]), do: {:error, :session_not_found}
+
+  defp normalize_hydrate_reason(reason) when is_atom(reason), do: reason
+  defp normalize_hydrate_reason(_reason), do: :unknown
 
   defp process_command_on_node(server_id, node, command)
        when is_atom(server_id) and is_atom(node) do

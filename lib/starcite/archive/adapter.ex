@@ -29,7 +29,13 @@ defmodule Starcite.Archive.Adapter do
           optional(:title) => String.t() | nil,
           required(:creator_principal) => Principal.t() | map(),
           optional(:metadata) => map(),
-          required(:created_at) => DateTime.t() | String.t()
+          required(:created_at) => DateTime.t() | String.t(),
+          optional(:last_seq) => non_neg_integer(),
+          optional(:archived_seq) => non_neg_integer(),
+          optional(:retention) => map(),
+          optional(:producer_cursors) => map(),
+          optional(:last_progress_poll) => non_neg_integer(),
+          optional(:snapshot_version) => String.t() | nil
         }
 
   @type session_query :: %{

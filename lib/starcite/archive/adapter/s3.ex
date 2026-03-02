@@ -65,9 +65,10 @@ defmodule Starcite.Archive.Adapter.S3 do
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
-             is_struct(creator_principal, Principal) and
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
              is_map(metadata) do
     config = config!()
+    runtime = normalize_runtime_snapshot(session)
 
     session = %{
       id: id,
@@ -77,14 +78,178 @@ defmodule Starcite.Archive.Adapter.S3 do
       metadata: metadata,
       created_at: created_at
     }
+    |> Map.merge(runtime)
 
-    with :ok <- put_session_tenant_index(config, id, tenant_id),
-         result <- put_session(config, tenant_id, id, session) do
-      case result do
-        :ok -> :ok
-        {:error, :precondition_failed} -> :ok
-        {:error, :unavailable} -> {:error, :archive_write_unavailable}
+    upsert_session_snapshot(config, tenant_id, id, session, 1)
+  end
+
+  defp upsert_session_snapshot(config, tenant_id, session_id, incoming, attempt)
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
+              session_id != "" and is_map(incoming) and is_integer(attempt) and attempt > 0 do
+    with :ok <- put_session_tenant_index(config, session_id, tenant_id),
+         {:ok, existing, etag} <- fetch_session_snapshot(config, tenant_id, session_id) do
+      if runtime_newer?(incoming, existing) do
+        case put_session(config, tenant_id, session_id, incoming, etag) do
+          :ok ->
+            :ok
+
+          {:error, :precondition_failed} when attempt <= config.max_write_retries ->
+            upsert_session_snapshot(config, tenant_id, session_id, incoming, attempt + 1)
+
+          {:error, :precondition_failed} ->
+            :ok
+
+          {:error, :unavailable} ->
+            {:error, :archive_write_unavailable}
+        end
+      else
+        :ok
       end
+    else
+      {:error, :archive_write_unavailable} ->
+        {:error, :archive_write_unavailable}
+
+      {:error, :archive_read_unavailable} ->
+        {:error, :archive_write_unavailable}
+    end
+  end
+
+  defp fetch_session_snapshot(config, tenant_id, session_id)
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and session_id != "" do
+    current_key = Layout.session_key(config, tenant_id, session_id)
+    legacy_key = Layout.legacy_session_key(config, session_id)
+
+    with {:ok, current} <- fetch_session_snapshot_key(config, current_key),
+         {:ok, legacy} <- fetch_session_snapshot_key(config, legacy_key) do
+      case current do
+        {session, etag} ->
+          {:ok, session, etag}
+
+        nil ->
+          case legacy do
+            {session, _etag} -> {:ok, session, nil}
+            nil -> {:ok, nil, nil}
+          end
+      end
+    end
+  end
+
+  defp fetch_session_snapshot_key(config, key) when is_binary(key) do
+    case client(config).get_object(config, key) do
+      {:ok, :not_found} ->
+        {:ok, nil}
+
+      {:ok, {body, etag}} ->
+        case Schema.decode_session(body) do
+          {:ok, session, _migration_required} -> {:ok, {session, etag}}
+          {:error, _reason} -> {:error, :archive_read_unavailable}
+        end
+
+      {:error, :unavailable} ->
+        {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp runtime_newer?(_incoming, nil), do: true
+
+  defp runtime_newer?(incoming, existing) when is_map(incoming) and is_map(existing) do
+    runtime_tuple(incoming) > runtime_tuple(existing)
+  end
+
+  defp runtime_tuple(session) when is_map(session) do
+    {
+      session_runtime_value(session, :last_seq),
+      session_runtime_value(session, :last_progress_poll),
+      session_runtime_value(session, :archived_seq)
+    }
+  end
+
+  defp session_runtime_value(session, key) when is_map(session) and is_atom(key) do
+    case Map.get(session, key, Map.get(session, Atom.to_string(key), 0)) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
+  defp normalize_runtime_snapshot(session) when is_map(session) do
+    last_seq = non_neg_integer_snapshot(session, :last_seq, 0)
+    archived_seq = non_neg_integer_snapshot(session, :archived_seq, 0)
+    last_progress_poll = non_neg_integer_snapshot(session, :last_progress_poll, 0)
+    retention = map_snapshot(session, :retention, %{})
+    producer_cursors = map_snapshot(session, :producer_cursors, %{}) |> encode_producer_cursors()
+    snapshot_version = snapshot_version(session)
+
+    if archived_seq <= last_seq do
+      %{
+        last_seq: last_seq,
+        archived_seq: archived_seq,
+        retention: retention,
+        producer_cursors: producer_cursors,
+        last_progress_poll: last_progress_poll,
+        snapshot_version: snapshot_version
+      }
+    else
+      raise ArgumentError,
+            "invalid session runtime snapshot: archived_seq=#{archived_seq} > last_seq=#{last_seq}"
+    end
+  end
+
+  defp non_neg_integer_snapshot(session, key, default)
+       when is_map(session) and is_atom(key) and is_integer(default) and default >= 0 do
+    case Map.get(session, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp map_snapshot(session, key, default)
+       when is_map(session) and is_atom(key) and is_map(default) do
+    case Map.get(session, key, default) do
+      value when is_map(value) -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp snapshot_version(session) when is_map(session) do
+    case Map.get(session, :snapshot_version) do
+      nil -> nil
+      value when is_binary(value) and value != "" -> value
+      value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
+    end
+  end
+
+  defp encode_producer_cursors(cursors) when map_size(cursors) == 0, do: %{}
+
+  defp encode_producer_cursors(cursors) when is_map(cursors) do
+    Enum.reduce(cursors, %{}, fn
+      {producer_id, cursor}, acc
+      when is_binary(producer_id) and producer_id != "" and is_map(cursor) ->
+        producer_seq = cursor_integer!(cursor, :producer_seq)
+        session_seq = cursor_integer!(cursor, :session_seq)
+        hash = cursor_hash!(cursor)
+
+        Map.put(acc, producer_id, %{
+          producer_seq: producer_seq,
+          session_seq: session_seq,
+          hash: Base.url_encode64(hash, padding: false)
+        })
+
+      entry, _acc ->
+        raise ArgumentError, "invalid producer cursor entry: #{inspect(entry)}"
+    end)
+  end
+
+  defp cursor_integer!(cursor, key) when is_map(cursor) and is_atom(key) do
+    case Map.get(cursor, key) || Map.get(cursor, Atom.to_string(key)) do
+      value when is_integer(value) and value > 0 -> value
+      value -> raise ArgumentError, "invalid producer cursor #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp cursor_hash!(cursor) when is_map(cursor) do
+    case Map.get(cursor, :hash) || Map.get(cursor, "hash") do
+      value when is_binary(value) and value != "" -> value
+      value -> raise ArgumentError, "invalid producer cursor hash: #{inspect(value)}"
     end
   end
 
@@ -265,13 +430,24 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
-  defp put_session(config, tenant_id, session_id, session) do
+  defp put_session(config, tenant_id, session_id, session, nil) do
     key = Layout.session_key(config, tenant_id, session_id)
     body = Schema.encode_session(session)
 
     client(config).put_object(config, key, body,
       content_type: "application/json",
       if_none_match: "*"
+    )
+  end
+
+  defp put_session(config, tenant_id, session_id, session, etag)
+       when is_binary(etag) and etag != "" do
+    key = Layout.session_key(config, tenant_id, session_id)
+    body = Schema.encode_session(session)
+
+    client(config).put_object(config, key, body,
+      content_type: "application/json",
+      if_match: etag
     )
   end
 

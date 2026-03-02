@@ -11,6 +11,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
       ingestion_metrics(),
       request_slo_metrics(),
       archive_metrics(),
+      session_metrics(),
       event_store_metrics()
     ]
   end
@@ -153,6 +154,66 @@ defmodule Starcite.Observability.PromEx.Metrics do
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
+        )
+      ]
+    )
+  end
+
+  defp session_metrics do
+    Event.build(
+      :starcite_session_lifecycle_metrics,
+      [
+        counter("starcite_session_eviction_tick_total",
+          event_name: [:starcite, :session, :eviction_tick],
+          measurement: :count,
+          description: "Total session eviction ticks",
+          tags: [:group_id]
+        ),
+        counter("starcite_session_freeze_candidate_total",
+          event_name: [:starcite, :session, :eviction_tick],
+          measurement: :candidates,
+          description: "Total session freeze candidates selected"
+        ),
+        last_value("starcite_hot_sessions",
+          event_name: [:starcite, :session, :eviction_tick],
+          measurement: :hot_sessions,
+          description: "Hot sessions currently in Raft FSM state",
+          tags: [:group_id]
+        ),
+        counter("starcite_session_freeze_success_total",
+          event_name: [:starcite, :session, :freeze, :success],
+          measurement: :count,
+          description: "Total successful session freezes",
+          tags: [:tenant_id]
+        ),
+        counter("starcite_session_freeze_conflict_total",
+          event_name: [:starcite, :session, :freeze, :conflict],
+          measurement: :count,
+          description: "Total session freeze conflicts",
+          tags: [:tenant_id]
+        ),
+        counter("starcite_session_freeze_error_total",
+          event_name: [:starcite, :session, :freeze, :error],
+          measurement: :count,
+          description: "Total session freeze errors",
+          tags: [:tenant_id, :reason]
+        ),
+        counter("starcite_session_hydrate_attempt_total",
+          event_name: [:starcite, :session, :hydrate, :attempt],
+          measurement: :count,
+          description: "Total session hydrate attempts"
+        ),
+        counter("starcite_session_hydrate_success_total",
+          event_name: [:starcite, :session, :hydrate, :success],
+          measurement: :count,
+          description: "Total successful session hydrates",
+          tags: [:result]
+        ),
+        counter("starcite_session_hydrate_error_total",
+          event_name: [:starcite, :session, :hydrate, :error],
+          measurement: :count,
+          description: "Total session hydrate errors",
+          tags: [:reason]
         )
       ]
     )

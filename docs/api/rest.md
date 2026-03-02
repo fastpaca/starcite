@@ -33,7 +33,7 @@ Optional JWT claim:
 Scopes:
 
 - `session:create` for `POST /v1/sessions`
-- `session:read` for `GET /v1/sessions` and `GET /v1/sessions/:id/tail`
+- `session:read` for `GET /v1/sessions`, `GET /v1/sessions/:id/tail`, and `GET /v1/sessions/stream`
 - `session:append` for `POST /v1/sessions/:id/append`
 
 Unauthorized requests fail with `401`.
@@ -79,6 +79,15 @@ WebSocket upgrade for replay + live stream. See the
 - Requires `session:read`
 - Session must match JWT `tenant_id`
 - If JWT has `session_id`, `:id` must match it
+
+### `GET /v1/sessions/stream`
+
+WebSocket upgrade for service-level session lifecycle discovery. See the
+[WebSocket API](websocket.md) for frame format.
+
+- Requires `session:read`
+- Tenant-fenced by JWT `tenant_id`
+- If JWT has `session_id`, only lifecycle updates for that session are delivered
 
 ### `GET /health/live` and `GET /health/ready`
 

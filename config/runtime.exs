@@ -262,6 +262,40 @@ if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS")
          parse_positive_integer!.("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS", archive_flush_interval)
 end
 
+if session_freeze_enabled = System.get_env("STARCITE_SESSION_FREEZE_ENABLED") do
+  config :starcite,
+         :session_freeze_enabled,
+         Starcite.Env.parse_bool!(session_freeze_enabled, "STARCITE_SESSION_FREEZE_ENABLED")
+end
+
+if session_freeze_min_idle_polls = System.get_env("STARCITE_SESSION_FREEZE_MIN_IDLE_POLLS") do
+  config :starcite,
+         :session_freeze_min_idle_polls,
+         parse_non_neg_integer!.(
+           "STARCITE_SESSION_FREEZE_MIN_IDLE_POLLS",
+           session_freeze_min_idle_polls
+         )
+end
+
+if session_freeze_max_batch_size = System.get_env("STARCITE_SESSION_FREEZE_MAX_BATCH_SIZE") do
+  config :starcite,
+         :session_freeze_max_batch_size,
+         parse_positive_integer!.(
+           "STARCITE_SESSION_FREEZE_MAX_BATCH_SIZE",
+           session_freeze_max_batch_size
+         )
+end
+
+if session_freeze_hydrate_grace_polls =
+     System.get_env("STARCITE_SESSION_FREEZE_HYDRATE_GRACE_POLLS") do
+  config :starcite,
+         :session_freeze_hydrate_grace_polls,
+         parse_non_neg_integer!.(
+           "STARCITE_SESSION_FREEZE_HYDRATE_GRACE_POLLS",
+           session_freeze_hydrate_grace_polls
+         )
+end
+
 if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
   config :starcite,
          :event_store_max_bytes,

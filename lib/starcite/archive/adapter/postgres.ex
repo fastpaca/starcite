@@ -70,38 +70,179 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def upsert_session(%{
+  def upsert_session(
+        %{
+          id: id,
+          title: title,
+          tenant_id: tenant_id,
+          creator_principal: creator_principal,
+          metadata: metadata,
+          created_at: %DateTime{} = created_at
+        } = session
+      )
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_binary(tenant_id) and tenant_id != "" and
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
+             is_map(metadata) do
+    runtime = normalize_runtime_snapshot(session)
+
+    row =
+      %{
         id: id,
         title: title,
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
-        created_at: %DateTime{} = created_at
-      })
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             is_binary(tenant_id) and tenant_id != "" and
-             is_struct(creator_principal, Principal) and
-             is_map(metadata) do
-    {_inserted, _} =
+        created_at: created_at
+      }
+      |> Map.merge(runtime)
+
+    {inserted, _} =
       Repo.insert_all(
         "sessions",
-        [
-          %{
-            id: id,
-            title: title,
-            tenant_id: tenant_id,
-            creator_principal: creator_principal,
-            metadata: metadata,
-            created_at: created_at
-          }
-        ],
+        [row],
         on_conflict: :nothing,
         conflict_target: [:id]
       )
 
+    if inserted == 0 do
+      :ok = maybe_update_existing_row(row)
+    end
+
     :ok
   rescue
     _ -> {:error, :archive_write_unavailable}
+  end
+
+  defp maybe_update_existing_row(%{
+         id: id,
+         title: title,
+         tenant_id: tenant_id,
+         creator_principal: creator_principal,
+         metadata: metadata,
+         created_at: created_at,
+         last_seq: last_seq,
+         archived_seq: archived_seq,
+         retention: retention,
+         producer_cursors: producer_cursors,
+         last_progress_poll: last_progress_poll,
+         snapshot_version: snapshot_version
+       })
+       when is_binary(id) and id != "" and is_integer(last_seq) and last_seq >= 0 and
+              is_integer(archived_seq) and archived_seq >= 0 and
+              is_integer(last_progress_poll) and last_progress_poll >= 0 do
+    query =
+      from(s in SessionRecord,
+        where: s.id == ^id,
+        where:
+          coalesce(s.last_seq, 0) < ^last_seq or
+            (coalesce(s.last_seq, 0) == ^last_seq and
+               coalesce(s.last_progress_poll, 0) < ^last_progress_poll) or
+            (coalesce(s.last_seq, 0) == ^last_seq and
+               coalesce(s.last_progress_poll, 0) == ^last_progress_poll and
+               coalesce(s.archived_seq, 0) < ^archived_seq)
+      )
+
+    _updated_count =
+      Repo.update_all(query,
+        set: [
+          title: title,
+          tenant_id: tenant_id,
+          creator_principal: creator_principal,
+          metadata: metadata,
+          created_at: created_at,
+          last_seq: last_seq,
+          archived_seq: archived_seq,
+          retention: retention,
+          producer_cursors: producer_cursors,
+          last_progress_poll: last_progress_poll,
+          snapshot_version: snapshot_version
+        ]
+      )
+
+    :ok
+  end
+
+  defp normalize_runtime_snapshot(session) when is_map(session) do
+    last_seq = non_neg_integer_snapshot(session, :last_seq, 0)
+    archived_seq = non_neg_integer_snapshot(session, :archived_seq, 0)
+    last_progress_poll = non_neg_integer_snapshot(session, :last_progress_poll, 0)
+    retention = map_snapshot(session, :retention, %{})
+    producer_cursors = map_snapshot(session, :producer_cursors, %{}) |> encode_producer_cursors()
+    snapshot_version = snapshot_version(session)
+
+    if archived_seq <= last_seq do
+      %{
+        last_seq: last_seq,
+        archived_seq: archived_seq,
+        retention: retention,
+        producer_cursors: producer_cursors,
+        last_progress_poll: last_progress_poll,
+        snapshot_version: snapshot_version
+      }
+    else
+      raise ArgumentError,
+            "invalid session runtime snapshot: archived_seq=#{archived_seq} > last_seq=#{last_seq}"
+    end
+  end
+
+  defp non_neg_integer_snapshot(session, key, default)
+       when is_map(session) and is_atom(key) and is_integer(default) and default >= 0 do
+    case Map.get(session, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp map_snapshot(session, key, default)
+       when is_map(session) and is_atom(key) and is_map(default) do
+    case Map.get(session, key, default) do
+      value when is_map(value) -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp snapshot_version(session) when is_map(session) do
+    case Map.get(session, :snapshot_version) do
+      nil -> nil
+      value when is_binary(value) and value != "" -> value
+      value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
+    end
+  end
+
+  defp encode_producer_cursors(cursors) when map_size(cursors) == 0, do: %{}
+
+  defp encode_producer_cursors(cursors) when is_map(cursors) do
+    Enum.reduce(cursors, %{}, fn
+      {producer_id, cursor}, acc
+      when is_binary(producer_id) and producer_id != "" and is_map(cursor) ->
+        producer_seq = cursor_integer!(cursor, :producer_seq)
+        session_seq = cursor_integer!(cursor, :session_seq)
+        hash = cursor_hash!(cursor)
+
+        Map.put(acc, producer_id, %{
+          producer_seq: producer_seq,
+          session_seq: session_seq,
+          hash: Base.url_encode64(hash, padding: false)
+        })
+
+      entry, _acc ->
+        raise ArgumentError, "invalid producer cursor entry: #{inspect(entry)}"
+    end)
+  end
+
+  defp cursor_integer!(cursor, key) when is_map(cursor) and is_atom(key) do
+    case Map.get(cursor, key) || Map.get(cursor, Atom.to_string(key)) do
+      value when is_integer(value) and value > 0 -> value
+      value -> raise ArgumentError, "invalid producer cursor #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp cursor_hash!(cursor) when is_map(cursor) do
+    case Map.get(cursor, :hash) || Map.get(cursor, "hash") do
+      value when is_binary(value) and value != "" -> value
+      value -> raise ArgumentError, "invalid producer cursor hash: #{inspect(value)}"
+    end
   end
 
   @impl true
@@ -267,7 +408,13 @@ defmodule Starcite.Archive.Adapter.Postgres do
       tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
-      created_at: DateTime.to_iso8601(session.created_at)
+      created_at: DateTime.to_iso8601(session.created_at),
+      last_seq: session.last_seq || 0,
+      archived_seq: session.archived_seq || 0,
+      retention: session.retention || %{},
+      producer_cursors: session.producer_cursors || %{},
+      last_progress_poll: session.last_progress_poll || 0,
+      snapshot_version: session.snapshot_version
     }
   end
 end

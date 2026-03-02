@@ -277,11 +277,41 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
        tenant_id: tenant_id,
        creator_principal: creator_principal,
        metadata: metadata,
-       created_at: created_at
+       created_at: created_at,
+       last_seq: session_non_neg_integer(session_payload, "last_seq", 0),
+       archived_seq: session_non_neg_integer(session_payload, "archived_seq", 0),
+       retention: session_map(session_payload, "retention", %{}),
+       producer_cursors: session_map(session_payload, "producer_cursors", %{}),
+       last_progress_poll: session_non_neg_integer(session_payload, "last_progress_poll", 0),
+       snapshot_version: session_snapshot_version(session_payload)
      }}
   end
 
   defp decode_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
+
+  defp session_non_neg_integer(session_payload, key, default)
+       when is_map(session_payload) and is_binary(key) and is_integer(default) and default >= 0 do
+    case Map.get(session_payload, key, default) do
+      value when is_integer(value) and value >= 0 -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp session_map(session_payload, key, default)
+       when is_map(session_payload) and is_binary(key) and is_map(default) do
+    case Map.get(session_payload, key, default) do
+      value when is_map(value) -> value
+      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
+    end
+  end
+
+  defp session_snapshot_version(session_payload) when is_map(session_payload) do
+    case Map.get(session_payload, "snapshot_version") do
+      nil -> nil
+      value when is_binary(value) and value != "" -> value
+      value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
+    end
+  end
 
   defp migrate_session_tenant_index(%{
          "schema_version" => version,

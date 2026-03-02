@@ -1,6 +1,9 @@
 # WebSocket API
 
-Starcite exposes `tail` as a WebSocket endpoint.
+Starcite exposes two WebSocket endpoints:
+
+- `tail` for per-session replay + live event streaming
+- `stream` for service-level session lifecycle discovery
 
 ## Endpoint
 
@@ -95,3 +98,45 @@ Notes:
 - no `tombstone` event in the primary contract
 - no `tail_synced` event
 - tail is server-to-client only; inbound client frames are ignored
+
+## Session Discovery Stream
+
+Endpoint:
+
+```
+ws://HOST/v1/sessions/stream
+```
+
+This stream is service-level and emits lifecycle updates whenever session state
+changes across the cluster.
+
+JWT requirements:
+
+- valid JWT signature via JWKS
+- `session:read` scope
+- updates are tenant-fenced by JWT `tenant_id`
+- if JWT has `session_id`, only updates for that session are delivered
+
+Server frames are JSON objects:
+
+```json
+{
+  "version": 1,
+  "kind": "session_created",
+  "state": "active",
+  "session_id": "ses_abc123",
+  "tenant_id": "acme",
+  "occurred_at": "2026-03-02T19:50:02Z"
+}
+```
+
+`kind` values:
+
+- `session_created`
+- `session_frozen`
+- `session_hydrated`
+
+`state` values:
+
+- `active`
+- `frozen`

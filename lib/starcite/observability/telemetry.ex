@@ -444,6 +444,145 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit an event describing one session eviction tick for a Raft group.
+
+  Measurements:
+    - `:count` – fixed at 1 per tick
+    - `:candidates` – number of freeze candidates returned by the FSM
+    - `:hot_sessions` – number of hot sessions in FSM state after the tick
+
+  Metadata:
+    - `:group_id`
+    - `:poll_epoch`
+    - `:min_idle_polls`
+    - `:max_freeze_batch_size`
+  """
+  @spec session_eviction_tick(
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          pos_integer()
+        ) :: :ok
+  def session_eviction_tick(
+        group_id,
+        poll_epoch,
+        candidates,
+        hot_sessions,
+        min_idle_polls,
+        max_freeze_batch_size
+      )
+      when is_integer(group_id) and group_id >= 0 and is_integer(poll_epoch) and poll_epoch >= 0 and
+             is_integer(candidates) and candidates >= 0 and is_integer(hot_sessions) and
+             hot_sessions >= 0 and
+             is_integer(min_idle_polls) and min_idle_polls >= 0 and
+             is_integer(max_freeze_batch_size) and max_freeze_batch_size > 0 do
+    execute_if_enabled(
+      [:starcite, :session, :eviction_tick],
+      %{count: 1, candidates: candidates, hot_sessions: hot_sessions},
+      %{
+        group_id: group_id,
+        poll_epoch: poll_epoch,
+        min_idle_polls: min_idle_polls,
+        max_freeze_batch_size: max_freeze_batch_size
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a successful session freeze event.
+  """
+  @spec session_freeze_success(String.t(), String.t()) :: :ok
+  def session_freeze_success(session_id, tenant_id)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    execute_if_enabled(
+      [:starcite, :session, :freeze, :success],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a session freeze conflict event.
+  """
+  @spec session_freeze_conflict(String.t(), String.t()) :: :ok
+  def session_freeze_conflict(session_id, tenant_id)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    execute_if_enabled(
+      [:starcite, :session, :freeze, :conflict],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a session freeze error event.
+  """
+  @spec session_freeze_error(String.t(), String.t(), atom()) :: :ok
+  def session_freeze_error(session_id, tenant_id, reason)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_atom(reason) do
+    execute_if_enabled(
+      [:starcite, :session, :freeze, :error],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id, reason: reason}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a session hydrate attempt event.
+  """
+  @spec session_hydrate_attempt(String.t()) :: :ok
+  def session_hydrate_attempt(session_id) when is_binary(session_id) and session_id != "" do
+    execute_if_enabled(
+      [:starcite, :session, :hydrate, :attempt],
+      %{count: 1},
+      %{session_id: session_id}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a successful session hydrate event.
+  """
+  @spec session_hydrate_success(String.t(), :hydrated | :already_hot) :: :ok
+  def session_hydrate_success(session_id, result)
+      when is_binary(session_id) and session_id != "" and result in [:hydrated, :already_hot] do
+    execute_if_enabled(
+      [:starcite, :session, :hydrate, :success],
+      %{count: 1},
+      %{session_id: session_id, result: result}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit a failed session hydrate event.
+  """
+  @spec session_hydrate_error(String.t(), atom()) :: :ok
+  def session_hydrate_error(session_id, reason)
+      when is_binary(session_id) and session_id != "" and is_atom(reason) do
+    execute_if_enabled(
+      [:starcite, :session, :hydrate, :error],
+      %{count: 1},
+      %{session_id: session_id, reason: reason}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:
