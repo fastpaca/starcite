@@ -23,7 +23,8 @@ defmodule Starcite.Archive.Adapter.S3.Config do
       bucket: required_bucket!(opts),
       prefix: normalize_prefix(Keyword.get(opts, :prefix, @default_prefix)),
       chunk_size: cache_chunk_size(),
-      max_write_retries: Keyword.get(opts, :max_write_retries, @default_max_write_retries),
+      max_write_retries:
+        positive_integer_opt!(opts, :max_write_retries, @default_max_write_retries),
       client_mod: Keyword.get(opts, :client_mod, @default_client_mod),
       request_opts: request_opts(opts)
     }
@@ -82,6 +83,18 @@ defmodule Starcite.Archive.Adapter.S3.Config do
     case prefix |> String.trim() |> String.trim("/") do
       "" -> @default_prefix
       normalized -> normalized
+    end
+  end
+
+  defp positive_integer_opt!(opts, key, default)
+       when is_list(opts) and is_atom(key) and is_integer(default) and default > 0 do
+    case Keyword.get(opts, key, default) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid :#{key} for S3 archive adapter: #{inspect(value)} (expected positive integer)"
     end
   end
 end

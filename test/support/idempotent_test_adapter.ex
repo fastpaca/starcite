@@ -89,8 +89,8 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def handle_call({:upsert_session, %{id: id} = session}, _from, state)
-      when is_binary(id) and id != "" do
+  def handle_call({:upsert_session, %{id: id, tenant_id: tenant_id} = session}, _from, state)
+      when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
     normalized = normalize_session(session)
     {:reply, :ok, %{state | sessions: Map.put(state.sessions, id, normalized)}}
   end
@@ -142,7 +142,7 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   defp to_event_map(row) do
-    %{
+    event = %{
       seq: row.seq,
       type: row.type,
       payload: row.payload,
@@ -155,14 +155,29 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       idempotency_key: row.idempotency_key,
       inserted_at: row.inserted_at
     }
+
+    case row do
+      %{tenant_id: tenant_id} when is_binary(tenant_id) and tenant_id != "" ->
+        Map.put(event, :tenant_id, tenant_id)
+
+      _ ->
+        event
+    end
   end
 
   defp normalize_session(
-         %{id: id, title: title, metadata: metadata, created_at: created_at} = session
+         %{
+           id: id,
+           title: title,
+           tenant_id: tenant_id,
+           metadata: metadata,
+           created_at: created_at
+         } = session
        ) do
     %{
       id: id,
       title: title,
+      tenant_id: tenant_id,
       creator_principal: Map.get(session, :creator_principal),
       metadata: metadata,
       created_at: created_at
@@ -187,7 +202,7 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       sorted
       |> Enum.filter(fn session ->
         (is_nil(cursor) or session.id > cursor) and
-          tenant_match?(session.creator_principal, tenant_id) and
+          tenant_match?(session.tenant_id, tenant_id) and
           metadata_match?(session.metadata || %{}, metadata_filters) and
           owner_principal_match?(session.creator_principal, owner_principal_ids)
       end)
@@ -250,15 +265,9 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   defp tenant_match?(_creator_principal, :all), do: true
   defp tenant_match?(_creator_principal, :none), do: false
 
-  defp tenant_match?(creator_principal, tenant_id)
-       when is_map(creator_principal) and is_binary(tenant_id) do
-    (creator_principal["tenant_id"] || creator_principal[:tenant_id]) == tenant_id
-  end
+  defp tenant_match?(session_tenant_id, tenant_id)
+       when is_binary(session_tenant_id) and is_binary(tenant_id),
+       do: session_tenant_id == tenant_id
 
-  defp tenant_match?(%Starcite.Auth.Principal{tenant_id: principal_tenant_id}, tenant_id)
-       when is_binary(tenant_id) do
-    principal_tenant_id == tenant_id
-  end
-
-  defp tenant_match?(_creator_principal, _tenant_id), do: false
+  defp tenant_match?(_session_tenant_id, _tenant_id), do: false
 end
