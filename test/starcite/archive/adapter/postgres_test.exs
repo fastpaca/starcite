@@ -1,5 +1,6 @@
 defmodule Starcite.Archive.Adapter.PostgresTest do
   use ExUnit.Case, async: false
+  @moduletag :requires_postgres
 
   alias Starcite.Archive.Adapter.Postgres
   alias Starcite.Auth.Principal

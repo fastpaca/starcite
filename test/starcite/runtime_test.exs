@@ -182,6 +182,7 @@ defmodule Starcite.RuntimeTest do
                })
     end
 
+    @tag :requires_postgres
     test "hydrates frozen sessions from archive and retries append once" do
       :ok = setup_repo_shared_sandbox()
       :ok = PubSub.subscribe(Starcite.PubSub, SessionDiscovery.topic())
@@ -361,6 +362,7 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1]
     end
 
+    @tag :requires_postgres
     test "returns ordered events across Postgres cold + ETS hot boundary" do
       :ok = setup_repo_shared_sandbox()
 
@@ -385,6 +387,7 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
     end
 
+    @tag :requires_postgres
     test "respects limit across Postgres cold + ETS hot boundary" do
       :ok = setup_repo_shared_sandbox()
 
