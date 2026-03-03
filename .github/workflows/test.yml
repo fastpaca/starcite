@@ -77,7 +77,18 @@ jobs:
     #     MIX_ENV: test
 
     - name: Run tests
-      run: mix test --trace
+      run: |
+        mix run -e '
+          adapter =
+            System.get_env("STARCITE_ARCHIVE_ADAPTER", "")
+            |> String.trim()
+            |> String.downcase()
+
+          if adapter == "s3" do
+            Mix.Task.run("starcite.archive.migrate_s3_schema")
+          end
+        '
+        mix test --trace
 
 #    - name: Run tests with coverage
 #      run: mix test --cover
