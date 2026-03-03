@@ -558,6 +558,11 @@ defmodule StarciteWeb.TailSocketTest do
     end
 
     Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
+    end)
+
     :ok
   end
 end

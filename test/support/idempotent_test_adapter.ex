@@ -158,7 +158,13 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   defp normalize_session(
-         %{id: id, title: title, metadata: metadata, created_at: created_at} = session
+         %{
+           id: id,
+           title: title,
+           tenant_id: tenant_id,
+           metadata: metadata,
+           created_at: created_at
+         } = session
        ) do
     last_seq = normalize_non_neg_integer(Map.get(session, :last_seq), 0)
     archived_seq = normalize_non_neg_integer(Map.get(session, :archived_seq), 0)

@@ -259,14 +259,16 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
 
   defp migrate_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
 
-  defp decode_session_payload(%{
-         "id" => id,
-         "title" => title,
-         "tenant_id" => tenant_id,
-         "creator_principal" => creator_principal,
-         "metadata" => metadata,
-         "created_at" => created_at
-       })
+  defp decode_session_payload(
+         %{
+           "id" => id,
+           "title" => title,
+           "tenant_id" => tenant_id,
+           "creator_principal" => creator_principal,
+           "metadata" => metadata,
+           "created_at" => created_at
+         } = session_payload
+       )
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_binary(tenant_id) and tenant_id != "" and is_map(creator_principal) and
               is_map(metadata) and is_binary(created_at) do

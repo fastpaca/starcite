@@ -55,67 +55,136 @@ defmodule Starcite.Archive.Adapter.S3 do
     do: read_events(session_id, from_seq, to_seq, config!())
 
   @impl true
-  def upsert_session(%{
+  def upsert_session(
+        %{
+          id: id,
+          title: title,
+          tenant_id: tenant_id,
+          creator_principal: creator_principal,
+          metadata: metadata,
+          created_at: created_at
+        } = session
+      )
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_binary(tenant_id) and tenant_id != "" and
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
+             is_map(metadata) do
+    config = config!()
+    runtime_snapshot_explicit? = runtime_snapshot_explicit?(session)
+    runtime = normalize_runtime_snapshot(session)
+
+    session =
+      %{
         id: id,
         title: title,
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
         created_at: created_at
-      })
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             is_binary(tenant_id) and tenant_id != "" and
-             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) do
-    config = config!()
-    runtime = normalize_runtime_snapshot(session)
+      }
+      |> Map.merge(runtime)
 
-    session = %{
-      id: id,
-      title: title,
-      tenant_id: tenant_id,
-      creator_principal: creator_principal,
-      metadata: metadata,
-      created_at: created_at
-    }
-    |> Map.merge(runtime)
-
-    upsert_session_snapshot(config, tenant_id, id, session, 1)
+    upsert_session_snapshot(config, tenant_id, id, session, 1, runtime_snapshot_explicit?)
   end
 
-  defp upsert_session_snapshot(config, tenant_id, session_id, incoming, attempt)
+  defp upsert_session_snapshot(
+         config,
+         tenant_id,
+         session_id,
+         incoming,
+         attempt,
+         runtime_snapshot_explicit?
+       )
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
-              session_id != "" and is_map(incoming) and is_integer(attempt) and attempt > 0 do
-    with :ok <- put_session_tenant_index(config, session_id, tenant_id),
-         {:ok, existing, etag} <- fetch_session_snapshot(config, tenant_id, session_id) do
-      if runtime_newer?(incoming, existing) do
-        case put_session(config, tenant_id, session_id, incoming, etag) do
-          :ok ->
-            :ok
+              session_id != "" and is_map(incoming) and is_integer(attempt) and attempt > 0 and
+              is_boolean(runtime_snapshot_explicit?) do
+    with {:ok, resolved_tenant_id} <- fetch_session_tenant_index(config, session_id) do
+      lookup_tenant_id = resolved_tenant_id || tenant_id
 
-          {:error, :precondition_failed} when attempt <= config.max_write_retries ->
-            upsert_session_snapshot(config, tenant_id, session_id, incoming, attempt + 1)
+      with {:ok, existing, etag} <- fetch_session_snapshot(config, lookup_tenant_id, session_id) do
+        if runtime_newer?(incoming, existing) do
+          case tenant_ownership_status(resolved_tenant_id, tenant_id) do
+            :ok ->
+              with :ok <- put_session_tenant_index(config, session_id, tenant_id) do
+                case put_session(config, tenant_id, session_id, incoming, etag) do
+                  :ok ->
+                    :ok
 
-          {:error, :precondition_failed} ->
-            :ok
+                  {:error, :precondition_failed} when attempt <= config.max_write_retries ->
+                    upsert_session_snapshot(
+                      config,
+                      tenant_id,
+                      session_id,
+                      incoming,
+                      attempt + 1,
+                      runtime_snapshot_explicit?
+                    )
 
-          {:error, :unavailable} ->
-            {:error, :archive_write_unavailable}
+                  {:error, :precondition_failed} ->
+                    :ok
+
+                  {:error, :unavailable} ->
+                    {:error, :archive_write_unavailable}
+                end
+              end
+
+            :conflict ->
+              {:error, :archive_write_unavailable}
+          end
+        else
+          case tenant_ownership_status(resolved_tenant_id, tenant_id) do
+            :ok ->
+              :ok
+
+            :conflict when runtime_snapshot_explicit? ->
+              :ok
+
+            :conflict ->
+              {:error, :archive_write_unavailable}
+          end
         end
       else
-        :ok
+        {:error, :archive_read_unavailable} ->
+          {:error, :archive_write_unavailable}
       end
     else
-      {:error, :archive_write_unavailable} ->
-        {:error, :archive_write_unavailable}
-
       {:error, :archive_read_unavailable} ->
         {:error, :archive_write_unavailable}
     end
   end
 
+  defp tenant_ownership_status(nil, incoming_tenant_id)
+       when is_binary(incoming_tenant_id) and incoming_tenant_id != "",
+       do: :ok
+
+  defp tenant_ownership_status(existing_tenant_id, existing_tenant_id)
+       when is_binary(existing_tenant_id) and existing_tenant_id != "",
+       do: :ok
+
+  defp tenant_ownership_status(existing_tenant_id, incoming_tenant_id)
+       when is_binary(existing_tenant_id) and existing_tenant_id != "" and
+              is_binary(incoming_tenant_id) and incoming_tenant_id != "",
+       do: :conflict
+
+  defp runtime_snapshot_explicit?(session) when is_map(session) do
+    Enum.any?(
+      [
+        :last_seq,
+        :archived_seq,
+        :retention,
+        :producer_cursors,
+        :last_progress_poll,
+        :snapshot_version
+      ],
+      fn key ->
+        Map.has_key?(session, key) or Map.has_key?(session, Atom.to_string(key))
+      end
+    )
+  end
+
   defp fetch_session_snapshot(config, tenant_id, session_id)
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and session_id != "" do
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
+              session_id != "" do
     current_key = Layout.session_key(config, tenant_id, session_id)
     legacy_key = Layout.legacy_session_key(config, session_id)
 

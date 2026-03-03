@@ -5,11 +5,18 @@ defmodule Starcite.Archive.Adapter.PostgresTest do
   alias Starcite.Auth.Principal
   alias Starcite.Repo
 
-  test "upsert_session ignores stale runtime snapshots for existing rows" do
+  setup do
     ensure_repo_started()
     :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
 
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
+    end)
+
+    :ok
+  end
+
+  test "upsert_session ignores stale runtime snapshots for existing rows" do
     id = "ses-pg-stale-#{System.unique_integer([:positive, :monotonic])}"
     created_at = DateTime.utc_now() |> DateTime.truncate(:second)
 
@@ -51,10 +58,6 @@ defmodule Starcite.Archive.Adapter.PostgresTest do
   end
 
   test "upsert_session updates existing rows when runtime snapshot is newer" do
-    ensure_repo_started()
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-
     id = "ses-pg-newer-#{System.unique_integer([:positive, :monotonic])}"
     created_at = DateTime.utc_now() |> DateTime.truncate(:second)
 

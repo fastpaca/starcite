@@ -183,9 +183,7 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "hydrates frozen sessions from archive and retries append once" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+      :ok = setup_repo_shared_sandbox()
       :ok = PubSub.subscribe(Starcite.PubSub, SessionDiscovery.topic())
 
       id = unique_id("ses-hydrate")
@@ -364,9 +362,7 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "returns ordered events across Postgres cold + ETS hot boundary" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+      :ok = setup_repo_shared_sandbox()
 
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -390,9 +386,7 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "respects limit across Postgres cold + ETS hot boundary" do
-      ensure_repo_started()
-      :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+      :ok = setup_repo_shared_sandbox()
 
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -668,5 +662,17 @@ defmodule Starcite.RuntimeTest do
       _pid = start_supervised!(Repo)
       :ok
     end
+  end
+
+  defp setup_repo_shared_sandbox do
+    ensure_repo_started()
+    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+
+    on_exit(fn ->
+      Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
+    end)
+
+    :ok
   end
 end

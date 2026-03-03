@@ -71,31 +71,18 @@ defmodule StarciteWeb.HealthControllerTest do
         }
       end)
 
-      :sys.replace_state(RaftBootstrap, fn state ->
-        now_ms = System.monotonic_time(:millisecond)
+      eventually(fn ->
+        force_bootstrap_raft_not_ready()
 
-        state
-        |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :write)
-        |> Map.put(:consensus_ready?, false)
-        |> Map.put(:consensus_last_probe_at_ms, now_ms)
-        |> Map.put(:consensus_probe_success_streak, 0)
-        |> Map.put(:consensus_probe_failure_streak, 1)
-        |> Map.put(:consensus_probe_detail, %{
-          checked_groups: 1,
-          failing_group_id: 0,
-          probe_result: "timeout"
-        })
+        conn = request("/health/ready")
+        body = Jason.decode!(conn.resp_body)
+
+        assert conn.status == 503
+        assert body["status"] == "starting"
+        assert body["mode"] == "write_node"
+        assert body["reason"] == "raft_sync"
+        assert body["detail"]["probe_result"] == "timeout"
       end)
-
-      conn = request("/health/ready")
-      body = Jason.decode!(conn.resp_body)
-
-      assert conn.status == 503
-      assert body["status"] == "starting"
-      assert body["mode"] == "write_node"
-      assert body["reason"] == "raft_sync"
-      assert body["detail"]["probe_result"] == "timeout"
     end
 
     test "returns ok again after raft convergence recovers" do
@@ -124,27 +111,14 @@ defmodule StarciteWeb.HealthControllerTest do
         }
       end)
 
-      :sys.replace_state(RaftBootstrap, fn state ->
-        now_ms = System.monotonic_time(:millisecond)
+      eventually(fn ->
+        force_bootstrap_raft_not_ready()
 
-        state
-        |> Map.put(:startup_complete?, true)
-        |> Map.put(:startup_mode, :write)
-        |> Map.put(:consensus_ready?, false)
-        |> Map.put(:consensus_last_probe_at_ms, now_ms)
-        |> Map.put(:consensus_probe_success_streak, 0)
-        |> Map.put(:consensus_probe_failure_streak, 1)
-        |> Map.put(:consensus_probe_detail, %{
-          checked_groups: 1,
-          failing_group_id: 0,
-          probe_result: "timeout"
-        })
+        conn = request("/health/ready")
+        body = Jason.decode!(conn.resp_body)
+        assert conn.status == 503
+        assert body["reason"] == "raft_sync"
       end)
-
-      conn = request("/health/ready")
-      body = Jason.decode!(conn.resp_body)
-      assert conn.status == 503
-      assert body["reason"] == "raft_sync"
 
       :sys.replace_state(RaftBootstrap, fn state ->
         now_ms = System.monotonic_time(:millisecond)
@@ -280,6 +254,25 @@ defmodule StarciteWeb.HealthControllerTest do
     interval = Keyword.get(opts, :interval, 25)
     deadline = System.monotonic_time(:millisecond) + timeout
     do_eventually(fun, deadline, interval)
+  end
+
+  defp force_bootstrap_raft_not_ready do
+    :sys.replace_state(RaftBootstrap, fn state ->
+      now_ms = System.monotonic_time(:millisecond)
+
+      state
+      |> Map.put(:startup_complete?, true)
+      |> Map.put(:startup_mode, :write)
+      |> Map.put(:consensus_ready?, false)
+      |> Map.put(:consensus_last_probe_at_ms, now_ms)
+      |> Map.put(:consensus_probe_success_streak, 0)
+      |> Map.put(:consensus_probe_failure_streak, 1)
+      |> Map.put(:consensus_probe_detail, %{
+        checked_groups: 1,
+        failing_group_id: 0,
+        probe_result: "timeout"
+      })
+    end)
   end
 
   defp do_eventually(fun, deadline, interval) do
