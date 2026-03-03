@@ -71,18 +71,6 @@ jobs:
           mc mb --ignore-existing local/starcite-test >/dev/null
         '
 
-    - name: Initialize S3 archive schema
-      run: |
-        for _ in $(seq 1 5); do
-          if mix starcite.archive.migrate_s3_schema; then
-            exit 0
-          fi
-          sleep 2
-        done
-
-        echo "S3 schema migration bootstrap failed after retries" >&2
-        exit 1
-
     # - name: Setup test database
     #   run: mix ecto.setup
     #   env:
