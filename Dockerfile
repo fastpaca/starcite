@@ -30,8 +30,6 @@ COPY config/config.exs config/prod.exs config/
 
 RUN --mount=type=cache,target=/root/.hex \
     --mount=type=cache,target=/root/.cache/rebar3 \
-    --mount=type=cache,target=/app/deps \
-    --mount=type=cache,target=/app/_build \
     mix deps.get --only ${MIX_ENV} && \
     mix deps.compile
 
@@ -42,8 +40,6 @@ COPY rel rel
 
 RUN --mount=type=cache,target=/root/.hex \
     --mount=type=cache,target=/root/.cache/rebar3 \
-    --mount=type=cache,target=/app/deps \
-    --mount=type=cache,target=/app/_build \
     mix compile && \
     mix release starcite --path /app/release
 

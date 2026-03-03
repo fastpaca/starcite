@@ -71,6 +71,9 @@ jobs:
           mc mb --ignore-existing local/starcite-test >/dev/null
         '
 
+    - name: Initialize S3 archive schema
+      run: mix starcite.archive.migrate_s3_schema
+
     # - name: Setup test database
     #   run: mix ecto.setup
     #   env:

@@ -37,7 +37,8 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
   end
 
   defp migrate(opts) when is_list(opts) do
-    Mix.Task.run("app.start")
+    Mix.Task.run("loadpaths")
+    Mix.Task.run("app.config")
 
     archive_adapter = Application.get_env(:starcite, :archive_adapter, S3)
 
