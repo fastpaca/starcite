@@ -31,14 +31,11 @@ defmodule StarciteWeb.Auth.JWKS do
 
   @doc false
   def clear_cache do
-    case :ets.whereis(@cache_table) do
-      :undefined ->
-        :ok
-
-      table ->
-        true = :ets.delete_all_objects(table)
-        :ok
-    end
+    _ = :ets.delete_all_objects(@cache_table)
+    :ok
+  rescue
+    ArgumentError ->
+      :ok
   end
 
   defp key_by_kid(keys_by_kid, kid) when is_map(keys_by_kid) and is_binary(kid) do
