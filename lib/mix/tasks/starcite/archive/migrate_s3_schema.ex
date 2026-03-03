@@ -39,6 +39,7 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
   defp migrate(opts) when is_list(opts) do
     Mix.Task.run("loadpaths")
     Mix.Task.run("app.config")
+    ensure_s3_client_apps_started!()
 
     archive_adapter = Application.get_env(:starcite, :archive_adapter, S3)
 
@@ -62,6 +63,18 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
       {:error, reason} ->
         Mix.raise("S3 schema migration failed: #{inspect(reason)}")
     end
+  end
+
+  defp ensure_s3_client_apps_started! do
+    Enum.each([:req, :ex_aws_s3], fn app ->
+      case Application.ensure_all_started(app) do
+        {:ok, _started_apps} ->
+          :ok
+
+        {:error, reason} ->
+          Mix.raise("failed to start #{app} for S3 schema migration: #{inspect(reason)}")
+      end
+    end)
   end
 
   defp print_stats(stats) when is_map(stats) do
