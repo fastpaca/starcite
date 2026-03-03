@@ -10,6 +10,7 @@ defmodule Starcite.DataPlane.SessionDiscovery do
   """
 
   alias Phoenix.PubSub
+  alias Starcite.Observability.Telemetry
 
   @topic "session_discovery"
 
@@ -34,6 +35,7 @@ defmodule Starcite.DataPlane.SessionDiscovery do
   def publish_created(session_id, tenant_id, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
              tenant_id != "" and is_list(opts) do
+    :ok = Telemetry.session_create(session_id, tenant_id)
     publish(:session_created, :active, session_id, tenant_id, occurred_at(opts))
   end
 

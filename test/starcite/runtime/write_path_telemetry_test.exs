@@ -36,6 +36,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
       :telemetry.attach_many(
         session_handler_id,
         [
+          [:starcite, :session, :create],
           [:starcite, :session, :eviction_tick],
           [:starcite, :session, :freeze, :success],
           [:starcite, :session, :freeze, :conflict],
@@ -209,6 +210,14 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                    1_000
   end
 
+  test "telemetry helper exposes session create dimensions" do
+    assert :ok = Telemetry.session_create("ses-create", "acme")
+
+    assert_receive {:session_event, [:starcite, :session, :create], %{count: 1},
+                    %{session_id: "ses-create", tenant_id: "acme"}},
+                   1_000
+  end
+
   test "telemetry helper exposes session freeze outcome dimensions" do
     assert :ok = Telemetry.session_freeze_success("ses-a", "acme")
     assert :ok = Telemetry.session_freeze_conflict("ses-a", "acme")
@@ -257,6 +266,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
       Application.put_env(:starcite, :telemetry_enabled, original)
     end)
 
+    assert :ok = Telemetry.session_create("ses-a", "acme")
     assert :ok = Telemetry.session_eviction_tick(0, 1, 0, 0, 1, 1)
     assert :ok = Telemetry.session_freeze_success("ses-a", "acme")
     assert :ok = Telemetry.session_hydrate_attempt("ses-a")

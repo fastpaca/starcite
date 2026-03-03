@@ -243,15 +243,16 @@ Hot-path impact note:
 
 Required events/counters:
 
-1. `session_eviction_tick_total`
-2. `session_freeze_candidate_total`
-3. `session_freeze_success_total`
-4. `session_freeze_conflict_total`
-5. `session_freeze_error_total`
-6. `session_hydrate_attempt_total`
-7. `session_hydrate_success_total`
-8. `session_hydrate_error_total`
-9. gauges:
+1. `session_create_total`
+2. `session_eviction_tick_total`
+3. `session_freeze_candidate_total`
+4. `session_freeze_success_total`
+5. `session_freeze_conflict_total`
+6. `session_freeze_error_total`
+7. `session_hydrate_attempt_total`
+8. `session_hydrate_success_total`
+9. `session_hydrate_error_total`
+10. gauges:
    `hot_sessions`
 
 ## Rollout plan

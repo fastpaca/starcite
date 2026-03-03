@@ -444,6 +444,21 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit a successful session create event.
+  """
+  @spec session_create(String.t(), String.t()) :: :ok
+  def session_create(session_id, tenant_id)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    execute_if_enabled(
+      [:starcite, :session, :create],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing one session eviction tick for a Raft group.
 
   Measurements:

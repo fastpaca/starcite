@@ -477,6 +477,7 @@ defmodule Starcite.ArchiveTest do
         :telemetry.attach_many(
           telemetry_handler_id,
           [
+            [:starcite, :session, :create],
             [:starcite, :session, :eviction_tick],
             [:starcite, :session, :freeze, :success],
             [:starcite, :session, :hydrate, :attempt],
@@ -514,6 +515,13 @@ defmodule Starcite.ArchiveTest do
 
           assert_receive {:session_discovery, %{kind: :session_created, session_id: ^session_id}},
                          1_000
+
+          assert_receive_session_lifecycle(
+            [:starcite, :session, :create],
+            fn _measurements, metadata ->
+              metadata.session_id == session_id and metadata.tenant_id == "service"
+            end
+          )
 
           {:ok, _} =
             append_event(session_id, %{

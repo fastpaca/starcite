@@ -163,6 +163,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_session_lifecycle_metrics,
       [
+        counter("starcite_session_create_total",
+          event_name: [:starcite, :session, :create],
+          measurement: :count,
+          description: "Total successfully created sessions",
+          tags: [:tenant_id]
+        ),
         counter("starcite_session_eviction_tick_total",
           event_name: [:starcite, :session, :eviction_tick],
           measurement: :count,
