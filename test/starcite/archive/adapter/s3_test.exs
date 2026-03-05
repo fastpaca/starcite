@@ -301,7 +301,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
     assert by_ids_tenant_scoped.sessions |> Enum.map(& &1.id) == ["ses-a"]
   end
 
-  test "upsert_session only applies newer runtime snapshots" do
+  test "upsert_session rejects tenant conflicts and persists runtime snapshots" do
     created_at = DateTime.utc_now() |> DateTime.truncate(:second)
 
     assert :ok =
@@ -317,7 +317,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
                last_progress_poll: 1
              })
 
-    assert :ok =
+    assert {:error, :archive_write_unavailable} =
              S3.upsert_session(%{
                id: "ses-runtime",
                title: "Stale",

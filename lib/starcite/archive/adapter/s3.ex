@@ -68,10 +68,12 @@ defmodule Starcite.Archive.Adapter.S3 do
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) do
+             is_map(metadata) and
+             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     config = config!()
     runtime_snapshot_explicit? = runtime_snapshot_explicit?(session)
-    runtime = normalize_runtime_snapshot(session)
+    runtime = normalize_runtime_snapshot(session, runtime_snapshot_explicit?)
+    created_at = normalize_created_at(created_at)
 
     session =
       %{
@@ -84,87 +86,24 @@ defmodule Starcite.Archive.Adapter.S3 do
       }
       |> Map.merge(runtime)
 
-    upsert_session_snapshot(config, tenant_id, id, session, 1, runtime_snapshot_explicit?)
-  end
-
-  defp upsert_session_snapshot(
-         config,
-         tenant_id,
-         session_id,
-         incoming,
-         attempt,
-         runtime_snapshot_explicit?
-       )
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
-              session_id != "" and is_map(incoming) and is_integer(attempt) and attempt > 0 and
-              is_boolean(runtime_snapshot_explicit?) do
-    with {:ok, resolved_tenant_id} <- fetch_session_tenant_index(config, session_id) do
-      lookup_tenant_id = resolved_tenant_id || tenant_id
-
-      with {:ok, existing, etag} <- fetch_session_snapshot(config, lookup_tenant_id, session_id) do
-        if runtime_newer?(incoming, existing) do
-          case tenant_ownership_status(resolved_tenant_id, tenant_id) do
-            :ok ->
-              with :ok <- put_session_tenant_index(config, session_id, tenant_id) do
-                case put_session(config, tenant_id, session_id, incoming, etag) do
-                  :ok ->
-                    :ok
-
-                  {:error, :precondition_failed} when attempt <= config.max_write_retries ->
-                    upsert_session_snapshot(
-                      config,
-                      tenant_id,
-                      session_id,
-                      incoming,
-                      attempt + 1,
-                      runtime_snapshot_explicit?
-                    )
-
-                  {:error, :precondition_failed} ->
-                    :ok
-
-                  {:error, :unavailable} ->
-                    {:error, :archive_write_unavailable}
-                end
-              end
-
-            :conflict ->
-              {:error, :archive_write_unavailable}
-          end
-        else
-          case tenant_ownership_status(resolved_tenant_id, tenant_id) do
-            :ok ->
-              :ok
-
-            :conflict when runtime_snapshot_explicit? ->
-              :ok
-
-            :conflict ->
-              {:error, :archive_write_unavailable}
-          end
-        end
-      else
-        {:error, :archive_read_unavailable} ->
-          {:error, :archive_write_unavailable}
+    with :ok <- put_session_tenant_index(config, id, tenant_id),
+         result <- put_session(config, tenant_id, id, session, runtime_snapshot_explicit?) do
+      case result do
+        :ok -> :ok
+        {:error, :precondition_failed} -> :ok
+        {:error, :unavailable} -> {:error, :archive_write_unavailable}
       end
-    else
-      {:error, :archive_read_unavailable} ->
-        {:error, :archive_write_unavailable}
     end
   end
 
-  defp tenant_ownership_status(nil, incoming_tenant_id)
-       when is_binary(incoming_tenant_id) and incoming_tenant_id != "",
-       do: :ok
+  defp normalize_created_at(%DateTime{} = value), do: DateTime.truncate(value, :second)
 
-  defp tenant_ownership_status(existing_tenant_id, existing_tenant_id)
-       when is_binary(existing_tenant_id) and existing_tenant_id != "",
-       do: :ok
-
-  defp tenant_ownership_status(existing_tenant_id, incoming_tenant_id)
-       when is_binary(existing_tenant_id) and existing_tenant_id != "" and
-              is_binary(incoming_tenant_id) and incoming_tenant_id != "",
-       do: :conflict
+  defp normalize_created_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
+      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
+    end
+  end
 
   defp runtime_snapshot_explicit?(session) when is_map(session) do
     Enum.any?(
@@ -182,65 +121,9 @@ defmodule Starcite.Archive.Adapter.S3 do
     )
   end
 
-  defp fetch_session_snapshot(config, tenant_id, session_id)
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
-              session_id != "" do
-    current_key = Layout.session_key(config, tenant_id, session_id)
-    legacy_key = Layout.legacy_session_key(config, session_id)
+  defp normalize_runtime_snapshot(_session, false), do: %{}
 
-    with {:ok, current} <- fetch_session_snapshot_key(config, current_key),
-         {:ok, legacy} <- fetch_session_snapshot_key(config, legacy_key) do
-      case current do
-        {session, etag} ->
-          {:ok, session, etag}
-
-        nil ->
-          case legacy do
-            {session, _etag} -> {:ok, session, nil}
-            nil -> {:ok, nil, nil}
-          end
-      end
-    end
-  end
-
-  defp fetch_session_snapshot_key(config, key) when is_binary(key) do
-    case client(config).get_object(config, key) do
-      {:ok, :not_found} ->
-        {:ok, nil}
-
-      {:ok, {body, etag}} ->
-        case Schema.decode_session(body) do
-          {:ok, session, _migration_required} -> {:ok, {session, etag}}
-          {:error, _reason} -> {:error, :archive_read_unavailable}
-        end
-
-      {:error, :unavailable} ->
-        {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp runtime_newer?(_incoming, nil), do: true
-
-  defp runtime_newer?(incoming, existing) when is_map(incoming) and is_map(existing) do
-    runtime_tuple(incoming) > runtime_tuple(existing)
-  end
-
-  defp runtime_tuple(session) when is_map(session) do
-    {
-      session_runtime_value(session, :last_seq),
-      session_runtime_value(session, :last_progress_poll),
-      session_runtime_value(session, :archived_seq)
-    }
-  end
-
-  defp session_runtime_value(session, key) when is_map(session) and is_atom(key) do
-    case Map.get(session, key, Map.get(session, Atom.to_string(key), 0)) do
-      value when is_integer(value) and value >= 0 -> value
-      _ -> 0
-    end
-  end
-
-  defp normalize_runtime_snapshot(session) when is_map(session) do
+  defp normalize_runtime_snapshot(session, true) when is_map(session) do
     last_seq = non_neg_integer_snapshot(session, :last_seq, 0)
     archived_seq = non_neg_integer_snapshot(session, :archived_seq, 0)
     last_progress_poll = non_neg_integer_snapshot(session, :last_progress_poll, 0)
@@ -265,7 +148,7 @@ defmodule Starcite.Archive.Adapter.S3 do
 
   defp non_neg_integer_snapshot(session, key, default)
        when is_map(session) and is_atom(key) and is_integer(default) and default >= 0 do
-    case Map.get(session, key, default) do
+    case snapshot_value(session, key, default) do
       value when is_integer(value) and value >= 0 -> value
       value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
     end
@@ -273,17 +156,24 @@ defmodule Starcite.Archive.Adapter.S3 do
 
   defp map_snapshot(session, key, default)
        when is_map(session) and is_atom(key) and is_map(default) do
-    case Map.get(session, key, default) do
+    case snapshot_value(session, key, default) do
       value when is_map(value) -> value
       value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
     end
   end
 
   defp snapshot_version(session) when is_map(session) do
-    case Map.get(session, :snapshot_version) do
+    case snapshot_value(session, :snapshot_version, nil) do
       nil -> nil
       value when is_binary(value) and value != "" -> value
       value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
+    end
+  end
+
+  defp snapshot_value(session, key, default) when is_map(session) and is_atom(key) do
+    case Map.fetch(session, key) do
+      {:ok, value} -> value
+      :error -> Map.get(session, Atom.to_string(key), default)
     end
   end
 
@@ -499,7 +389,7 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
-  defp put_session(config, tenant_id, session_id, session, nil) do
+  defp put_session(config, tenant_id, session_id, session, false) do
     key = Layout.session_key(config, tenant_id, session_id)
     body = Schema.encode_session(session)
 
@@ -509,15 +399,11 @@ defmodule Starcite.Archive.Adapter.S3 do
     )
   end
 
-  defp put_session(config, tenant_id, session_id, session, etag)
-       when is_binary(etag) and etag != "" do
+  defp put_session(config, tenant_id, session_id, session, true) do
     key = Layout.session_key(config, tenant_id, session_id)
     body = Schema.encode_session(session)
 
-    client(config).put_object(config, key, body,
-      content_type: "application/json",
-      if_match: etag
-    )
+    client(config).put_object(config, key, body, content_type: "application/json")
   end
 
   defp put_session_tenant_index(config, session_id, tenant_id)

@@ -77,14 +77,17 @@ defmodule Starcite.Archive.Adapter.Postgres do
           tenant_id: tenant_id,
           creator_principal: creator_principal,
           metadata: metadata,
-          created_at: %DateTime{} = created_at
+          created_at: created_at
         } = session
       )
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) do
-    runtime = normalize_runtime_snapshot(session)
+             is_map(metadata) and
+             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
+    created_at = normalize_created_at(created_at)
+    runtime_snapshot_explicit? = runtime_snapshot_explicit?(session)
+    runtime = normalize_runtime_snapshot(session, runtime_snapshot_explicit?)
 
     row =
       %{
@@ -105,13 +108,38 @@ defmodule Starcite.Archive.Adapter.Postgres do
         conflict_target: [:id]
       )
 
-    if inserted == 0 do
+    if inserted == 0 and runtime_snapshot_explicit? do
       :ok = maybe_update_existing_row(row)
     end
 
     :ok
   rescue
     _ -> {:error, :archive_write_unavailable}
+  end
+
+  defp normalize_created_at(%DateTime{} = value), do: DateTime.truncate(value, :second)
+
+  defp normalize_created_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
+      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
+    end
+  end
+
+  defp runtime_snapshot_explicit?(session) when is_map(session) do
+    Enum.any?(
+      [
+        :last_seq,
+        :archived_seq,
+        :retention,
+        :producer_cursors,
+        :last_progress_poll,
+        :snapshot_version
+      ],
+      fn key ->
+        Map.has_key?(session, key) or Map.has_key?(session, Atom.to_string(key))
+      end
+    )
   end
 
   defp maybe_update_existing_row(%{
@@ -163,7 +191,9 @@ defmodule Starcite.Archive.Adapter.Postgres do
     :ok
   end
 
-  defp normalize_runtime_snapshot(session) when is_map(session) do
+  defp normalize_runtime_snapshot(_session, false), do: %{}
+
+  defp normalize_runtime_snapshot(session, true) when is_map(session) do
     last_seq = non_neg_integer_snapshot(session, :last_seq, 0)
     archived_seq = non_neg_integer_snapshot(session, :archived_seq, 0)
     last_progress_poll = non_neg_integer_snapshot(session, :last_progress_poll, 0)
@@ -188,7 +218,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp non_neg_integer_snapshot(session, key, default)
        when is_map(session) and is_atom(key) and is_integer(default) and default >= 0 do
-    case Map.get(session, key, default) do
+    case snapshot_value(session, key, default) do
       value when is_integer(value) and value >= 0 -> value
       value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
     end
@@ -196,17 +226,24 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp map_snapshot(session, key, default)
        when is_map(session) and is_atom(key) and is_map(default) do
-    case Map.get(session, key, default) do
+    case snapshot_value(session, key, default) do
       value when is_map(value) -> value
       value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
     end
   end
 
   defp snapshot_version(session) when is_map(session) do
-    case Map.get(session, :snapshot_version) do
+    case snapshot_value(session, :snapshot_version, nil) do
       nil -> nil
       value when is_binary(value) and value != "" -> value
       value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
+    end
+  end
+
+  defp snapshot_value(session, key, default) when is_map(session) and is_atom(key) do
+    case Map.fetch(session, key) do
+      {:ok, value} -> value
+      :error -> Map.get(session, Atom.to_string(key), default)
     end
   end
 

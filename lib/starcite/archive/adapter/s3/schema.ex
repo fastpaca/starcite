@@ -272,47 +272,71 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_binary(tenant_id) and tenant_id != "" and is_map(creator_principal) and
               is_map(metadata) and is_binary(created_at) do
-    {:ok,
-     %{
-       id: id,
-       title: title,
-       tenant_id: tenant_id,
-       creator_principal: creator_principal,
-       metadata: metadata,
-       created_at: created_at,
-       last_seq: session_non_neg_integer(session_payload, "last_seq", 0),
-       archived_seq: session_non_neg_integer(session_payload, "archived_seq", 0),
-       retention: session_map(session_payload, "retention", %{}),
-       producer_cursors: session_map(session_payload, "producer_cursors", %{}),
-       last_progress_poll: session_non_neg_integer(session_payload, "last_progress_poll", 0),
-       snapshot_version: session_snapshot_version(session_payload)
-     }}
+    with {:ok, last_seq} <-
+           decode_optional_non_neg_integer(Map.get(session_payload, "last_seq"), 0),
+         {:ok, archived_seq} <-
+           decode_optional_non_neg_integer(Map.get(session_payload, "archived_seq"), 0),
+         {:ok, retention} <- decode_optional_map(Map.get(session_payload, "retention"), %{}),
+         {:ok, producer_cursors} <-
+           decode_optional_map(Map.get(session_payload, "producer_cursors"), %{}),
+         {:ok, last_progress_poll} <-
+           decode_optional_non_neg_integer(Map.get(session_payload, "last_progress_poll"), 0),
+         {:ok, snapshot_version} <-
+           decode_optional_snapshot_version(Map.get(session_payload, "snapshot_version")),
+         :ok <- validate_archive_cursors(last_seq, archived_seq) do
+      {:ok,
+       %{
+         id: id,
+         title: title,
+         tenant_id: tenant_id,
+         creator_principal: creator_principal,
+         metadata: metadata,
+         created_at: created_at,
+         last_seq: last_seq,
+         archived_seq: archived_seq,
+         retention: retention,
+         producer_cursors: producer_cursors,
+         last_progress_poll: last_progress_poll,
+         snapshot_version: snapshot_version
+       }}
+    else
+      :error -> {:error, :archive_read_unavailable}
+    end
   end
 
   defp decode_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
 
-  defp session_non_neg_integer(session_payload, key, default)
-       when is_map(session_payload) and is_binary(key) and is_integer(default) and default >= 0 do
-    case Map.get(session_payload, key, default) do
-      value when is_integer(value) and value >= 0 -> value
-      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
-    end
+  defp decode_optional_non_neg_integer(nil, default)
+       when is_integer(default) and default >= 0,
+       do: {:ok, default}
+
+  defp decode_optional_non_neg_integer(value, _default)
+       when is_integer(value) and value >= 0,
+       do: {:ok, value}
+
+  defp decode_optional_non_neg_integer(_value, _default), do: :error
+
+  defp decode_optional_map(nil, default) when is_map(default), do: {:ok, default}
+  defp decode_optional_map(value, _default) when is_map(value), do: {:ok, value}
+  defp decode_optional_map(_value, _default), do: :error
+
+  defp decode_optional_snapshot_version(nil), do: {:ok, nil}
+
+  defp decode_optional_snapshot_version(value)
+       when is_binary(value) and value != "",
+       do: {:ok, value}
+
+  defp decode_optional_snapshot_version(_value), do: :error
+
+  defp validate_archive_cursors(last_seq, archived_seq)
+       when is_integer(last_seq) and is_integer(archived_seq) and last_seq >= 0 and
+              archived_seq >= 0 and
+              archived_seq <= last_seq do
+    :ok
   end
 
-  defp session_map(session_payload, key, default)
-       when is_map(session_payload) and is_binary(key) and is_map(default) do
-    case Map.get(session_payload, key, default) do
-      value when is_map(value) -> value
-      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
-    end
-  end
-
-  defp session_snapshot_version(session_payload) when is_map(session_payload) do
-    case Map.get(session_payload, "snapshot_version") do
-      nil -> nil
-      value when is_binary(value) and value != "" -> value
-      value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
-    end
+  defp validate_archive_cursors(_last_seq, _archived_seq) do
+    :error
   end
 
   defp migrate_session_tenant_index(%{
