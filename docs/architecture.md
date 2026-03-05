@@ -60,16 +60,6 @@ The leader assigns the next monotonic `seq`, replicates to followers, and after 
 commit produces a PubSub broadcast — this is how tail subscribers learn about new
 events in real time.
 
-Session lifecycle discovery uses a separate service-level PubSub stream. Raft
-command side-effects on create/freeze/hydrate emit `session_created`,
-`session_frozen`, and `session_hydrated` updates for
-`/v1/sessions/stream` subscribers.
-
-If a session was previously frozen out of Raft hot state, append returns
-`session_not_found` on first attempt. Write path then performs one hydrate retry:
-load the archived session snapshot, issue a Raft `hydrate_session` command, and retry
-the original append exactly once.
-
 Session metadata and read caches are warmed after a successful append, but neither is
 on the critical path.
 
@@ -154,16 +144,6 @@ duplicate writes across replicas).
 After a successful flush, sends `ack_archived` back through Raft so the event store
 can evict those events from memory. Archive writes are idempotent — safe across
 retries and overlapping flushes.
-
-When session freeze is enabled, archiver also drives inactivity-based eviction:
-
-1. issue Raft `eviction_tick` to advance poll epoch and select deterministic freeze
-   candidates
-2. persist runtime session snapshot to archive
-3. issue guarded `freeze_session` command to evict from `RaftFSM.state.sessions`
-
-Active sessions are protected by Raft guards (sequence/progress checks), so resumed
-writes race safely with freeze attempts.
 
 The archiver never touches the critical path. If it falls behind or fails, appends
 and tail continue unaffected.

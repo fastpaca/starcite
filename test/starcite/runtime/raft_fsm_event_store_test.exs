@@ -48,294 +48,55 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert migrated_state.sessions["ses-legacy"].last_progress_poll == 0
   end
 
-  test "create, append, and ack update last_progress_poll only on progress" do
+  test "ack_archived evicts drained sessions and hydrate resets producer cursors" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
-    assert {:ok, created_session} = RaftFSM.query_session(state, session_id)
-    assert created_session.last_progress_poll == 0
-
-    {state, {:reply, {:ok, %{poll_epoch: 1, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
-    {state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
       RaftFSM.apply(
         nil,
         {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
-    assert {:ok, after_append} = RaftFSM.query_session(state, session_id)
-    assert after_append.last_progress_poll == 1
-
-    {state, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
-        state
-      )
-
-    assert {:ok, after_dedupe} = RaftFSM.query_session(state, session_id)
-    assert after_dedupe.last_progress_poll == 1
-
-    {state, {:reply, {:ok, %{poll_epoch: 2, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
     {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}} =
       RaftFSM.apply(nil, {:ack_archived, session_id, 1}, state)
-
-    assert {:ok, after_ack} = RaftFSM.query_session(state, session_id)
-    assert after_ack.last_progress_poll == 2
-
-    {state, {:reply, {:ok, %{poll_epoch: 3, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
-    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 0}}}} =
-      RaftFSM.apply(nil, {:ack_archived, session_id, 1}, state)
-
-    assert {:ok, after_noop_ack} = RaftFSM.query_session(state, session_id)
-    assert after_noop_ack.last_progress_poll == 2
-  end
-
-  test "eviction_tick selects drained idle sessions in deterministic order" do
-    session_a = unique_session_id()
-    session_b = unique_session_id()
-    session_c = unique_session_id()
-
-    state = seeded_state(session_a)
-
-    {state, {:reply, {:ok, _session}}, create_effects_b} =
-      RaftFSM.apply(
-        nil,
-        {:create_session, session_b, nil,
-         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme", %{}},
-        state
-      )
-
-    assert [{:mod_call, Starcite.DataPlane.SessionDiscovery, :publish_created, _args}] =
-             create_effects_b
-
-    {state, {:reply, {:ok, _session}}, create_effects_c} =
-      RaftFSM.apply(
-        nil,
-        {:create_session, session_c, nil,
-         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme", %{}},
-        state
-      )
-
-    assert [{:mod_call, Starcite.DataPlane.SessionDiscovery, :publish_created, _args}] =
-             create_effects_c
-
-    {state, {:reply, {:ok, %{poll_epoch: 1, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
-    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_c, event_payload("c-1", producer_seq: 1), nil},
-        state
-      )
-
-    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}} =
-      RaftFSM.apply(nil, {:ack_archived, session_c, 1}, state)
-
-    {state, {:reply, {:ok, %{poll_epoch: 2, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
-    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
-      RaftFSM.apply(
-        nil,
-        {:append_event, session_b, event_payload("b-1", producer_seq: 1), nil},
-        state
-      )
-
-    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}} =
-      RaftFSM.apply(nil, {:ack_archived, session_b, 1}, state)
-
-    {_, {:reply, {:ok, %{poll_epoch: 3, candidates: candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 1, max_freeze_batch_size: 10}}, state)
-
-    assert candidates == [
-             {session_a, 0, 0, 0},
-             {session_c, 1, 1, 1},
-             {session_b, 1, 1, 2}
-           ]
-  end
-
-  test "freeze_session is guarded and removes session on matching snapshot" do
-    session_id = unique_session_id()
-    state = seeded_state(session_id)
-
-    {state, {:reply, {:ok, %{poll_epoch: 1, candidates: _candidates}}}} =
-      RaftFSM.apply(nil, {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10}}, state)
-
-    {state, {:reply, {:error, :freeze_conflict}}} =
-      RaftFSM.apply(nil, {:freeze_session, session_id, 1, 0, 0}, state)
-
-    assert {:ok, _session} = RaftFSM.query_session(state, session_id)
-
-    {state, {:reply, {:ok, %{id: frozen_id}}}, freeze_effects} =
-      RaftFSM.apply(nil, {:freeze_session, session_id, 0, 0, 0}, state)
-
-    assert frozen_id == session_id
-
-    assert [
-             {:mod_call, Starcite.DataPlane.SessionDiscovery, :publish_frozen,
-              [^session_id, "acme", []]}
-           ] = freeze_effects
 
     assert {:error, :session_not_found} = RaftFSM.query_session(state, session_id)
 
-    {_, {:reply, {:error, :session_not_found}}} =
-      RaftFSM.apply(nil, {:freeze_session, session_id, 0, 0, 0}, state)
-  end
-
-  test "hydrate_session loads runtime snapshot and is idempotent when already hot" do
-    session_id = unique_session_id()
-    state = RaftFSM.init(%{group_id: 0})
-    inserted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-    encoded_hash = Base.url_encode64(<<1, 2, 3, 4>>, padding: false)
-
-    snapshot = %{
-      "id" => session_id,
-      "title" => "Hydrated",
-      "tenant_id" => "acme",
-      "creator_principal" => %{"tenant_id" => "acme", "id" => "user-1", "type" => "user"},
-      "metadata" => %{"source" => "snapshot"},
-      "created_at" => inserted_at,
-      "last_seq" => 3,
-      "archived_seq" => 2,
-      "last_progress_poll" => 5,
-      "retention" => %{"tail_keep" => 101, "producer_max_entries" => 202},
-      "producer_cursors" => %{
-        "writer:test" => %{"producer_seq" => 3, "session_seq" => 3, "hash" => encoded_hash}
+    producer_cursors = %{
+      "writer:test" => %{
+        producer_seq: 1,
+        session_seq: 1,
+        hash: <<1, 2, 3, 4>>
       }
     }
 
-    {state, {:reply, {:ok, :hydrated}}, hydrate_effects} =
-      RaftFSM.apply(nil, {:hydrate_session, snapshot}, state)
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 
-    assert [
-             {:mod_call, Starcite.DataPlane.SessionDiscovery, :publish_hydrated,
-              [^session_id, "acme", []]}
-           ] = hydrate_effects
+    {state, {:reply, {:ok, :hydrated}}} =
+      RaftFSM.apply(
+        nil,
+        {:hydrate_session, session_id, "Hydrated",
+         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme",
+         %{"source" => "archive"}, inserted_at, 1, 1, 1000, 10_000, producer_cursors, 0},
+        state
+      )
 
     assert {:ok, hydrated} = RaftFSM.query_session(state, session_id)
-    assert hydrated.title == "Hydrated"
-    assert hydrated.last_seq == 3
-    assert hydrated.archived_seq == 2
-    assert hydrated.last_progress_poll == 5
+    assert hydrated.last_seq == 1
+    assert hydrated.archived_seq == 1
     assert hydrated.last_hydrated_poll == 0
-    assert hydrated.retention.tail_keep == 101
-    assert hydrated.retention.producer_max_entries == 202
-    assert hydrated.producer_cursors["writer:test"].hash == <<1, 2, 3, 4>>
+    assert hydrated.last_progress_poll == 0
+    assert hydrated.producer_cursors == %{}
 
-    {_, {:reply, {:ok, :already_hot}}} = RaftFSM.apply(nil, {:hydrate_session, snapshot}, state)
-  end
-
-  test "eviction_tick defers freezing hydrated sessions until grace polls elapse" do
-    session_id = unique_session_id()
-    inserted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-
-    snapshot = %{
-      "id" => session_id,
-      "tenant_id" => "acme",
-      "created_at" => inserted_at,
-      "last_seq" => 1,
-      "archived_seq" => 1,
-      "last_progress_poll" => 0
-    }
-
-    state = RaftFSM.init(%{group_id: 0})
-
-    {state, {:reply, {:ok, :hydrated}}, _effects} =
-      RaftFSM.apply(nil, {:hydrate_session, snapshot}, state)
-
-    assert {:ok, hydrated} = RaftFSM.query_session(state, session_id)
-    assert hydrated.last_hydrated_poll == 0
-
-    {state, {:reply, {:ok, %{poll_epoch: 1, candidates: []}}}} =
+    {_, {:reply, {:ok, :already_hot}}} =
       RaftFSM.apply(
         nil,
-        {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10, hydrate_grace_polls: 2}},
+        {:hydrate_session, session_id, nil, nil, "acme", %{}, inserted_at, 1, 1, 1000, 10_000,
+         %{}, 0},
         state
       )
-
-    {_, {:reply, {:ok, %{poll_epoch: 2, candidates: candidates}}}} =
-      RaftFSM.apply(
-        nil,
-        {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10, hydrate_grace_polls: 2}},
-        state
-      )
-
-    assert candidates == [{session_id, 1, 1, 0}]
-  end
-
-  test "eviction_tick keeps immediate freeze semantics when hydrate grace is zero" do
-    session_id = unique_session_id()
-    inserted_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-
-    snapshot = %{
-      "id" => session_id,
-      "tenant_id" => "acme",
-      "created_at" => inserted_at,
-      "last_seq" => 1,
-      "archived_seq" => 1,
-      "last_progress_poll" => 0
-    }
-
-    state = RaftFSM.init(%{group_id: 0})
-
-    {state, {:reply, {:ok, :hydrated}}, _effects} =
-      RaftFSM.apply(nil, {:hydrate_session, snapshot}, state)
-
-    {_, {:reply, {:ok, %{poll_epoch: 1, candidates: candidates}}}} =
-      RaftFSM.apply(
-        nil,
-        {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10, hydrate_grace_polls: 0}},
-        state
-      )
-
-    assert candidates == [{session_id, 1, 1, 0}]
-  end
-
-  test "eviction_tick does not block never-hydrated sessions with hydrate grace" do
-    session_id = unique_session_id()
-    state = seeded_state(session_id)
-
-    {_, {:reply, {:ok, %{poll_epoch: 1, candidates: candidates}}}} =
-      RaftFSM.apply(
-        nil,
-        {:eviction_tick, %{min_idle_polls: 0, max_freeze_batch_size: 10, hydrate_grace_polls: 4}},
-        state
-      )
-
-    assert candidates == [{session_id, 0, 0, 0}]
-  end
-
-  test "eviction_tick rejects negative hydrate grace polls" do
-    session_id = unique_session_id()
-    state = seeded_state(session_id)
-
-    {next_state, {:reply, {:error, :invalid_eviction_opts}}} =
-      RaftFSM.apply(
-        nil,
-        {:eviction_tick,
-         %{min_idle_polls: 0, max_freeze_batch_size: 10, hydrate_grace_polls: -1}},
-        state
-      )
-
-    assert next_state == state
-  end
-
-  test "hydrate_session rejects invalid snapshots" do
-    state = RaftFSM.init(%{group_id: 0})
-    bad_snapshot = %{"id" => "ses-invalid", "tenant_id" => "acme"}
-
-    {next_state, {:reply, {:error, :invalid_snapshot}}} =
-      RaftFSM.apply(nil, {:hydrate_session, bad_snapshot}, state)
-
-    assert next_state == state
   end
 
   test "append_event mirrors appended events to ETS" do
@@ -556,7 +317,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert [{:release_cursor, 42, %RaftFSM{}}] = effects
   end
 
-  test "ack_archived does not emit release_cursor when archive cursor does not advance" do
+  test "ack_archived evicts drained session after cursor advances" do
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
@@ -570,7 +331,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
       RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
 
-    {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 0}}}} =
+    {_, {:reply, {:error, :session_not_found}}} =
       RaftFSM.apply(%{index: 43}, {:ack_archived, session_id, 1}, state)
   end
 
@@ -630,16 +391,13 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   defp seeded_state(session_id) do
     state = RaftFSM.init(%{group_id: 0})
 
-    {seeded, {:reply, {:ok, _session}}, create_effects} =
+    {seeded, {:reply, {:ok, _session}}} =
       RaftFSM.apply(
         nil,
         {:create_session, session_id, nil,
          %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme", %{}},
         state
       )
-
-    assert [{:mod_call, Starcite.DataPlane.SessionDiscovery, :publish_created, _args}] =
-             create_effects
 
     seeded
   end

@@ -16,6 +16,7 @@ defmodule Starcite.WritePath do
   alias Starcite.Auth.Principal
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
+  alias Starcite.Session.RuntimeSnapshot
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -123,11 +124,10 @@ defmodule Starcite.WritePath do
       end
 
     case result do
-      {:ok, session} = ok ->
-        # Keep archive session catalog in sync for list/get lookups backed by cold storage.
-        _ = maybe_index_session(session, creator_principal, tenant_id)
+      {:ok, _session} = ok ->
         # Warm local session cache so immediate same-node reads stay on the RAM path.
         _ = maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
+        :ok = Telemetry.session_create(id, tenant_id)
         ok
 
       other ->
@@ -256,36 +256,6 @@ defmodule Starcite.WritePath do
     end
   end
 
-  defp maybe_index_session(
-         %{
-           id: id,
-           title: title,
-           metadata: metadata,
-           created_at: created_at
-         },
-         creator_principal,
-         tenant_id
-       )
-       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
-              is_map(metadata) do
-    row = %{
-      id: id,
-      title: title,
-      creator_principal: creator_principal,
-      tenant_id: tenant_id,
-      metadata: metadata,
-      created_at: parse_utc_datetime!(created_at)
-    }
-
-    case Store.upsert_session(row) do
-      :ok -> :ok
-      {:error, _reason} -> :ok
-    end
-  end
-
-  defp maybe_index_session(_session, _creator_principal, _tenant_id), do: :ok
-
   defp maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
@@ -346,44 +316,149 @@ defmodule Starcite.WritePath do
        when is_atom(server_id) and is_binary(session_id) and session_id != "" do
     case process_command_with_leader_retry(server_id, command) do
       {:error, :session_not_found} ->
-        :ok = Telemetry.session_hydrate_attempt(session_id)
-
-        with {:ok, snapshot} <- load_session_snapshot(session_id),
-             {:ok, hydrate_result} <-
-               process_command_with_leader_retry(server_id, {:hydrate_session, snapshot}),
-             true <- hydrate_result in [:hydrated, :already_hot],
-             {:ok, _reply} = append_reply <- process_command_with_leader_retry(server_id, command) do
-          :ok = Telemetry.session_hydrate_success(session_id, hydrate_result)
-          append_reply
-        else
-          {:error, :invalid_snapshot} ->
-            :ok = Telemetry.session_hydrate_error(session_id, :invalid_snapshot)
-            {:error, :archive_read_unavailable}
-
-          {:error, reason} ->
-            :ok = Telemetry.session_hydrate_error(session_id, normalize_hydrate_reason(reason))
-            {:error, reason}
-
-          false ->
-            :ok = Telemetry.session_hydrate_error(session_id, :unexpected_hydrate_result)
-            {:error, :archive_read_unavailable}
-        end
+        hydrate_and_retry_append(server_id, session_id, command)
 
       result ->
         result
     end
   end
 
+  defp hydrate_and_retry_append(server_id, session_id, command)
+       when is_atom(server_id) and is_binary(session_id) and session_id != "" do
+    case load_session_snapshot(session_id) do
+      {:ok, snapshot} ->
+        tenant_id = snapshot.tenant_id
+
+        with {:ok, hydrate_result} <-
+               process_command_with_leader_retry(server_id, hydrate_command(snapshot)),
+             true <- hydrate_result in [:hydrated, :already_hot],
+             {:ok, _reply} = append_reply <- process_command_with_leader_retry(server_id, command) do
+          :ok = Telemetry.session_hydrate(session_id, tenant_id, :ok, hydrate_result)
+          append_reply
+        else
+          false ->
+            :ok =
+              Telemetry.session_hydrate(
+                session_id,
+                tenant_id,
+                :error,
+                :unexpected_hydrate_result
+              )
+
+            {:error, :archive_read_unavailable}
+
+          {:error, reason} ->
+            normalized = normalize_hydrate_reason(reason)
+            :ok = Telemetry.session_hydrate(session_id, tenant_id, :error, normalized)
+
+            case normalized do
+              :snapshot_missing -> {:error, :archive_read_unavailable}
+              :invalid_snapshot -> {:error, :archive_read_unavailable}
+              :unsupported_snapshot_version -> {:error, :archive_read_unavailable}
+              _ -> {:error, reason}
+            end
+        end
+
+      {:error, reason} ->
+        normalized = normalize_hydrate_reason(reason)
+        :ok = Telemetry.session_hydrate(session_id, "unknown", :error, normalized)
+
+        case normalized do
+          :snapshot_missing -> {:error, :archive_read_unavailable}
+          :invalid_snapshot -> {:error, :archive_read_unavailable}
+          :unsupported_snapshot_version -> {:error, :archive_read_unavailable}
+          _ -> {:error, reason}
+        end
+    end
+  end
+
   defp load_session_snapshot(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, %{sessions: sessions}} when is_list(sessions) <-
            Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
-         {:ok, snapshot} <- select_session_snapshot(sessions) do
+         {:ok, row} <- select_snapshot_row(sessions),
+         {:ok, snapshot} <- decode_snapshot_row(row) do
       {:ok, snapshot}
     end
   end
 
-  defp select_session_snapshot([snapshot | _rest]) when is_map(snapshot), do: {:ok, snapshot}
-  defp select_session_snapshot([]), do: {:error, :session_not_found}
+  defp select_snapshot_row([%{id: session_id} = row | _rest])
+       when is_binary(session_id) and session_id != "" do
+    {:ok, row}
+  end
+
+  defp select_snapshot_row([]), do: {:error, :session_not_found}
+  defp select_snapshot_row(_rows), do: {:error, :invalid_snapshot}
+
+  defp decode_snapshot_row(%{
+         id: session_id,
+         title: title,
+         tenant_id: tenant_id,
+         creator_principal: creator_principal,
+         metadata: metadata,
+         created_at: created_at
+       })
+       when is_binary(session_id) and session_id != "" and (is_binary(title) or is_nil(title)) and
+              is_binary(tenant_id) and tenant_id != "" and
+              (is_map(creator_principal) or is_struct(creator_principal, Principal)) and
+              is_map(metadata) do
+    with {:ok, inserted_at} <- parse_inserted_at(created_at),
+         {:ok, runtime} <- RuntimeSnapshot.decode_from_metadata(metadata) do
+      {:ok,
+       %{
+         session_id: session_id,
+         title: title,
+         creator_principal: creator_principal,
+         tenant_id: tenant_id,
+         metadata: RuntimeSnapshot.drop_from_metadata(metadata),
+         inserted_at: inserted_at,
+         last_seq: runtime.archived_seq,
+         archived_seq: runtime.archived_seq,
+         tail_keep: runtime.tail_keep,
+         producer_max_entries: runtime.producer_max_entries,
+         producer_cursors: %{},
+         last_progress_poll: 0
+       }}
+    end
+  end
+
+  defp decode_snapshot_row(_row), do: {:error, :invalid_snapshot}
+
+  defp parse_inserted_at(%DateTime{} = datetime), do: {:ok, DateTime.to_naive(datetime)}
+  defp parse_inserted_at(%NaiveDateTime{} = datetime), do: {:ok, datetime}
+
+  defp parse_inserted_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} ->
+        {:ok, DateTime.to_naive(datetime)}
+
+      _ ->
+        case NaiveDateTime.from_iso8601(value) do
+          {:ok, datetime} -> {:ok, datetime}
+          _ -> {:error, :invalid_snapshot}
+        end
+    end
+  end
+
+  defp parse_inserted_at(_value), do: {:error, :invalid_snapshot}
+
+  defp hydrate_command(%{
+         session_id: session_id,
+         title: title,
+         creator_principal: creator_principal,
+         tenant_id: tenant_id,
+         metadata: metadata,
+         inserted_at: inserted_at,
+         last_seq: last_seq,
+         archived_seq: archived_seq,
+         tail_keep: tail_keep,
+         producer_max_entries: producer_max_entries,
+         producer_cursors: producer_cursors,
+         last_progress_poll: last_progress_poll
+       }) do
+    {:hydrate_session, session_id, title, creator_principal, tenant_id, metadata, inserted_at,
+     last_seq, archived_seq, tail_keep, producer_max_entries, producer_cursors,
+     last_progress_poll}
+  end
 
   defp normalize_hydrate_reason(reason) when is_atom(reason), do: reason
   defp normalize_hydrate_reason(_reason), do: :unknown
@@ -422,15 +497,6 @@ defmodule Starcite.WritePath do
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)
-  end
-
-  defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
-
-  defp parse_utc_datetime!(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> datetime
-      {:error, reason} -> raise ArgumentError, "invalid datetime: #{inspect(reason)}"
-    end
   end
 
   defp generate_session_id do

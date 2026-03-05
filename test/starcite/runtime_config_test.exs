@@ -8,18 +8,12 @@ defmodule Starcite.RuntimeConfigTest do
   setup do
     original_raft_data_dir = System.get_env(@raft_data_dir_env)
     original_enable_telemetry = System.get_env(@enable_telemetry_env)
-
-    original_session_freeze_hydrate_grace_polls =
-      System.get_env(@session_freeze_hydrate_grace_polls_env)
+    original_hydrate_grace = System.get_env(@session_freeze_hydrate_grace_polls_env)
 
     on_exit(fn ->
       restore_env(@raft_data_dir_env, original_raft_data_dir)
       restore_env(@enable_telemetry_env, original_enable_telemetry)
-
-      restore_env(
-        @session_freeze_hydrate_grace_polls_env,
-        original_session_freeze_hydrate_grace_polls
-      )
+      restore_env(@session_freeze_hydrate_grace_polls_env, original_hydrate_grace)
     end)
 
     :ok
@@ -62,23 +56,6 @@ defmodule Starcite.RuntimeConfigTest do
     assert Keyword.fetch!(prom_ex_config, :enabled) == true
   end
 
-  test "session freeze hydrate grace polls env overrides runtime config" do
-    System.put_env(@session_freeze_hydrate_grace_polls_env, "4")
-
-    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    starcite_config = Keyword.fetch!(config, :starcite)
-
-    assert Keyword.fetch!(starcite_config, :session_freeze_hydrate_grace_polls) == 4
-  end
-
-  test "session freeze hydrate grace polls env rejects negative values" do
-    System.put_env(@session_freeze_hydrate_grace_polls_env, "-1")
-
-    assert_raise ArgumentError, fn ->
-      Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    end
-  end
-
   test "telemetry flag disables PromEx and telemetry emission" do
     System.put_env(@enable_telemetry_env, "false")
 
@@ -89,6 +66,23 @@ defmodule Starcite.RuntimeConfigTest do
 
     prom_ex_config = Keyword.fetch!(starcite_config, Starcite.Observability.PromEx)
     assert Keyword.fetch!(prom_ex_config, :enabled) == false
+  end
+
+  test "session freeze hydrate grace polls env overrides runtime config" do
+    System.put_env(@session_freeze_hydrate_grace_polls_env, "5")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    assert Keyword.fetch!(starcite_config, :session_freeze_hydrate_grace_polls) == 5
+  end
+
+  test "session freeze hydrate grace polls env rejects negative values" do
+    System.put_env(@session_freeze_hydrate_grace_polls_env, "-1")
+
+    assert_raise ArgumentError, fn ->
+      Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    end
   end
 
   defp restore_env(env_name, nil), do: System.delete_env(env_name)

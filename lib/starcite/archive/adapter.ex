@@ -26,16 +26,10 @@ defmodule Starcite.Archive.Adapter do
   @type session_row :: %{
           required(:id) => String.t(),
           required(:tenant_id) => String.t(),
-          optional(:title) => String.t() | nil,
+          required(:title) => String.t() | nil,
           required(:creator_principal) => Principal.t() | map(),
-          optional(:metadata) => map(),
-          required(:created_at) => DateTime.t() | String.t(),
-          optional(:last_seq) => non_neg_integer(),
-          optional(:archived_seq) => non_neg_integer(),
-          optional(:retention) => map(),
-          optional(:producer_cursors) => map(),
-          optional(:last_progress_poll) => non_neg_integer(),
-          optional(:snapshot_version) => String.t() | nil
+          required(:metadata) => map(),
+          required(:created_at) => DateTime.t() | String.t()
         }
 
   @type session_query :: %{
@@ -56,6 +50,8 @@ defmodule Starcite.Archive.Adapter do
   @callback read_events(String.t(), pos_integer(), pos_integer()) ::
               {:ok, [map()]} | {:error, term()}
   @callback upsert_session(session_row()) :: :ok | {:error, term()}
+  @callback update_session_archived_seq(String.t(), String.t(), non_neg_integer()) ::
+              :ok | {:error, term()}
   @callback list_sessions(session_query()) :: {:ok, session_page()} | {:error, term()}
   @callback list_sessions_by_ids([String.t()], session_query()) ::
               {:ok, session_page()} | {:error, term()}

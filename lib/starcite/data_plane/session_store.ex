@@ -226,150 +226,21 @@ defmodule Starcite.DataPlane.SessionStore do
            tenant_id: tenant_id,
            creator_principal: creator_principal,
            metadata: metadata
-         } = row
+         }
        )
        when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
               is_map(metadata) and
-              (is_map(creator_principal) or is_struct(creator_principal) or
-                 is_nil(creator_principal)) do
-    with {:ok, inserted_at} <- archive_created_at(row),
-         {:ok, last_seq} <- archive_non_neg_integer(row, :last_seq, 0),
-         {:ok, archived_seq} <- archive_non_neg_integer(row, :archived_seq, 0),
-         {:ok, last_progress_poll} <- archive_non_neg_integer(row, :last_progress_poll, 0),
-         :ok <- validate_archive_cursors(last_seq, archived_seq),
-         {:ok, retention} <- archive_retention(row),
-         {:ok, producer_cursors} <- archive_producer_cursors(row) do
-      session =
-        Session.new(session_id,
-          title: title,
-          tenant_id: tenant_id,
-          creator_principal: creator_principal,
-          metadata: metadata,
-          timestamp: inserted_at,
-          tail_keep: retention.tail_keep,
-          producer_max_entries: retention.producer_max_entries,
-          last_progress_poll: last_progress_poll
-        )
-
-      {:ok,
-       %Session{
-         session
-         | last_seq: last_seq,
-           archived_seq: archived_seq,
-           producer_cursors: producer_cursors
-       }}
-    end
+              (is_map(creator_principal) or is_nil(creator_principal)) do
+    {:ok,
+     Session.new(session_id,
+       title: title,
+       tenant_id: tenant_id,
+       creator_principal: creator_principal,
+       metadata: metadata
+     )}
   end
 
   defp session_from_archive_row(_session_id, _row), do: {:error, :archive_read_unavailable}
-
-  defp archive_created_at(row) when is_map(row) do
-    case Map.get(row, :created_at) || Map.get(row, "created_at") do
-      %DateTime{} = datetime -> {:ok, DateTime.to_naive(datetime)}
-      %NaiveDateTime{} = datetime -> {:ok, datetime}
-      value when is_binary(value) -> parse_archive_naive_datetime(value)
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp parse_archive_naive_datetime(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> {:ok, DateTime.to_naive(datetime)}
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp archive_non_neg_integer(row, key, default)
-       when is_map(row) and is_atom(key) and is_integer(default) and default >= 0 do
-    case Map.get(row, key, Map.get(row, Atom.to_string(key), default)) do
-      value when is_integer(value) and value >= 0 -> {:ok, value}
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp validate_archive_cursors(last_seq, archived_seq)
-       when is_integer(last_seq) and is_integer(archived_seq) and last_seq >= 0 and
-              archived_seq >= 0 and
-              archived_seq <= last_seq,
-       do: :ok
-
-  defp validate_archive_cursors(_last_seq, _archived_seq), do: {:error, :archive_read_unavailable}
-
-  defp archive_retention(row) when is_map(row) do
-    retention = Map.get(row, :retention, Map.get(row, "retention", %{}))
-
-    if is_map(retention) do
-      with {:ok, tail_keep} <- archive_retention_value(retention, :tail_keep, 1_000),
-           {:ok, producer_max_entries} <-
-             archive_retention_value(retention, :producer_max_entries, 10_000) do
-        {:ok, %{tail_keep: tail_keep, producer_max_entries: producer_max_entries}}
-      end
-    else
-      {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp archive_retention_value(retention, key, default)
-       when is_map(retention) and is_atom(key) and is_integer(default) and default > 0 do
-    case Map.get(retention, key, Map.get(retention, Atom.to_string(key), default)) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp archive_producer_cursors(row) when is_map(row) do
-    case Map.get(row, :producer_cursors, Map.get(row, "producer_cursors", %{})) do
-      value when is_map(value) -> decode_archive_producer_cursors(value)
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp decode_archive_producer_cursors(cursors) when map_size(cursors) == 0, do: {:ok, %{}}
-
-  defp decode_archive_producer_cursors(cursors) when is_map(cursors) do
-    Enum.reduce_while(cursors, {:ok, %{}}, fn
-      {producer_id, cursor}, {:ok, acc}
-      when is_binary(producer_id) and producer_id != "" and is_map(cursor) ->
-        with {:ok, producer_seq} <- archive_cursor_integer(cursor, :producer_seq),
-             {:ok, session_seq} <- archive_cursor_integer(cursor, :session_seq),
-             {:ok, hash} <- archive_cursor_hash(cursor) do
-          {:cont,
-           {:ok,
-            Map.put(acc, producer_id, %{
-              producer_seq: producer_seq,
-              session_seq: session_seq,
-              hash: hash
-            })}}
-        end
-
-      _, _acc ->
-        {:halt, {:error, :archive_read_unavailable}}
-    end)
-  end
-
-  defp archive_cursor_integer(cursor, key) when is_map(cursor) and is_atom(key) do
-    case Map.get(cursor, key, Map.get(cursor, Atom.to_string(key))) do
-      value when is_integer(value) and value > 0 -> {:ok, value}
-      _ -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp archive_cursor_hash(cursor) when is_map(cursor) do
-    case Map.get(cursor, :hash, Map.get(cursor, "hash")) do
-      value when is_binary(value) and value != "" ->
-        {:ok, decode_archive_hash(value)}
-
-      _ ->
-        {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp decode_archive_hash(value) when is_binary(value) do
-    case Base.url_decode64(value, padding: false) do
-      {:ok, decoded} when decoded != "" -> decoded
-      _ -> value
-    end
-  end
 
   defp session_entries do
     case Cachex.keys(@cache) do

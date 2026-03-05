@@ -22,6 +22,9 @@ defmodule Starcite.ArchiveTest do
     def upsert_session(_session), do: :ok
 
     @impl true
+    def update_session_archived_seq(_session_id, _tenant_id, _archived_seq), do: :ok
+
+    @impl true
     def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
 
     @impl true
@@ -29,11 +32,11 @@ defmodule Starcite.ArchiveTest do
   end
 
   alias Starcite.WritePath
-  alias Phoenix.PubSub
+  alias Starcite.Archive.Store
   alias Starcite.DataPlane.EventStore
   alias Starcite.DataPlane.RaftAccess
-  alias Starcite.DataPlane.SessionDiscovery
   alias Starcite.Archive.IdempotentTestAdapter
+  alias Starcite.Session.RuntimeSnapshot
 
   setup do
     # Ensure clean raft data for isolation
@@ -66,8 +69,7 @@ defmodule Starcite.ArchiveTest do
     eventually(
       fn ->
         {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-        {:ok, session} = RaftAccess.query_session(server_id, session_id)
-        assert session.archived_seq == session.last_seq
+        assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
         assert EventStore.session_size(session_id) == 0
       end,
       timeout: 2_000
@@ -323,13 +325,10 @@ defmodule Starcite.ArchiveTest do
       eventually(
         fn ->
           {:ok, server_a, _group_a} = RaftAccess.locate_and_ensure_started(session_a)
-          {:ok, session_a_state} = RaftAccess.query_session(server_a, session_a)
+          assert {:error, :session_not_found} = RaftAccess.query_session(server_a, session_a)
 
           {:ok, server_b, _group_b} = RaftAccess.locate_and_ensure_started(session_b)
-          {:ok, session_b_state} = RaftAccess.query_session(server_b, session_b)
-
-          assert session_a_state.archived_seq == session_a_state.last_seq
-          assert session_b_state.archived_seq == session_b_state.last_seq
+          assert {:error, :session_not_found} = RaftAccess.query_session(server_b, session_b)
 
           writes = IdempotentTestAdapter.get_writes()
           written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
@@ -390,8 +389,7 @@ defmodule Starcite.ArchiveTest do
       eventually(
         fn ->
           {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-          {:ok, session} = RaftAccess.query_session(server_id, session_id)
-          assert session.archived_seq == session.last_seq
+          assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
 
           batch_sizes =
             IdempotentTestAdapter.get_write_batches()
@@ -404,101 +402,79 @@ defmodule Starcite.ArchiveTest do
     end
 
     test "continues archiving new writes after a full ETS compaction" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 10_000,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        :ok = IdempotentTestAdapter.clear_writes()
+
+        session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
+        {:ok, _} = WritePath.create_session(id: session_id)
+
+        for i <- 1..3 do
+          {:ok, _} =
+            append_event(session_id, %{
+              type: "content",
+              payload: %{text: "m#{i}"},
+              actor: "agent:test"
+            })
+        end
+
+        send(Starcite.Archive, :flush_tick)
+
+        eventually(
+          fn ->
+            {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+            assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
+            assert EventStore.session_size(session_id) == 0
+          end,
+          timeout: 2_000
         )
 
-      :ok = IdempotentTestAdapter.clear_writes()
-
-      session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = WritePath.create_session(id: session_id)
-
-      for i <- 1..3 do
         {:ok, _} =
           append_event(session_id, %{
             type: "content",
-            payload: %{text: "m#{i}"},
+            payload: %{text: "m4"},
             actor: "agent:test"
           })
-      end
 
-      send(Starcite.Archive, :flush_tick)
+        send(Starcite.Archive, :flush_tick)
 
-      eventually(
-        fn ->
-          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-          {:ok, session} = RaftAccess.query_session(server_id, session_id)
-          assert session.archived_seq == 3
-          assert EventStore.session_size(session_id) == 0
-        end,
-        timeout: 2_000
-      )
+        eventually(
+          fn ->
+            {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+            assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
+            assert EventStore.session_size(session_id) == 0
 
-      {:ok, _} =
-        append_event(session_id, %{
-          type: "content",
-          payload: %{text: "m4"},
-          actor: "agent:test"
-        })
+            seqs =
+              IdempotentTestAdapter.get_writes()
+              |> Enum.filter(fn row -> row.session_id == session_id end)
+              |> Enum.map(& &1.seq)
+              |> Enum.uniq()
+              |> Enum.sort()
 
-      send(Starcite.Archive, :flush_tick)
-
-      eventually(
-        fn ->
-          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-          {:ok, session} = RaftAccess.query_session(server_id, session_id)
-          assert session.archived_seq == 4
-          assert EventStore.session_size(session_id) == 0
-
-          seqs =
-            IdempotentTestAdapter.get_writes()
-            |> Enum.filter(fn row -> row.session_id == session_id end)
-            |> Enum.map(& &1.seq)
-            |> Enum.uniq()
-            |> Enum.sort()
-
-          assert seqs == [1, 2, 3, 4]
-        end,
-        timeout: 2_000
-      )
-    end
-
-    test "freezes drained idle sessions and allows write-path hydrate on next append" do
-      telemetry_handler_id =
-        "archive-session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
-
-      test_pid = self()
-
-      :ok =
-        :telemetry.attach_many(
-          telemetry_handler_id,
-          [
-            [:starcite, :session, :create],
-            [:starcite, :session, :eviction_tick],
-            [:starcite, :session, :freeze, :success],
-            [:starcite, :session, :hydrate, :attempt],
-            [:starcite, :session, :hydrate, :success]
-          ],
-          fn event_name, measurements, metadata, pid ->
-            send(pid, {:session_lifecycle_event, event_name, measurements, metadata})
+            assert seqs == [1, 2, 3, 4]
           end,
-          test_pid
+          timeout: 2_000
         )
-
-      on_exit(fn ->
-        :telemetry.detach(telemetry_handler_id)
       end)
+    end
+  end
 
+  describe "session freeze and hydrate" do
+    test "freezes drained session and hydrates on next append" do
       with_app_env(
         [
           archive_adapter: IdempotentTestAdapter,
           session_freeze_enabled: true,
           session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10
+          session_freeze_max_batch_size: 10,
+          session_freeze_hydrate_grace_polls: 0
         ],
         fn ->
           {:ok, _pid} =
@@ -508,27 +484,18 @@ defmodule Starcite.ArchiveTest do
             )
 
           :ok = IdempotentTestAdapter.clear_writes()
-          :ok = PubSub.subscribe(Starcite.PubSub, SessionDiscovery.topic())
 
           session_id = "ses-freeze-#{System.unique_integer([:positive, :monotonic])}"
           {:ok, _} = WritePath.create_session(id: session_id)
 
-          assert_receive {:session_discovery, %{kind: :session_created, session_id: ^session_id}},
-                         1_000
+          assert {:ok, first_reply} =
+                   append_event(session_id, %{
+                     type: "content",
+                     payload: %{text: "m1"},
+                     actor: "agent:test"
+                   })
 
-          assert_receive_session_lifecycle(
-            [:starcite, :session, :create],
-            fn _measurements, metadata ->
-              metadata.session_id == session_id and metadata.tenant_id == "service"
-            end
-          )
-
-          {:ok, _} =
-            append_event(session_id, %{
-              type: "content",
-              payload: %{text: "m1"},
-              actor: "agent:test"
-            })
+          assert first_reply.seq == 1
 
           send(Starcite.Archive, :flush_tick)
 
@@ -542,62 +509,37 @@ defmodule Starcite.ArchiveTest do
             timeout: 2_000
           )
 
-          sessions = IdempotentTestAdapter.get_sessions()
-          snapshot = Map.fetch!(sessions, session_id)
-          assert snapshot.last_seq == 1
-          assert snapshot.archived_seq == 1
-
-          assert_receive {:session_discovery, frozen_update}, 1_000
-          assert frozen_update.kind == :session_frozen
-          assert frozen_update.state == :frozen
-          assert frozen_update.session_id == session_id
-
-          assert {:ok, append_reply} =
+          assert {:ok, second_reply} =
                    append_event(session_id, %{
                      type: "content",
                      payload: %{text: "m2"},
                      actor: "agent:test"
                    })
 
-          assert append_reply.seq == 2
+          assert second_reply.seq == 2
+          assert second_reply.last_seq == 2
 
-          assert_receive_session_lifecycle(
-            [:starcite, :session, :eviction_tick],
-            fn _measurements, metadata ->
-              metadata.group_id >= 0 and metadata.min_idle_polls == 1
-            end
+          eventually(
+            fn ->
+              {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+              assert {:ok, session} = RaftAccess.query_session(server_id, session_id)
+              assert session.last_seq == 2
+              assert session.archived_seq == 1
+            end,
+            timeout: 2_000
           )
-
-          assert_receive_session_lifecycle(
-            [:starcite, :session, :freeze, :success],
-            fn _measurements, metadata -> metadata.session_id == session_id end
-          )
-
-          assert_receive_session_lifecycle(
-            [:starcite, :session, :hydrate, :attempt],
-            fn _measurements, metadata -> metadata.session_id == session_id end
-          )
-
-          assert_receive_session_lifecycle(
-            [:starcite, :session, :hydrate, :success],
-            fn _measurements, metadata -> metadata.session_id == session_id end
-          )
-
-          assert_receive {:session_discovery, hydrated_update}, 1_000
-          assert hydrated_update.kind == :session_hydrated
-          assert hydrated_update.state == :active
-          assert hydrated_update.session_id == session_id
         end
       )
     end
 
-    test "repeated freeze-hydrate loops preserve contiguous seq and runtime cursors" do
+    test "repeated freeze-hydrate loops keep contiguous sequence without cursor restoration" do
       with_app_env(
         [
           archive_adapter: IdempotentTestAdapter,
           session_freeze_enabled: true,
           session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10
+          session_freeze_max_batch_size: 10,
+          session_freeze_hydrate_grace_polls: 0
         ],
         fn ->
           {:ok, _pid} =
@@ -609,67 +551,6 @@ defmodule Starcite.ArchiveTest do
           :ok = IdempotentTestAdapter.clear_writes()
 
           session_id = "ses-freeze-loop-#{System.unique_integer([:positive, :monotonic])}"
-          {:ok, _} = WritePath.create_session(id: session_id)
-
-          for i <- 1..5 do
-            assert {:ok, reply} =
-                     append_event(session_id, %{
-                       type: "content",
-                       payload: %{text: "loop-#{i}"},
-                       actor: "agent:test"
-                     })
-
-            assert reply.seq == i
-
-            send(Starcite.Archive, :flush_tick)
-
-            eventually(
-              fn ->
-                {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-
-                assert {:error, :session_not_found} =
-                         RaftAccess.query_session(server_id, session_id)
-              end,
-              timeout: 2_000
-            )
-          end
-
-          archived_seqs =
-            IdempotentTestAdapter.get_writes()
-            |> Enum.filter(&(&1.session_id == session_id))
-            |> Enum.uniq_by(& &1.seq)
-            |> Enum.map(& &1.seq)
-            |> Enum.sort()
-
-          assert archived_seqs == [1, 2, 3, 4, 5]
-
-          snapshot = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
-          assert snapshot.last_seq == 5
-          assert snapshot.archived_seq == 5
-          assert producer_cursor_field!(snapshot, "writer:test", :producer_seq) == 5
-          assert producer_cursor_field!(snapshot, "writer:test", :session_seq) == 5
-        end
-      )
-    end
-
-    test "producer dedupe survives freeze-hydrate loop boundaries" do
-      with_app_env(
-        [
-          archive_adapter: IdempotentTestAdapter,
-          session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10
-        ],
-        fn ->
-          {:ok, _pid} =
-            start_supervised(
-              {Starcite.Archive,
-               flush_interval_ms: 10_000, adapter: IdempotentTestAdapter, adapter_opts: []}
-            )
-
-          :ok = IdempotentTestAdapter.clear_writes()
-
-          session_id = "ses-freeze-dedupe-#{System.unique_integer([:positive, :monotonic])}"
           producer_id = "writer:loop"
           {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -697,10 +578,9 @@ defmodule Starcite.ArchiveTest do
             timeout: 2_000
           )
 
-          assert {:ok, deduped_reply} = WritePath.append_event(session_id, event_one)
-          assert deduped_reply.seq == 1
-          assert deduped_reply.deduped
-          assert deduped_reply.last_seq == 1
+          assert {:ok, replayed_after_hydrate} = WritePath.append_event(session_id, event_one)
+          assert replayed_after_hydrate.seq == 2
+          refute replayed_after_hydrate.deduped
 
           event_two = %{
             type: "content",
@@ -711,7 +591,7 @@ defmodule Starcite.ArchiveTest do
           }
 
           assert {:ok, second_reply} = WritePath.append_event(session_id, event_two)
-          assert second_reply.seq == 2
+          assert second_reply.seq == 3
           refute second_reply.deduped
 
           send(Starcite.Archive, :flush_tick)
@@ -726,94 +606,22 @@ defmodule Starcite.ArchiveTest do
             timeout: 2_000
           )
 
-          archived_seqs =
-            IdempotentTestAdapter.get_writes()
-            |> Enum.filter(&(&1.session_id == session_id))
-            |> Enum.uniq_by(& &1.seq)
-            |> Enum.map(& &1.seq)
-            |> Enum.sort()
-
-          assert archived_seqs == [1, 2]
-
-          snapshot = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
-          assert snapshot.last_seq == 2
-          assert snapshot.archived_seq == 2
-          assert producer_cursor_field!(snapshot, producer_id, :producer_seq) == 2
-          assert producer_cursor_field!(snapshot, producer_id, :session_seq) == 2
-        end
-      )
-    end
-
-    test "hydrate grace polls prevent immediate re-freeze after dedupe-only hydrate" do
-      with_app_env(
-        [
-          archive_adapter: IdempotentTestAdapter,
-          session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 0,
-          session_freeze_max_batch_size: 10,
-          session_freeze_hydrate_grace_polls: 2
-        ],
-        fn ->
-          {:ok, _pid} =
-            start_supervised(
-              {Starcite.Archive,
-               flush_interval_ms: 10_000, adapter: IdempotentTestAdapter, adapter_opts: []}
-            )
-
-          :ok = IdempotentTestAdapter.clear_writes()
-
-          session_id = "ses-hydrate-grace-#{System.unique_integer([:positive, :monotonic])}"
-          producer_id = "writer:grace"
-          {:ok, _} = WritePath.create_session(id: session_id)
-
-          event = %{
-            type: "content",
-            payload: %{text: "hello"},
-            actor: "agent:test",
-            producer_id: producer_id,
-            producer_seq: 1
-          }
-
-          assert {:ok, first_reply} = WritePath.append_event(session_id, event)
-          assert first_reply.seq == 1
-          refute first_reply.deduped
-
+          # Hydrate again and accept producer_seq=2 as first seen sequence after rehydrate.
+          assert {:ok, replay_two} = WritePath.append_event(session_id, event_two)
+          assert replay_two.seq == 4
+          refute replay_two.deduped
           send(Starcite.Archive, :flush_tick)
 
           eventually(
             fn ->
-              {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+              written_seqs =
+                IdempotentTestAdapter.get_writes()
+                |> Enum.filter(&(&1.session_id == session_id))
+                |> Enum.uniq_by(& &1.seq)
+                |> Enum.map(& &1.seq)
+                |> Enum.sort()
 
-              assert {:error, :session_not_found} =
-                       RaftAccess.query_session(server_id, session_id)
-            end,
-            timeout: 2_000
-          )
-
-          assert {:ok, deduped_reply} = WritePath.append_event(session_id, event)
-          assert deduped_reply.seq == 1
-          assert deduped_reply.deduped
-
-          send(Starcite.Archive, :flush_tick)
-
-          eventually(
-            fn ->
-              {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-
-              assert {:ok, %Starcite.Session{last_seq: 1, archived_seq: 1}} =
-                       RaftAccess.query_session(server_id, session_id)
-            end,
-            timeout: 2_000
-          )
-
-          send(Starcite.Archive, :flush_tick)
-
-          eventually(
-            fn ->
-              {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-
-              assert {:error, :session_not_found} =
-                       RaftAccess.query_session(server_id, session_id)
+              assert written_seqs == [1, 2, 3, 4]
             end,
             timeout: 2_000
           )
@@ -821,12 +629,12 @@ defmodule Starcite.ArchiveTest do
       )
     end
 
-    test "dedupe-only hydrate re-freezes on next tick when hydrate grace is disabled" do
+    test "hydrate fails when runtime snapshot schema is incomplete" do
       with_app_env(
         [
           archive_adapter: IdempotentTestAdapter,
           session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 0,
+          session_freeze_min_idle_polls: 1,
           session_freeze_max_batch_size: 10,
           session_freeze_hydrate_grace_polls: 0
         ],
@@ -839,21 +647,15 @@ defmodule Starcite.ArchiveTest do
 
           :ok = IdempotentTestAdapter.clear_writes()
 
-          session_id = "ses-hydrate-no-grace-#{System.unique_integer([:positive, :monotonic])}"
-          producer_id = "writer:no-grace"
+          session_id = "ses-bad-snapshot-#{System.unique_integer([:positive, :monotonic])}"
           {:ok, _} = WritePath.create_session(id: session_id)
 
-          event = %{
-            type: "content",
-            payload: %{text: "hello"},
-            actor: "agent:test",
-            producer_id: producer_id,
-            producer_seq: 1
-          }
-
-          assert {:ok, first_reply} = WritePath.append_event(session_id, event)
-          assert first_reply.seq == 1
-          refute first_reply.deduped
+          assert {:ok, _reply} =
+                   append_event(session_id, %{
+                     type: "content",
+                     payload: %{text: "m1"},
+                     actor: "agent:test"
+                   })
 
           send(Starcite.Archive, :flush_tick)
 
@@ -867,21 +669,26 @@ defmodule Starcite.ArchiveTest do
             timeout: 2_000
           )
 
-          assert {:ok, deduped_reply} = WritePath.append_event(session_id, event)
-          assert deduped_reply.seq == 1
-          assert deduped_reply.deduped
+          session_row = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
 
-          send(Starcite.Archive, :flush_tick)
+          runtime_key = RuntimeSnapshot.metadata_key()
 
-          eventually(
-            fn ->
-              {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+          runtime =
+            session_row.metadata |> Map.fetch!(runtime_key) |> Map.delete("tail_keep")
 
-              assert {:error, :session_not_found} =
-                       RaftAccess.query_session(server_id, session_id)
-            end,
-            timeout: 2_000
-          )
+          metadata = Map.put(session_row.metadata, runtime_key, runtime)
+
+          assert :ok =
+                   Store.upsert_session(IdempotentTestAdapter, %{session_row | metadata: metadata})
+
+          assert {:error, :archive_read_unavailable} =
+                   WritePath.append_event(session_id, %{
+                     type: "content",
+                     payload: %{text: "m2"},
+                     actor: "agent:test",
+                     producer_id: "writer:test",
+                     producer_seq: 2
+                   })
         end
       )
     end
@@ -930,36 +737,10 @@ defmodule Starcite.ArchiveTest do
     end
   end
 
-  defp assert_receive_session_lifecycle(event_name, matcher)
-       when is_list(event_name) and is_function(matcher, 2) do
-    deadline = System.monotonic_time(:millisecond) + 2_000
-    do_assert_receive_session_lifecycle(event_name, matcher, deadline)
-  end
-
-  defp do_assert_receive_session_lifecycle(event_name, matcher, deadline)
-       when is_list(event_name) and is_function(matcher, 2) and is_integer(deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {:session_lifecycle_event, ^event_name, measurements, metadata} ->
-        if matcher.(measurements, metadata) do
-          :ok
-        else
-          do_assert_receive_session_lifecycle(event_name, matcher, deadline)
-        end
-
-      {:session_lifecycle_event, _other_event_name, _measurements, _metadata} ->
-        do_assert_receive_session_lifecycle(event_name, matcher, deadline)
-    after
-      remaining ->
-        flunk("timed out waiting for session lifecycle telemetry event #{inspect(event_name)}")
-    end
-  end
-
   defp with_app_env(overrides, fun) when is_list(overrides) and is_function(fun, 0) do
     previous =
       Enum.map(overrides, fn {key, _value} ->
-        {key, Application.get_env(:starcite, key, :__starcite_missing__)}
+        {key, Application.get_env(:starcite, key, :__missing__)}
       end)
 
     Enum.each(overrides, fn {key, value} ->
@@ -970,27 +751,9 @@ defmodule Starcite.ArchiveTest do
       fun.()
     after
       Enum.each(previous, fn
-        {key, :__starcite_missing__} -> Application.delete_env(:starcite, key)
+        {key, :__missing__} -> Application.delete_env(:starcite, key)
         {key, value} -> Application.put_env(:starcite, key, value)
       end)
-    end
-  end
-
-  defp producer_cursor_field!(snapshot, producer_id, key)
-       when is_map(snapshot) and is_binary(producer_id) and producer_id != "" and is_atom(key) do
-    cursor =
-      snapshot
-      |> Map.get(:producer_cursors, %{})
-      |> Map.get(producer_id)
-
-    case cursor do
-      %{} = value ->
-        Map.get(value, key) || Map.get(value, Atom.to_string(key))
-
-      _ ->
-        flunk(
-          "missing producer cursor for #{producer_id}: #{inspect(Map.get(snapshot, :producer_cursors, %{}))}"
-        )
     end
   end
 end

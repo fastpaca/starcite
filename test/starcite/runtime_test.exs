@@ -3,11 +3,10 @@ defmodule Starcite.RuntimeTest do
 
   import ExUnit.CaptureLog
 
-  alias Phoenix.PubSub
-  alias Starcite.Archive.Store
   alias Starcite.Auth.Principal
   alias Starcite.{ReadPath, WritePath}
-  alias Starcite.DataPlane.{EventStore, RaftAccess, SessionDiscovery, SessionStore}
+  alias Starcite.Archive.Store
+  alias Starcite.DataPlane.{EventStore, RaftAccess, SessionStore}
   alias Starcite.DataPlane.RaftManager
   alias Starcite.Session
   alias Starcite.Repo
@@ -64,22 +63,6 @@ defmodule Starcite.RuntimeTest do
       assert {:ok, loaded} = SessionStore.get_session(id)
       assert loaded.id == id
       assert loaded.creator_principal == principal
-    end
-
-    test "create_session publishes service discovery update" do
-      id = unique_id("ses-discovery")
-      :ok = PubSub.subscribe(Starcite.PubSub, SessionDiscovery.topic())
-
-      {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
-
-      assert_receive {:session_discovery, update}, 1_000
-      assert update.version == 1
-      assert update.kind == :session_created
-      assert update.state == :active
-      assert update.session_id == id
-      assert update.tenant_id == "acme"
-      assert is_binary(update.occurred_at)
-      assert String.ends_with?(update.occurred_at, "Z")
     end
 
     test "auth lookup returns session store hit without raft/archive read-through" do
@@ -180,65 +163,6 @@ defmodule Starcite.RuntimeTest do
                  producer_id: "writer-1",
                  producer_seq: 1
                })
-    end
-
-    @tag :requires_postgres
-    test "hydrates frozen sessions from archive and retries append once" do
-      :ok = setup_repo_shared_sandbox()
-      :ok = PubSub.subscribe(Starcite.PubSub, SessionDiscovery.topic())
-
-      id = unique_id("ses-hydrate")
-      {:ok, _} = WritePath.create_session(id: id)
-
-      assert_receive {:session_discovery, %{kind: :session_created, session_id: ^id}}, 1_000
-
-      {:ok, _reply} =
-        append_event(id, %{
-          type: "content",
-          payload: %{text: "one"},
-          actor: "agent:1"
-        })
-
-      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(id, 1)
-
-      {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(id)
-      {:ok, session} = RaftAccess.query_session(server_id, id)
-
-      assert :ok = Store.upsert_session(archive_session_snapshot(session))
-
-      assert {:ok, {:reply, {:ok, %{id: ^id}}}, _leader} =
-               :ra.process_command(
-                 {server_id, Node.self()},
-                 {:freeze_session, id, session.last_seq, session.archived_seq,
-                  session.last_progress_poll},
-                 2_000
-               )
-
-      assert {:error, :session_not_found} = RaftAccess.query_session(server_id, id)
-
-      assert_receive {:session_discovery, frozen_update}, 1_000
-      assert frozen_update.kind == :session_frozen
-      assert frozen_update.state == :frozen
-      assert frozen_update.session_id == id
-
-      assert {:ok, append_reply} =
-               append_event(id, %{
-                 type: "content",
-                 payload: %{text: "two"},
-                 actor: "agent:1"
-               })
-
-      assert append_reply.seq == 2
-      assert append_reply.last_seq == 2
-
-      assert {:ok, rehydrated_session} = RaftAccess.query_session(server_id, id)
-      assert rehydrated_session.last_seq == 2
-      assert rehydrated_session.archived_seq == 1
-
-      assert_receive {:session_discovery, hydrated_update}, 1_000
-      assert hydrated_update.kind == :session_hydrated
-      assert hydrated_update.state == :active
-      assert hydrated_update.session_id == id
     end
   end
 
@@ -362,10 +286,7 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1]
     end
 
-    @tag :requires_postgres
-    test "returns ordered events across Postgres cold + ETS hot boundary" do
-      :ok = setup_repo_shared_sandbox()
-
+    test "returns ordered events across archive cold + ETS hot boundary" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
@@ -387,10 +308,7 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
     end
 
-    @tag :requires_postgres
-    test "respects limit across Postgres cold + ETS hot boundary" do
-      :ok = setup_repo_shared_sandbox()
-
+    test "respects limit across archive cold + ETS hot boundary" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
@@ -580,9 +498,7 @@ defmodule Starcite.RuntimeTest do
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
-    include_tenant_id? = events_table_has_tenant_id?()
-
-    rows =
+    base_rows =
       Enum.map(events, fn event ->
         %{
           session_id: session_id,
@@ -592,24 +508,45 @@ defmodule Starcite.RuntimeTest do
           actor: event.actor,
           producer_id: event.producer_id,
           producer_seq: event.producer_seq,
+          tenant_id: event.tenant_id,
           source: event.source,
           metadata: event.metadata,
           refs: event.refs,
           idempotency_key: event.idempotency_key,
           inserted_at: as_datetime(event.inserted_at)
         }
-        |> maybe_put_tenant_id(event, include_tenant_id?)
       end)
 
-    {count, _} =
-      Repo.insert_all(
-        "events",
-        rows,
-        on_conflict: :nothing,
-        conflict_target: [:session_id, :seq]
-      )
+    case Store.adapter() do
+      Starcite.Archive.Adapter.Postgres ->
+        ensure_repo_sandbox()
 
-    assert count == length(rows)
+        rows =
+          if events_table_has_tenant_id?() do
+            Enum.zip(base_rows, events)
+            |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
+          else
+            base_rows
+          end
+
+        {count, _} =
+          Repo.insert_all(
+            "events",
+            rows,
+            on_conflict: :nothing,
+            conflict_target: [:session_id, :seq]
+          )
+
+        assert count == length(rows)
+
+      _other ->
+        rows =
+          Enum.zip(base_rows, events)
+          |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
+
+        assert {:ok, inserted} = Store.write_events(rows)
+        assert inserted == length(rows)
+    end
   end
 
   defp event_tenant_id!(%{tenant_id: tenant_id})
@@ -620,12 +557,6 @@ defmodule Starcite.RuntimeTest do
     raise ArgumentError,
           "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
   end
-
-  defp maybe_put_tenant_id(row, event, true) when is_map(row) and is_map(event) do
-    Map.put(row, :tenant_id, event_tenant_id!(event))
-  end
-
-  defp maybe_put_tenant_id(row, _event, false) when is_map(row), do: row
 
   defp events_table_has_tenant_id? do
     result =
@@ -641,40 +572,23 @@ defmodule Starcite.RuntimeTest do
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
 
-  defp archive_session_snapshot(%Session{} = session) do
-    %{
-      id: session.id,
-      title: session.title,
-      tenant_id: session.tenant_id,
-      creator_principal: session.creator_principal,
-      metadata: session.metadata,
-      created_at: DateTime.from_naive!(session.inserted_at, "Etc/UTC"),
-      last_seq: session.last_seq,
-      archived_seq: session.archived_seq,
-      retention: session.retention,
-      producer_cursors: session.producer_cursors,
-      last_progress_poll: session.last_progress_poll,
-      snapshot_version: "v1"
-    }
-  end
-
-  defp ensure_repo_started do
-    if Process.whereis(Repo) do
-      :ok
-    else
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
       _pid = start_supervised!(Repo)
       :ok
     end
-  end
 
-  defp setup_repo_shared_sandbox do
-    ensure_repo_started()
-    :ok = Ecto.Adapters.SQL.Sandbox.checkout(Repo)
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    checked_out? =
+      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+        :ok -> true
+        {:already, _owner} -> false
+      end
 
-    on_exit(fn ->
-      Ecto.Adapters.SQL.Sandbox.mode(Repo, :auto)
-    end)
+    if checked_out? do
+      on_exit(fn ->
+        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
+      end)
+    end
 
     :ok
   end

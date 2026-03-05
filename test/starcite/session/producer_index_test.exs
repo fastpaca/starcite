@@ -3,9 +3,9 @@ defmodule Starcite.Session.ProducerIndexTest do
 
   alias Starcite.Session.ProducerIndex
 
-  test "new producer must start at sequence 1" do
-    assert {:error, {:producer_seq_conflict, "p1", 1, 2}} =
-             ProducerIndex.decide(%{}, "p1", 2, <<1>>, 1, 10)
+  test "new producer accepts first seen sequence value" do
+    assert {:append, index} = ProducerIndex.decide(%{}, "p1", 2, <<1>>, 1, 10)
+    assert %{"p1" => %{producer_seq: 2, session_seq: 1, hash: <<1>>}} = index
   end
 
   test "contiguous producer sequences append and advance cursor" do

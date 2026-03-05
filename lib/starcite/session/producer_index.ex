@@ -30,13 +30,9 @@ defmodule Starcite.Session.ProducerIndex do
              max_entries > 0 do
     case Map.get(index, producer_id) do
       nil ->
-        if producer_seq == 1 do
-          {:append,
-           put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
-           |> prune_lru(max_entries)}
-        else
-          {:error, {:producer_seq_conflict, producer_id, 1, producer_seq}}
-        end
+        {:append,
+         put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
+         |> prune_lru(max_entries)}
 
       %{producer_seq: last_producer_seq, session_seq: last_session_seq, hash: last_hash}
       when is_integer(last_producer_seq) and last_producer_seq > 0 and
@@ -60,7 +56,9 @@ defmodule Starcite.Session.ProducerIndex do
         end
 
       _other ->
-        {:error, {:producer_seq_conflict, producer_id, 1, producer_seq}}
+        {:append,
+         put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
+         |> prune_lru(max_entries)}
     end
   end
 

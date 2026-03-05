@@ -37,6 +37,16 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    GenServer.call(
+      __MODULE__,
+      {:update_session_archived_seq, session_id, tenant_id, archived_seq}
+    )
+  end
+
+  @impl true
   def list_sessions(query_opts) when is_map(query_opts) do
     GenServer.call(__MODULE__, {:list_sessions, query_opts})
   end
@@ -89,8 +99,8 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def handle_call({:upsert_session, %{id: id} = session}, _from, state)
-      when is_binary(id) and id != "" do
+  def handle_call({:upsert_session, %{id: id, tenant_id: tenant_id} = session}, _from, state)
+      when is_binary(id) and id != "" and is_binary(tenant_id) and tenant_id != "" do
     normalized = normalize_session(session)
     {:reply, :ok, %{state | sessions: Map.put(state.sessions, id, normalized)}}
   end
@@ -98,6 +108,50 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   @impl true
   def handle_call({:upsert_session, _session}, _from, state) do
     {:reply, {:error, :invalid_session}, state}
+  end
+
+  @impl true
+  def handle_call(
+        {:update_session_archived_seq, session_id, tenant_id, archived_seq},
+        _from,
+        state
+      )
+      when is_binary(session_id) and is_binary(tenant_id) and is_integer(archived_seq) do
+    session =
+      case Map.get(state.sessions, session_id) do
+        nil ->
+          %{
+            id: session_id,
+            title: nil,
+            tenant_id: tenant_id,
+            creator_principal: %{"tenant_id" => tenant_id, "id" => "service", "type" => "service"},
+            metadata: %{},
+            created_at: DateTime.utc_now() |> DateTime.truncate(:second)
+          }
+
+        existing ->
+          existing
+      end
+
+    runtime_snapshot =
+      %Starcite.Session.RuntimeSnapshot{
+        archived_seq: archived_seq,
+        tail_keep: 1_000,
+        producer_max_entries: 10_000
+      }
+
+    metadata =
+      Starcite.Session.RuntimeSnapshot.put_in_metadata(
+        Map.get(session, :metadata, %{}),
+        runtime_snapshot
+      )
+
+    updated =
+      session
+      |> Map.put(:tenant_id, tenant_id)
+      |> Map.put(:metadata, metadata)
+
+    {:reply, :ok, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
   end
 
   @impl true
@@ -142,7 +196,7 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   defp to_event_map(row) do
-    %{
+    event = %{
       seq: row.seq,
       type: row.type,
       payload: row.payload,
@@ -155,6 +209,14 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       idempotency_key: row.idempotency_key,
       inserted_at: row.inserted_at
     }
+
+    case row do
+      %{tenant_id: tenant_id} when is_binary(tenant_id) and tenant_id != "" ->
+        Map.put(event, :tenant_id, tenant_id)
+
+      _ ->
+        event
+    end
   end
 
   defp normalize_session(
@@ -166,48 +228,15 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
            created_at: created_at
          } = session
        ) do
-    last_seq = normalize_non_neg_integer(Map.get(session, :last_seq), 0)
-    archived_seq = normalize_non_neg_integer(Map.get(session, :archived_seq), 0)
-    last_progress_poll = normalize_non_neg_integer(Map.get(session, :last_progress_poll), 0)
-    retention = normalize_map(Map.get(session, :retention), %{})
-    producer_cursors = normalize_map(Map.get(session, :producer_cursors), %{})
-    snapshot_version = normalize_optional_binary(Map.get(session, :snapshot_version))
-
     %{
       id: id,
       title: title,
       tenant_id: tenant_id,
       creator_principal: Map.get(session, :creator_principal),
       metadata: metadata,
-      created_at: created_at,
-      last_seq: last_seq,
-      archived_seq: archived_seq,
-      retention: retention,
-      producer_cursors: producer_cursors,
-      last_progress_poll: last_progress_poll,
-      snapshot_version: snapshot_version
+      created_at: created_at
     }
   end
-
-  defp normalize_non_neg_integer(value, default) when is_integer(default) and default >= 0 do
-    case value do
-      nil -> default
-      integer when is_integer(integer) and integer >= 0 -> integer
-      _other -> default
-    end
-  end
-
-  defp normalize_map(value, default) when is_map(default) do
-    case value do
-      nil -> default
-      map when is_map(map) -> map
-      _other -> default
-    end
-  end
-
-  defp normalize_optional_binary(nil), do: nil
-  defp normalize_optional_binary(value) when is_binary(value) and value != "", do: value
-  defp normalize_optional_binary(_value), do: nil
 
   defp session_page(sessions, query_opts) do
     metadata_filters = query_opts |> Map.get(:metadata, %{}) |> normalize_metadata_filters()
@@ -227,7 +256,7 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       sorted
       |> Enum.filter(fn session ->
         (is_nil(cursor) or session.id > cursor) and
-          tenant_match?(session.creator_principal, tenant_id) and
+          tenant_match?(session.tenant_id, tenant_id) and
           metadata_match?(session.metadata || %{}, metadata_filters) and
           owner_principal_match?(session.creator_principal, owner_principal_ids)
       end)
@@ -290,15 +319,9 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   defp tenant_match?(_creator_principal, :all), do: true
   defp tenant_match?(_creator_principal, :none), do: false
 
-  defp tenant_match?(creator_principal, tenant_id)
-       when is_map(creator_principal) and is_binary(tenant_id) do
-    (creator_principal["tenant_id"] || creator_principal[:tenant_id]) == tenant_id
-  end
+  defp tenant_match?(session_tenant_id, tenant_id)
+       when is_binary(session_tenant_id) and is_binary(tenant_id),
+       do: session_tenant_id == tenant_id
 
-  defp tenant_match?(%Starcite.Auth.Principal{tenant_id: principal_tenant_id}, tenant_id)
-       when is_binary(tenant_id) do
-    principal_tenant_id == tenant_id
-  end
-
-  defp tenant_match?(_creator_principal, _tenant_id), do: false
+  defp tenant_match?(_session_tenant_id, _tenant_id), do: false
 end

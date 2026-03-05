@@ -72,11 +72,6 @@ lag separately from Starcite's own replication.
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
 | `STARCITE_ARCHIVE_ADAPTER` | `s3` (default) or `postgres`. |
-| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | Archiver tick interval in milliseconds. Default `5000`. |
-| `STARCITE_SESSION_FREEZE_ENABLED` | Enables inactivity-based session freeze/eviction from Raft hot state. Default `false`. |
-| `STARCITE_SESSION_FREEZE_MIN_IDLE_POLLS` | Number of consecutive archiver polls without progress before a drained session is eligible to freeze. Default `3`. |
-| `STARCITE_SESSION_FREEZE_MAX_BATCH_SIZE` | Maximum sessions to freeze per eviction tick per group. Default `50`. |
-| `STARCITE_SESSION_FREEZE_HYDRATE_GRACE_POLLS` | Extra eviction polls to wait after hydrate before a drained session can freeze again. Default `0`. |
 | `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for development. |
 | `PORT` | HTTP listen port. Default `4000`. |
 
@@ -88,24 +83,6 @@ Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
 `STARCITE_S3_SECRET_ACCESS_KEY`, `STARCITE_S3_PATH_STYLE`.
 
 **Postgres backend** additionally requires: `DATABASE_URL`.
-
-### Session freeze/hydrate
-
-When `STARCITE_SESSION_FREEZE_ENABLED=true`, each local group leader runs an
-inactivity eviction tick after archive flush. Sessions are freeze candidates only
-when both conditions hold:
-
-1. `last_seq == archived_seq` (drained, no unarchived tail)
-2. no progress for `STARCITE_SESSION_FREEZE_MIN_IDLE_POLLS` ticks
-3. if recently hydrated, grace window elapsed:
-   `STARCITE_SESSION_FREEZE_HYDRATE_GRACE_POLLS`
-
-Candidates are frozen in deterministic order and capped per tick by
-`STARCITE_SESSION_FREEZE_MAX_BATCH_SIZE`.
-
-Append behavior does not change for hot sessions. If an append hits a frozen session,
-write path performs one hydrate retry: load archive snapshot, hydrate into Raft, retry
-the original append once.
 
 ### S3 schema migration
 

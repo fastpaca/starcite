@@ -246,6 +246,16 @@ defmodule Starcite.Archive.Adapter.S3Test do
                created_at: created_at
              })
 
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-a",
+               title: "A-updated",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{"updated" => true},
+               created_at: created_at
+             })
+
     assert {:error, :archive_write_unavailable} =
              S3.upsert_session(%{
                id: "ses-a",
@@ -281,8 +291,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
       (page_1.sessions ++ page_2.sessions)
       |> Enum.find(&(&1.id == "ses-a"))
 
-    assert session_a.title == "A"
+    assert session_a.title == "A-updated"
     assert session_a.tenant_id == "acme"
+    assert session_a.metadata == %{"updated" => true}
 
     assert {:ok, by_ids} =
              S3.list_sessions_by_ids(
@@ -299,62 +310,6 @@ defmodule Starcite.Archive.Adapter.S3Test do
              )
 
     assert by_ids_tenant_scoped.sessions |> Enum.map(& &1.id) == ["ses-a"]
-  end
-
-  test "upsert_session rejects tenant conflicts and persists runtime snapshots" do
-    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
-
-    assert :ok =
-             S3.upsert_session(%{
-               id: "ses-runtime",
-               title: "Original",
-               tenant_id: "acme",
-               creator_principal: principal_for_tenant("acme"),
-               metadata: %{"source" => "original"},
-               created_at: created_at,
-               last_seq: 1,
-               archived_seq: 1,
-               last_progress_poll: 1
-             })
-
-    assert {:error, :archive_write_unavailable} =
-             S3.upsert_session(%{
-               id: "ses-runtime",
-               title: "Stale",
-               tenant_id: "wrong",
-               creator_principal: principal_for_tenant("wrong"),
-               metadata: %{"source" => "stale"},
-               created_at: created_at,
-               last_seq: 1,
-               archived_seq: 1,
-               last_progress_poll: 1
-             })
-
-    assert :ok =
-             S3.upsert_session(%{
-               id: "ses-runtime",
-               title: "Updated",
-               tenant_id: "acme",
-               creator_principal: principal_for_tenant("acme"),
-               metadata: %{"source" => "updated"},
-               created_at: created_at,
-               last_seq: 2,
-               archived_seq: 2,
-               last_progress_poll: 2
-             })
-
-    assert {:ok, %{sessions: [session], next_cursor: nil}} =
-             S3.list_sessions_by_ids(
-               ["ses-runtime"],
-               %{limit: 10, cursor: nil, metadata: %{}}
-             )
-
-    assert session.title == "Updated"
-    assert session.tenant_id == "acme"
-    assert session.metadata == %{"source" => "updated"}
-    assert session.last_seq == 2
-    assert session.archived_seq == 2
-    assert session.last_progress_poll == 2
   end
 
   defp event_rows(session_id, inserted_at, seqs) do

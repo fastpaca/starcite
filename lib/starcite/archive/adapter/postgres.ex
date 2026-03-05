@@ -14,6 +14,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   alias Starcite.Archive.{Event, SessionRecord}
   alias Starcite.Auth.Principal
   alias Starcite.Repo
+  alias Starcite.Session.RuntimeSnapshot
 
   @impl true
   def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
@@ -70,216 +71,79 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def upsert_session(
-        %{
-          id: id,
-          title: title,
-          tenant_id: tenant_id,
-          creator_principal: creator_principal,
-          metadata: metadata,
-          created_at: created_at
-        } = session
-      )
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             is_binary(tenant_id) and tenant_id != "" and
-             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) and
-             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
-    created_at = normalize_created_at(created_at)
-    runtime_snapshot_explicit? = runtime_snapshot_explicit?(session)
-    runtime = normalize_runtime_snapshot(session, runtime_snapshot_explicit?)
-
-    row =
-      %{
+  def upsert_session(%{
         id: id,
         title: title,
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
         created_at: created_at
-      }
-      |> Map.merge(runtime)
+      })
+      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+             is_binary(tenant_id) and tenant_id != "" and
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
+             is_map(metadata) and
+             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
+    created_at = normalize_session_created_at(created_at)
 
-    {inserted, _} =
+    {_inserted, _} =
       Repo.insert_all(
         "sessions",
-        [row],
-        on_conflict: :nothing,
+        [
+          %{
+            id: id,
+            title: title,
+            tenant_id: tenant_id,
+            creator_principal: creator_principal,
+            metadata: metadata,
+            created_at: created_at
+          }
+        ],
+        on_conflict: [
+          set: [
+            title: title,
+            tenant_id: tenant_id,
+            creator_principal: creator_principal,
+            metadata: metadata,
+            created_at: created_at
+          ]
+        ],
         conflict_target: [:id]
       )
-
-    if inserted == 0 and runtime_snapshot_explicit? do
-      :ok = maybe_update_existing_row(row)
-    end
 
     :ok
   rescue
     _ -> {:error, :archive_write_unavailable}
   end
 
-  defp normalize_created_at(%DateTime{} = value), do: DateTime.truncate(value, :second)
+  @impl true
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    metadata = %{RuntimeSnapshot.metadata_key() => runtime_snapshot_payload(archived_seq)}
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+    creator_principal = %{"tenant_id" => tenant_id, "id" => "service", "type" => "service"}
+    runtime_key = RuntimeSnapshot.metadata_key()
 
-  defp normalize_created_at(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
-      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
+    sql = """
+    INSERT INTO sessions (id, title, tenant_id, creator_principal, metadata, created_at)
+    VALUES ($1, NULL, $2, $3, $4, $5)
+    ON CONFLICT (id) DO UPDATE
+    SET tenant_id = EXCLUDED.tenant_id,
+        metadata = jsonb_set(
+          COALESCE(sessions.metadata, '{}'::jsonb),
+          '{#{runtime_key}}',
+          (EXCLUDED.metadata->'#{runtime_key}'),
+          true
+        )
+    """
+
+    case Repo.query(sql, [session_id, tenant_id, creator_principal, metadata, created_at]) do
+      {:ok, _result} -> :ok
+      {:error, _reason} -> {:error, :archive_write_unavailable}
     end
-  end
-
-  defp runtime_snapshot_explicit?(session) when is_map(session) do
-    Enum.any?(
-      [
-        :last_seq,
-        :archived_seq,
-        :retention,
-        :producer_cursors,
-        :last_progress_poll,
-        :snapshot_version
-      ],
-      fn key ->
-        Map.has_key?(session, key) or Map.has_key?(session, Atom.to_string(key))
-      end
-    )
-  end
-
-  defp maybe_update_existing_row(%{
-         id: id,
-         title: title,
-         tenant_id: tenant_id,
-         creator_principal: creator_principal,
-         metadata: metadata,
-         created_at: created_at,
-         last_seq: last_seq,
-         archived_seq: archived_seq,
-         retention: retention,
-         producer_cursors: producer_cursors,
-         last_progress_poll: last_progress_poll,
-         snapshot_version: snapshot_version
-       })
-       when is_binary(id) and id != "" and is_integer(last_seq) and last_seq >= 0 and
-              is_integer(archived_seq) and archived_seq >= 0 and
-              is_integer(last_progress_poll) and last_progress_poll >= 0 do
-    query =
-      from(s in SessionRecord,
-        where: s.id == ^id,
-        where:
-          coalesce(s.last_seq, 0) < ^last_seq or
-            (coalesce(s.last_seq, 0) == ^last_seq and
-               coalesce(s.last_progress_poll, 0) < ^last_progress_poll) or
-            (coalesce(s.last_seq, 0) == ^last_seq and
-               coalesce(s.last_progress_poll, 0) == ^last_progress_poll and
-               coalesce(s.archived_seq, 0) < ^archived_seq)
-      )
-
-    _updated_count =
-      Repo.update_all(query,
-        set: [
-          title: title,
-          tenant_id: tenant_id,
-          creator_principal: creator_principal,
-          metadata: metadata,
-          created_at: created_at,
-          last_seq: last_seq,
-          archived_seq: archived_seq,
-          retention: retention,
-          producer_cursors: producer_cursors,
-          last_progress_poll: last_progress_poll,
-          snapshot_version: snapshot_version
-        ]
-      )
-
-    :ok
-  end
-
-  defp normalize_runtime_snapshot(_session, false), do: %{}
-
-  defp normalize_runtime_snapshot(session, true) when is_map(session) do
-    last_seq = non_neg_integer_snapshot(session, :last_seq, 0)
-    archived_seq = non_neg_integer_snapshot(session, :archived_seq, 0)
-    last_progress_poll = non_neg_integer_snapshot(session, :last_progress_poll, 0)
-    retention = map_snapshot(session, :retention, %{})
-    producer_cursors = map_snapshot(session, :producer_cursors, %{}) |> encode_producer_cursors()
-    snapshot_version = snapshot_version(session)
-
-    if archived_seq <= last_seq do
-      %{
-        last_seq: last_seq,
-        archived_seq: archived_seq,
-        retention: retention,
-        producer_cursors: producer_cursors,
-        last_progress_poll: last_progress_poll,
-        snapshot_version: snapshot_version
-      }
-    else
-      raise ArgumentError,
-            "invalid session runtime snapshot: archived_seq=#{archived_seq} > last_seq=#{last_seq}"
-    end
-  end
-
-  defp non_neg_integer_snapshot(session, key, default)
-       when is_map(session) and is_atom(key) and is_integer(default) and default >= 0 do
-    case snapshot_value(session, key, default) do
-      value when is_integer(value) and value >= 0 -> value
-      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
-    end
-  end
-
-  defp map_snapshot(session, key, default)
-       when is_map(session) and is_atom(key) and is_map(default) do
-    case snapshot_value(session, key, default) do
-      value when is_map(value) -> value
-      value -> raise ArgumentError, "invalid session #{key}: #{inspect(value)}"
-    end
-  end
-
-  defp snapshot_version(session) when is_map(session) do
-    case snapshot_value(session, :snapshot_version, nil) do
-      nil -> nil
-      value when is_binary(value) and value != "" -> value
-      value -> raise ArgumentError, "invalid session snapshot_version: #{inspect(value)}"
-    end
-  end
-
-  defp snapshot_value(session, key, default) when is_map(session) and is_atom(key) do
-    case Map.fetch(session, key) do
-      {:ok, value} -> value
-      :error -> Map.get(session, Atom.to_string(key), default)
-    end
-  end
-
-  defp encode_producer_cursors(cursors) when map_size(cursors) == 0, do: %{}
-
-  defp encode_producer_cursors(cursors) when is_map(cursors) do
-    Enum.reduce(cursors, %{}, fn
-      {producer_id, cursor}, acc
-      when is_binary(producer_id) and producer_id != "" and is_map(cursor) ->
-        producer_seq = cursor_integer!(cursor, :producer_seq)
-        session_seq = cursor_integer!(cursor, :session_seq)
-        hash = cursor_hash!(cursor)
-
-        Map.put(acc, producer_id, %{
-          producer_seq: producer_seq,
-          session_seq: session_seq,
-          hash: Base.url_encode64(hash, padding: false)
-        })
-
-      entry, _acc ->
-        raise ArgumentError, "invalid producer cursor entry: #{inspect(entry)}"
-    end)
-  end
-
-  defp cursor_integer!(cursor, key) when is_map(cursor) and is_atom(key) do
-    case Map.get(cursor, key) || Map.get(cursor, Atom.to_string(key)) do
-      value when is_integer(value) and value > 0 -> value
-      value -> raise ArgumentError, "invalid producer cursor #{key}: #{inspect(value)}"
-    end
-  end
-
-  defp cursor_hash!(cursor) when is_map(cursor) do
-    case Map.get(cursor, :hash) || Map.get(cursor, "hash") do
-      value when is_binary(value) and value != "" -> value
-      value -> raise ArgumentError, "invalid producer cursor hash: #{inspect(value)}"
-    end
+  rescue
+    _ -> {:error, :archive_write_unavailable}
   end
 
   @impl true
@@ -365,6 +229,17 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp normalize_inserted_at(%DateTime{} = datetime), do: DateTime.truncate(datetime, :second)
 
+  defp normalize_session_created_at(%DateTime{} = datetime) do
+    DateTime.truncate(datetime, :second)
+  end
+
+  defp normalize_session_created_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
+      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
+    end
+  end
+
   defp apply_cursor(query, nil), do: query
 
   defp apply_cursor(query, cursor) when is_binary(cursor) and cursor != "" do
@@ -438,6 +313,29 @@ defmodule Starcite.Archive.Adapter.Postgres do
     |> Enum.map(&to_session_row/1)
   end
 
+  defp runtime_snapshot_payload(archived_seq)
+       when is_integer(archived_seq) and archived_seq >= 0 do
+    RuntimeSnapshot.encode(%RuntimeSnapshot{
+      archived_seq: archived_seq,
+      tail_keep: tail_keep(),
+      producer_max_entries: producer_max_entries()
+    })
+  end
+
+  defp tail_keep do
+    case Application.get_env(:starcite, :tail_keep, 1_000) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> 1_000
+    end
+  end
+
+  defp producer_max_entries do
+    case Application.get_env(:starcite, :producer_max_entries, 10_000) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> 10_000
+    end
+  end
+
   defp to_session_row(%SessionRecord{} = session) do
     %{
       id: session.id,
@@ -445,13 +343,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
       tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
-      created_at: DateTime.to_iso8601(session.created_at),
-      last_seq: session.last_seq || 0,
-      archived_seq: session.archived_seq || 0,
-      retention: session.retention || %{},
-      producer_cursors: session.producer_cursors || %{},
-      last_progress_poll: session.last_progress_poll || 0,
-      snapshot_version: session.snapshot_version
+      created_at: DateTime.to_iso8601(session.created_at)
     }
   end
 end
