@@ -27,23 +27,6 @@ services:
       - "4000:4000"
     restart: unless-stopped
 
-  db:
-    image: postgres:15
-    environment:
-      POSTGRES_DB: starcite_dev
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: postgres
-    healthcheck:
-      test: ["CMD", "pg_isready", "-U", "postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-    ports:
-      - "5433:5432"
-    volumes:
-      - db-data:/var/lib/postgresql/data
-    restart: unless-stopped
-
   minio:
     image: minio/minio:RELEASE.2025-01-20T14-49-07Z
     command: server /data --console-address :9001
