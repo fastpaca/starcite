@@ -16,7 +16,7 @@ The edge handles client connections, auth, and protocol translation.
 sessions. Validates input, enforces tenant fencing, and delegates to the data plane.
 
 **Tailer** — WebSocket handler for `tail`. Upgrades to a long-lived process that
-manages replay and live streaming. This is the only stateful process per client
+manages replay, live streaming, and socket append acknowledgements. This is the only stateful process per client
 connection.
 
 **Auth** — Validates bearer JWTs on every `/v1` request against JWKS keys. Builds an
@@ -89,6 +89,8 @@ sequenceDiagram
     T-->>C: replay events
 
     Note over P,T: After replay completes
+    C->>T: WS append frame
+    T-->>C: append_ok / append_error
     P->>T: new event committed
     T-->>C: live event
 ```
@@ -102,7 +104,9 @@ gap-free.
 
 **Live** — the tailer subscribes to PubSub for the session at connect time. Events
 arriving during replay are buffered and flushed once replay completes. After that, new
-commits are pushed to the client immediately.
+commits are pushed to the client immediately. The same socket can also accept append
+frames, which are validated at the edge, routed through the write path, and acknowledged
+before the committed event is streamed back on PubSub.
 
 A periodic catchup timer (every 5s) detects missed PubSub messages — if the event
 store has advanced past the socket's cursor, it re-enters replay. This handles

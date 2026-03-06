@@ -72,6 +72,9 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
 
 # 3) Tail from a cursor (WebSocket)
 ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
+
+# The same socket can also accept append JSON frames and will
+# return an append acknowledgement before streaming the committed event.
 ```
 
 ## Delivery Guarantees

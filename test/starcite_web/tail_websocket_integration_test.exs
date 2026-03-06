@@ -178,6 +178,63 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     :ok = :gen_tcp.close(socket)
   end
 
+  test "tail websocket accepts append input and returns ack plus streamed event", %{
+    port: port,
+    private_key: private_key,
+    kid: kid
+  } do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{
+          "sub" => "user:user-42",
+          "scopes" => ["session:read", "session:append"],
+          "tenant_id" => "acme"
+        }
+      )
+
+    {:ok, socket, response_headers, buffer} =
+      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token})
+
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
+
+    :ok =
+      send_text_frame(
+        socket,
+        Jason.encode!(%{
+          "request_id" => "req-1",
+          "type" => "content",
+          "payload" => %{"text" => "over-ws"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+      )
+
+    {frame_one, buffer} = recv_text_frame(socket, buffer)
+    {frame_two, _buffer} = recv_text_frame(socket, buffer)
+
+    frames = Enum.map([frame_one, frame_two], &Jason.decode!/1)
+    ack = Enum.find(frames, &Map.has_key?(&1, "op"))
+    event = Enum.find(frames, &(Map.has_key?(&1, "seq") and not Map.has_key?(&1, "op")))
+
+    assert ack["op"] == "append_ok"
+    assert ack["request_id"] == "req-1"
+    assert ack["seq"] == 1
+    assert ack["last_seq"] == 1
+    assert ack["deduped"] == false
+
+    assert event["seq"] == 1
+    assert event["type"] == "content"
+    assert event["payload"]["text"] == "over-ws"
+    assert String.ends_with?(event["inserted_at"], "Z")
+
+    :ok = :gen_tcp.close(socket)
+  end
+
   test "tail websocket closes with token_expired at JWT exp", %{
     port: port,
     private_key: private_key,
@@ -335,6 +392,46 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
   end
 
   defp parse_ws_frame(_buffer), do: :more
+
+  defp send_text_frame(socket, payload) when is_port(socket) and is_binary(payload) do
+    frame = client_text_frame(payload)
+    :gen_tcp.send(socket, frame)
+  end
+
+  defp client_text_frame(payload) when is_binary(payload) do
+    mask = :crypto.strong_rand_bytes(4)
+    length = byte_size(payload)
+    masked_payload = apply_mask(payload, mask)
+
+    case length do
+      len when len < 126 ->
+        [<<0x81, 0x80 ||| len>>, mask, masked_payload]
+
+      len when len < 65_536 ->
+        [<<0x81, 0x80 ||| 126, len::16>>, mask, masked_payload]
+
+      len ->
+        [<<0x81, 0x80 ||| 127, len::64>>, mask, masked_payload]
+    end
+  end
+
+  defp apply_mask(payload, <<m1, m2, m3, m4>>) when is_binary(payload) do
+    payload
+    |> :binary.bin_to_list()
+    |> Enum.with_index()
+    |> Enum.map(fn {byte, index} ->
+      mask_byte =
+        case rem(index, 4) do
+          0 -> m1
+          1 -> m2
+          2 -> m3
+          3 -> m4
+        end
+
+      Bitwise.bxor(byte, mask_byte)
+    end)
+    |> :erlang.list_to_binary()
+  end
 
   defp decode_close_payload(<<code::16, reason::binary>>), do: {code, reason}
   defp decode_close_payload(<<code::16>>), do: {code, ""}

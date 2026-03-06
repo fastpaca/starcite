@@ -34,6 +34,10 @@ JWT requirements for tail:
 - JWT `tenant_id` must match session tenant
 - if JWT has `session_id`, it must match `:id`
 
+Additional requirement for client append frames:
+
+- `session:append` scope
+
 Auth behavior:
 
 - missing/invalid/expired token: HTTP `401` during upgrade
@@ -48,6 +52,37 @@ On connect:
 1. Replay committed events where `seq > cursor`, in ascending order.
 2. Continue streaming newly committed events on the same socket.
 3. On reconnect, use the last processed `seq` as the next `cursor`.
+4. Clients may also send one append command per text frame on the same socket.
+
+Successful append frames are acknowledged immediately and then show up on the normal event
+stream after commit. Failed append frames return an error frame and leave the socket open.
+
+## Client frames
+
+To append over the websocket, send one JSON object per text frame using the same event
+shape accepted by `POST /v1/sessions/:id/append`.
+
+Optional websocket-only field:
+
+- `request_id` — echoed back in `append_ok` and `append_error` frames for client
+  correlation. It is not stored with the event.
+
+Example:
+
+```json
+{
+  "request_id": "req_123",
+  "type": "state",
+  "payload": { "state": "running" },
+  "producer_id": "writer_123",
+  "producer_seq": 8,
+  "source": "agent",
+  "metadata": { "role": "worker" },
+  "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
+  "idempotency_key": "run_123-step_8",
+  "expected_seq": 41
+}
+```
 
 ## Server frames
 
@@ -89,9 +124,32 @@ When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batc
 ]
 ```
 
+Successful append acknowledgements use a dedicated object:
+
+```json
+{
+  "op": "append_ok",
+  "request_id": "req_123",
+  "seq": 42,
+  "last_seq": 42,
+  "deduped": false
+}
+```
+
+Failed append acknowledgements use the same error codes/messages as the REST API:
+
+```json
+{
+  "op": "append_error",
+  "request_id": "req_123",
+  "error": "forbidden_scope",
+  "message": "Token scope does not allow this operation"
+}
+```
+
 Notes:
 
 - no `gap` event in the primary contract
 - no `tombstone` event in the primary contract
 - no `tail_synced` event
-- tail is server-to-client only; inbound client frames are ignored
+- non-text inbound frames are ignored

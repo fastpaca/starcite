@@ -33,6 +33,7 @@ defmodule StarciteWeb.TailController do
         StarciteWeb.TailSocket,
         %{
           session_id: id,
+          session: session,
           cursor: cursor,
           frame_batch_size: frame_batch_size,
           principal: auth.principal,

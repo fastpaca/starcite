@@ -2,16 +2,18 @@ defmodule StarciteWeb.TailSocket do
   @moduledoc """
   Raw WebSocket handler for session tails.
 
-  Emits JSON text frames for replay and live events.
+  Emits JSON text frames for replay/live events and append acknowledgements.
   """
 
   @behaviour WebSock
 
   alias Starcite.Auth.Principal
   alias Starcite.ReadPath
+  alias Starcite.Session
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.Context
+  alias StarciteWeb.SessionAppend
   alias Phoenix.PubSub
 
   @replay_batch_size 1_000
@@ -22,6 +24,7 @@ defmodule StarciteWeb.TailSocket do
   def init(
         %{
           session_id: session_id,
+          session: %Session{id: session_id} = session,
           cursor: cursor,
           principal: principal,
           auth_context: %Context{} = auth_context
@@ -36,6 +39,7 @@ defmodule StarciteWeb.TailSocket do
 
     state = %{
       session_id: session_id,
+      session: session,
       topic: topic,
       principal: principal,
       auth_context: auth_context,
@@ -58,10 +62,11 @@ defmodule StarciteWeb.TailSocket do
   end
 
   @impl true
-  def handle_in({_payload, opcode: _opcode}, state) do
-    # Tail socket is server->client only; inbound frames are ignored.
-    {:ok, state}
+  def handle_in({payload, opcode: :text}, state) when is_binary(payload) do
+    handle_text_frame(payload, state)
   end
+
+  def handle_in({_payload, opcode: _opcode}, state), do: {:ok, state}
 
   @impl true
   def handle_info(:drain_replay, state) do
@@ -99,6 +104,30 @@ defmodule StarciteWeb.TailSocket do
 
   @impl true
   def terminate(_reason, _state), do: :ok
+
+  defp handle_text_frame(
+         payload,
+         %{session_id: session_id, session: %Session{} = session, auth_context: %Context{} = auth} =
+           state
+       )
+       when is_binary(payload) and is_binary(session_id) and session_id != "" do
+    started_at = System.monotonic_time()
+
+    {request_id, result} =
+      case decode_append_request(payload) do
+        {:ok, params, request_id} ->
+          {request_id, SessionAppend.append(session_id, params, auth, session)}
+
+        {:error, request_id, reason} ->
+          {request_id, {:error, reason}}
+      end
+
+    duration_ms = elapsed_ms_since(started_at)
+    :ok = Telemetry.request(:append_event, :ack, append_request_outcome(result), duration_ms)
+    :ok = emit_append_edge_telemetry(auth, result)
+
+    {:push, {:text, encode_append_response(request_id, result)}, state}
+  end
 
   defp handle_cursor_update(%{seq: seq} = update, state)
        when is_integer(seq) and seq > 0 do
@@ -312,6 +341,28 @@ defmodule StarciteWeb.TailSocket do
     {:stop, :token_expired, {4001, "token_expired"}, state}
   end
 
+  defp decode_append_request(payload) when is_binary(payload) do
+    with {:ok, %{} = params} <- Jason.decode(payload),
+         {:ok, request_id} <- request_id_from_params(params) do
+      {:ok, params, request_id}
+    else
+      {:error, request_id, reason} ->
+        {:error, request_id, reason}
+
+      _other ->
+        {:error, nil, :invalid_event}
+    end
+  end
+
+  defp request_id_from_params(%{"request_id" => nil}), do: {:ok, nil}
+
+  defp request_id_from_params(%{"request_id" => request_id})
+       when is_binary(request_id) and request_id != "",
+       do: {:ok, request_id}
+
+  defp request_id_from_params(%{"request_id" => _request_id}), do: {:error, nil, :invalid_event}
+  defp request_id_from_params(%{}), do: {:ok, nil}
+
   defp auth_expires_at(%Context{expires_at: expires_at})
        when is_integer(expires_at) and expires_at > 0,
        do: expires_at
@@ -340,6 +391,41 @@ defmodule StarciteWeb.TailSocket do
               frame_batch_size >= @default_frame_batch_size do
     payload = encode_events_payload(events, frame_batch_size)
     {:push, {:text, payload}, state}
+  end
+
+  defp encode_append_response(
+         request_id,
+         {:ok, %{seq: seq, last_seq: last_seq, deduped: deduped}}
+       )
+       when is_integer(seq) and seq >= 0 and is_integer(last_seq) and last_seq >= 0 and
+              is_boolean(deduped) do
+    %{
+      "op" => "append_ok",
+      "seq" => seq,
+      "last_seq" => last_seq,
+      "deduped" => deduped
+    }
+    |> maybe_put_request_id(request_id)
+    |> Jason.encode!()
+  end
+
+  defp encode_append_response(request_id, error) do
+    {_status, code, message} = StarciteWeb.FallbackController.error_details(error)
+
+    %{
+      "op" => "append_error",
+      "error" => code,
+      "message" => message
+    }
+    |> maybe_put_request_id(request_id)
+    |> Jason.encode!()
+  end
+
+  defp maybe_put_request_id(payload, nil) when is_map(payload), do: payload
+
+  defp maybe_put_request_id(payload, request_id)
+       when is_map(payload) and is_binary(request_id) and request_id != "" do
+    Map.put(payload, "request_id", request_id)
   end
 
   defp encode_events_payload(events, frame_batch_size)
@@ -379,6 +465,32 @@ defmodule StarciteWeb.TailSocket do
 
   defp read_outcome({:ok, _result}), do: :ok
   defp read_outcome(_result), do: :error
+
+  defp append_request_outcome({:ok, _reply}), do: :ok
+  defp append_request_outcome({:timeout, _reason}), do: :timeout
+  defp append_request_outcome({:error, {:timeout, _reason}}), do: :timeout
+  defp append_request_outcome(_result), do: :error
+
+  defp emit_append_edge_telemetry(
+         %Context{principal: %Principal{tenant_id: tenant_id}},
+         {:ok, _reply}
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    Telemetry.ingest_edge(:append_event, tenant_id, :ok)
+  end
+
+  defp emit_append_edge_telemetry(
+         %Context{principal: %Principal{tenant_id: tenant_id}},
+         error
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    Telemetry.ingest_edge(
+      :append_event,
+      tenant_id,
+      :error,
+      StarciteWeb.SessionController.ingest_edge_error_reason(error)
+    )
+  end
 
   defp elapsed_ms_since(started_at) when is_integer(started_at) do
     System.monotonic_time()

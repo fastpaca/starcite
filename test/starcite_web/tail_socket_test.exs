@@ -4,9 +4,11 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Archive.Store
+  alias Starcite.ReadPath
   alias Starcite.WritePath
   alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
   alias Starcite.Repo
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.TailSocket
 
   setup do
@@ -35,6 +37,16 @@ defmodule StarciteWeb.TailSocketTest do
       auth_expires_at: nil,
       auth_expiry_timer_ref: nil
     }
+  end
+
+  defp append_state(session_id, tenant_id, scopes) do
+    {:ok, session} = ReadPath.get_session(session_id)
+    principal = principal_for_tenant(tenant_id)
+
+    base_state(session_id, 0, principal)
+    |> Map.put(:session, session)
+    |> Map.put(:auth_context, %Context{kind: :jwt, principal: principal, scopes: scopes})
+    |> Map.put(:replay_done, true)
   end
 
   defp drain_until_idle(state, frames \\ [], remaining \\ 20)
@@ -323,6 +335,168 @@ defmodule StarciteWeb.TailSocketTest do
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]
       assert final_state.cursor == 4
+    end
+  end
+
+  describe "inbound append frames" do
+    test "accepts append input and streams the committed event" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+      state = append_state(session_id, "acme", ["session:append"])
+
+      payload =
+        Jason.encode!(%{
+          "request_id" => "req-1",
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+
+      assert {:push, {:text, ack_payload}, next_state} =
+               TailSocket.handle_in({payload, opcode: :text}, state)
+
+      ack = Jason.decode!(ack_payload)
+      assert ack["op"] == "append_ok"
+      assert ack["request_id"] == "req-1"
+      assert ack["seq"] == 1
+      assert ack["last_seq"] == 1
+      assert ack["deduped"] == false
+      assert next_state.cursor == 0
+
+      {:ok, update} = cursor_update_for(session_id, 1)
+
+      assert {:push, {:text, event_payload}, streamed_state} =
+               TailSocket.handle_info({:cursor_update, update}, next_state)
+
+      event = Jason.decode!(event_payload)
+      assert event["seq"] == 1
+      assert event["type"] == "content"
+      assert event["actor"] == "service:tail-test"
+      assert event["payload"] == %{"text" => "hello"}
+      assert event["metadata"]["starcite_principal"]["tenant_id"] == "acme"
+      assert event["metadata"]["starcite_principal"]["actor"] == "service:tail-test"
+      assert streamed_state.cursor == 1
+    end
+
+    test "rejects append input when auth lacks append scope" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+      state = append_state(session_id, "acme", ["session:read"])
+
+      payload =
+        Jason.encode!(%{
+          "request_id" => "req-2",
+          "type" => "content",
+          "payload" => %{"text" => "blocked"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+
+      assert {:push, {:text, error_payload}, next_state} =
+               TailSocket.handle_in({payload, opcode: :text}, state)
+
+      error = Jason.decode!(error_payload)
+      assert error["op"] == "append_error"
+      assert error["request_id"] == "req-2"
+      assert error["error"] == "forbidden_scope"
+      assert error["message"] == "Token scope does not allow this operation"
+      assert next_state.cursor == 0
+
+      assert {:ok, []} = ReadPath.get_events_from_cursor(session_id, 0, 10)
+    end
+
+    test "returns a deduped ack when the same producer append repeats" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+      state = append_state(session_id, "acme", ["session:append"])
+
+      payload =
+        Jason.encode!(%{
+          "request_id" => "req-3",
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+
+      assert {:push, {:text, first_ack_payload}, state_after_first_ack} =
+               TailSocket.handle_in({payload, opcode: :text}, state)
+
+      first_ack = Jason.decode!(first_ack_payload)
+      assert first_ack["op"] == "append_ok"
+      assert first_ack["request_id"] == "req-3"
+      assert first_ack["deduped"] == false
+
+      deduped_payload =
+        Jason.encode!(%{
+          "request_id" => "req-4",
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+
+      assert {:push, {:text, second_ack_payload}, state_after_second_ack} =
+               TailSocket.handle_in({deduped_payload, opcode: :text}, state_after_first_ack)
+
+      second_ack = Jason.decode!(second_ack_payload)
+      assert second_ack["op"] == "append_ok"
+      assert second_ack["request_id"] == "req-4"
+      assert second_ack["seq"] == first_ack["seq"]
+      assert second_ack["last_seq"] == 1
+      assert second_ack["deduped"] == true
+      assert state_after_second_ack.cursor == 0
+
+      assert {:ok, [event]} = ReadPath.get_events_from_cursor(session_id, 0, 10)
+      assert event.seq == 1
+      assert event.payload == %{"text" => "hello"}
+      assert event.actor == "service:tail-test"
+    end
+
+    test "rejects websocket-specific request_id values that are not non-empty strings" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+      state = append_state(session_id, "acme", ["session:append"])
+
+      payload =
+        Jason.encode!(%{
+          "request_id" => 123,
+          "type" => "content",
+          "payload" => %{"text" => "bad"},
+          "producer_id" => "writer:test",
+          "producer_seq" => 1
+        })
+
+      assert {:push, {:text, error_payload}, next_state} =
+               TailSocket.handle_in({payload, opcode: :text}, state)
+
+      error = Jason.decode!(error_payload)
+      assert error["op"] == "append_error"
+      refute Map.has_key?(error, "request_id")
+      assert error["error"] == "invalid_event"
+      assert error["message"] == "Invalid event payload"
+      assert next_state.cursor == 0
+
+      assert {:ok, []} = ReadPath.get_events_from_cursor(session_id, 0, 10)
+    end
+
+    test "rejects malformed JSON append frames" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+      state = append_state(session_id, "acme", ["session:append"])
+
+      assert {:push, {:text, error_payload}, next_state} =
+               TailSocket.handle_in({"{", opcode: :text}, state)
+
+      error = Jason.decode!(error_payload)
+      assert error["op"] == "append_error"
+      refute Map.has_key?(error, "request_id")
+      assert error["error"] == "invalid_event"
+      assert error["message"] == "Invalid event payload"
+      assert next_state.cursor == 0
+
+      assert {:ok, []} = ReadPath.get_events_from_cursor(session_id, 0, 10)
     end
   end
 

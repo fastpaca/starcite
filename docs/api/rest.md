@@ -34,7 +34,8 @@ Scopes:
 
 - `session:create` for `POST /v1/sessions`
 - `session:read` for `GET /v1/sessions` and `GET /v1/sessions/:id/tail`
-- `session:append` for `POST /v1/sessions/:id/append`
+- `session:append` for `POST /v1/sessions/:id/append` and append frames sent over
+  `GET /v1/sessions/:id/tail`
 
 Unauthorized requests fail with `401`.
 
@@ -77,8 +78,14 @@ WebSocket upgrade for replay + live stream. See the
 - Optional `batch_size` (`1..1000`): when `M > 1`, server emits JSON array frames
   with up to `M` events per frame
 - Requires `session:read`
+- Sending append frames on the socket also requires `session:append`
 - Session must match JWT `tenant_id`
 - If JWT has `session_id`, `:id` must match it
+- Client text frames may carry one append payload using the same event fields accepted by
+  `POST /v1/sessions/:id/append`, plus an optional socket-only `request_id` used to
+  correlate acknowledgements
+- Successful websocket appends emit an `append_ok` frame and then the committed event on
+  the stream; failures emit an `append_error` frame and keep the socket open
 
 ### `GET /health/live` and `GET /health/ready`
 
