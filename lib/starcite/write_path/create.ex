@@ -103,9 +103,14 @@ defmodule Starcite.WritePath.Create do
 
     case result do
       {:ok, session} = ok ->
-        _ = SessionCatalog.persist_created(session, creator_principal, tenant_id, metadata)
-        :ok = Telemetry.session_create(id, tenant_id)
-        ok
+        # The archived session row is required before the first archive flush can
+        # advance archived_seq for this session, so do not silently continue if
+        # that write fails.
+        with :ok <-
+               SessionCatalog.persist_created(session, creator_principal, tenant_id, metadata) do
+          :ok = Telemetry.session_create(id, tenant_id)
+          ok
+        end
 
       other ->
         other

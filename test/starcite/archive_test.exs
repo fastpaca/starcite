@@ -31,6 +31,36 @@ defmodule Starcite.ArchiveTest do
     def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
   end
 
+  defmodule FailingSessionUpsertAdapter do
+    @behaviour Starcite.Archive.Adapter
+
+    use GenServer
+
+    @impl true
+    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{})
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
+
+    @impl true
+    def read_events(_session_id, _from_seq, _to_seq), do: {:ok, []}
+
+    @impl true
+    def upsert_session(_session), do: {:error, :archive_write_unavailable}
+
+    @impl true
+    def update_session_archived_seq(_session_id, _tenant_id, _archived_seq), do: :ok
+
+    @impl true
+    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+
+    @impl true
+    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
+  end
+
   alias Starcite.WritePath
   alias Starcite.Archive.Store
   alias Starcite.DataPlane.EventStore
@@ -468,6 +498,20 @@ defmodule Starcite.ArchiveTest do
   end
 
   describe "session freeze and hydrate" do
+    test "create_session fails when the authoritative session row cannot be persisted" do
+      with_app_env([archive_adapter: FailingSessionUpsertAdapter], fn ->
+        session_id = "ses-create-row-fail-#{System.unique_integer([:positive, :monotonic])}"
+
+        assert {:error, :archive_write_unavailable} =
+                 WritePath.create_session(
+                   id: session_id,
+                   title: "Draft",
+                   tenant_id: "acme",
+                   metadata: %{"workflow" => "legal"}
+                 )
+      end)
+    end
+
     test "create_session persists the authoritative session row before archive updates" do
       with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
         {:ok, _pid} =
