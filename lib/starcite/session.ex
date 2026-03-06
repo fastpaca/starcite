@@ -350,6 +350,24 @@ defmodule Starcite.Session do
     end
   end
 
+  defp optional_principal!(
+         %{tenant_id: tenant_id, id: id, type: type},
+         field
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
+              ((is_binary(type) and type != "") or type in [:user, :agent, :service]) do
+    type =
+      case type do
+        atom when atom in [:user, :agent, :service] -> atom
+        string when is_binary(string) -> principal_type!(string, field)
+      end
+
+    case Principal.new(tenant_id, id, type) do
+      {:ok, principal} -> principal
+      {:error, :invalid_principal} -> raise ArgumentError, "invalid session #{field}"
+    end
+  end
+
   defp optional_principal!(value, field) do
     raise ArgumentError, "invalid session #{field}: #{inspect(value)}"
   end

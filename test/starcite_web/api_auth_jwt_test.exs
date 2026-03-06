@@ -4,6 +4,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   import Plug.Conn
   import Plug.Test
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.JWKS
@@ -16,12 +17,31 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, StarciteWeb.Auth)
+    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
+    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
+
+    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
+    Application.put_env(:starcite, :archive_adapter_opts, [])
+    start_supervised!({IdempotentTestAdapter, []})
+    :ok = IdempotentTestAdapter.clear_writes()
 
     on_exit(fn ->
       if is_nil(previous_auth) do
         Application.delete_env(:starcite, StarciteWeb.Auth)
       else
         Application.put_env(:starcite, StarciteWeb.Auth, previous_auth)
+      end
+
+      if is_nil(previous_archive_adapter) do
+        Application.delete_env(:starcite, :archive_adapter)
+      else
+        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
+      end
+
+      if is_nil(previous_archive_adapter_opts) do
+        Application.delete_env(:starcite, :archive_adapter_opts)
+      else
+        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()

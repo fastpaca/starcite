@@ -5,12 +5,12 @@ defmodule Starcite.DataPlane.SessionStore do
   `SessionStore` serves session reads as hot/cold tiers:
 
   - hot: Cachex in-memory session cache
-  - cold: archive adapter lookup via `Starcite.Archive.Store`
+  - cold: archive session catalog lookup via `Starcite.Archive.SessionCatalog`
 
   Cache misses hydrate from archive and populate cache for follow-up reads.
   """
 
-  alias Starcite.Archive.Store
+  alias Starcite.Archive.SessionCatalog
   alias Starcite.Session
   import Cachex.Spec, only: [expiration: 1]
 
@@ -73,11 +73,22 @@ defmodule Starcite.DataPlane.SessionStore do
         {:ok, session}
 
       _ ->
-        load_session_from_archive(session_id)
+        fetch_session_from_archive(session_id, true)
     end
   end
 
   def get_session(_session_id), do: {:error, :invalid_session_id}
+
+  @doc """
+  Read one session directly from archive storage without consulting or updating
+  the hot cache.
+  """
+  @spec get_archived_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
+  def get_archived_session(session_id) when is_binary(session_id) and session_id != "" do
+    fetch_session_from_archive(session_id, false)
+  end
+
+  def get_archived_session(_session_id), do: {:error, :invalid_session_id}
 
   @doc """
   Delete one session by id.
@@ -201,46 +212,15 @@ defmodule Starcite.DataPlane.SessionStore do
     :ok
   end
 
-  defp load_session_from_archive(session_id)
-       when is_binary(session_id) and session_id != "" do
-    with {:ok, %{sessions: sessions}} when is_list(sessions) <-
-           Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
-         {:ok, %Session{} = session} <- session_from_archive_rows(session_id, sessions) do
-      :ok = cache_put(session_id, session)
+  defp fetch_session_from_archive(session_id, cache_result?)
+       when is_binary(session_id) and session_id != "" and is_boolean(cache_result?) do
+    with {:ok, %Session{} = session} <- SessionCatalog.get_session(session_id) do
+      if cache_result?, do: :ok = cache_put(session_id, session)
       {:ok, session}
     else
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp session_from_archive_rows(_session_id, []), do: {:error, :session_not_found}
-
-  defp session_from_archive_rows(session_id, [row | _rest]),
-    do: session_from_archive_row(session_id, row)
-
-  defp session_from_archive_row(
-         session_id,
-         %{
-           id: session_id,
-           title: title,
-           tenant_id: tenant_id,
-           creator_principal: creator_principal,
-           metadata: metadata
-         }
-       )
-       when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
-              is_map(metadata) and
-              (is_map(creator_principal) or is_nil(creator_principal)) do
-    {:ok,
-     Session.new(session_id,
-       title: title,
-       tenant_id: tenant_id,
-       creator_principal: creator_principal,
-       metadata: metadata
-     )}
-  end
-
-  defp session_from_archive_row(_session_id, _row), do: {:error, :archive_read_unavailable}
 
   defp session_entries do
     case Cachex.keys(@cache) do

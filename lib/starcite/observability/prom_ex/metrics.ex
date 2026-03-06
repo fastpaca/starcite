@@ -11,6 +11,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
       ingestion_metrics(),
       request_slo_metrics(),
       archive_metrics(),
+      session_metrics(),
       event_store_metrics()
     ]
   end
@@ -153,6 +154,32 @@ defmodule Starcite.Observability.PromEx.Metrics do
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
+        )
+      ]
+    )
+  end
+
+  defp session_metrics do
+    Event.build(
+      :starcite_session_lifecycle_metrics,
+      [
+        counter("starcite_session_create_total",
+          event_name: [:starcite, :session, :create],
+          measurement: :count,
+          description: "Total successfully created sessions",
+          tags: [:tenant_id]
+        ),
+        counter("starcite_session_freeze_total",
+          event_name: [:starcite, :session, :freeze],
+          measurement: :count,
+          description: "Session freeze outcomes",
+          tags: [:tenant_id, :outcome, :reason]
+        ),
+        counter("starcite_session_hydrate_total",
+          event_name: [:starcite, :session, :hydrate],
+          measurement: :count,
+          description: "Session hydrate outcomes",
+          tags: [:tenant_id, :outcome, :reason]
         )
       ]
     )

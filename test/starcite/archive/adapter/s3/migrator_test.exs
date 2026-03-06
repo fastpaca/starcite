@@ -86,7 +86,7 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
     {:ok, config: config, bucket: bucket, prefix: prefix}
   end
 
-  test "rewrites legacy session, index, and event chunk payloads", %{
+  test "rewrites legacy index and event chunk payloads", %{
     config: config,
     bucket: bucket,
     prefix: prefix
@@ -111,7 +111,7 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
              FakeClient.put_object(
                %{bucket: bucket},
                session_key,
-               Jason.encode!(%{
+               Schema.encode_session(%{
                  id: session_id,
                  title: "Legacy",
                  tenant_id: tenant_id,
@@ -121,6 +121,7 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
                    "tenant_id" => tenant_id
                  },
                  metadata: %{},
+                 archived_seq: 0,
                  created_at: "2026-01-01T00:00:00Z"
                })
              )
@@ -147,8 +148,8 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
     assert {:ok, stats} = Migrator.run(config)
     assert stats.index_migrations_needed == 1
     assert stats.index_rewritten == 1
-    assert stats.session_migrations_needed == 1
-    assert stats.session_rewritten == 1
+    assert stats.session_migrations_needed == 0
+    assert stats.session_rewritten == 0
     assert stats.event_migrations_needed == 1
     assert stats.event_rewritten == 1
 

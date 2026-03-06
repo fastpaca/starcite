@@ -82,16 +82,25 @@ defmodule Starcite.SessionTest do
                })
     end
 
-    test "rejects producer sequence gap" do
+    test "tracks first seen producer sequence and then enforces continuity" do
       session = Session.new("ses-1")
 
-      assert {:error, {:producer_seq_conflict, "writer-1", 1, 2}} =
+      {:appended, session, _event} =
+        Session.append_event(session, %{
+          type: "state",
+          payload: %{"state" => "running"},
+          actor: "agent:1",
+          producer_id: "writer-1",
+          producer_seq: 2
+        })
+
+      assert {:error, {:producer_seq_conflict, "writer-1", 3, 5}} =
                Session.append_event(session, %{
                  type: "state",
                  payload: %{"state" => "running"},
                  actor: "agent:1",
                  producer_id: "writer-1",
-                 producer_seq: 2
+                 producer_seq: 5
                })
     end
 

@@ -4,6 +4,7 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -17,6 +18,8 @@ defmodule StarciteWeb.SessionControllerTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
+    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
+    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
@@ -38,6 +41,11 @@ defmodule StarciteWeb.SessionControllerTest do
       jwks_refresh_ms: 1_000
     )
 
+    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
+    Application.put_env(:starcite, :archive_adapter_opts, [])
+    start_supervised!({IdempotentTestAdapter, []})
+    :ok = IdempotentTestAdapter.clear_writes()
+
     token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
 
@@ -46,6 +54,18 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.delete_env(:starcite, @auth_env_key)
       else
         Application.put_env(:starcite, @auth_env_key, previous_auth)
+      end
+
+      if is_nil(previous_archive_adapter) do
+        Application.delete_env(:starcite, :archive_adapter)
+      else
+        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
+      end
+
+      if is_nil(previous_archive_adapter_opts) do
+        Application.delete_env(:starcite, :archive_adapter_opts)
+      else
+        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()
@@ -272,6 +292,10 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert ids == [id1]
       assert body["next_cursor"] in [nil, id1]
+
+      Enum.each(body["sessions"], fn session ->
+        refute Map.has_key?(session["metadata"], "__starcite_runtime_v1")
+      end)
     end
 
     test "supports cursor pagination" do
@@ -485,9 +509,20 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body2["deduped"] == true
     end
 
-    test "producer sequence conflict returns 409" do
+    test "producer sequence conflict returns 409 after first seen producer sequence" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      first =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "state",
+          "payload" => %{"state" => "running"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2
+        })
+
+      assert first.status == 201
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -495,7 +530,7 @@ defmodule StarciteWeb.SessionControllerTest do
           "payload" => %{"state" => "running"},
           "actor" => "user:user-test",
           "producer_id" => "writer-1",
-          "producer_seq" => 2
+          "producer_seq" => 4
         })
 
       assert conn.status == 409

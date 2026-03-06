@@ -76,12 +76,16 @@ defmodule Starcite.Archive.Adapter.Postgres do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
-        created_at: %DateTime{} = created_at
+        archived_seq: archived_seq,
+        created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
-             is_struct(creator_principal, Principal) and
-             is_map(metadata) do
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
+             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
+             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
+    created_at = normalize_session_created_at(created_at)
+
     {_inserted, _} =
       Repo.insert_all(
         "sessions",
@@ -92,6 +96,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
             tenant_id: tenant_id,
             creator_principal: creator_principal,
             metadata: metadata,
+            archived_seq: archived_seq,
             created_at: created_at
           }
         ],
@@ -100,6 +105,21 @@ defmodule Starcite.Archive.Adapter.Postgres do
       )
 
     :ok
+  rescue
+    _ -> {:error, :archive_write_unavailable}
+  end
+
+  @impl true
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    sql = "UPDATE sessions SET archived_seq = $3 WHERE id = $1 AND tenant_id = $2"
+
+    case Repo.query(sql, [session_id, tenant_id, archived_seq]) do
+      {:ok, %{num_rows: 1}} -> :ok
+      {:ok, %{num_rows: 0}} -> {:error, :session_not_found}
+      {:error, _reason} -> {:error, :archive_write_unavailable}
+    end
   rescue
     _ -> {:error, :archive_write_unavailable}
   end
@@ -187,6 +207,17 @@ defmodule Starcite.Archive.Adapter.Postgres do
 
   defp normalize_inserted_at(%DateTime{} = datetime), do: DateTime.truncate(datetime, :second)
 
+  defp normalize_session_created_at(%DateTime{} = datetime) do
+    DateTime.truncate(datetime, :second)
+  end
+
+  defp normalize_session_created_at(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
+      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
+    end
+  end
+
   defp apply_cursor(query, nil), do: query
 
   defp apply_cursor(query, cursor) when is_binary(cursor) and cursor != "" do
@@ -267,6 +298,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
       tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
+      archived_seq: session.archived_seq || 0,
       created_at: DateTime.to_iso8601(session.created_at)
     }
   end

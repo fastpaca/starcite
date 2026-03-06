@@ -12,6 +12,7 @@ defmodule Mix.Tasks.Bench do
       mix bench hot-path
       mix bench routing
       mix bench internal
+      mix bench raft
       mix bench k6
       mix bench --help
   """
@@ -38,12 +39,13 @@ defmodule Mix.Tasks.Bench do
   defp parse_scenario(["hot-path"]), do: :hot_path
   defp parse_scenario(["routing"]), do: :routing
   defp parse_scenario(["internal"]), do: :internal
+  defp parse_scenario(["raft"]), do: :raft
   defp parse_scenario(["k6"]), do: :k6
 
   defp parse_scenario([value]) do
     Mix.raise("""
     unknown benchmark scenario: #{inspect(value)}
-    expected one of: hot-path, routing, internal, k6
+    expected one of: hot-path, routing, internal, raft, k6
     """)
   end
 
@@ -64,6 +66,11 @@ defmodule Mix.Tasks.Bench do
   defp run_scenario(:internal) do
     configure_local_archive_adapter()
     Mix.Tasks.Bench.Internal.run()
+  end
+
+  defp run_scenario(:raft) do
+    configure_local_archive_adapter()
+    Mix.Tasks.Bench.Raft.run()
   end
 
   defp run_scenario(:k6) do

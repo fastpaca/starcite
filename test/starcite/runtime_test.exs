@@ -258,7 +258,8 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
+               WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 3, 100)
       assert Enum.map(events, & &1.seq) == [4, 5]
@@ -302,7 +303,8 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
+               WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
@@ -324,14 +326,15 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
+               WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 2, 2)
       assert Enum.map(events, & &1.seq) == [3, 4]
     end
   end
 
-  describe "ack_archived/2" do
+  describe "ack_archived/1" do
     test "is idempotent for the same archive cursor" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -345,10 +348,14 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(id, 2)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 2, trimmed: 2}], failed: []}} =
+               WritePath.ack_archived(id, 2)
+
       assert EventStore.session_size(id) == 2
 
-      assert {:ok, %{archived_seq: 2, trimmed: 0}} = WritePath.ack_archived(id, 2)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 2, trimmed: 0}], failed: []}} =
+               WritePath.ack_archived(id, 2)
+
       assert EventStore.session_size(id) == 2
     end
 
@@ -365,8 +372,64 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 10_000)
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
+               WritePath.ack_archived(id, 10_000)
+
       assert EventStore.session_size(id) == 0
+    end
+
+    test "coalesces duplicate sessions to the highest archived cursor in one batch" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      for n <- 1..3 do
+        {:ok, _} =
+          append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
+               WritePath.ack_archived([{id, 1}, {id, 3}, {id, 2}])
+
+      assert EventStore.session_size(id) == 0
+    end
+
+    test "is best effort for missing sessions within a batch" do
+      first_id = unique_id("ses")
+      second_id = unique_id("ses")
+      missing_id = unique_id("ses-missing")
+
+      {:ok, _} = WritePath.create_session(id: first_id)
+      {:ok, _} = WritePath.create_session(id: second_id)
+
+      {:ok, _} =
+        append_event(first_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:1"
+        })
+
+      {:ok, _} =
+        append_event(second_id, %{
+          type: "content",
+          payload: %{text: "two"},
+          actor: "agent:1"
+        })
+
+      assert {:ok, %{applied: applied, failed: failed}} =
+               WritePath.ack_archived([{first_id, 1}, {missing_id, 1}, {second_id, 1}])
+
+      assert Enum.sort_by(applied, & &1.session_id) == [
+               %{session_id: first_id, archived_seq: 1, trimmed: 1},
+               %{session_id: second_id, archived_seq: 1, trimmed: 1}
+             ]
+
+      assert failed == [%{session_id: missing_id, reason: :session_not_found}]
+      assert EventStore.session_size(first_id) == 0
+      assert EventStore.session_size(second_id) == 0
     end
   end
 
@@ -578,12 +641,18 @@ defmodule Starcite.RuntimeTest do
       :ok
     end
 
-    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-      :ok -> :ok
-      {:already, _owner} -> :ok
+    checked_out? =
+      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+        :ok -> true
+        {:already, _owner} -> false
+      end
+
+    if checked_out? do
+      on_exit(fn ->
+        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
+      end)
     end
 
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
 end

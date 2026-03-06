@@ -91,6 +91,7 @@ defmodule Starcite.DataPlane.RaftPipelineClient do
   # Let the Ra leader coalesce hot append traffic into fewer log appends.
   defp command_priority({:append_event, _id, _event, _expected_seq}), do: :low
   defp command_priority({:append_events, _id, _events, _opts}), do: :low
+  defp command_priority({:ack_archived, entries}) when is_list(entries), do: :low
   defp command_priority({:ack_archived, _id, _upto_seq}), do: :low
   defp command_priority(_command), do: :normal
 end

@@ -9,6 +9,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
     handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
     request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
+    session_handler_id = "session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
 
     :ok =
@@ -31,9 +32,24 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
         test_pid
       )
 
+    :ok =
+      :telemetry.attach_many(
+        session_handler_id,
+        [
+          [:starcite, :session, :create],
+          [:starcite, :session, :freeze],
+          [:starcite, :session, :hydrate]
+        ],
+        fn event_name, measurements, metadata, pid ->
+          send(pid, {:session_event, event_name, measurements, metadata})
+        end,
+        test_pid
+      )
+
     on_exit(fn ->
       :telemetry.detach(handler_id)
       :telemetry.detach(request_handler_id)
+      :telemetry.detach(session_handler_id)
     end)
 
     :ok
@@ -136,6 +152,34 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
 
     assert_receive_raft_command(:append_event, :leader_retry_timeout, "acme")
+  end
+
+  test "create_session emits session lifecycle telemetry" do
+    id = unique_id("ses")
+    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
+
+    assert_receive {:session_event, [:starcite, :session, :create], %{count: 1},
+                    %{session_id: ^id, tenant_id: "acme"}},
+                   1_000
+  end
+
+  test "telemetry helper exposes freeze and hydrate dimensions" do
+    assert :ok = Telemetry.session_freeze("ses-1", "acme", :conflict, :freeze_conflict)
+
+    assert_receive {:session_event, [:starcite, :session, :freeze], %{count: 1},
+                    %{
+                      session_id: "ses-1",
+                      tenant_id: "acme",
+                      outcome: :conflict,
+                      reason: :freeze_conflict
+                    }},
+                   1_000
+
+    assert :ok = Telemetry.session_hydrate("ses-1", "acme", :ok, :hydrated)
+
+    assert_receive {:session_event, [:starcite, :session, :hydrate], %{count: 1},
+                    %{session_id: "ses-1", tenant_id: "acme", outcome: :ok, reason: :hydrated}},
+                   1_000
   end
 
   test "telemetry helper exposes write request dimensions" do

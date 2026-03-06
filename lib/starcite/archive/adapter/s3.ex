@@ -61,12 +61,14 @@ defmodule Starcite.Archive.Adapter.S3 do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
+        archived_seq: archived_seq,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
-             is_struct(creator_principal, Principal) and
-             is_map(metadata) do
+             (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
+             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
+             (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     config = config!()
 
     session = %{
@@ -75,6 +77,7 @@ defmodule Starcite.Archive.Adapter.S3 do
       tenant_id: tenant_id,
       creator_principal: creator_principal,
       metadata: metadata,
+      archived_seq: archived_seq,
       created_at: created_at
     }
 
@@ -85,6 +88,32 @@ defmodule Starcite.Archive.Adapter.S3 do
         {:error, :precondition_failed} -> :ok
         {:error, :unavailable} -> {:error, :archive_write_unavailable}
       end
+    end
+  end
+
+  @impl true
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    config = config!()
+
+    with {:ok, key, session} <- load_session_for_update(config, session_id, tenant_id),
+         updated_session <-
+           session
+           |> Map.put(:tenant_id, tenant_id)
+           |> Map.put(:archived_seq, archived_seq),
+         result <- put_session_by_key(config, key, updated_session) do
+      case result do
+        :ok -> :ok
+        {:error, :unavailable} -> {:error, :archive_write_unavailable}
+        {:error, _reason} -> {:error, :archive_write_unavailable}
+      end
+    else
+      {:error, :unavailable} ->
+        {:error, :archive_write_unavailable}
+
+      {:error, _reason} ->
+        {:error, :archive_write_unavailable}
     end
   end
 
@@ -275,6 +304,42 @@ defmodule Starcite.Archive.Adapter.S3 do
     )
   end
 
+  defp put_session_by_key(config, key, session)
+       when is_binary(key) and key != "" and is_map(session) do
+    body = Schema.encode_session(session)
+
+    client(config).put_object(config, key, body, content_type: "application/json")
+  end
+
+  defp load_session_for_update(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    config
+    |> session_keys_for_id(tenant_id, session_id)
+    |> Enum.reduce_while({:ok, nil, nil}, fn key, _acc ->
+      case load_session(key, config) do
+        {:ok, nil} ->
+          {:cont, {:ok, nil, nil}}
+
+        {:ok, session} ->
+          {:halt, {:ok, key, session}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, key, session} when is_binary(key) and is_map(session) ->
+        {:ok, key, session}
+
+      {:error, _reason} = error ->
+        error
+
+      _ ->
+        {:error, :session_not_found}
+    end
+  end
+
   defp put_session_tenant_index(config, session_id, tenant_id)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" do
@@ -378,8 +443,8 @@ defmodule Starcite.Archive.Adapter.S3 do
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
               session_id != "" do
     [
-      Layout.legacy_session_key(config, session_id),
-      Layout.session_key(config, tenant_id, session_id)
+      Layout.session_key(config, tenant_id, session_id),
+      Layout.legacy_session_key(config, session_id)
     ]
   end
 

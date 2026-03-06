@@ -444,6 +444,53 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit a successful session create event.
+  """
+  @spec session_create(String.t(), String.t()) :: :ok
+  def session_create(session_id, tenant_id)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    execute_if_enabled(
+      [:starcite, :session, :create],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit one session freeze outcome.
+  """
+  @spec session_freeze(String.t(), String.t(), :ok | :conflict | :error, atom()) :: :ok
+  def session_freeze(session_id, tenant_id, outcome, reason)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             outcome in [:ok, :conflict, :error] and is_atom(reason) do
+    execute_if_enabled(
+      [:starcite, :session, :freeze],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id, outcome: outcome, reason: reason}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit one session hydrate outcome.
+  """
+  @spec session_hydrate(String.t(), String.t(), :ok | :error, atom()) :: :ok
+  def session_hydrate(session_id, tenant_id, outcome, reason)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             outcome in [:ok, :error] and is_atom(reason) do
+    execute_if_enabled(
+      [:starcite, :session, :hydrate],
+      %{count: 1},
+      %{session_id: session_id, tenant_id: tenant_id, outcome: outcome, reason: reason}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:

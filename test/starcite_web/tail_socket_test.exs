@@ -235,7 +235,11 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 1)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
+
+      assert {:ok,
+              %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}} =
+               WritePath.ack_archived(session_id, 1)
+
       assert :error = EventStore.get_event(session_id, 1)
 
       update = %{
@@ -288,8 +292,7 @@ defmodule StarciteWeb.TailSocketTest do
 
       eventually(fn ->
         {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-        {:ok, session} = RaftAccess.query_session(server_id, session_id)
-        assert session.archived_seq == 1
+        assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
         assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)
 
@@ -318,7 +321,10 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 2)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
+
+      assert {:ok,
+              %{applied: [%{session_id: ^session_id, archived_seq: 2, trimmed: 2}], failed: []}} =
+               WritePath.ack_archived(session_id, 2)
 
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]
@@ -552,12 +558,18 @@ defmodule StarciteWeb.TailSocketTest do
       :ok
     end
 
-    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-      :ok -> :ok
-      {:already, _owner} -> :ok
+    checked_out? =
+      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+        :ok -> true
+        {:already, _owner} -> false
+      end
+
+    if checked_out? do
+      on_exit(fn ->
+        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
+      end)
     end
 
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
 end
