@@ -4,6 +4,7 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -40,8 +41,10 @@ defmodule StarciteWeb.SessionControllerTest do
       jwks_refresh_ms: 1_000
     )
 
-    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
+    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
     Application.put_env(:starcite, :archive_adapter_opts, [])
+    start_supervised!({IdempotentTestAdapter, []})
+    :ok = IdempotentTestAdapter.clear_writes()
 
     token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
