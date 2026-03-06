@@ -5,8 +5,6 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.Archive.Store
-  alias Starcite.Session.RuntimeSnapshot
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
 
@@ -19,6 +17,8 @@ defmodule StarciteWeb.SessionControllerTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
+    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
+    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
@@ -40,6 +40,9 @@ defmodule StarciteWeb.SessionControllerTest do
       jwks_refresh_ms: 1_000
     )
 
+    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
+    Application.put_env(:starcite, :archive_adapter_opts, [])
+
     token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
 
@@ -48,6 +51,18 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.delete_env(:starcite, @auth_env_key)
       else
         Application.put_env(:starcite, @auth_env_key, previous_auth)
+      end
+
+      if is_nil(previous_archive_adapter) do
+        Application.delete_env(:starcite, :archive_adapter)
+      else
+        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
+      end
+
+      if is_nil(previous_archive_adapter_opts) do
+        Application.delete_env(:starcite, :archive_adapter_opts)
+      else
+        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()
@@ -261,33 +276,6 @@ defmodule StarciteWeb.SessionControllerTest do
                  metadata: %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker}
                )
 
-      :ok =
-        archive_session!(
-          id1,
-          "acme",
-          %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"},
-          %{"user_id" => "u1", "tenant_id" => "acme", "marker" => marker},
-          "A"
-        )
-
-      :ok =
-        archive_session!(
-          id2,
-          "acme",
-          %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"},
-          %{"user_id" => "u2", "tenant_id" => "acme", "marker" => marker},
-          "B"
-        )
-
-      :ok =
-        archive_session!(
-          id3,
-          "beta",
-          %{"tenant_id" => "beta", "id" => "service", "type" => "service"},
-          %{"user_id" => "u1", "tenant_id" => "beta", "marker" => marker},
-          nil
-        )
-
       conn =
         json_conn(
           :get,
@@ -301,6 +289,10 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert ids == [id1]
       assert body["next_cursor"] in [nil, id1]
+
+      Enum.each(body["sessions"], fn session ->
+        refute Map.has_key?(session["metadata"], "__starcite_runtime_v1")
+      end)
     end
 
     test "supports cursor pagination" do
@@ -317,24 +309,6 @@ defmodule StarciteWeb.SessionControllerTest do
                    "metadata" => %{"marker" => marker}
                  })
                ).status
-
-      :ok =
-        archive_session!(
-          id1,
-          "acme",
-          %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"},
-          %{"marker" => marker},
-          nil
-        )
-
-      :ok =
-        archive_session!(
-          id2,
-          "acme",
-          %{"tenant_id" => "acme", "id" => "user-test", "type" => "user"},
-          %{"marker" => marker},
-          nil
-        )
 
       assert 201 ==
                json_conn(
@@ -637,29 +611,6 @@ defmodule StarciteWeb.SessionControllerTest do
       assert conn.status == 409
       assert_receive_ingest_edge(:append_event, :error, :seq_conflict, "acme")
     end
-  end
-
-  defp archive_session!(session_id, tenant_id, creator_principal, metadata, title)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and
-              is_map(creator_principal) and is_map(metadata) and
-              (is_binary(title) or is_nil(title)) do
-    snapshot = %RuntimeSnapshot{
-      archived_seq: 0,
-      tail_keep: Application.get_env(:starcite, :tail_keep, 1_000),
-      producer_max_entries: Application.get_env(:starcite, :producer_max_entries, 10_000)
-    }
-
-    row = %{
-      id: session_id,
-      title: title,
-      tenant_id: tenant_id,
-      creator_principal: creator_principal,
-      metadata: RuntimeSnapshot.put_in_metadata(metadata, snapshot),
-      created_at: DateTime.utc_now() |> DateTime.truncate(:second)
-    }
-
-    assert :ok = Store.upsert_session(row)
   end
 
   defp token_for(private_key, kid, overrides)

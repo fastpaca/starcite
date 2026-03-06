@@ -239,9 +239,7 @@ defmodule Mix.Tasks.Bench.Raft do
             context.config.hydrate_archived_seq,
             context.config.hydrate_archived_seq,
             @default_tail_keep,
-            @default_producer_max_entries,
-            %{},
-            0
+            @default_producer_max_entries
           },
           timeout_ms
         )

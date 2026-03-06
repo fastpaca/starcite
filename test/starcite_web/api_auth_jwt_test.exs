@@ -5,8 +5,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.Archive.Store
-  alias Starcite.Session.RuntimeSnapshot
   alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.JWKS
 
@@ -18,12 +16,29 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, StarciteWeb.Auth)
+    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
+    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
+
+    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
+    Application.put_env(:starcite, :archive_adapter_opts, [])
 
     on_exit(fn ->
       if is_nil(previous_auth) do
         Application.delete_env(:starcite, StarciteWeb.Auth)
       else
         Application.put_env(:starcite, StarciteWeb.Auth, previous_auth)
+      end
+
+      if is_nil(previous_archive_adapter) do
+        Application.delete_env(:starcite, :archive_adapter)
+      else
+        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
+      end
+
+      if is_nil(previous_archive_adapter_opts) do
+        Application.delete_env(:starcite, :archive_adapter_opts)
+      else
+        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()
@@ -135,7 +150,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     create_conn = json_conn(:post, "/v1/sessions", %{"id" => session_id}, [auth_header])
     assert create_conn.status == 201
-    :ok = archive_session_catalog!(session_id, "acme")
 
     append_conn =
       json_conn(
@@ -287,9 +301,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert 201 ==
              json_conn(:post, "/v1/sessions", %{"id" => blocked_session_id}, [service_header]).status
-
-    :ok = archive_session_catalog!(allowed_session_id, "acme")
-    :ok = archive_session_catalog!(blocked_session_id, "acme")
 
     scoped_token =
       token_for(private_key, kid, %{
@@ -482,26 +493,5 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   defp unique_id(prefix) do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
-  end
-
-  defp archive_session_catalog!(session_id, tenant_id)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" do
-    snapshot = %RuntimeSnapshot{
-      archived_seq: 0,
-      tail_keep: Application.get_env(:starcite, :tail_keep, 1_000),
-      producer_max_entries: Application.get_env(:starcite, :producer_max_entries, 10_000)
-    }
-
-    row = %{
-      id: session_id,
-      title: nil,
-      tenant_id: tenant_id,
-      creator_principal: %{"tenant_id" => tenant_id, "id" => "service", "type" => "service"},
-      metadata: RuntimeSnapshot.put_in_metadata(%{}, snapshot),
-      created_at: DateTime.utc_now() |> DateTime.truncate(:second)
-    }
-
-    assert :ok = Store.upsert_session(row)
   end
 end

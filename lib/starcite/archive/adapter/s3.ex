@@ -84,6 +84,7 @@ defmodule Starcite.Archive.Adapter.S3 do
          result <- put_session(config, tenant_id, id, session) do
       case result do
         :ok -> :ok
+        {:error, :precondition_failed} -> :ok
         {:error, :unavailable} -> {:error, :archive_write_unavailable}
       end
     end
@@ -95,15 +96,14 @@ defmodule Starcite.Archive.Adapter.S3 do
              tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
     config = config!()
 
-    with :ok <- put_session_tenant_index(config, session_id, tenant_id),
-         {:ok, session} <- load_session_for_update(config, session_id, tenant_id),
+    with {:ok, key, session} <- load_session_for_update(config, session_id, tenant_id),
          metadata <- session.metadata,
-         updated_metadata <- update_runtime_metadata(metadata, archived_seq),
+         {:ok, updated_metadata} <- update_runtime_metadata(metadata, archived_seq),
          updated_session <-
            session
            |> Map.put(:tenant_id, tenant_id)
            |> Map.put(:metadata, updated_metadata),
-         result <- put_session(config, tenant_id, session_id, updated_session) do
+         result <- put_session_by_key(config, key, updated_session) do
       case result do
         :ok -> :ok
         {:error, :unavailable} -> {:error, :archive_write_unavailable}
@@ -308,6 +308,16 @@ defmodule Starcite.Archive.Adapter.S3 do
     key = Layout.session_key(config, tenant_id, session_id)
     body = Schema.encode_session(session)
 
+    client(config).put_object(config, key, body,
+      content_type: "application/json",
+      if_none_match: "*"
+    )
+  end
+
+  defp put_session_by_key(config, key, session)
+       when is_binary(key) and key != "" and is_map(session) do
+    body = Schema.encode_session(session)
+
     client(config).put_object(config, key, body, content_type: "application/json")
   end
 
@@ -316,72 +326,42 @@ defmodule Starcite.Archive.Adapter.S3 do
               tenant_id != "" do
     config
     |> session_keys_for_id(tenant_id, session_id)
-    |> Enum.reduce_while({:ok, nil}, fn key, _acc ->
+    |> Enum.reduce_while({:ok, nil, nil}, fn key, _acc ->
       case load_session(key, config) do
         {:ok, nil} ->
-          {:cont, {:ok, nil}}
+          {:cont, {:ok, nil, nil}}
 
         {:ok, session} ->
-          {:halt, {:ok, session}}
+          {:halt, {:ok, key, session}}
 
         {:error, _reason} = error ->
           {:halt, error}
       end
     end)
     |> case do
-      {:ok, nil} ->
-        {:ok, default_session_payload(session_id, tenant_id)}
-
-      {:ok, session} ->
-        {:ok, session}
+      {:ok, key, session} when is_binary(key) and is_map(session) ->
+        {:ok, key, session}
 
       {:error, _reason} = error ->
         error
+
+      _ ->
+        {:error, :session_not_found}
     end
   end
 
   defp update_runtime_metadata(metadata, archived_seq)
        when is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 do
-    snapshot =
-      case RuntimeSnapshot.decode_from_metadata(metadata) do
-        {:ok, %RuntimeSnapshot{} = existing} ->
-          %RuntimeSnapshot{existing | archived_seq: archived_seq}
+    case RuntimeSnapshot.decode_from_metadata(metadata) do
+      {:ok, %RuntimeSnapshot{} = existing} ->
+        {:ok,
+         RuntimeSnapshot.put_in_metadata(metadata, %RuntimeSnapshot{
+           existing
+           | archived_seq: archived_seq
+         })}
 
-        _other ->
-          %RuntimeSnapshot{
-            archived_seq: archived_seq,
-            tail_keep: tail_keep(),
-            producer_max_entries: producer_max_entries()
-          }
-      end
-
-    RuntimeSnapshot.put_in_metadata(metadata, snapshot)
-  end
-
-  defp default_session_payload(session_id, tenant_id)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" do
-    %{
-      id: session_id,
-      title: nil,
-      tenant_id: tenant_id,
-      creator_principal: %{"tenant_id" => tenant_id, "id" => "service", "type" => "service"},
-      metadata: %{},
-      created_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
-    }
-  end
-
-  defp tail_keep do
-    case Application.get_env(:starcite, :tail_keep, 1_000) do
-      value when is_integer(value) and value > 0 -> value
-      _ -> 1_000
-    end
-  end
-
-  defp producer_max_entries do
-    case Application.get_env(:starcite, :producer_max_entries, 10_000) do
-      value when is_integer(value) and value > 0 -> value
-      _ -> 10_000
+      {:error, _reason} ->
+        {:error, :session_not_found}
     end
   end
 
@@ -488,8 +468,8 @@ defmodule Starcite.Archive.Adapter.S3 do
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
               session_id != "" do
     [
-      Layout.legacy_session_key(config, session_id),
-      Layout.session_key(config, tenant_id, session_id)
+      Layout.session_key(config, tenant_id, session_id),
+      Layout.legacy_session_key(config, session_id)
     ]
   end
 

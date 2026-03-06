@@ -246,16 +246,6 @@ defmodule Starcite.Archive.Adapter.S3Test do
                created_at: created_at
              })
 
-    assert :ok =
-             S3.upsert_session(%{
-               id: "ses-a",
-               title: "A-updated",
-               tenant_id: "acme",
-               creator_principal: principal_for_tenant("acme"),
-               metadata: %{"updated" => true},
-               created_at: created_at
-             })
-
     assert {:error, :archive_write_unavailable} =
              S3.upsert_session(%{
                id: "ses-a",
@@ -291,9 +281,8 @@ defmodule Starcite.Archive.Adapter.S3Test do
       (page_1.sessions ++ page_2.sessions)
       |> Enum.find(&(&1.id == "ses-a"))
 
-    assert session_a.title == "A-updated"
+    assert session_a.title == "A"
     assert session_a.tenant_id == "acme"
-    assert session_a.metadata == %{"updated" => true}
 
     assert {:ok, by_ids} =
              S3.list_sessions_by_ids(

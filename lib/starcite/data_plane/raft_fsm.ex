@@ -11,7 +11,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
 
-  @machine_version 2
+  @machine_version 1
 
   @checkpoint_interval_entries Application.compile_env(
                                  :starcite,
@@ -19,20 +19,19 @@ defmodule Starcite.DataPlane.RaftFSM do
                                  2_048
                                )
 
-  defstruct [:group_id, :sessions, :poll_epoch, :last_checkpoint_index]
+  defstruct [:group_id, :sessions, :last_checkpoint_index]
 
   @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
 
   @type t :: %__MODULE__{
           group_id: term(),
           sessions: %{optional(String.t()) => session_state()},
-          poll_epoch: non_neg_integer(),
           last_checkpoint_index: non_neg_integer() | nil
         }
 
   @impl true
   def init(%{group_id: group_id}) do
-    %__MODULE__{group_id: group_id, sessions: %{}, poll_epoch: 0, last_checkpoint_index: nil}
+    %__MODULE__{group_id: group_id, sessions: %{}, last_checkpoint_index: nil}
   end
 
   @impl true
@@ -40,8 +39,6 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   @impl true
   def which_module(0), do: __MODULE__
-
-  def which_module(1), do: __MODULE__
 
   def which_module(@machine_version), do: __MODULE__
 
@@ -58,8 +55,6 @@ defmodule Starcite.DataPlane.RaftFSM do
         {:create_session, session_id, title, creator_principal, tenant_id, metadata},
         state
       ) do
-    poll_epoch = Map.get(state, :poll_epoch, 0)
-
     case Map.get(state.sessions, session_id) do
       nil ->
         session =
@@ -67,8 +62,7 @@ defmodule Starcite.DataPlane.RaftFSM do
             title: title,
             creator_principal: creator_principal,
             tenant_id: tenant_id,
-            metadata: metadata,
-            last_progress_poll: poll_epoch
+            metadata: metadata
           )
 
         new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
@@ -90,12 +84,9 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   @impl true
   def apply(meta, {:append_event, session_id, input, expected_seq}, state) do
-    poll_epoch = Map.get(state, :poll_epoch, 0)
-
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq),
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
-      updated_session = maybe_mark_progress(updated_session, event_to_store, poll_epoch)
       :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
@@ -118,12 +109,9 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(meta, {:append_events, session_id, inputs, opts}, state)
       when is_list(inputs) and (is_list(opts) or is_nil(opts)) do
-    poll_epoch = Map.get(state, :poll_epoch, 0)
-
     with {:ok, session} <- fetch_session(state.sessions, session_id),
          :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
-      updated_session = maybe_mark_progress(updated_session, events_to_store, poll_epoch)
       :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
       new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
@@ -202,8 +190,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   def apply(
         meta,
         {:hydrate_session, session_id, title, creator_principal, tenant_id, metadata, inserted_at,
-         last_seq, archived_seq, tail_keep, producer_max_entries, _producer_cursors,
-         _last_progress_poll},
+         last_seq, archived_seq, tail_keep, producer_max_entries},
         state
       ) do
     case Map.get(state.sessions, session_id) do
@@ -211,8 +198,6 @@ defmodule Starcite.DataPlane.RaftFSM do
         reply_with_optional_effects(meta, state, {:reply, {:ok, :already_hot}})
 
       nil ->
-        poll_epoch = Map.get(state, :poll_epoch, 0)
-
         session =
           Session.new(session_id,
             title: title,
@@ -221,9 +206,7 @@ defmodule Starcite.DataPlane.RaftFSM do
             metadata: metadata,
             timestamp: inserted_at,
             tail_keep: tail_keep,
-            producer_max_entries: producer_max_entries,
-            last_progress_poll: poll_epoch,
-            last_hydrated_poll: poll_epoch
+            producer_max_entries: producer_max_entries
           )
 
         hydrated = %Session{
@@ -241,7 +224,7 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(_meta, {:machine_version, from, to}, state)
       when is_integer(from) and is_integer(to) do
-    {migrate_state(state), :ok}
+    {ensure_state_schema(state), :ok}
   end
 
   # Queries
@@ -281,14 +264,6 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   defp expected_seq_from_opts(nil), do: nil
   defp expected_seq_from_opts(opts) when is_list(opts), do: opts[:expected_seq]
-
-  defp maybe_mark_progress(%Session{} = session, nil, _poll_epoch), do: session
-  defp maybe_mark_progress(%Session{} = session, [], _poll_epoch), do: session
-
-  defp maybe_mark_progress(%Session{} = session, _event_or_events, poll_epoch)
-       when is_integer(poll_epoch) and poll_epoch >= 0 do
-    %Session{session | last_progress_poll: poll_epoch}
-  end
 
   defp evict_session_after_ack?(%Session{} = session, previous_archived_seq)
        when is_integer(previous_archived_seq) and previous_archived_seq >= 0 do
@@ -416,13 +391,7 @@ defmodule Starcite.DataPlane.RaftFSM do
     end
   end
 
-  defp migrate_state(%__MODULE__{} = state) do
-    poll_epoch =
-      case Map.get(state, :poll_epoch) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> 0
-      end
-
+  defp ensure_state_schema(%__MODULE__{} = state) do
     last_checkpoint_index =
       case Map.get(state, :last_checkpoint_index) do
         value when is_integer(value) and value >= 0 -> value
@@ -430,38 +399,14 @@ defmodule Starcite.DataPlane.RaftFSM do
       end
 
     sessions =
-      case state.sessions do
-        sessions when is_map(sessions) ->
-          Enum.into(sessions, %{}, fn {session_id, session} ->
-            {session_id, migrate_session(session, poll_epoch)}
-          end)
-
-        _ ->
-          %{}
+      case Map.get(state, :sessions) do
+        value when is_map(value) -> value
+        _ -> %{}
       end
 
     state
-    |> Map.put(:poll_epoch, poll_epoch)
     |> Map.put(:last_checkpoint_index, last_checkpoint_index)
     |> Map.put(:sessions, sessions)
-  end
-
-  defp migrate_session(%Session{} = session, poll_epoch) do
-    last_progress_poll =
-      case Map.get(session, :last_progress_poll) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> poll_epoch
-      end
-
-    last_hydrated_poll =
-      case Map.get(session, :last_hydrated_poll) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> nil
-      end
-
-    session
-    |> Map.put(:last_progress_poll, last_progress_poll)
-    |> Map.put(:last_hydrated_poll, last_hydrated_poll)
   end
 
   defp build_effects_for_events(_session_id, []), do: []

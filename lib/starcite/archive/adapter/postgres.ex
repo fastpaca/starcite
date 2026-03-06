@@ -99,15 +99,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
             created_at: created_at
           }
         ],
-        on_conflict: [
-          set: [
-            title: title,
-            tenant_id: tenant_id,
-            creator_principal: creator_principal,
-            metadata: metadata,
-            created_at: created_at
-          ]
-        ],
+        on_conflict: :nothing,
         conflict_target: [:id]
       )
 
@@ -120,26 +112,25 @@ defmodule Starcite.Archive.Adapter.Postgres do
   def update_session_archived_seq(session_id, tenant_id, archived_seq)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
              tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
-    metadata = %{RuntimeSnapshot.metadata_key() => runtime_snapshot_payload(archived_seq)}
-    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
-    creator_principal = %{"tenant_id" => tenant_id, "id" => "service", "type" => "service"}
     runtime_key = RuntimeSnapshot.metadata_key()
 
     sql = """
-    INSERT INTO sessions (id, title, tenant_id, creator_principal, metadata, created_at)
-    VALUES ($1, NULL, $2, $3, $4, $5)
-    ON CONFLICT (id) DO UPDATE
-    SET tenant_id = EXCLUDED.tenant_id,
-        metadata = jsonb_set(
-          COALESCE(sessions.metadata, '{}'::jsonb),
-          '{#{runtime_key}}',
-          (EXCLUDED.metadata->'#{runtime_key}'),
-          true
-        )
+    UPDATE sessions
+    SET metadata = jsonb_set(
+      metadata,
+      '{#{runtime_key},archived_seq}',
+      to_jsonb($3::bigint),
+      false
+    )
+    WHERE id = $1
+      AND tenant_id = $2
+      AND jsonb_typeof(metadata) = 'object'
+      AND jsonb_typeof(metadata->'#{runtime_key}') = 'object'
     """
 
-    case Repo.query(sql, [session_id, tenant_id, creator_principal, metadata, created_at]) do
-      {:ok, _result} -> :ok
+    case Repo.query(sql, [session_id, tenant_id, archived_seq]) do
+      {:ok, %{num_rows: 1}} -> :ok
+      {:ok, %{num_rows: 0}} -> {:error, :session_not_found}
       {:error, _reason} -> {:error, :archive_write_unavailable}
     end
   rescue
@@ -311,29 +302,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
   defp normalize_session_rows(rows) when is_list(rows) do
     rows
     |> Enum.map(&to_session_row/1)
-  end
-
-  defp runtime_snapshot_payload(archived_seq)
-       when is_integer(archived_seq) and archived_seq >= 0 do
-    RuntimeSnapshot.encode(%RuntimeSnapshot{
-      archived_seq: archived_seq,
-      tail_keep: tail_keep(),
-      producer_max_entries: producer_max_entries()
-    })
-  end
-
-  defp tail_keep do
-    case Application.get_env(:starcite, :tail_keep, 1_000) do
-      value when is_integer(value) and value > 0 -> value
-      _ -> 1_000
-    end
-  end
-
-  defp producer_max_entries do
-    case Application.get_env(:starcite, :producer_max_entries, 10_000) do
-      value when is_integer(value) and value > 0 -> value
-      _ -> 10_000
-    end
   end
 
   defp to_session_row(%SessionRecord{} = session) do

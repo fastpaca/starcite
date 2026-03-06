@@ -15,37 +15,10 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   end
 
   test "declares raft machine version mapping" do
-    assert RaftFSM.version() == 2
+    assert RaftFSM.version() == 1
     assert RaftFSM.which_module(0) == RaftFSM
     assert RaftFSM.which_module(1) == RaftFSM
-    assert RaftFSM.which_module(2) == RaftFSM
     assert_raise ArgumentError, fn -> RaftFSM.which_module(99) end
-  end
-
-  test "machine_version command migrates legacy state schema" do
-    legacy_session =
-      Starcite.Session.new("ses-legacy",
-        creator_principal: %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user},
-        tenant_id: "acme"
-      )
-      |> Map.delete(:last_progress_poll)
-
-    legacy_state =
-      RaftFSM.init(%{group_id: 7})
-      |> Map.delete(:last_checkpoint_index)
-      |> Map.delete(:poll_epoch)
-      |> Map.put(:sessions, %{"ses-legacy" => legacy_session})
-
-    refute Map.has_key?(legacy_state, :last_checkpoint_index)
-    refute Map.has_key?(legacy_state, :poll_epoch)
-
-    {migrated_state, :ok} =
-      RaftFSM.apply(%{index: 1}, {:machine_version, 1, 2}, legacy_state)
-
-    assert Map.has_key?(migrated_state, :last_checkpoint_index)
-    assert migrated_state.last_checkpoint_index == nil
-    assert migrated_state.poll_epoch == 0
-    assert migrated_state.sessions["ses-legacy"].last_progress_poll == 0
   end
 
   test "ack_archived evicts drained sessions and hydrate resets producer cursors" do
@@ -64,14 +37,6 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
 
     assert {:error, :session_not_found} = RaftFSM.query_session(state, session_id)
 
-    producer_cursors = %{
-      "writer:test" => %{
-        producer_seq: 1,
-        session_seq: 1,
-        hash: <<1, 2, 3, 4>>
-      }
-    }
-
     inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 
     {state, {:reply, {:ok, :hydrated}}} =
@@ -79,22 +44,19 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         nil,
         {:hydrate_session, session_id, "Hydrated",
          %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme",
-         %{"source" => "archive"}, inserted_at, 1, 1, 1000, 10_000, producer_cursors, 0},
+         %{"source" => "archive"}, inserted_at, 1, 1, 1000, 10_000},
         state
       )
 
     assert {:ok, hydrated} = RaftFSM.query_session(state, session_id)
     assert hydrated.last_seq == 1
     assert hydrated.archived_seq == 1
-    assert hydrated.last_hydrated_poll == 0
-    assert hydrated.last_progress_poll == 0
     assert hydrated.producer_cursors == %{}
 
     {_, {:reply, {:ok, :already_hot}}} =
       RaftFSM.apply(
         nil,
-        {:hydrate_session, session_id, nil, nil, "acme", %{}, inserted_at, 1, 1, 1000, 10_000,
-         %{}, 0},
+        {:hydrate_session, session_id, nil, nil, "acme", %{}, inserted_at, 1, 1, 1000, 10_000},
         state
       )
   end

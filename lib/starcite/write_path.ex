@@ -124,7 +124,8 @@ defmodule Starcite.WritePath do
       end
 
     case result do
-      {:ok, _session} = ok ->
+      {:ok, session} = ok ->
+        _ = maybe_index_session(session, creator_principal, tenant_id)
         # Warm local session cache so immediate same-node reads stay on the RAM path.
         _ = maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
         :ok = Telemetry.session_create(id, tenant_id)
@@ -273,6 +274,42 @@ defmodule Starcite.WritePath do
 
   defp maybe_cache_session(_id, _title, _creator_principal, _tenant_id, _metadata), do: :ok
 
+  defp maybe_index_session(
+         %{
+           id: id,
+           title: title,
+           metadata: metadata,
+           created_at: created_at
+         },
+         creator_principal,
+         tenant_id
+       )
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
+              is_map(metadata) do
+    snapshot = %RuntimeSnapshot{
+      archived_seq: 0,
+      tail_keep: Application.get_env(:starcite, :tail_keep, 1_000),
+      producer_max_entries: Application.get_env(:starcite, :producer_max_entries, 10_000)
+    }
+
+    row = %{
+      id: id,
+      title: title,
+      creator_principal: creator_principal,
+      tenant_id: tenant_id,
+      metadata: RuntimeSnapshot.put_in_metadata(metadata, snapshot),
+      created_at: parse_utc_datetime!(created_at)
+    }
+
+    case Store.upsert_session(row) do
+      :ok -> :ok
+      {:error, _reason} -> :ok
+    end
+  end
+
+  defp maybe_index_session(_session, _creator_principal, _tenant_id), do: :ok
+
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do
     route_opts = [prefer_leader: false]
@@ -398,25 +435,23 @@ defmodule Starcite.WritePath do
          created_at: created_at
        })
        when is_binary(session_id) and session_id != "" and (is_binary(title) or is_nil(title)) and
-              is_binary(tenant_id) and tenant_id != "" and
-              (is_map(creator_principal) or is_struct(creator_principal, Principal)) and
-              is_map(metadata) do
+              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
     with {:ok, inserted_at} <- parse_inserted_at(created_at),
+         {:ok, normalized_creator_principal} <-
+           normalize_snapshot_creator_principal(creator_principal),
          {:ok, runtime} <- RuntimeSnapshot.decode_from_metadata(metadata) do
       {:ok,
        %{
          session_id: session_id,
          title: title,
-         creator_principal: creator_principal,
+         creator_principal: normalized_creator_principal,
          tenant_id: tenant_id,
          metadata: RuntimeSnapshot.drop_from_metadata(metadata),
          inserted_at: inserted_at,
          last_seq: runtime.archived_seq,
          archived_seq: runtime.archived_seq,
          tail_keep: runtime.tail_keep,
-         producer_max_entries: runtime.producer_max_entries,
-         producer_cursors: %{},
-         last_progress_poll: 0
+         producer_max_entries: runtime.producer_max_entries
        }}
     end
   end
@@ -441,6 +476,32 @@ defmodule Starcite.WritePath do
 
   defp parse_inserted_at(_value), do: {:error, :invalid_snapshot}
 
+  defp normalize_snapshot_creator_principal(%Principal{} = creator_principal),
+    do: {:ok, creator_principal}
+
+  defp normalize_snapshot_creator_principal(%{
+         "tenant_id" => tenant_id,
+         "id" => id,
+         "type" => type
+       })
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" do
+    case normalize_snapshot_principal_type(type) do
+      {:ok, normalized_type} -> Principal.new(tenant_id, id, normalized_type)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp normalize_snapshot_creator_principal(_creator_principal), do: {:error, :invalid_snapshot}
+
+  defp normalize_snapshot_principal_type(type) when type in [:user, :agent, :service],
+    do: {:ok, type}
+
+  defp normalize_snapshot_principal_type("user"), do: {:ok, :user}
+  defp normalize_snapshot_principal_type("agent"), do: {:ok, :agent}
+  defp normalize_snapshot_principal_type("service"), do: {:ok, :service}
+  defp normalize_snapshot_principal_type("svc"), do: {:ok, :service}
+  defp normalize_snapshot_principal_type(_type), do: {:error, :invalid_snapshot}
+
   defp hydrate_command(%{
          session_id: session_id,
          title: title,
@@ -451,13 +512,10 @@ defmodule Starcite.WritePath do
          last_seq: last_seq,
          archived_seq: archived_seq,
          tail_keep: tail_keep,
-         producer_max_entries: producer_max_entries,
-         producer_cursors: producer_cursors,
-         last_progress_poll: last_progress_poll
+         producer_max_entries: producer_max_entries
        }) do
     {:hydrate_session, session_id, title, creator_principal, tenant_id, metadata, inserted_at,
-     last_seq, archived_seq, tail_keep, producer_max_entries, producer_cursors,
-     last_progress_poll}
+     last_seq, archived_seq, tail_keep, producer_max_entries}
   end
 
   defp normalize_hydrate_reason(reason) when is_atom(reason), do: reason
@@ -497,6 +555,15 @@ defmodule Starcite.WritePath do
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)
+  end
+
+  defp parse_utc_datetime!(%DateTime{} = datetime), do: datetime
+
+  defp parse_utc_datetime!(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      {:error, reason} -> raise ArgumentError, "invalid datetime: #{inspect(reason)}"
+    end
   end
 
   defp generate_session_id do

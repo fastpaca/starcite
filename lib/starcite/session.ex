@@ -19,7 +19,6 @@ defmodule Starcite.Session do
     :tenant_id,
     :last_seq,
     :archived_seq,
-    :last_progress_poll,
     :inserted_at,
     :retention,
     :producer_cursors
@@ -32,8 +31,6 @@ defmodule Starcite.Session do
     :metadata,
     :last_seq,
     :archived_seq,
-    :last_progress_poll,
-    :last_hydrated_poll,
     :inserted_at,
     :retention,
     :producer_cursors
@@ -47,8 +44,6 @@ defmodule Starcite.Session do
           metadata: map(),
           last_seq: non_neg_integer(),
           archived_seq: non_neg_integer(),
-          last_progress_poll: non_neg_integer(),
-          last_hydrated_poll: non_neg_integer() | nil,
           inserted_at: NaiveDateTime.t(),
           retention: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()},
           producer_cursors: ProducerIndex.t()
@@ -63,13 +58,6 @@ defmodule Starcite.Session do
   @spec new(String.t(), keyword()) :: t()
   def new(id, opts \\ []) when is_binary(id) do
     now = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
-    last_progress_poll = resolve_last_progress_poll!(Keyword.get(opts, :last_progress_poll, 0))
-
-    last_hydrated_poll =
-      resolve_optional_non_neg_integer!(
-        Keyword.get(opts, :last_hydrated_poll),
-        :last_hydrated_poll
-      )
 
     creator_principal =
       optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal)
@@ -98,8 +86,6 @@ defmodule Starcite.Session do
       metadata: Keyword.get(opts, :metadata, %{}),
       last_seq: 0,
       archived_seq: 0,
-      last_progress_poll: last_progress_poll,
-      last_hydrated_poll: last_hydrated_poll,
       inserted_at: now,
       retention: %{tail_keep: tail_keep, producer_max_entries: producer_max_entries},
       producer_cursors: %{}
@@ -407,21 +393,5 @@ defmodule Starcite.Session do
 
   defp resolve_tenant_id!(value, _creator_principal) do
     raise ArgumentError, "invalid session tenant_id: #{inspect(value)}"
-  end
-
-  defp resolve_last_progress_poll!(value) when is_integer(value) and value >= 0, do: value
-
-  defp resolve_last_progress_poll!(value) do
-    raise ArgumentError, "invalid session last_progress_poll: #{inspect(value)}"
-  end
-
-  defp resolve_optional_non_neg_integer!(nil, _field), do: nil
-
-  defp resolve_optional_non_neg_integer!(value, _field)
-       when is_integer(value) and value >= 0,
-       do: value
-
-  defp resolve_optional_non_neg_integer!(value, field) do
-    raise ArgumentError, "invalid session #{field}: #{inspect(value)}"
   end
 end

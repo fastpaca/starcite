@@ -102,303 +102,305 @@ defmodule Starcite.ArchiveTest do
 
   describe "archive idempotency" do
     test "duplicate writes are idempotent" do
-      # Start Archive with test adapter that tracks writes
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 50,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
+        {:ok, _} = WritePath.create_session(id: session_id)
+
+        for i <- 1..3 do
+          {:ok, _} =
+            append_event(session_id, %{
+              type: "content",
+              payload: %{text: "msg#{i}"},
+              actor: "agent:test"
+            })
+        end
+
+        eventually(
+          fn ->
+            writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+            assert length(writes) >= 3
+          end,
+          timeout: 2_000
         )
 
-      session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = WritePath.create_session(id: session_id)
+        _first_count = length(Starcite.Archive.IdempotentTestAdapter.get_writes())
+        Process.sleep(100)
 
-      for i <- 1..3 do
-        {:ok, _} =
-          append_event(session_id, %{
-            type: "content",
-            payload: %{text: "msg#{i}"},
-            actor: "agent:test"
-          })
-      end
+        eventually(
+          fn ->
+            writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
 
-      # Wait for first flush
-      eventually(
-        fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
-          assert length(writes) >= 3
-        end,
-        timeout: 2_000
-      )
+            unique_keys =
+              writes
+              |> Enum.map(fn row -> {row.session_id, row.seq} end)
+              |> Enum.uniq()
 
-      _first_count = length(Starcite.Archive.IdempotentTestAdapter.get_writes())
-
-      # Trigger another flush cycle by waiting
-      Process.sleep(100)
-
-      # The adapter should have the same unique events (idempotent)
-      eventually(
-        fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
-
-          unique_keys =
-            writes
-            |> Enum.map(fn row -> {row.session_id, row.seq} end)
-            |> Enum.uniq()
-
-          # Should have exactly 3 unique events regardless of flush count
-          assert length(unique_keys) == 3
-        end,
-        timeout: 1_000
-      )
+            assert length(unique_keys) == 3
+          end,
+          timeout: 1_000
+        )
+      end)
     end
 
     test "retried writes succeed without duplicates" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 50,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
 
-      session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = WritePath.create_session(id: session_id)
+        session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
+        {:ok, _} = WritePath.create_session(id: session_id)
 
-      # Append same logical event multiple times (simulating retry scenario)
-      {:ok, _} =
-        append_event(session_id, %{
-          type: "content",
-          payload: %{text: "retry-msg"},
-          actor: "agent:test"
-        })
-
-      eventually(
-        fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
-
-          matching =
-            Enum.filter(writes, fn row ->
-              row.session_id == session_id and row.seq == 1
-            end)
-
-          # Should have exactly one event with seq=1 for this session
-          unique_matching = Enum.uniq_by(matching, fn row -> {row.session_id, row.seq} end)
-          assert length(unique_matching) == 1
-        end,
-        timeout: 2_000
-      )
-    end
-
-    test "archive respects sequence ordering" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
-
-      session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = WritePath.create_session(id: session_id)
-
-      # Append events in order
-      for i <- 1..5 do
         {:ok, _} =
           append_event(session_id, %{
             type: "content",
-            payload: %{text: "msg#{i}"},
+            payload: %{text: "retry-msg"},
             actor: "agent:test"
           })
-      end
 
-      eventually(
-        fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+        eventually(
+          fn ->
+            writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
 
-          session_writes =
-            writes
-            |> Enum.filter(fn row -> row.session_id == session_id end)
-            |> Enum.sort_by(fn row -> row.seq end)
+            matching =
+              Enum.filter(writes, fn row ->
+                row.session_id == session_id and row.seq == 1
+              end)
 
-          seqs = Enum.map(session_writes, & &1.seq)
-          # Should have sequences 1-5 in order
-          assert Enum.take(Enum.uniq(seqs), 5) == [1, 2, 3, 4, 5]
-        end,
-        timeout: 2_000
-      )
+            unique_matching = Enum.uniq_by(matching, fn row -> {row.session_id, row.seq} end)
+            assert length(unique_matching) == 1
+          end,
+          timeout: 2_000
+        )
+      end)
+    end
+
+    test "archive respects sequence ordering" do
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 50,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
+        {:ok, _} = WritePath.create_session(id: session_id)
+
+        for i <- 1..5 do
+          {:ok, _} =
+            append_event(session_id, %{
+              type: "content",
+              payload: %{text: "msg#{i}"},
+              actor: "agent:test"
+            })
+        end
+
+        eventually(
+          fn ->
+            writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+
+            session_writes =
+              writes
+              |> Enum.filter(fn row -> row.session_id == session_id end)
+              |> Enum.sort_by(fn row -> row.seq end)
+
+            seqs = Enum.map(session_writes, & &1.seq)
+            assert Enum.take(Enum.uniq(seqs), 5) == [1, 2, 3, 4, 5]
+          end,
+          timeout: 2_000
+        )
+      end)
     end
   end
 
   describe "pull-mode behavior" do
     test "interleaves flush order across tenants within a tick" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 10_000,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        :ok = IdempotentTestAdapter.clear_writes()
+
+        acme_a = "ses-acme-a-#{System.unique_integer([:positive, :monotonic])}"
+        acme_b = "ses-acme-b-#{System.unique_integer([:positive, :monotonic])}"
+        beta_a = "ses-beta-a-#{System.unique_integer([:positive, :monotonic])}"
+        beta_b = "ses-beta-b-#{System.unique_integer([:positive, :monotonic])}"
+
+        tenant_by_session = %{
+          acme_a => "acme",
+          acme_b => "acme",
+          beta_a => "beta",
+          beta_b => "beta"
+        }
+
+        for {session_id, tenant_id} <- tenant_by_session do
+          {:ok, _} = WritePath.create_session(id: session_id, tenant_id: tenant_id)
+
+          {:ok, _} =
+            append_event(session_id, %{
+              type: "content",
+              payload: %{text: "#{tenant_id}:#{session_id}"},
+              actor: "agent:test"
+            })
+        end
+
+        send(Starcite.Archive, :flush_tick)
+
+        eventually(
+          fn ->
+            first_batches =
+              IdempotentTestAdapter.get_write_batches()
+              |> Enum.take(4)
+
+            assert length(first_batches) == 4
+            assert Enum.all?(first_batches, &(length(&1) == 1))
+
+            tenant_sequence =
+              first_batches
+              |> Enum.map(fn [row] -> Map.fetch!(tenant_by_session, row.session_id) end)
+
+            assert tenant_sequence == ["acme", "beta", "acme", "beta"]
+          end,
+          timeout: 2_000
         )
-
-      :ok = IdempotentTestAdapter.clear_writes()
-
-      acme_a = "ses-acme-a-#{System.unique_integer([:positive, :monotonic])}"
-      acme_b = "ses-acme-b-#{System.unique_integer([:positive, :monotonic])}"
-      beta_a = "ses-beta-a-#{System.unique_integer([:positive, :monotonic])}"
-      beta_b = "ses-beta-b-#{System.unique_integer([:positive, :monotonic])}"
-
-      tenant_by_session = %{
-        acme_a => "acme",
-        acme_b => "acme",
-        beta_a => "beta",
-        beta_b => "beta"
-      }
-
-      for {session_id, tenant_id} <- tenant_by_session do
-        {:ok, _} = WritePath.create_session(id: session_id, tenant_id: tenant_id)
-
-        {:ok, _} =
-          append_event(session_id, %{
-            type: "content",
-            payload: %{text: "#{tenant_id}:#{session_id}"},
-            actor: "agent:test"
-          })
-      end
-
-      send(Starcite.Archive, :flush_tick)
-
-      eventually(
-        fn ->
-          first_batches =
-            IdempotentTestAdapter.get_write_batches()
-            |> Enum.take(4)
-
-          assert length(first_batches) == 4
-          assert Enum.all?(first_batches, &(length(&1) == 1))
-
-          tenant_sequence =
-            first_batches
-            |> Enum.map(fn [row] -> Map.fetch!(tenant_by_session, row.session_id) end)
-
-          assert tenant_sequence == ["acme", "beta", "acme", "beta"]
-        end,
-        timeout: 2_000
-      )
+      end)
     end
 
     test "archives pending work across multiple sessions in one scan loop" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 10_000,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        :ok = IdempotentTestAdapter.clear_writes()
+
+        session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
+        session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
+
+        {:ok, _} = WritePath.create_session(id: session_a)
+        {:ok, _} = WritePath.create_session(id: session_b)
+
+        for i <- 1..3 do
+          {:ok, _} =
+            append_event(session_a, %{
+              type: "content",
+              payload: %{text: "a#{i}"},
+              actor: "agent:test"
+            })
+
+          {:ok, _} =
+            append_event(session_b, %{
+              type: "content",
+              payload: %{text: "b#{i}"},
+              actor: "agent:test"
+            })
+        end
+
+        send(Starcite.Archive, :flush_tick)
+
+        eventually(
+          fn ->
+            {:ok, server_a, _group_a} = RaftAccess.locate_and_ensure_started(session_a)
+            assert {:error, :session_not_found} = RaftAccess.query_session(server_a, session_a)
+
+            {:ok, server_b, _group_b} = RaftAccess.locate_and_ensure_started(session_b)
+            assert {:error, :session_not_found} = RaftAccess.query_session(server_b, session_b)
+
+            writes = IdempotentTestAdapter.get_writes()
+            written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
+
+            assert written_sessions == Enum.sort([session_a, session_b])
+          end,
+          timeout: 2_000
         )
-
-      :ok = IdempotentTestAdapter.clear_writes()
-
-      session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
-      session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
-
-      {:ok, _} = WritePath.create_session(id: session_a)
-      {:ok, _} = WritePath.create_session(id: session_b)
-
-      for i <- 1..3 do
-        {:ok, _} =
-          append_event(session_a, %{
-            type: "content",
-            payload: %{text: "a#{i}"},
-            actor: "agent:test"
-          })
-
-        {:ok, _} =
-          append_event(session_b, %{
-            type: "content",
-            payload: %{text: "b#{i}"},
-            actor: "agent:test"
-          })
-      end
-
-      send(Starcite.Archive, :flush_tick)
-
-      eventually(
-        fn ->
-          {:ok, server_a, _group_a} = RaftAccess.locate_and_ensure_started(session_a)
-          assert {:error, :session_not_found} = RaftAccess.query_session(server_a, session_a)
-
-          {:ok, server_b, _group_b} = RaftAccess.locate_and_ensure_started(session_b)
-          assert {:error, :session_not_found} = RaftAccess.query_session(server_b, session_b)
-
-          writes = IdempotentTestAdapter.get_writes()
-          written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
-
-          assert written_sessions == Enum.sort([session_a, session_b])
-        end,
-        timeout: 2_000
-      )
+      end)
     end
 
     test "respects archive batch size per flush tick and converges over repeated ticks" do
-      old_batch_size = Application.get_env(:starcite, :archive_batch_size)
-      Application.put_env(:starcite, :archive_batch_size, 2)
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        old_batch_size = Application.get_env(:starcite, :archive_batch_size)
+        Application.put_env(:starcite, :archive_batch_size, 2)
 
-      on_exit(fn ->
-        if old_batch_size do
-          Application.put_env(:starcite, :archive_batch_size, old_batch_size)
-        else
-          Application.delete_env(:starcite, :archive_batch_size)
+        on_exit(fn ->
+          if old_batch_size do
+            Application.put_env(:starcite, :archive_batch_size, old_batch_size)
+          else
+            Application.delete_env(:starcite, :archive_batch_size)
+          end
+        end)
+
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 10_000,
+             adapter: Starcite.Archive.IdempotentTestAdapter,
+             adapter_opts: []}
+          )
+
+        :ok = IdempotentTestAdapter.clear_writes()
+
+        session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
+        {:ok, _} = WritePath.create_session(id: session_id)
+
+        for i <- 1..5 do
+          {:ok, _} =
+            append_event(session_id, %{
+              type: "content",
+              payload: %{text: "m#{i}"},
+              actor: "agent:test"
+            })
         end
-      end)
 
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
+        send(Starcite.Archive, :flush_tick)
+
+        eventually(
+          fn ->
+            [first_batch | _] = IdempotentTestAdapter.get_write_batches()
+            assert length(first_batch) == 2
+          end,
+          timeout: 1_500
         )
 
-      :ok = IdempotentTestAdapter.clear_writes()
+        send(Starcite.Archive, :flush_tick)
+        send(Starcite.Archive, :flush_tick)
 
-      session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
-      {:ok, _} = WritePath.create_session(id: session_id)
+        eventually(
+          fn ->
+            {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
+            assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
 
-      for i <- 1..5 do
-        {:ok, _} =
-          append_event(session_id, %{
-            type: "content",
-            payload: %{text: "m#{i}"},
-            actor: "agent:test"
-          })
-      end
+            batch_sizes =
+              IdempotentTestAdapter.get_write_batches()
+              |> Enum.map(&length/1)
 
-      send(Starcite.Archive, :flush_tick)
-
-      eventually(
-        fn ->
-          [first_batch | _] = IdempotentTestAdapter.get_write_batches()
-          assert length(first_batch) == 2
-        end,
-        timeout: 1_500
-      )
-
-      send(Starcite.Archive, :flush_tick)
-      send(Starcite.Archive, :flush_tick)
-
-      eventually(
-        fn ->
-          {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-          assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
-
-          batch_sizes =
-            IdempotentTestAdapter.get_write_batches()
-            |> Enum.map(&length/1)
-
-          assert batch_sizes == [2, 2, 1]
-        end,
-        timeout: 2_000
-      )
+            assert batch_sizes == [2, 2, 1]
+          end,
+          timeout: 2_000
+        )
+      end)
     end
 
     test "continues archiving new writes after a full ETS compaction" do
@@ -467,15 +469,42 @@ defmodule Starcite.ArchiveTest do
   end
 
   describe "session freeze and hydrate" do
+    test "create_session persists the authoritative session row before archive updates" do
+      with_app_env([archive_adapter: IdempotentTestAdapter], fn ->
+        {:ok, _pid} =
+          start_supervised(
+            {Starcite.Archive,
+             flush_interval_ms: 10_000, adapter: IdempotentTestAdapter, adapter_opts: []}
+          )
+
+        :ok = IdempotentTestAdapter.clear_writes()
+
+        session_id = "ses-create-row-#{System.unique_integer([:positive, :monotonic])}"
+        creator_principal = %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}
+
+        assert {:ok, _session} =
+                 WritePath.create_session(
+                   id: session_id,
+                   title: "Draft",
+                   creator_principal: creator_principal,
+                   tenant_id: "acme",
+                   metadata: %{"workflow" => "legal"}
+                 )
+
+        session_row = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
+        runtime_key = RuntimeSnapshot.metadata_key()
+
+        assert session_row.title == "Draft"
+        assert session_row.tenant_id == "acme"
+        assert session_row.creator_principal == creator_principal
+        assert session_row.metadata["workflow"] == "legal"
+        assert session_row.metadata[runtime_key]["archived_seq"] == 0
+      end)
+    end
+
     test "freezes drained session and hydrates on next append" do
       with_app_env(
-        [
-          archive_adapter: IdempotentTestAdapter,
-          session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10,
-          session_freeze_hydrate_grace_polls: 0
-        ],
+        [archive_adapter: IdempotentTestAdapter],
         fn ->
           {:ok, _pid} =
             start_supervised(
@@ -486,7 +515,21 @@ defmodule Starcite.ArchiveTest do
           :ok = IdempotentTestAdapter.clear_writes()
 
           session_id = "ses-freeze-#{System.unique_integer([:positive, :monotonic])}"
-          {:ok, _} = WritePath.create_session(id: session_id)
+
+          creator_principal = %Starcite.Auth.Principal{
+            tenant_id: "acme",
+            id: "user-1",
+            type: :user
+          }
+
+          {:ok, _} =
+            WritePath.create_session(
+              id: session_id,
+              title: "Draft",
+              creator_principal: creator_principal,
+              tenant_id: "acme",
+              metadata: %{"workflow" => "legal"}
+            )
 
           assert {:ok, first_reply} =
                    append_event(session_id, %{
@@ -523,6 +566,9 @@ defmodule Starcite.ArchiveTest do
             fn ->
               {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
               assert {:ok, session} = RaftAccess.query_session(server_id, session_id)
+              assert session.title == "Draft"
+              assert session.creator_principal == creator_principal
+              assert session.metadata == %{"workflow" => "legal"}
               assert session.last_seq == 2
               assert session.archived_seq == 1
             end,
@@ -534,13 +580,7 @@ defmodule Starcite.ArchiveTest do
 
     test "repeated freeze-hydrate loops keep contiguous sequence without cursor restoration" do
       with_app_env(
-        [
-          archive_adapter: IdempotentTestAdapter,
-          session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10,
-          session_freeze_hydrate_grace_polls: 0
-        ],
+        [archive_adapter: IdempotentTestAdapter],
         fn ->
           {:ok, _pid} =
             start_supervised(
@@ -631,13 +671,7 @@ defmodule Starcite.ArchiveTest do
 
     test "hydrate fails when runtime snapshot schema is incomplete" do
       with_app_env(
-        [
-          archive_adapter: IdempotentTestAdapter,
-          session_freeze_enabled: true,
-          session_freeze_min_idle_polls: 1,
-          session_freeze_max_batch_size: 10,
-          session_freeze_hydrate_grace_polls: 0
-        ],
+        [archive_adapter: IdempotentTestAdapter],
         fn ->
           {:ok, _pid} =
             start_supervised(
