@@ -125,65 +125,13 @@ defmodule Starcite.DataPlane.RaftFSM do
   end
 
   @impl true
+  def apply(meta, {:ack_archived, entries}, state) when is_list(entries) and entries != [] do
+    apply_ack_archived_batch(meta, entries, state)
+  end
+
+  @impl true
   def apply(meta, {:ack_archived, session_id, upto_seq}, state) do
-    with {:ok, session} <- fetch_session(state.sessions, session_id) do
-      previous_archived_seq = session.archived_seq
-      {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
-      session_evicted? = evict_session_after_ack?(updated_session, previous_archived_seq)
-
-      new_sessions =
-        if session_evicted? do
-          Map.delete(state.sessions, session_id)
-        else
-          Map.put(state.sessions, session_id, updated_session)
-        end
-
-      new_state = %{state | sessions: new_sessions}
-
-      evicted =
-        evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
-
-      tail_size = Session.tail_size(updated_session)
-      tenant_id = updated_session.tenant_id
-
-      Starcite.Observability.Telemetry.archive_ack_applied(
-        session_id,
-        tenant_id,
-        updated_session.last_seq,
-        updated_session.archived_seq,
-        evicted,
-        updated_session.retention.tail_keep,
-        tail_size
-      )
-
-      if session_evicted? do
-        :ok =
-          Starcite.Observability.Telemetry.session_freeze(
-            session_id,
-            tenant_id,
-            :ok,
-            :archive_ack
-          )
-      end
-
-      reply = {:reply, {:ok, %{archived_seq: updated_session.archived_seq, trimmed: evicted}}}
-
-      effects =
-        case release_cursor_effect(
-               meta,
-               previous_archived_seq,
-               updated_session.archived_seq,
-               new_state
-             ) do
-          nil -> []
-          effect -> [effect]
-        end
-
-      reply_with_optional_effects(meta, new_state, reply, effects)
-    else
-      {:error, reason} ->
-        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
-    end
+    apply_ack_archived_batch(meta, [{session_id, upto_seq}], state)
   end
 
   @impl true
@@ -280,19 +228,103 @@ defmodule Starcite.DataPlane.RaftFSM do
     EventStore.delete_below(session_id, updated_archived_seq + 1)
   end
 
-  defp release_cursor_effect(
-         %{index: raft_index},
-         previous_archived_seq,
-         updated_archived_seq,
-         %__MODULE__{} = state
-       )
-       when is_integer(raft_index) and raft_index > 0 and
-              updated_archived_seq > previous_archived_seq do
+  defp release_cursor_effect(%{index: raft_index}, true, %__MODULE__{} = state)
+       when is_integer(raft_index) and raft_index > 0 do
     {:release_cursor, raft_index, state}
   end
 
-  defp release_cursor_effect(_meta, _previous_archived_seq, _updated_archived_seq, _state),
-    do: nil
+  defp release_cursor_effect(_meta, _archived_advanced?, _state), do: nil
+
+  defp apply_ack_archived_batch(meta, entries, state)
+       when is_list(entries) and entries != [] do
+    {new_state, applied, failed, archived_advanced?} =
+      Enum.reduce(entries, {state, [], [], false}, fn entry,
+                                                      {state_acc, applied_acc, failed_acc,
+                                                       archived_advanced_acc} ->
+        case apply_ack_archived_entry(entry, state_acc) do
+          {:ok, next_state, applied_entry, archived_advanced?} ->
+            {next_state, [applied_entry | applied_acc], failed_acc,
+             archived_advanced_acc or archived_advanced?}
+
+          {:error, next_state, failed_entry} ->
+            {next_state, applied_acc, [failed_entry | failed_acc], archived_advanced_acc}
+        end
+      end)
+
+    reply =
+      {:reply, {:ok, %{applied: Enum.reverse(applied), failed: Enum.reverse(failed)}}}
+
+    effects =
+      case release_cursor_effect(meta, archived_advanced?, new_state) do
+        nil -> []
+        effect -> [effect]
+      end
+
+    reply_with_optional_effects(meta, new_state, reply, effects)
+  end
+
+  defp apply_ack_archived_entry(
+         {session_id, upto_seq},
+         %__MODULE__{sessions: sessions} = state
+       )
+       when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and
+              upto_seq >= 0 do
+    case fetch_session(sessions, session_id) do
+      {:ok, session} ->
+        previous_archived_seq = session.archived_seq
+        {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
+        session_evicted? = evict_session_after_ack?(updated_session, previous_archived_seq)
+
+        new_sessions =
+          if session_evicted? do
+            Map.delete(sessions, session_id)
+          else
+            Map.put(sessions, session_id, updated_session)
+          end
+
+        next_state = %{state | sessions: new_sessions}
+
+        trimmed =
+          evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
+
+        tail_size = Session.tail_size(updated_session)
+        tenant_id = updated_session.tenant_id
+
+        Starcite.Observability.Telemetry.archive_ack_applied(
+          session_id,
+          tenant_id,
+          updated_session.last_seq,
+          updated_session.archived_seq,
+          trimmed,
+          updated_session.retention.tail_keep,
+          tail_size
+        )
+
+        if session_evicted? do
+          :ok =
+            Starcite.Observability.Telemetry.session_freeze(
+              session_id,
+              tenant_id,
+              :ok,
+              :archive_ack
+            )
+        end
+
+        applied_entry = %{
+          session_id: session_id,
+          archived_seq: updated_session.archived_seq,
+          trimmed: trimmed
+        }
+
+        {:ok, next_state, applied_entry, updated_session.archived_seq > previous_archived_seq}
+
+      {:error, reason} ->
+        {:error, state, %{session_id: session_id, reason: reason}}
+    end
+  end
+
+  defp apply_ack_archived_entry(_entry, %__MODULE__{} = state),
+    do: {:error, state, %{session_id: nil, reason: :invalid_archive_ack}}
 
   defp append_to_session(%Session{} = session, inputs)
        when is_list(inputs) and inputs != [] do

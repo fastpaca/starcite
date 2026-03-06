@@ -235,7 +235,11 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 1)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
+
+      assert {:ok,
+              %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}} =
+               WritePath.ack_archived(session_id, 1)
+
       assert :error = EventStore.get_event(session_id, 1)
 
       update = %{
@@ -317,7 +321,10 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 2)
       insert_cold_rows(session_id, cold_rows)
-      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
+
+      assert {:ok,
+              %{applied: [%{session_id: ^session_id, archived_seq: 2, trimmed: 2}], failed: []}} =
+               WritePath.ack_archived(session_id, 2)
 
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]

@@ -219,7 +219,7 @@ defmodule Mix.Tasks.Bench.Raft do
     job = fn {session_id, upto_seq} ->
       process_command!(
         context.server_id,
-        {:ack_archived, session_id, upto_seq},
+        {:ack_archived, [{session_id, upto_seq}]},
         timeout_ms
       )
     end
@@ -282,7 +282,7 @@ defmodule Mix.Tasks.Bench.Raft do
       _ack_reply =
         process_command!(
           context.server_id,
-          {:ack_archived, session_id, cleanup_seq},
+          {:ack_archived, [{session_id, cleanup_seq}]},
           timeout_ms
         )
 

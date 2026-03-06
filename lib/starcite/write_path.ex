@@ -235,27 +235,67 @@ defmodule Starcite.WritePath do
     end
   end
 
+  @type ack_archived_entry :: {String.t(), non_neg_integer()}
+  @type ack_archived_applied :: %{
+          session_id: String.t(),
+          archived_seq: non_neg_integer(),
+          trimmed: non_neg_integer()
+        }
+  @type ack_archived_failed :: %{session_id: String.t(), reason: term()}
+  @type ack_archived_result :: %{
+          applied: [ack_archived_applied()],
+          failed: [ack_archived_failed()]
+        }
+
+  @spec ack_archived([ack_archived_entry()]) ::
+          {:ok, ack_archived_result()} | {:error, term()} | {:timeout, term()}
+  def ack_archived(entries) when is_list(entries) and entries != [] do
+    with {:ok, grouped_entries} <- normalize_ack_archived_entries(entries) do
+      result =
+        Enum.reduce(grouped_entries, %{applied: [], failed: []}, fn {group, group_entries}, acc ->
+          dispatch_result =
+            case RaftAccess.local_server_for_group(group) do
+              {:ok, server_id} ->
+                process_command_with_leader_retry(server_id, {:ack_archived, group_entries})
+
+              :error ->
+                call_remote(group, :ack_archived_local, [group_entries])
+            end
+
+          merge_ack_archived_result(acc, group_entries, dispatch_result)
+        end)
+
+      {:ok, %{applied: Enum.reverse(result.applied), failed: Enum.reverse(result.failed)}}
+    end
+  end
+
+  def ack_archived(_entries), do: {:error, :invalid_archive_ack}
+
   @spec ack_archived(String.t(), non_neg_integer()) ::
-          {:ok, map()} | {:error, term()} | {:timeout, term()}
+          {:ok, ack_archived_result()} | {:error, term()} | {:timeout, term()}
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    group = RaftAccess.group_for_session(id)
+    ack_archived([{id, upto_seq}])
+  end
 
-    case RaftAccess.local_server_for_group(group) do
-      {:ok, server_id} ->
-        process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
+  def ack_archived(_id, _upto_seq), do: {:error, :invalid_archive_ack}
 
-      :error ->
-        call_remote(group, :ack_archived_local, [id, upto_seq])
+  @doc false
+  def ack_archived_local(entries) when is_list(entries) and entries != [] do
+    with [{session_id, _upto_seq} | _rest] <- entries,
+         {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(session_id) do
+      process_command_with_leader_retry(server_id, {:ack_archived, entries})
+    else
+      _ -> {:error, :invalid_archive_ack}
     end
   end
 
   @doc false
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
-      process_command_with_leader_retry(server_id, {:ack_archived, id, upto_seq})
-    end
+    ack_archived_local([{id, upto_seq}])
   end
+
+  def ack_archived_local(_id, _upto_seq), do: {:error, :invalid_archive_ack}
 
   defp maybe_cache_session(id, title, creator_principal, tenant_id, metadata)
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
@@ -309,6 +349,61 @@ defmodule Starcite.WritePath do
   end
 
   defp maybe_index_session(_session, _creator_principal, _tenant_id), do: :ok
+
+  defp normalize_ack_archived_entries(entries) when is_list(entries) do
+    case Enum.reduce_while(entries, %{}, fn
+           {session_id, upto_seq}, acc
+           when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and
+                  upto_seq >= 0 ->
+             {:cont, Map.update(acc, session_id, upto_seq, &max(&1, upto_seq))}
+
+           _entry, _acc ->
+             {:halt, :error}
+         end) do
+      deduped when is_map(deduped) and map_size(deduped) > 0 ->
+        grouped_entries =
+          Enum.reduce(deduped, %{}, fn {session_id, upto_seq}, acc ->
+            group = RaftAccess.group_for_session(session_id)
+            Map.update(acc, group, [{session_id, upto_seq}], &[{session_id, upto_seq} | &1])
+          end)
+          |> Enum.map(fn {group, group_entries} -> {group, Enum.reverse(group_entries)} end)
+
+        {:ok, grouped_entries}
+
+      _ ->
+        {:error, :invalid_archive_ack}
+    end
+  end
+
+  defp merge_ack_archived_result(
+         %{applied: applied_acc, failed: failed_acc},
+         group_entries,
+         {:ok, %{applied: applied, failed: failed}}
+       )
+       when is_list(group_entries) and is_list(applied) and is_list(failed) do
+    %{applied: Enum.reverse(applied, applied_acc), failed: Enum.reverse(failed, failed_acc)}
+  end
+
+  defp merge_ack_archived_result(
+         %{applied: applied_acc, failed: failed_acc},
+         group_entries,
+         error
+       )
+       when is_list(group_entries) do
+    reason =
+      case error do
+        {:error, failure} -> failure
+        {:timeout, failure} -> {:timeout, failure}
+        other -> {:invalid_archive_ack_reply, other}
+      end
+
+    failed =
+      Enum.map(group_entries, fn {session_id, _upto_seq} ->
+        %{session_id: session_id, reason: reason}
+      end)
+
+    %{applied: applied_acc, failed: Enum.reverse(failed, failed_acc)}
+  end
 
   defp call_remote(group_id, fun, args)
        when is_integer(group_id) and group_id >= 0 and is_atom(fun) and is_list(args) do

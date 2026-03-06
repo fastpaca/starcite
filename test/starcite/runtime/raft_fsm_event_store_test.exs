@@ -32,8 +32,10 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}} =
-      RaftFSM.apply(nil, {:ack_archived, session_id, 1}, state)
+    {state,
+     {:reply,
+      {:ok, %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}}}} =
+      RaftFSM.apply(nil, {:ack_archived, [{session_id, 1}]}, state)
 
     assert {:error, :session_not_found} = RaftFSM.query_session(state, session_id)
 
@@ -250,8 +252,10 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert {:ok, _} = EventStore.get_event(session_id, 2)
     assert {:ok, _} = EventStore.get_event(session_id, 3)
 
-    {next_state, {:reply, {:ok, %{archived_seq: 2, trimmed: 2}}}} =
-      RaftFSM.apply(nil, {:ack_archived, session_id, 2}, state)
+    {next_state,
+     {:reply,
+      {:ok, %{applied: [%{session_id: ^session_id, archived_seq: 2, trimmed: 2}], failed: []}}}} =
+      RaftFSM.apply(nil, {:ack_archived, [{session_id, 2}]}, state)
 
     assert {:ok, session} = RaftFSM.query_session(next_state, session_id)
     assert session.archived_seq == 2
@@ -273,8 +277,11 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    {_, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, effects} =
-      RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
+    {_,
+     {:reply,
+      {:ok, %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}}},
+     effects} =
+      RaftFSM.apply(%{index: 42}, {:ack_archived, [{session_id, 1}]}, state)
 
     assert [{:release_cursor, 42, %RaftFSM{}}] = effects
   end
@@ -290,11 +297,53 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    {state, {:reply, {:ok, %{archived_seq: 1, trimmed: 1}}}, _effects} =
-      RaftFSM.apply(%{index: 42}, {:ack_archived, session_id, 1}, state)
+    {state,
+     {:reply,
+      {:ok, %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}}},
+     _effects} =
+      RaftFSM.apply(%{index: 42}, {:ack_archived, [{session_id, 1}]}, state)
 
-    {_, {:reply, {:error, :session_not_found}}} =
-      RaftFSM.apply(%{index: 43}, {:ack_archived, session_id, 1}, state)
+    {_,
+     {:reply,
+      {:ok, %{applied: [], failed: [%{session_id: ^session_id, reason: :session_not_found}]}}}} =
+      RaftFSM.apply(%{index: 43}, {:ack_archived, [{session_id, 1}]}, state)
+  end
+
+  test "ack_archived batch is best effort across sessions" do
+    first_session_id = unique_session_id()
+    second_session_id = unique_session_id()
+    missing_session_id = unique_session_id()
+    state = seeded_state(first_session_id) |> seed_session(second_session_id)
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, first_session_id, event_payload("one", producer_seq: 1), nil},
+        state
+      )
+
+    {state, {:reply, {:ok, %{seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_event, second_session_id, event_payload("two", producer_seq: 1), nil},
+        state
+      )
+
+    {next_state, {:reply, {:ok, %{applied: applied, failed: failed}}}} =
+      RaftFSM.apply(
+        nil,
+        {:ack_archived, [{first_session_id, 1}, {missing_session_id, 1}, {second_session_id, 1}]},
+        state
+      )
+
+    assert Enum.sort_by(applied, & &1.session_id) == [
+             %{session_id: first_session_id, archived_seq: 1, trimmed: 1},
+             %{session_id: second_session_id, archived_seq: 1, trimmed: 1}
+           ]
+
+    assert failed == [%{session_id: missing_session_id, reason: :session_not_found}]
+    assert {:error, :session_not_found} = RaftFSM.query_session(next_state, first_session_id)
+    assert {:error, :session_not_found} = RaftFSM.query_session(next_state, second_session_id)
   end
 
   test "append_event preserves deterministic state transition under event-store backpressure" do
@@ -353,6 +402,10 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   defp seeded_state(session_id) do
     state = RaftFSM.init(%{group_id: 0})
 
+    seed_session(state, session_id)
+  end
+
+  defp seed_session(state, session_id) do
     {seeded, {:reply, {:ok, _session}}} =
       RaftFSM.apply(
         nil,
