@@ -5,22 +5,17 @@ defmodule Starcite.Repo.Migrations.AddArchivedSeqToSessions do
     execute("ALTER TABLE sessions ADD COLUMN IF NOT EXISTS archived_seq bigint DEFAULT 0")
 
     execute("""
-    UPDATE sessions
-    SET archived_seq = COALESCE(
-      NULLIF(metadata->'__starcite_runtime_v1'->>'archived_seq', '')::bigint,
-      archived_seq,
-      0
-    )
+    UPDATE sessions AS s
+    SET archived_seq = e.max_seq
+    FROM (
+      SELECT session_id, MAX(seq) AS max_seq
+      FROM events
+      GROUP BY session_id
+    ) AS e
+    WHERE s.id = e.session_id
     """)
 
-    execute("""
-    UPDATE sessions
-    SET metadata = CASE
-      WHEN jsonb_typeof(metadata) = 'object' THEN metadata - '__starcite_runtime_v1'
-      ELSE metadata
-    END
-    WHERE metadata ? '__starcite_runtime_v1'
-    """)
+    execute("UPDATE sessions SET archived_seq = 0 WHERE archived_seq IS NULL")
 
     execute("ALTER TABLE sessions ALTER COLUMN archived_seq SET DEFAULT 0")
     execute("ALTER TABLE sessions ALTER COLUMN archived_seq SET NOT NULL")

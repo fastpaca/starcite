@@ -242,7 +242,7 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
   defp migrate_session_payload(%{"schema_version" => version, "session" => session_payload})
        when is_integer(version) and version > 0 and version < @session_schema_version and
               is_map(session_payload) do
-    {:ok, migrate_session_archived_seq(session_payload), true}
+    {:ok, session_payload, true}
   end
 
   defp migrate_session_payload(%{"schema_version" => version})
@@ -254,7 +254,7 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
     do: {:error, :archive_read_unavailable}
 
   defp migrate_session_payload(session_payload) when is_map(session_payload) do
-    {:ok, migrate_session_archived_seq(session_payload), true}
+    {:ok, session_payload, true}
   end
 
   defp migrate_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
@@ -285,24 +285,6 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
   end
 
   defp decode_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
-
-  defp migrate_session_archived_seq(%{"metadata" => metadata} = session_payload)
-       when is_map(metadata) do
-    case metadata do
-      %{"__starcite_runtime_v1" => %{"archived_seq" => archived_seq}} = full_metadata
-      when is_integer(archived_seq) and archived_seq >= 0 ->
-        session_payload
-        |> Map.put("archived_seq", archived_seq)
-        |> Map.put("metadata", Map.delete(full_metadata, "__starcite_runtime_v1"))
-
-      _other ->
-        Map.put_new(session_payload, "archived_seq", 0)
-    end
-  end
-
-  defp migrate_session_archived_seq(session_payload) when is_map(session_payload) do
-    Map.put_new(session_payload, "archived_seq", 0)
-  end
 
   defp migrate_session_tenant_index(%{
          "schema_version" => version,
