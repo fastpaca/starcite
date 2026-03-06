@@ -458,11 +458,11 @@ defmodule Starcite.WritePath do
   defp hydrate_and_retry_append(server_id, session_id, command)
        when is_atom(server_id) and is_binary(session_id) and session_id != "" do
     case load_session_snapshot(session_id) do
-      {:ok, snapshot} ->
-        tenant_id = snapshot.tenant_id
+      {:ok, hydrated_session} ->
+        tenant_id = hydrated_session.tenant_id
 
         with {:ok, hydrate_result} <-
-               process_command_with_leader_retry(server_id, hydrate_command(snapshot)),
+               process_command_with_leader_retry(server_id, hydrate_command(hydrated_session)),
              true <- hydrate_result in [:hydrated, :already_hot],
              {:ok, _reply} = append_reply <- process_command_with_leader_retry(server_id, command) do
           :ok = Telemetry.session_hydrate(session_id, tenant_id, :ok, hydrate_result)
@@ -508,8 +508,8 @@ defmodule Starcite.WritePath do
     with {:ok, %{sessions: sessions}} when is_list(sessions) <-
            Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
          {:ok, row} <- select_snapshot_row(sessions),
-         {:ok, snapshot} <- decode_snapshot_row(row) do
-      {:ok, snapshot}
+         {:ok, hydrated_session} <- decode_snapshot_row(row) do
+      {:ok, hydrated_session}
     end
   end
 
@@ -536,17 +536,20 @@ defmodule Starcite.WritePath do
            normalize_snapshot_creator_principal(creator_principal),
          {:ok, runtime} <- RuntimeSnapshot.decode_from_metadata(metadata) do
       {:ok,
-       %{
-         session_id: session_id,
+       %Session{
+         id: session_id,
          title: title,
          creator_principal: normalized_creator_principal,
          tenant_id: tenant_id,
          metadata: RuntimeSnapshot.drop_from_metadata(metadata),
-         inserted_at: inserted_at,
          last_seq: runtime.archived_seq,
          archived_seq: runtime.archived_seq,
-         tail_keep: runtime.tail_keep,
-         producer_max_entries: runtime.producer_max_entries
+         inserted_at: inserted_at,
+         retention: %{
+           tail_keep: runtime.tail_keep,
+           producer_max_entries: runtime.producer_max_entries
+         },
+         producer_cursors: %{}
        }}
     end
   end
@@ -597,21 +600,7 @@ defmodule Starcite.WritePath do
   defp normalize_snapshot_principal_type("svc"), do: {:ok, :service}
   defp normalize_snapshot_principal_type(_type), do: {:error, :invalid_snapshot}
 
-  defp hydrate_command(%{
-         session_id: session_id,
-         title: title,
-         creator_principal: creator_principal,
-         tenant_id: tenant_id,
-         metadata: metadata,
-         inserted_at: inserted_at,
-         last_seq: last_seq,
-         archived_seq: archived_seq,
-         tail_keep: tail_keep,
-         producer_max_entries: producer_max_entries
-       }) do
-    {:hydrate_session, session_id, title, creator_principal, tenant_id, metadata, inserted_at,
-     last_seq, archived_seq, tail_keep, producer_max_entries}
-  end
+  defp hydrate_command(%Session{} = session), do: {:hydrate_session, session}
 
   defp normalize_hydrate_reason(reason) when is_atom(reason), do: reason
   defp normalize_hydrate_reason(_reason), do: :unknown

@@ -84,20 +84,26 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   @impl true
   def apply(meta, {:append_event, session_id, input, expected_seq}, state) do
-    with {:ok, session} <- fetch_session(state.sessions, session_id),
-         :ok <- guard_expected_seq(session, expected_seq),
-         {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
-      :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
-      new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+    case Map.get(state.sessions, session_id) do
+      %Session{} = session ->
+        with :ok <- guard_expected_seq(session, expected_seq),
+             {:ok, updated_session, reply, event_to_store} <-
+               append_one_to_session(session, input) do
+          :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
+          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
-      effect = build_effect_for_event(session_id, event_to_store)
-      reply = {:reply, {:ok, reply}}
-      effects = if is_nil(effect), do: [], else: [effect]
+          effect = build_effect_for_event(session_id, event_to_store)
+          reply = {:reply, {:ok, reply}}
+          effects = if is_nil(effect), do: [], else: [effect]
 
-      reply_with_optional_effects(meta, new_state, reply, effects)
-    else
-      {:error, reason} ->
-        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
+          reply_with_optional_effects(meta, new_state, reply, effects)
+        else
+          {:error, reason} ->
+            reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
+        end
+
+      nil ->
+        reply_with_optional_effects(meta, state, {:reply, {:error, :session_not_found}})
     end
   end
 
@@ -109,62 +115,125 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(meta, {:append_events, session_id, inputs, opts}, state)
       when is_list(inputs) and (is_list(opts) or is_nil(opts)) do
-    with {:ok, session} <- fetch_session(state.sessions, session_id),
-         :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
-         {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
-      :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
-      new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+    case Map.get(state.sessions, session_id) do
+      %Session{} = session ->
+        with :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
+             {:ok, updated_session, replies, events_to_store} <-
+               append_to_session(session, inputs) do
+          :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
+          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
-      effects = build_effects_for_events(session_id, events_to_store)
-      reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
-      reply_with_optional_effects(meta, new_state, reply, effects)
-    else
-      {:error, reason} ->
-        reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
+          effects = build_effects_for_events(session_id, events_to_store)
+          reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
+          reply_with_optional_effects(meta, new_state, reply, effects)
+        else
+          {:error, reason} ->
+            reply_with_optional_effects(meta, state, {:reply, {:error, reason}})
+        end
+
+      nil ->
+        reply_with_optional_effects(meta, state, {:reply, {:error, :session_not_found}})
     end
   end
 
   @impl true
   def apply(meta, {:ack_archived, entries}, state) when is_list(entries) and entries != [] do
-    apply_ack_archived_batch(meta, entries, state)
+    {new_state, applied, failed, archived_advanced?} =
+      Enum.reduce(entries, {state, [], [], false}, fn
+        {session_id, upto_seq},
+        {%__MODULE__{sessions: sessions} = state_acc, applied_acc, failed_acc,
+         archived_advanced_acc}
+        when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and upto_seq >= 0 ->
+          case Map.get(sessions, session_id) do
+            %Session{} = session ->
+              previous_archived_seq = session.archived_seq
+              {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
+              session_evicted? = evict_session_after_ack?(updated_session, previous_archived_seq)
+
+              new_sessions =
+                if session_evicted? do
+                  Map.delete(sessions, session_id)
+                else
+                  Map.put(sessions, session_id, updated_session)
+                end
+
+              next_state = %{state_acc | sessions: new_sessions}
+
+              trimmed =
+                evict_archived_events(
+                  session_id,
+                  previous_archived_seq,
+                  updated_session.archived_seq
+                )
+
+              tail_size = Session.tail_size(updated_session)
+              tenant_id = updated_session.tenant_id
+
+              Starcite.Observability.Telemetry.archive_ack_applied(
+                session_id,
+                tenant_id,
+                updated_session.last_seq,
+                updated_session.archived_seq,
+                trimmed,
+                updated_session.retention.tail_keep,
+                tail_size
+              )
+
+              if session_evicted? do
+                :ok =
+                  Starcite.Observability.Telemetry.session_freeze(
+                    session_id,
+                    tenant_id,
+                    :ok,
+                    :archive_ack
+                  )
+              end
+
+              applied_entry = %{
+                session_id: session_id,
+                archived_seq: updated_session.archived_seq,
+                trimmed: trimmed
+              }
+
+              {next_state, [applied_entry | applied_acc], failed_acc,
+               archived_advanced_acc or updated_session.archived_seq > previous_archived_seq}
+
+            nil ->
+              {state_acc, applied_acc,
+               [%{session_id: session_id, reason: :session_not_found} | failed_acc],
+               archived_advanced_acc}
+          end
+
+        _entry, {state_acc, applied_acc, failed_acc, archived_advanced_acc} ->
+          {state_acc, applied_acc,
+           [%{session_id: nil, reason: :invalid_archive_ack} | failed_acc], archived_advanced_acc}
+      end)
+
+    reply =
+      {:reply, {:ok, %{applied: Enum.reverse(applied), failed: Enum.reverse(failed)}}}
+
+    effects =
+      case release_cursor_effect(meta, archived_advanced?, new_state) do
+        nil -> []
+        effect -> [effect]
+      end
+
+    reply_with_optional_effects(meta, new_state, reply, effects)
   end
 
   @impl true
   def apply(meta, {:ack_archived, session_id, upto_seq}, state) do
-    apply_ack_archived_batch(meta, [{session_id, upto_seq}], state)
+    __MODULE__.apply(meta, {:ack_archived, [{session_id, upto_seq}]}, state)
   end
 
   @impl true
-  def apply(
-        meta,
-        {:hydrate_session, session_id, title, creator_principal, tenant_id, metadata, inserted_at,
-         last_seq, archived_seq, tail_keep, producer_max_entries},
-        state
-      ) do
+  def apply(meta, {:hydrate_session, %Session{id: session_id} = session}, state) do
     case Map.get(state.sessions, session_id) do
       %Session{} ->
         reply_with_optional_effects(meta, state, {:reply, {:ok, :already_hot}})
 
       nil ->
-        session =
-          Session.new(session_id,
-            title: title,
-            creator_principal: creator_principal,
-            tenant_id: tenant_id,
-            metadata: metadata,
-            timestamp: inserted_at,
-            tail_keep: tail_keep,
-            producer_max_entries: producer_max_entries
-          )
-
-        hydrated = %Session{
-          session
-          | last_seq: last_seq,
-            archived_seq: archived_seq,
-            producer_cursors: %{}
-        }
-
-        next_state = %{state | sessions: Map.put(state.sessions, session_id, hydrated)}
+        next_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
         reply_with_optional_effects(meta, next_state, {:reply, {:ok, :hydrated}})
     end
   end
@@ -182,23 +251,13 @@ defmodule Starcite.DataPlane.RaftFSM do
   """
   @spec query_session(t(), String.t()) :: {:ok, session_state()} | {:error, :session_not_found}
   def query_session(state, session_id) do
-    with {:ok, session} <- fetch_session(state.sessions, session_id) do
-      {:ok, session}
-    else
-      _ -> {:error, :session_not_found}
+    case Map.get(state.sessions, session_id) do
+      %Session{} = session -> {:ok, session}
+      nil -> {:error, :session_not_found}
     end
   end
 
   # Helpers
-
-  @spec fetch_session(%{optional(String.t()) => session_state()}, String.t()) ::
-          {:ok, session_state()} | {:error, :session_not_found}
-  defp fetch_session(sessions, session_id) when is_map(sessions) do
-    case Map.get(sessions, session_id) do
-      nil -> {:error, :session_not_found}
-      session -> {:ok, session}
-    end
-  end
 
   defp guard_expected_seq(_session, nil), do: :ok
 
@@ -234,97 +293,6 @@ defmodule Starcite.DataPlane.RaftFSM do
   end
 
   defp release_cursor_effect(_meta, _archived_advanced?, _state), do: nil
-
-  defp apply_ack_archived_batch(meta, entries, state)
-       when is_list(entries) and entries != [] do
-    {new_state, applied, failed, archived_advanced?} =
-      Enum.reduce(entries, {state, [], [], false}, fn entry,
-                                                      {state_acc, applied_acc, failed_acc,
-                                                       archived_advanced_acc} ->
-        case apply_ack_archived_entry(entry, state_acc) do
-          {:ok, next_state, applied_entry, archived_advanced?} ->
-            {next_state, [applied_entry | applied_acc], failed_acc,
-             archived_advanced_acc or archived_advanced?}
-
-          {:error, next_state, failed_entry} ->
-            {next_state, applied_acc, [failed_entry | failed_acc], archived_advanced_acc}
-        end
-      end)
-
-    reply =
-      {:reply, {:ok, %{applied: Enum.reverse(applied), failed: Enum.reverse(failed)}}}
-
-    effects =
-      case release_cursor_effect(meta, archived_advanced?, new_state) do
-        nil -> []
-        effect -> [effect]
-      end
-
-    reply_with_optional_effects(meta, new_state, reply, effects)
-  end
-
-  defp apply_ack_archived_entry(
-         {session_id, upto_seq},
-         %__MODULE__{sessions: sessions} = state
-       )
-       when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and
-              upto_seq >= 0 do
-    case fetch_session(sessions, session_id) do
-      {:ok, session} ->
-        previous_archived_seq = session.archived_seq
-        {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
-        session_evicted? = evict_session_after_ack?(updated_session, previous_archived_seq)
-
-        new_sessions =
-          if session_evicted? do
-            Map.delete(sessions, session_id)
-          else
-            Map.put(sessions, session_id, updated_session)
-          end
-
-        next_state = %{state | sessions: new_sessions}
-
-        trimmed =
-          evict_archived_events(session_id, previous_archived_seq, updated_session.archived_seq)
-
-        tail_size = Session.tail_size(updated_session)
-        tenant_id = updated_session.tenant_id
-
-        Starcite.Observability.Telemetry.archive_ack_applied(
-          session_id,
-          tenant_id,
-          updated_session.last_seq,
-          updated_session.archived_seq,
-          trimmed,
-          updated_session.retention.tail_keep,
-          tail_size
-        )
-
-        if session_evicted? do
-          :ok =
-            Starcite.Observability.Telemetry.session_freeze(
-              session_id,
-              tenant_id,
-              :ok,
-              :archive_ack
-            )
-        end
-
-        applied_entry = %{
-          session_id: session_id,
-          archived_seq: updated_session.archived_seq,
-          trimmed: trimmed
-        }
-
-        {:ok, next_state, applied_entry, updated_session.archived_seq > previous_archived_seq}
-
-      {:error, reason} ->
-        {:error, state, %{session_id: session_id, reason: reason}}
-    end
-  end
-
-  defp apply_ack_archived_entry(_entry, %__MODULE__{} = state),
-    do: {:error, state, %{session_id: nil, reason: :invalid_archive_ack}}
 
   defp append_to_session(%Session{} = session, inputs)
        when is_list(inputs) and inputs != [] do

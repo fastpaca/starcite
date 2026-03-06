@@ -41,12 +41,13 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
 
     inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 
+    hydrated_session =
+      hydrated_session(session_id, inserted_at, "Hydrated", %{"source" => "archive"})
+
     {state, {:reply, {:ok, :hydrated}}} =
       RaftFSM.apply(
         nil,
-        {:hydrate_session, session_id, "Hydrated",
-         %Starcite.Auth.Principal{tenant_id: "acme", id: "user-1", type: :user}, "acme",
-         %{"source" => "archive"}, inserted_at, 1, 1, 1000, 10_000},
+        {:hydrate_session, hydrated_session},
         state
       )
 
@@ -56,11 +57,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert hydrated.producer_cursors == %{}
 
     {_, {:reply, {:ok, :already_hot}}} =
-      RaftFSM.apply(
-        nil,
-        {:hydrate_session, session_id, nil, nil, "acme", %{}, inserted_at, 1, 1, 1000, 10_000},
-        state
-      )
+      RaftFSM.apply(nil, {:hydrate_session, hydrated_session}, state)
   end
 
   test "append_event mirrors appended events to ETS" do
@@ -336,10 +333,14 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    assert Enum.sort_by(applied, & &1.session_id) == [
-             %{session_id: first_session_id, archived_seq: 1, trimmed: 1},
-             %{session_id: second_session_id, archived_seq: 1, trimmed: 1}
-           ]
+    assert Enum.sort_by(applied, & &1.session_id) ==
+             Enum.sort_by(
+               [
+                 %{session_id: first_session_id, archived_seq: 1, trimmed: 1},
+                 %{session_id: second_session_id, archived_seq: 1, trimmed: 1}
+               ],
+               & &1.session_id
+             )
 
     assert failed == [%{session_id: missing_session_id, reason: :session_not_found}]
     assert {:error, :session_not_found} = RaftFSM.query_session(next_state, first_session_id)
@@ -415,6 +416,25 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
       )
 
     seeded
+  end
+
+  defp hydrated_session(session_id, inserted_at, title, metadata) do
+    %Starcite.Session{
+      id: session_id,
+      title: title,
+      creator_principal: %Starcite.Auth.Principal{
+        tenant_id: "acme",
+        id: "user-1",
+        type: :user
+      },
+      tenant_id: "acme",
+      metadata: metadata,
+      last_seq: 1,
+      archived_seq: 1,
+      inserted_at: inserted_at,
+      retention: %{tail_keep: 1000, producer_max_entries: 10_000},
+      producer_cursors: %{}
+    }
   end
 
   defp event_payload(text, opts \\ []) do

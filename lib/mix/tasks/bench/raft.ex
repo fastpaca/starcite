@@ -241,22 +241,27 @@ defmodule Mix.Tasks.Bench.Raft do
     end
 
     job = fn session_id ->
+      session =
+        %Starcite.Session{
+          id: session_id,
+          title: "Hydrated",
+          creator_principal: context.principal,
+          tenant_id: @tenant_id,
+          metadata: %{bench: true, scenario: "raft_hydrate_session"},
+          last_seq: context.config.hydrate_archived_seq,
+          archived_seq: context.config.hydrate_archived_seq,
+          inserted_at: inserted_at,
+          retention: %{
+            tail_keep: @default_tail_keep,
+            producer_max_entries: @default_producer_max_entries
+          },
+          producer_cursors: %{}
+        }
+
       hydrate_result =
         process_command!(
           context.server_id,
-          {
-            :hydrate_session,
-            session_id,
-            "Hydrated",
-            context.principal,
-            @tenant_id,
-            %{bench: true, scenario: "raft_hydrate_session"},
-            inserted_at,
-            context.config.hydrate_archived_seq,
-            context.config.hydrate_archived_seq,
-            @default_tail_keep,
-            @default_producer_max_entries
-          },
+          {:hydrate_session, session},
           timeout_ms
         )
 
