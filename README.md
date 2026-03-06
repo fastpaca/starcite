@@ -1,7 +1,7 @@
 <h1 align="center">Starcite</h1>
 
 <p align="center">
-  Durable ordered event streams for AI applications.
+  The durable ordered interaction stream beneath AI protocols and runtimes.
 </p>
 
 <p align="center">
@@ -11,9 +11,67 @@
   <a href="https://elixir-lang.org/"><img src="https://img.shields.io/badge/Elixir-1.18.4-blue.svg" alt="Elixir"></a>
 </p>
 
-[Run Locally](#run-locally-with-docker-compose) • [Use Hosted](#use-the-hosted-version) • [Use With](#use-with) • [Clients & CLI](https://github.com/fastpaca/starcite-clients) • [REST API](docs/api/rest.md) • [WebSocket API](docs/api/websocket.md) • [Architecture](docs/architecture.md) • [Self-hosting](docs/self-hosting.md)
+[What It Is](#what-starcite-is) • [Where It Fits](#where-starcite-fits) • [Get Started](#get-started) • [Use With](#use-with) • [REST API](docs/api/rest.md) • [WebSocket API](docs/api/websocket.md) • [Architecture](docs/architecture.md) • [Self-hosting](docs/self-hosting.md)
 
-## Run Locally With Docker Compose
+## What Starcite Is
+
+Starcite stores the canonical history of what happened inside an AI interaction
+as one durable, ordered session stream.
+
+That stream can include:
+
+- user messages
+- model output and streamed chunks
+- tool calls and tool results
+- agent handoffs and task updates
+- human approvals and workflow state transitions
+
+One Starcite session is one interaction log. In practice that might be:
+
+- a user + agent conversation
+- an agent workflow run
+- a collaborative session shared by humans and agents
+- any AI event stream that must be replayable later
+
+If a browser refreshes, a WebSocket drops, a worker retries, or work moves
+between runtimes, Starcite keeps the canonical sequence intact. Appends are
+committed before acknowledgement. Consumers replay from any cursor and continue
+live on the same connection.
+
+## Why Teams Use It
+
+- keep browsers, agents, workers, and audit consumers aligned to the same ordered history
+- survive retries, redeploys, and dropped connections without rebuilding session state
+- recover long-running AI workflows instead of inventing ad hoc cursor and reconnect logic
+- make multi-producer writes safe with optimistic concurrency and deterministic de-duplication
+
+## Where Starcite Fits
+
+Starcite sits below the protocol or runtime layer. It is the persistence and
+replay layer, not the orchestration layer.
+
+```mermaid
+flowchart TD
+    A[Protocol / runtime / UI<br/>A2A gateway, browser, worker, model runtime] -->|append + tail| B[Starcite]
+    B --> C[Raft-backed ordered hot session stream]
+    B --> D[Archive for cold replay<br/>S3 or Postgres]
+```
+
+This is the boundary:
+
+- protocols and runtimes decide how agents talk and what events mean
+- Starcite stores those events as one ordered stream and lets consumers replay or continue live
+- storage and replication stay below Starcite
+
+With A2A, that usually means:
+
+- A2A `contextId` -> one Starcite session
+- A2A messages, task status updates, and artifacts -> typed events in that session
+- A2A stream resume -> tail from the last processed cursor
+
+## Get Started
+
+### Run Locally With Docker Compose
 
 ```bash
 git clone https://github.com/fastpaca/starcite
@@ -22,7 +80,7 @@ docker compose up -d
 curl -sS http://localhost:4000/health/live
 ```
 
-This starts a single-node Starcite stack locally:
+This starts a single-node stack for local development:
 
 - Starcite API on `http://localhost:4000`
 - Postgres on `localhost:5433`
@@ -37,7 +95,7 @@ docker compose down -v
 For production topology and cluster operations, see
 [Self-hosting](docs/self-hosting.md).
 
-## Use The Hosted Version
+### Use A Hosted Instance
 
 ```bash
 npm install -g starcite
@@ -48,28 +106,11 @@ starcite append ses_demo --agent researcher --text "Found 8 relevant cases..."
 starcite tail ses_demo --cursor 0 --limit 1
 ```
 
-Starcite is a clustered session-stream service for AI applications. It stores
-the events that happen inside an AI session as one durable, append-only stream.
+For one-off use without installing globally:
 
-That can be agent messages, model output, tool results, state transitions,
-human input, or workflow updates.
-
-If a browser refreshes, a WebSocket drops, a service retries, or work moves
-between agents and runtimes, Starcite keeps the authoritative stream intact.
-Appends are committed before they are acknowledged. Consumers reconnect and pick
-up from the last processed `seq`.
-
-Starcite gives you:
-
-- one ordered stream per session
-- committed appends with monotonic `seq`
-- replay from any cursor, then live continuation on the same connection
-- optimistic concurrency with `expected_seq`
-- deterministic de-duplication with `(producer_id, producer_seq)`
-- hot in-memory reads with cold archive fallback behind one API
-
-It replaces brittle reconnect handling, ad hoc cursor sync, and custom event
-reassembly with three primitives: create session, append event, tail stream.
+```bash
+npx starcite --help
+```
 
 ## Use With
 
@@ -85,6 +126,9 @@ Pick the surface you want. They all speak the same session model:
 <details>
 <summary>CLI</summary>
 
+Use the CLI when you want to create sessions, append events, and inspect the
+ordered timeline from the terminal.
+
 Install globally:
 
 ```bash
@@ -97,8 +141,7 @@ Or run once without installing:
 npx starcite --help
 ```
 
-Use it when you want to create sessions, append events, and tail a shared
-timeline from the terminal.
+Example:
 
 ```bash
 starcite config set endpoint https://<your-instance>.starcite.io
@@ -114,14 +157,14 @@ starcite tail ses_demo --cursor 0 --limit 1
 <details>
 <summary>TypeScript</summary>
 
+Use the TypeScript SDK when you want to create sessions, append events, and
+live-sync the canonical session log from Node.js or the browser.
+
 Install:
 
 ```bash
 npm install @starcite/sdk
 ```
-
-Use it when you want to create sessions, append events, and live-sync a session
-log from Node.js or the browser.
 
 ```ts
 import { Starcite } from "@starcite/sdk";
@@ -147,14 +190,14 @@ await session.append({
 <details>
 <summary>React</summary>
 
+Use the React package when you want a durable chat-style UI driven by the same
+ordered session log.
+
 Install:
 
 ```bash
 npm install @starcite/react @starcite/sdk ai react
 ```
-
-Use it when you want a durable chat-style UI driven by the canonical session
-log.
 
 ```tsx
 import { Starcite } from "@starcite/sdk";
@@ -188,113 +231,15 @@ export function Chat({ token }: { token: string }) {
 
 </details>
 
-<details>
-<summary>A2A</summary>
-
-Starcite sits underneath A2A. A2A defines how agents talk. Starcite stores what
-happened as one durable ordered stream.
-
-Typical layering:
-
-```text
-A2A client / agent
-        |
-   A2A server or gateway
-        |
-     Starcite
-```
-
-Typical mapping:
-
-- A2A `contextId` -> one Starcite session
-- A2A messages -> Starcite events
-- A2A task status / artifact updates -> typed Starcite events in the same session
-- A2A streaming -> tail replay + live continuation
-
-This keeps A2A at the protocol layer and Starcite at the persistence and replay
-layer.
-
-If an A2A gateway receives a task update, it can append it into the session log:
-
-```json
-{
-  "type": "a2a.task.status",
-  "payload": {
-    "state": "input-required",
-    "message": "Please confirm the budget cap."
-  },
-  "metadata": {
-    "protocol": "a2a",
-    "context_id": "ctx_123",
-    "task_id": "task_456"
-  }
-}
-```
-
-When another consumer reconnects, it tails the same session and rebuilds the
-same A2A interaction state from the ordered event history.
-
-</details>
-
-## Why It Exists
-
-AI systems feel brittle when streaming state is implicit.
-
-Tabs close. WebSockets drop. Servers redeploy. Agents hand work to each other.
-Retries race. Different consumers disagree about what happened.
-
-Starcite makes that interaction stream explicit and authoritative.
-
-## What You Use It For
-
-Use Starcite when you need:
-
-- a durable conversation log for agents and users
-- replayable workflow state for long-running AI jobs
-- resumable streams after disconnects or redeploys
-- one ordered history shared by browsers, workers, agents, and backend services
-- deterministic recovery instead of ad hoc retry and cursor logic
-
-One Starcite session is one ordered interaction log. In practice that might be:
-
-- a user + agent conversation
-- an agent task or workflow run
-- a collaborative session shared by multiple agents and humans
-- any stream of AI events that must be replayable later
-
 ## Core Guarantees
 
-- Reliable stream recovery: replay from any cursor after disconnects or restarts
 - Durable writes: appends are committed before acknowledgement
 - Deterministic ordering: strictly monotonic `seq` per session
+- Replay and live continuation: replay from any cursor, then keep reading on the same connection
 - Concurrency safety: optional `expected_seq` checks on append
 - Idempotency: `(producer_id, producer_seq)` de-duplication
-- Same stream contract everywhere: humans, agents, and services consume the same ordered history
+- Same stream contract everywhere: browsers, workers, agents, and services consume the same ordered history
 - Low-latency append path: sub-150ms p99 commit path with Raft-backed ordering
-
-## Where It Fits
-
-Starcite sits below the protocol or runtime layer. It is the persistence and
-replay layer, not the orchestration layer.
-
-It fits beneath:
-
-- agent-to-agent protocols and gateways
-- streaming model runtimes
-- human-in-the-loop workflows
-- multi-agent applications that need recovery, auditability, and deterministic history
-
-Think about the stack like this:
-
-```text
-Agent protocol / app runtime / UI
-             |
-       append + tail
-             |
-          Starcite
-             |
-  Raft ordering + hot event store + archive
-```
 
 ## How It Works
 
