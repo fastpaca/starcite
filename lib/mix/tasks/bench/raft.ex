@@ -177,16 +177,32 @@ defmodule Mix.Tasks.Bench.Raft do
 
     timeout_ms = context.config.raft_timeout_ms
     payload_text = payload_text(context.config.payload_bytes)
-    producer_key = :ack_archived
+    counter = :atomics.new(1, [])
+    :atomics.put(counter, 1, 0)
 
     before_each = fn _input ->
-      {session_id, producer_seq} = worker_session_and_next_seq(context, producer_key, 1)
+      index = :atomics.add_get(counter, 1, 1)
+      session_id = "raft-ack-#{context.run_id}-#{index}"
+
+      _create_reply =
+        process_command!(
+          context.server_id,
+          {
+            :create_session,
+            session_id,
+            nil,
+            context.principal,
+            @tenant_id,
+            %{bench: true, scenario: "raft_ack_archived"}
+          },
+          timeout_ms
+        )
 
       append_event =
         event_payload(
           payload_text,
           "writer:ack_archived:#{session_id}",
-          producer_seq,
+          1,
           "raft_ack_archived"
         )
 
