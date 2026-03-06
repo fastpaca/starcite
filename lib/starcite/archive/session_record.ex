@@ -11,6 +11,7 @@ defmodule Starcite.Archive.SessionRecord do
     field(:tenant_id, :string)
     field(:creator_principal, :map)
     field(:metadata, :map)
+    field(:archived_seq, :integer)
     field(:created_at, :utc_datetime)
   end
 end

@@ -118,24 +118,9 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       )
       when is_binary(session_id) and is_binary(tenant_id) and is_integer(archived_seq) do
     case Map.get(state.sessions, session_id) do
-      %{tenant_id: ^tenant_id, metadata: metadata} = session ->
-        case Starcite.Session.RuntimeSnapshot.decode_from_metadata(metadata) do
-          {:ok, snapshot} ->
-            updated =
-              Map.put(
-                session,
-                :metadata,
-                Starcite.Session.RuntimeSnapshot.put_in_metadata(
-                  metadata,
-                  %{snapshot | archived_seq: archived_seq}
-                )
-              )
-
-            {:reply, :ok, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
-
-          {:error, _reason} ->
-            {:reply, {:error, :session_not_found}, state}
-        end
+      %{tenant_id: ^tenant_id} = session ->
+        updated = Map.put(session, :archived_seq, archived_seq)
+        {:reply, :ok, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
 
       _ ->
         {:reply, {:error, :session_not_found}, state}
@@ -222,6 +207,7 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       tenant_id: tenant_id,
       creator_principal: Map.get(session, :creator_principal),
       metadata: metadata,
+      archived_seq: Map.get(session, :archived_seq, 0),
       created_at: created_at
     }
   end

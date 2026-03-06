@@ -14,7 +14,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
   alias Starcite.Archive.{Event, SessionRecord}
   alias Starcite.Auth.Principal
   alias Starcite.Repo
-  alias Starcite.Session.RuntimeSnapshot
 
   @impl true
   def start_link(_opts), do: GenServer.start_link(__MODULE__, %{}, name: __MODULE__)
@@ -77,12 +76,13 @@ defmodule Starcite.Archive.Adapter.Postgres do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
+        archived_seq: archived_seq,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) and
+             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
              (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     created_at = normalize_session_created_at(created_at)
 
@@ -96,6 +96,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
             tenant_id: tenant_id,
             creator_principal: creator_principal,
             metadata: metadata,
+            archived_seq: archived_seq,
             created_at: created_at
           }
         ],
@@ -112,21 +113,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
   def update_session_archived_seq(session_id, tenant_id, archived_seq)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
              tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
-    runtime_key = RuntimeSnapshot.metadata_key()
-
-    sql = """
-    UPDATE sessions
-    SET metadata = jsonb_set(
-      metadata,
-      '{#{runtime_key},archived_seq}',
-      to_jsonb($3::bigint),
-      false
-    )
-    WHERE id = $1
-      AND tenant_id = $2
-      AND jsonb_typeof(metadata) = 'object'
-      AND jsonb_typeof(metadata->'#{runtime_key}') = 'object'
-    """
+    sql = "UPDATE sessions SET archived_seq = $3 WHERE id = $1 AND tenant_id = $2"
 
     case Repo.query(sql, [session_id, tenant_id, archived_seq]) do
       {:ok, %{num_rows: 1}} -> :ok
@@ -311,6 +298,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
       tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
+      archived_seq: session.archived_seq || 0,
       created_at: DateTime.to_iso8601(session.created_at)
     }
   end

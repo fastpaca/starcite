@@ -36,7 +36,6 @@ defmodule Starcite.ArchiveTest do
   alias Starcite.DataPlane.EventStore
   alias Starcite.DataPlane.RaftAccess
   alias Starcite.Archive.IdempotentTestAdapter
-  alias Starcite.Session.RuntimeSnapshot
 
   setup do
     # Ensure clean raft data for isolation
@@ -492,13 +491,11 @@ defmodule Starcite.ArchiveTest do
                  )
 
         session_row = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
-        runtime_key = RuntimeSnapshot.metadata_key()
-
         assert session_row.title == "Draft"
         assert session_row.tenant_id == "acme"
         assert session_row.creator_principal == creator_principal
         assert session_row.metadata["workflow"] == "legal"
-        assert session_row.metadata[runtime_key]["archived_seq"] == 0
+        assert session_row.archived_seq == 0
       end)
     end
 
@@ -669,7 +666,7 @@ defmodule Starcite.ArchiveTest do
       )
     end
 
-    test "hydrate fails when runtime snapshot schema is incomplete" do
+    test "hydrate fails when archived session row is invalid" do
       with_app_env(
         [archive_adapter: IdempotentTestAdapter],
         fn ->
@@ -705,15 +702,8 @@ defmodule Starcite.ArchiveTest do
 
           session_row = IdempotentTestAdapter.get_sessions() |> Map.fetch!(session_id)
 
-          runtime_key = RuntimeSnapshot.metadata_key()
-
-          runtime =
-            session_row.metadata |> Map.fetch!(runtime_key) |> Map.delete("tail_keep")
-
-          metadata = Map.put(session_row.metadata, runtime_key, runtime)
-
           assert :ok =
-                   Store.upsert_session(IdempotentTestAdapter, %{session_row | metadata: metadata})
+                   Store.upsert_session(IdempotentTestAdapter, %{session_row | archived_seq: nil})
 
           assert {:error, :archive_read_unavailable} =
                    WritePath.append_event(session_id, %{

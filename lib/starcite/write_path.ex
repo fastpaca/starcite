@@ -16,7 +16,6 @@ defmodule Starcite.WritePath do
   alias Starcite.Auth.Principal
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
-  alias Starcite.Session.RuntimeSnapshot
 
   @timeout Application.compile_env(:starcite, :raft_command_timeout_ms, 2_000)
 
@@ -327,18 +326,13 @@ defmodule Starcite.WritePath do
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
               is_map(metadata) do
-    snapshot = %RuntimeSnapshot{
-      archived_seq: 0,
-      tail_keep: Application.get_env(:starcite, :tail_keep, 1_000),
-      producer_max_entries: Application.get_env(:starcite, :producer_max_entries, 10_000)
-    }
-
     row = %{
       id: id,
       title: title,
       creator_principal: creator_principal,
       tenant_id: tenant_id,
-      metadata: RuntimeSnapshot.put_in_metadata(metadata, snapshot),
+      metadata: metadata,
+      archived_seq: 0,
       created_at: parse_utc_datetime!(created_at)
     }
 
@@ -484,9 +478,7 @@ defmodule Starcite.WritePath do
             :ok = Telemetry.session_hydrate(session_id, tenant_id, :error, normalized)
 
             case normalized do
-              :snapshot_missing -> {:error, :archive_read_unavailable}
               :invalid_snapshot -> {:error, :archive_read_unavailable}
-              :unsupported_snapshot_version -> {:error, :archive_read_unavailable}
               _ -> {:error, reason}
             end
         end
@@ -496,9 +488,7 @@ defmodule Starcite.WritePath do
         :ok = Telemetry.session_hydrate(session_id, "unknown", :error, normalized)
 
         case normalized do
-          :snapshot_missing -> {:error, :archive_read_unavailable}
           :invalid_snapshot -> {:error, :archive_read_unavailable}
-          :unsupported_snapshot_version -> {:error, :archive_read_unavailable}
           _ -> {:error, reason}
         end
     end
@@ -527,30 +517,25 @@ defmodule Starcite.WritePath do
          tenant_id: tenant_id,
          creator_principal: creator_principal,
          metadata: metadata,
+         archived_seq: archived_seq,
          created_at: created_at
        })
        when is_binary(session_id) and session_id != "" and (is_binary(title) or is_nil(title)) and
-              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
+              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) and
+              is_integer(archived_seq) and archived_seq >= 0 do
     with {:ok, inserted_at} <- parse_inserted_at(created_at),
          {:ok, normalized_creator_principal} <-
-           normalize_snapshot_creator_principal(creator_principal),
-         {:ok, runtime} <- RuntimeSnapshot.decode_from_metadata(metadata) do
-      {:ok,
-       %Session{
-         id: session_id,
-         title: title,
-         creator_principal: normalized_creator_principal,
-         tenant_id: tenant_id,
-         metadata: RuntimeSnapshot.drop_from_metadata(metadata),
-         last_seq: runtime.archived_seq,
-         archived_seq: runtime.archived_seq,
-         inserted_at: inserted_at,
-         retention: %{
-           tail_keep: runtime.tail_keep,
-           producer_max_entries: runtime.producer_max_entries
-         },
-         producer_cursors: %{}
-       }}
+           normalize_snapshot_creator_principal(creator_principal) do
+      session =
+        Session.new(session_id,
+          title: title,
+          tenant_id: tenant_id,
+          creator_principal: normalized_creator_principal,
+          metadata: metadata,
+          timestamp: inserted_at
+        )
+
+      {:ok, %Session{session | last_seq: archived_seq, archived_seq: archived_seq}}
     end
   end
 

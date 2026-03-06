@@ -11,7 +11,6 @@ defmodule StarciteWeb.SessionController do
 
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Observability.Telemetry
-  alias Starcite.Session.RuntimeSnapshot
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
@@ -150,7 +149,7 @@ defmodule StarciteWeb.SessionController do
          {:ok, opts} <- validate_list(params),
          :ok <- Policy.can_list_sessions(auth),
          {:ok, page} <- list_sessions(auth, opts) do
-      json(conn, sanitize_session_page(page))
+      json(conn, page)
     end
   end
 
@@ -312,16 +311,6 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp list_sessions(_auth, _opts), do: {:error, :forbidden}
-
-  defp sanitize_session_page(%{sessions: sessions} = page) when is_list(sessions) do
-    %{page | sessions: Enum.map(sessions, &sanitize_session_row/1)}
-  end
-
-  defp sanitize_session_row(%{metadata: metadata} = row) when is_map(metadata) do
-    %{row | metadata: RuntimeSnapshot.drop_from_metadata(metadata)}
-  end
-
-  defp sanitize_session_row(row), do: row
 
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}

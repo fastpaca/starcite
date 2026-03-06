@@ -29,6 +29,7 @@ defmodule Starcite.Archive.Adapter do
           required(:title) => String.t() | nil,
           required(:creator_principal) => Principal.t() | map(),
           required(:metadata) => map(),
+          required(:archived_seq) => non_neg_integer(),
           required(:created_at) => DateTime.t() | String.t()
         }
 

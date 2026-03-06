@@ -19,7 +19,6 @@ defmodule Starcite.Archive.Adapter.S3 do
   use GenServer
 
   alias Starcite.Auth.Principal
-  alias Starcite.Session.RuntimeSnapshot
   alias __MODULE__.{Config, Layout, Schema, SchemaControl}
 
   @config_key {__MODULE__, :config}
@@ -62,12 +61,13 @@ defmodule Starcite.Archive.Adapter.S3 do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
+        archived_seq: archived_seq,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) and
+             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
              (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     config = config!()
 
@@ -77,7 +77,8 @@ defmodule Starcite.Archive.Adapter.S3 do
       tenant_id: tenant_id,
       creator_principal: creator_principal,
       metadata: metadata,
-      created_at: normalize_created_at(created_at)
+      archived_seq: archived_seq,
+      created_at: created_at
     }
 
     with :ok <- put_session_tenant_index(config, id, tenant_id),
@@ -97,12 +98,10 @@ defmodule Starcite.Archive.Adapter.S3 do
     config = config!()
 
     with {:ok, key, session} <- load_session_for_update(config, session_id, tenant_id),
-         metadata <- session.metadata,
-         {:ok, updated_metadata} <- update_runtime_metadata(metadata, archived_seq),
          updated_session <-
            session
            |> Map.put(:tenant_id, tenant_id)
-           |> Map.put(:metadata, updated_metadata),
+           |> Map.put(:archived_seq, archived_seq),
          result <- put_session_by_key(config, key, updated_session) do
       case result do
         :ok -> :ok
@@ -115,15 +114,6 @@ defmodule Starcite.Archive.Adapter.S3 do
 
       {:error, _reason} ->
         {:error, :archive_write_unavailable}
-    end
-  end
-
-  defp normalize_created_at(%DateTime{} = value), do: DateTime.truncate(value, :second)
-
-  defp normalize_created_at(value) when is_binary(value) do
-    case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> DateTime.truncate(datetime, :second)
-      _ -> raise ArgumentError, "invalid session created_at: #{inspect(value)}"
     end
   end
 
@@ -346,21 +336,6 @@ defmodule Starcite.Archive.Adapter.S3 do
         error
 
       _ ->
-        {:error, :session_not_found}
-    end
-  end
-
-  defp update_runtime_metadata(metadata, archived_seq)
-       when is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 do
-    case RuntimeSnapshot.decode_from_metadata(metadata) do
-      {:ok, %RuntimeSnapshot{} = existing} ->
-        {:ok,
-         RuntimeSnapshot.put_in_metadata(metadata, %RuntimeSnapshot{
-           existing
-           | archived_seq: archived_seq
-         })}
-
-      {:error, _reason} ->
         {:error, :session_not_found}
     end
   end

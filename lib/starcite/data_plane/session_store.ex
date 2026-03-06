@@ -225,22 +225,47 @@ defmodule Starcite.DataPlane.SessionStore do
            title: title,
            tenant_id: tenant_id,
            creator_principal: creator_principal,
-           metadata: metadata
+           metadata: metadata,
+           archived_seq: archived_seq,
+           created_at: created_at
          }
        )
        when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
-              is_map(metadata) and
+              is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
               (is_map(creator_principal) or is_nil(creator_principal)) do
-    {:ok,
-     Session.new(session_id,
-       title: title,
-       tenant_id: tenant_id,
-       creator_principal: creator_principal,
-       metadata: metadata
-     )}
+    with {:ok, inserted_at} <- session_created_at(created_at) do
+      session =
+        Session.new(session_id,
+          title: title,
+          tenant_id: tenant_id,
+          creator_principal: creator_principal,
+          metadata: metadata,
+          timestamp: inserted_at
+        )
+
+      {:ok, %Session{session | last_seq: archived_seq, archived_seq: archived_seq}}
+    end
   end
 
   defp session_from_archive_row(_session_id, _row), do: {:error, :archive_read_unavailable}
+
+  defp session_created_at(%DateTime{} = created_at), do: {:ok, DateTime.to_naive(created_at)}
+  defp session_created_at(%NaiveDateTime{} = created_at), do: {:ok, created_at}
+
+  defp session_created_at(created_at) when is_binary(created_at) do
+    case DateTime.from_iso8601(created_at) do
+      {:ok, datetime, _offset} ->
+        {:ok, DateTime.to_naive(datetime)}
+
+      _ ->
+        case NaiveDateTime.from_iso8601(created_at) do
+          {:ok, datetime} -> {:ok, datetime}
+          _ -> {:error, :archive_read_unavailable}
+        end
+    end
+  end
+
+  defp session_created_at(_created_at), do: {:error, :archive_read_unavailable}
 
   defp session_entries do
     case Cachex.keys(@cache) do
