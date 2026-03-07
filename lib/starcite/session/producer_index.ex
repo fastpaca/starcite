@@ -31,8 +31,7 @@ defmodule Starcite.Session.ProducerIndex do
     case Map.get(index, producer_id) do
       nil ->
         {:append,
-         put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
-         |> prune_lru(max_entries)}
+         put_new_cursor(index, producer_id, producer_seq, next_session_seq, hash, max_entries)}
 
       %{producer_seq: last_producer_seq, session_seq: last_session_seq, hash: last_hash}
       when is_integer(last_producer_seq) and last_producer_seq > 0 and
@@ -41,9 +40,7 @@ defmodule Starcite.Session.ProducerIndex do
 
         cond do
           producer_seq == expected_seq ->
-            {:append,
-             put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
-             |> prune_lru(max_entries)}
+            {:append, put_cursor(index, producer_id, producer_seq, next_session_seq, hash)}
 
           producer_seq == last_producer_seq and hash == last_hash ->
             {:deduped, last_session_seq, index}
@@ -56,9 +53,7 @@ defmodule Starcite.Session.ProducerIndex do
         end
 
       _other ->
-        {:append,
-         put_cursor(index, producer_id, producer_seq, next_session_seq, hash)
-         |> prune_lru(max_entries)}
+        {:append, put_cursor(index, producer_id, producer_seq, next_session_seq, hash)}
     end
   end
 
@@ -96,6 +91,28 @@ defmodule Starcite.Session.ProducerIndex do
       end)
 
     producer_id
+  end
+
+  defp put_new_cursor(index, producer_id, producer_seq, session_seq, hash, max_entries)
+       when is_map(index) and is_binary(producer_id) and is_integer(producer_seq) and
+              producer_seq > 0 and is_integer(session_seq) and session_seq > 0 and
+              is_binary(hash) and is_integer(max_entries) and max_entries > 0 do
+    index
+    |> prune_before_insert(max_entries)
+    |> put_cursor(producer_id, producer_seq, session_seq, hash)
+  end
+
+  defp prune_before_insert(index, max_entries)
+       when is_map(index) and is_integer(max_entries) and max_entries > 0 do
+    overflow = map_size(index) - max_entries + 1
+
+    if overflow > 0 do
+      Enum.reduce(1..overflow, index, fn _, acc ->
+        Map.delete(acc, oldest_producer_id(acc))
+      end)
+    else
+      index
+    end
   end
 
   defp put_cursor(index, producer_id, producer_seq, session_seq, hash) do

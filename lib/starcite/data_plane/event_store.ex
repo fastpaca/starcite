@@ -39,7 +39,53 @@ defmodule Starcite.DataPlane.EventStore do
   def init(_opts) do
     :ok = EventQueue.ensure_tables()
     :ok = cache_archive_memory_bytes(Store.cache_memory_bytes_or_zero())
-    {:ok, %{}}
+    {:ok, %{capacity_check_pending?: false, capacity_check_context: nil}}
+  end
+
+  @impl true
+  def handle_call(:clear_runtime_state, _from, state) when is_map(state) do
+    {:reply, :ok, %{state | capacity_check_pending?: false, capacity_check_context: nil}}
+  end
+
+  @impl true
+  def handle_cast(
+        {:schedule_capacity_check, session_id, tenant_id},
+        %{capacity_check_pending?: false} = state
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    send(self(), :run_capacity_check)
+
+    {:noreply,
+     %{
+       state
+       | capacity_check_pending?: true,
+         capacity_check_context: {session_id, tenant_id}
+     }}
+  end
+
+  @impl true
+  def handle_cast(
+        {:schedule_capacity_check, session_id, tenant_id},
+        %{capacity_check_pending?: true} = state
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    {:noreply, %{state | capacity_check_context: {session_id, tenant_id}}}
+  end
+
+  @impl true
+  def handle_info(
+        :run_capacity_check,
+        %{capacity_check_pending?: true, capacity_check_context: {session_id, tenant_id}} = state
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
+    maybe_emit_backpressure(ensure_capacity(session_id), session_id, tenant_id)
+
+    {:noreply, %{state | capacity_check_pending?: false, capacity_check_context: nil}}
+  end
+
+  @impl true
+  def handle_info(:run_capacity_check, state) when is_map(state) do
+    {:noreply, state}
   end
 
   @doc """
@@ -52,13 +98,8 @@ defmodule Starcite.DataPlane.EventStore do
   def put_event(session_id, tenant_id, %{seq: seq} = event)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
              tenant_id != "" and is_integer(seq) and seq > 0 do
-    maybe_emit_backpressure(
-      ensure_capacity_for_put_event(session_id, event),
-      session_id,
-      tenant_id
-    )
-
     :ok = EventQueue.put_event(session_id, seq, event)
+    :ok = maybe_schedule_capacity_check_for_put(session_id, tenant_id)
     :ok
   end
 
@@ -72,9 +113,8 @@ defmodule Starcite.DataPlane.EventStore do
   def put_events(session_id, tenant_id, events)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
              tenant_id != "" and is_list(events) and events != [] do
-    maybe_emit_backpressure(ensure_capacity_for_puts(session_id, events), session_id, tenant_id)
-
     :ok = EventQueue.put_events(session_id, events)
+    :ok = maybe_schedule_capacity_check_for_puts(session_id, tenant_id, events)
     :ok
   end
 
@@ -185,6 +225,7 @@ defmodule Starcite.DataPlane.EventStore do
     EventQueue.clear()
     _ = Store.clear_cache()
     :ok = cache_archive_memory_bytes(0)
+    _ = clear_runtime_state()
     :ok
   end
 
@@ -211,22 +252,25 @@ defmodule Starcite.DataPlane.EventStore do
     end
   end
 
-  defp ensure_capacity_for_put_event(session_id, event)
-       when is_binary(session_id) and session_id != "" and is_map(event) do
+  defp maybe_schedule_capacity_check_for_put(session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
     if capacity_check_due?() do
-      ensure_capacity(session_id)
-    else
-      {:ok, :capacity_check_skipped}
+      schedule_capacity_check(session_id, tenant_id)
     end
+
+    :ok
   end
 
-  defp ensure_capacity_for_puts(session_id, [first_event | _rest])
-       when is_binary(session_id) and session_id != "" and is_map(first_event) do
+  defp maybe_schedule_capacity_check_for_puts(session_id, tenant_id, [first_event | _rest])
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and
+              is_map(first_event) do
     if capacity_check_due?() do
-      ensure_capacity(session_id)
-    else
-      {:ok, :capacity_check_skipped}
+      schedule_capacity_check(session_id, tenant_id)
     end
+
+    :ok
   end
 
   defp maybe_emit_backpressure(
@@ -247,6 +291,19 @@ defmodule Starcite.DataPlane.EventStore do
   end
 
   defp maybe_emit_backpressure(_result, _session_id, _tenant_id), do: :ok
+
+  defp schedule_capacity_check(session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    GenServer.cast(__MODULE__, {:schedule_capacity_check, session_id, tenant_id})
+  end
+
+  defp clear_runtime_state do
+    case Process.whereis(__MODULE__) do
+      nil -> :ok
+      _pid -> GenServer.call(__MODULE__, :clear_runtime_state)
+    end
+  end
 
   defp max_memory_bytes_limit do
     raw = Application.get_env(:starcite, :event_store_max_bytes, @default_max_memory_bytes)

@@ -71,6 +71,9 @@ lag separately from Starcite's own replication.
 | `STARCITE_WRITE_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
+| `STARCITE_RA_WAL_DATA_DIR` | Optional separate Ra WAL path. Put this on the lowest-latency persistent volume you have. |
+| `STARCITE_RA_WAL_WRITE_STRATEGY` | Optional Ra WAL write strategy override. Default is `o_sync`; other values are `default` and `sync_after_notify`. |
+| `STARCITE_RA_WAL_SYNC_METHOD` | Optional Ra WAL sync method override. Default is `datasync`; other values are `sync` and `none`. |
 | `STARCITE_ARCHIVE_ADAPTER` | `s3` (default) or `postgres`. |
 | `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for development. |
 | `PORT` | HTTP listen port. Default `4000`. |
@@ -83,6 +86,11 @@ Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
 `STARCITE_S3_SECRET_ACCESS_KEY`, `STARCITE_S3_PATH_STYLE`.
 
 **Postgres backend** additionally requires: `DATABASE_URL`.
+
+**Raft WAL tuning:** `sync_after_notify` lowers observed latency by notifying the
+caller before the local WAL sync completes, and `none` disables the local sync
+entirely. Both trade durability semantics for latency and should be treated as
+explicit operational choices, not transparent optimizations.
 
 ### S3 schema migration
 

@@ -92,7 +92,7 @@ defmodule Starcite.WritePath.CommandRouter do
       remote_mod,
       remote_fun,
       remote_args,
-      prefer_leader: false
+      prefer_leader: true
     )
   end
 

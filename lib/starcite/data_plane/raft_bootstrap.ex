@@ -417,17 +417,17 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp configure_ra_system_storage do
     ra_system_dir = RaftManager.ra_system_data_dir()
+    wal_data_dir = RaftManager.ra_wal_data_dir()
 
-    case File.mkdir_p(ra_system_dir) do
-      :ok ->
-        ra_system_dir_charlist = String.to_charlist(ra_system_dir)
-        Application.put_env(:ra, :data_dir, ra_system_dir_charlist)
-        Application.put_env(:ra, :wal_data_dir, ra_system_dir_charlist)
-        :ok
-
+    with :ok <- File.mkdir_p(ra_system_dir),
+         :ok <- File.mkdir_p(wal_data_dir) do
+      Application.put_env(:ra, :data_dir, String.to_charlist(ra_system_dir))
+      Application.put_env(:ra, :wal_data_dir, String.to_charlist(wal_data_dir))
+      :ok
+    else
       {:error, reason} ->
         raise ArgumentError,
-              "failed to prepare :ra storage directory #{inspect(ra_system_dir)}: #{inspect(reason)}"
+              "failed to prepare :ra storage directories #{inspect(ra_system_dir)} / #{inspect(wal_data_dir)}: #{inspect(reason)}"
     end
   end
 

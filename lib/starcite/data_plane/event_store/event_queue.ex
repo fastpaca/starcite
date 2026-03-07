@@ -42,14 +42,14 @@ defmodule Starcite.DataPlane.EventStore.EventQueue do
     put_event(session_id, seq, event)
   end
 
-  def put_events(session_id, events)
-      when is_binary(session_id) and session_id != "" and is_list(events) and events != [] do
-    max_seq = max_seq_from_events!(events)
-
-    rows =
-      Enum.map(events, fn %{seq: seq} = event
-                          when is_integer(seq) and seq > 0 and is_map(event) ->
-        {{session_id, seq}, event}
+  def put_events(session_id, [%{seq: first_seq} = first_event | rest])
+      when is_binary(session_id) and session_id != "" and is_integer(first_seq) and first_seq > 0 and
+             is_map(first_event) and is_list(rest) do
+    {rows, max_seq} =
+      Enum.reduce(rest, {[{{session_id, first_seq}, first_event}], first_seq}, fn
+        %{seq: seq} = event, {rows_acc, max_seq_acc}
+        when is_integer(seq) and seq > 0 and is_map(event) ->
+          {[{{session_id, seq}, event} | rows_acc], max(max_seq_acc, seq)}
       end)
 
     true = :ets.insert(@table, rows)
@@ -224,10 +224,4 @@ defmodule Starcite.DataPlane.EventStore.EventQueue do
 
   defp should_drop_index?(nil, _floor_seq), do: true
   defp should_drop_index?(max_seq, floor_seq) when is_integer(max_seq), do: max_seq < floor_seq
-
-  defp max_seq_from_events!([%{seq: seq} | rest]) when is_integer(seq) and seq > 0 do
-    Enum.reduce(rest, seq, fn %{seq: value}, acc when is_integer(value) and value > 0 ->
-      max(acc, value)
-    end)
-  end
 end

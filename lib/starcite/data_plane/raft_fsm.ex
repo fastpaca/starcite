@@ -57,13 +57,7 @@ defmodule Starcite.DataPlane.RaftFSM do
       ) do
     case Map.get(state.sessions, session_id) do
       nil ->
-        session =
-          Session.new(session_id,
-            title: title,
-            creator_principal: creator_principal,
-            tenant_id: tenant_id,
-            metadata: metadata
-          )
+        session = Session.new_raft(session_id, title, creator_principal, tenant_id, metadata)
 
         new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
 
@@ -108,16 +102,17 @@ defmodule Starcite.DataPlane.RaftFSM do
   end
 
   @impl true
-  def apply(meta, {:append_events, _session_id, [], _opts}, state) do
+  def apply(meta, {:append_events, _session_id, [], _expected_seq_or_opts}, state) do
     reply_with_optional_effects(meta, state, {:reply, {:error, :invalid_event}})
   end
 
   @impl true
-  def apply(meta, {:append_events, session_id, inputs, opts}, state)
-      when is_list(inputs) and (is_list(opts) or is_nil(opts)) do
+  def apply(meta, {:append_events, session_id, inputs, expected_seq}, state)
+      when is_list(inputs) and
+             (is_nil(expected_seq) or (is_integer(expected_seq) and expected_seq >= 0)) do
     case Map.get(state.sessions, session_id) do
       %Session{} = session ->
-        with :ok <- guard_expected_seq(session, expected_seq_from_opts(opts)),
+        with :ok <- guard_expected_seq(session, expected_seq),
              {:ok, updated_session, replies, events_to_store} <-
                append_to_session(session, inputs) do
           :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
@@ -134,6 +129,16 @@ defmodule Starcite.DataPlane.RaftFSM do
       nil ->
         reply_with_optional_effects(meta, state, {:reply, {:error, :session_not_found}})
     end
+  end
+
+  @impl true
+  def apply(meta, {:append_events, session_id, inputs, opts}, state)
+      when is_list(inputs) and is_list(opts) do
+    __MODULE__.apply(
+      meta,
+      {:append_events, session_id, inputs, expected_seq_from_opts(opts)},
+      state
+    )
   end
 
   @impl true
@@ -269,7 +274,6 @@ defmodule Starcite.DataPlane.RaftFSM do
        when is_integer(expected_seq) and expected_seq >= 0,
        do: {:error, {:expected_seq_conflict, expected_seq, last_seq}}
 
-  defp expected_seq_from_opts(nil), do: nil
   defp expected_seq_from_opts(opts) when is_list(opts), do: opts[:expected_seq]
 
   defp evict_session_after_ack?(%Session{} = session, previous_archived_seq)
@@ -368,7 +372,7 @@ defmodule Starcite.DataPlane.RaftFSM do
        )
        when is_integer(raft_index) and raft_index > 0 and is_list(effects) do
     interval = checkpoint_interval_entries()
-    last_checkpoint_index = Map.get(state, :last_checkpoint_index) || 0
+    last_checkpoint_index = state.last_checkpoint_index || 0
 
     # Keep checkpoint opportunities independent of archive ack / release-cursor cadence.
     if raft_index - last_checkpoint_index >= interval do

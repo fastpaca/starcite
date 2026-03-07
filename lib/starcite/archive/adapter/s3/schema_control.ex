@@ -238,7 +238,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
 
     case client(config).get_object(config, key) do
       {:ok, :not_found} ->
-        {:ok, default_manifest(), nil}
+        fetch_missing_manifest(config)
 
       {:ok, {body, etag}} when is_binary(body) and is_binary(etag) ->
         with {:ok, manifest} <- decode_manifest(body) do
@@ -252,6 +252,59 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
 
       {:error, :unavailable} ->
         {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp fetch_missing_manifest(config) when is_map(config) do
+    case archive_contains_data?(config) do
+      {:ok, false} ->
+        bootstrap_manifest(config)
+
+      {:ok, true} ->
+        {:ok, default_manifest(), nil}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp archive_contains_data?(config) when is_map(config) do
+    config
+    |> archive_data_prefixes()
+    |> Enum.reduce_while({:ok, false}, fn prefix, {:ok, false} ->
+      case client(config).list_keys(config, prefix) do
+        {:ok, []} ->
+          {:cont, {:ok, false}}
+
+        {:ok, [_first | _rest]} ->
+          {:halt, {:ok, true}}
+
+        {:error, :unavailable} ->
+          {:halt, {:error, :archive_read_unavailable}}
+      end
+    end)
+  end
+
+  defp archive_data_prefixes(config) when is_map(config) do
+    [
+      Layout.event_prefix(config),
+      Layout.session_prefix(config),
+      Layout.session_tenant_index_prefix(config)
+    ]
+  end
+
+  defp bootstrap_manifest(config) when is_map(config) do
+    manifest = current_manifest()
+
+    case put_manifest(config, manifest, nil) do
+      :ok ->
+        {:ok, manifest, nil}
+
+      :conflict ->
+        fetch_manifest(config)
+
+      {:error, :archive_write_unavailable} ->
+        {:error, :archive_write_unavailable}
     end
   end
 
@@ -292,6 +345,17 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
       manifest_version: @manifest_version,
       state: "ready",
       current_versions: Schema.baseline_versions(),
+      updated_at: now_iso8601(),
+      active_migration: nil,
+      last_migration: nil
+    }
+  end
+
+  defp current_manifest do
+    %{
+      manifest_version: @manifest_version,
+      state: "ready",
+      current_versions: Schema.current_versions(),
       updated_at: now_iso8601(),
       active_migration: nil,
       last_migration: nil

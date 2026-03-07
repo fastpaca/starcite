@@ -61,6 +61,16 @@ defmodule Starcite.DataPlane.RaftManager do
     Path.join(raft_data_dir_root(), "ra_system")
   end
 
+  @doc false
+  @spec ra_wal_data_dir() :: String.t()
+  def ra_wal_data_dir do
+    case Application.get_env(:starcite, :raft_wal_data_dir) do
+      nil -> ra_system_data_dir()
+      path when is_list(path) -> List.to_string(path)
+      path when is_binary(path) -> path
+    end
+  end
+
   @doc "Map session_id -> group_id (0..num_groups-1)"
   @spec group_for_session(binary()) :: non_neg_integer()
   def group_for_session(session_id) when is_binary(session_id) do

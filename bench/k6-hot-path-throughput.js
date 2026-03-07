@@ -23,6 +23,7 @@ const rate = Number(__ENV.RATE || 1000);
 const duration = __ENV.DURATION || '30s';
 const timeUnit = __ENV.TIME_UNIT || '1s';
 const preAllocatedVUs = Number(__ENV.PRE_ALLOCATED_VUS || maxVUs);
+const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || '').trim();
 const skipClusterReadyCheck = (__ENV.SKIP_CLUSTER_READY_CHECK || 'false').trim() === 'true';
 const vuRuntime = {};
 
@@ -152,7 +153,7 @@ export default function (data) {
     const { res, json } = lib.appendEvent(sessionId, {
       type: 'content',
       payload: { text },
-      actor: `agent:vu:${vuId}`,
+      actor: benchmarkActor === '' ? undefined : benchmarkActor,
       producer_id: producerId,
       producer_seq: producerSeq,
       source: 'benchmark',
