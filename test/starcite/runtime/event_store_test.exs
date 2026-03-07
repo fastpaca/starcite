@@ -357,6 +357,44 @@ defmodule Starcite.DataPlane.EventStoreTest do
     assert EventStore.size() == 2
   end
 
+  test "emits backpressure telemetry from deferred capacity checks" do
+    with_env(:starcite, :event_store_capacity_check_interval, 1)
+    session_id = "ses-cap-telemetry-#{System.unique_integer([:positive, :monotonic])}"
+    handler_id = attach_event_store_handler()
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    inserted_at = NaiveDateTime.utc_now()
+
+    assert :ok =
+             EventStore.put_event(session_id, "acme", %{
+               seq: 1,
+               type: "content",
+               payload: %{n: 1},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    with_env(:starcite, :event_store_max_bytes, EventStore.memory_bytes())
+
+    assert :ok =
+             EventStore.put_event(session_id, "acme", %{
+               seq: 2,
+               type: "content",
+               payload: %{n: 2},
+               actor: "agent:test",
+               inserted_at: inserted_at
+             })
+
+    assert EventStore.size() == 2
+
+    assert_receive {:event_store_backpressure, measurements, metadata}, 1_000
+    assert measurements.count == 1
+    assert metadata.session_id == session_id
+    assert metadata.tenant_id == "acme"
+    assert metadata.reason == :memory_limit
+  end
+
   test "accepts committed writes even with tiny byte limit" do
     with_env(:starcite, :event_store_capacity_check_interval, 1)
     with_env(:starcite, :event_store_max_bytes, 1)
@@ -394,6 +432,23 @@ defmodule Starcite.DataPlane.EventStoreTest do
         Application.put_env(app, key, previous)
       end
     end)
+  end
+
+  defp attach_event_store_handler do
+    handler_id = "event-store-backpressure-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :event_store, :backpressure],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:event_store_backpressure, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    handler_id
   end
 
   defp setup_idempotent_archive_adapter do

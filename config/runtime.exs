@@ -48,15 +48,92 @@ if cluster_nodes && cluster_nodes != "" do
     ]
 end
 
-if raft_dir = System.get_env("STARCITE_RAFT_DATA_DIR") do
-  ra_system_dir = Path.join(raft_dir, "ra_system")
-  ra_system_dir_charlist = String.to_charlist(ra_system_dir)
+get_optional_env = fn env_name ->
+  case System.get_env(env_name) do
+    nil ->
+      nil
 
-  config :starcite, :raft_data_dir, raft_dir
+    raw ->
+      case String.trim(raw) do
+        "" -> nil
+        value -> value
+      end
+  end
+end
 
-  config :ra,
-    data_dir: ra_system_dir_charlist,
-    wal_data_dir: ra_system_dir_charlist
+parse_ra_wal_write_strategy! = fn env_name, raw ->
+  case raw do
+    "default" -> :default
+    "o_sync" -> :o_sync
+    "sync_after_notify" -> :sync_after_notify
+    _ -> raise ArgumentError, "invalid wal write strategy for #{env_name}: #{inspect(raw)}"
+  end
+end
+
+parse_ra_wal_sync_method! = fn env_name, raw ->
+  case raw do
+    "datasync" -> :datasync
+    "sync" -> :sync
+    "none" -> :none
+    _ -> raise ArgumentError, "invalid wal sync method for #{env_name}: #{inspect(raw)}"
+  end
+end
+
+ra_runtime_config =
+  case get_optional_env.("STARCITE_RAFT_DATA_DIR") do
+    nil ->
+      []
+
+    raft_dir ->
+      ra_system_dir = Path.join(raft_dir, "ra_system")
+
+      config :starcite, :raft_data_dir, raft_dir
+
+      [
+        data_dir: String.to_charlist(ra_system_dir),
+        wal_data_dir: String.to_charlist(ra_system_dir)
+      ]
+  end
+
+ra_runtime_config =
+  case get_optional_env.("STARCITE_RA_WAL_DATA_DIR") do
+    nil ->
+      ra_runtime_config
+
+    wal_data_dir ->
+      config :starcite, :raft_wal_data_dir, wal_data_dir
+
+      Keyword.put(ra_runtime_config, :wal_data_dir, String.to_charlist(wal_data_dir))
+  end
+
+ra_runtime_config =
+  case get_optional_env.("STARCITE_RA_WAL_WRITE_STRATEGY") do
+    nil ->
+      ra_runtime_config
+
+    write_strategy ->
+      Keyword.put(
+        ra_runtime_config,
+        :wal_write_strategy,
+        parse_ra_wal_write_strategy!.("STARCITE_RA_WAL_WRITE_STRATEGY", write_strategy)
+      )
+  end
+
+ra_runtime_config =
+  case get_optional_env.("STARCITE_RA_WAL_SYNC_METHOD") do
+    nil ->
+      ra_runtime_config
+
+    sync_method ->
+      Keyword.put(
+        ra_runtime_config,
+        :wal_sync_method,
+        parse_ra_wal_sync_method!.("STARCITE_RA_WAL_SYNC_METHOD", sync_method)
+      )
+  end
+
+if ra_runtime_config != [] do
+  config :ra, ra_runtime_config
 end
 
 parse_positive_integer! = fn env_name, raw ->

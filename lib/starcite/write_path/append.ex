@@ -73,7 +73,13 @@ defmodule Starcite.WritePath.Append do
 
   def append_events(id, events, opts)
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    dispatch(id, {:append_events, id, events, opts}, :append_events_local, [id, events, opts])
+    expected_seq = expected_seq_from_opts(opts)
+
+    dispatch(id, {:append_events, id, events, expected_seq}, :append_events_local, [
+      id,
+      events,
+      expected_seq
+    ])
   end
 
   def append_events(_id, _events, _opts), do: {:error, :invalid_event}
@@ -83,10 +89,16 @@ defmodule Starcite.WritePath.Append do
 
   def append_events_local(id, events, opts)
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    append_local(id, {:append_events, id, events, opts})
+    append_local(id, {:append_events, id, events, expected_seq_from_opts(opts)})
   end
 
-  def append_events_local(_id, _events, _opts), do: {:error, :invalid_event}
+  def append_events_local(id, events, expected_seq)
+      when is_binary(id) and id != "" and is_list(events) and events != [] and
+             (is_nil(expected_seq) or (is_integer(expected_seq) and expected_seq >= 0)) do
+    append_local(id, {:append_events, id, events, expected_seq})
+  end
+
+  def append_events_local(_id, _events, _opts_or_expected_seq), do: {:error, :invalid_event}
 
   defp dispatch(id, command, remote_fun, remote_args)
        when is_binary(id) and id != "" and is_atom(remote_fun) and is_list(remote_args) do
@@ -157,4 +169,6 @@ defmodule Starcite.WritePath.Append do
 
   defp hydrate_reason(reason) when is_atom(reason), do: reason
   defp hydrate_reason(_reason), do: :unknown
+
+  defp expected_seq_from_opts(opts) when is_list(opts), do: Keyword.get(opts, :expected_seq)
 end

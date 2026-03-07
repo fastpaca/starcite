@@ -36,10 +36,26 @@ export const config = {
   runId: __ENV.RUN_ID || `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
 };
 
+function authHeaders() {
+  const token = (__ENV.BENCH_BEARER_TOKEN || '').trim();
+
+  if (token === '') {
+    return {};
+  }
+
+  return {
+    Authorization: `Bearer ${token}`,
+  };
+}
+
+const requestHeaders = {
+  'Content-Type': 'application/json',
+};
+
+Object.assign(requestHeaders, authHeaders());
+
 export const jsonHeaders = {
-  headers: {
-    'Content-Type': 'application/json',
-  },
+  headers: requestHeaders,
 };
 
 function buildUrl(path, params = {}, useLoadBalancer = true) {
@@ -122,11 +138,11 @@ export function appendEvent(id, event, opts = {}) {
   const payload = {
     type: event.type,
     payload: event.payload,
-    actor: event.actor,
     producer_id: event.producer_id,
     producer_seq: event.producer_seq,
   };
 
+  if (event.actor !== undefined) payload.actor = event.actor;
   if (event.source !== undefined) payload.source = event.source;
   if (event.metadata !== undefined) payload.metadata = event.metadata;
   if (event.refs !== undefined) payload.refs = event.refs;

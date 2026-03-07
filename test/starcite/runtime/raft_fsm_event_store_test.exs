@@ -172,6 +172,20 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert session.last_seq == 1
   end
 
+  test "append_events accepts legacy opts tuple shape" do
+    session_id = unique_session_id()
+    state = seeded_state(session_id)
+
+    {_, {:reply, {:ok, %{results: [first], last_seq: 1}}}, _effects} =
+      RaftFSM.apply(
+        nil,
+        {:append_events, session_id, [event_payload("one", producer_seq: 1)], [expected_seq: 0]},
+        state
+      )
+
+    assert first == %{seq: 1, last_seq: 1, deduped: false}
+  end
+
   test "append_event producer sequence conflict does not mutate state" do
     session_id = unique_session_id()
     state = seeded_state(session_id)

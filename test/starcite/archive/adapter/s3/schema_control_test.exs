@@ -83,12 +83,37 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
     {:ok, config: config}
   end
 
-  test "startup compatibility requires migration when manifest is behind", %{config: config} do
+  test "startup compatibility bootstraps a current manifest for an empty archive", %{
+    config: config
+  } do
+    assert :ok = SchemaControl.ensure_startup_compatibility(config)
+
+    meta_key = Layout.schema_meta_key(config)
+
+    assert {:ok, {body, _etag}} = FakeClient.get_object(config, meta_key)
+
+    decoded = Jason.decode!(body)
+
+    assert decoded["state"] == "ready"
+    assert decoded["current_versions"]["event_chunk"] == Schema.event_schema_version()
+    assert decoded["current_versions"]["session"] == Schema.session_schema_version()
+
+    assert decoded["current_versions"]["session_tenant_index"] ==
+             Schema.session_tenant_index_schema_version()
+  end
+
+  test "startup compatibility requires migration when archive data exists without a manifest", %{
+    config: config
+  } do
+    seed_session_blob(config, "acme", "ses-legacy")
+
     assert {:error, :archive_schema_migration_required} =
              SchemaControl.ensure_startup_compatibility(config)
   end
 
   test "manual migration updates manifest and unblocks startup compatibility", %{config: config} do
+    seed_session_blob(config, "acme", "ses-migrate")
+
     assert {:ok, stats} = SchemaControl.migrate(config, actor: "test")
 
     assert stats.event_migrations_needed == 0
@@ -133,5 +158,25 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
 
     assert {:error, :archive_schema_version_unsupported} =
              SchemaControl.ensure_startup_compatibility(config)
+  end
+
+  defp seed_session_blob(config, tenant_id, session_id)
+       when is_map(config) and is_binary(tenant_id) and is_binary(session_id) do
+    session_key = Layout.session_key(config, tenant_id, session_id)
+
+    :ok =
+      FakeClient.put_object(
+        config,
+        session_key,
+        Schema.encode_session(%{
+          id: session_id,
+          tenant_id: tenant_id,
+          title: nil,
+          creator_principal: %{tenant_id: tenant_id, id: "svc", type: "service"},
+          metadata: %{},
+          archived_seq: 0,
+          created_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+        })
+      )
   end
 end
