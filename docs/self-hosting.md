@@ -116,7 +116,7 @@ First-time cluster setup:
 5. Verify:
 
 ```bash
-curl -sS http://<node>:4000/health/ready
+curl -sS http://<node>:4001/health/ready
 bin/starcite rpc "Starcite.ControlPlane.Ops.status()"
 bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
 ```
@@ -124,6 +124,10 @@ bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
 You should see each node report ready, and the ready write-node set should match your
 configured `STARCITE_WRITE_NODE_IDS`. If a node isn't ready, check its logs — the
 most common issue is misconfigured `CLUSTER_NODES` or unreachable peers.
+
+Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
+or admin network. `/health/live`, `/health/ready`, `/metrics`, and `pprof` are
+served there instead of the public API port.
 
 ## Rolling restarts
 
@@ -155,7 +159,7 @@ For each write node, one at a time:
    traffic. This blocks until sync is complete:
    ```bash
    bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_ready(60000)"
-   curl -sS http://<node>:4000/health/ready
+   curl -sS http://<node>:4001/health/ready
    ```
 
 6. **Verify** the cluster looks healthy before moving on:

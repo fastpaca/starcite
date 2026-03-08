@@ -6,8 +6,8 @@ defmodule Starcite.Application do
 
   @impl true
   def start(_type, _args) do
-    pprof_port = pprof_port()
-    :ok = maybe_prepare_pprof(pprof_port)
+    ops_port = ops_port()
+    :ok = maybe_prepare_ops_server(ops_port)
     :ok = Starcite.ControlPlane.WriteNodes.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
@@ -28,7 +28,7 @@ defmodule Starcite.Application do
         # Data-plane runtime (Raft bootstrap, archive, event store)
         Starcite.DataPlane.Supervisor
       ]
-      |> Enum.concat(pprof_children(pprof_port))
+      |> Enum.concat(ops_children(ops_port))
       |> Enum.concat(cluster_children(topologies))
       |> Enum.reject(&is_nil/1)
       |> Enum.concat([
@@ -97,8 +97,8 @@ defmodule Starcite.Application do
     end
   end
 
-  defp pprof_port do
-    case Application.get_env(:starcite, :pprof_port) do
+  defp ops_port do
+    case Application.get_env(:starcite, :ops_port, Application.get_env(:starcite, :pprof_port)) do
       nil ->
         nil
 
@@ -107,13 +107,13 @@ defmodule Starcite.Application do
 
       value ->
         raise ArgumentError,
-              "invalid value for :pprof_port: #{inspect(value)} (expected positive integer or nil)"
+              "invalid value for :ops_port: #{inspect(value)} (expected positive integer or nil)"
     end
   end
 
-  defp maybe_prepare_pprof(nil), do: :ok
+  defp maybe_prepare_ops_server(nil), do: :ok
 
-  defp maybe_prepare_pprof(_port) do
+  defp maybe_prepare_ops_server(_port) do
     case Application.load(:pprof) do
       :ok ->
         :ok
@@ -130,16 +130,16 @@ defmodule Starcite.Application do
         :ok
 
       {:error, reason} ->
-        raise "failed to start plug_cowboy for pprof: #{inspect(reason)}"
+        raise "failed to start plug_cowboy for ops server: #{inspect(reason)}"
     end
   end
 
-  defp pprof_children(nil), do: []
+  defp ops_children(nil), do: []
 
-  defp pprof_children(port) do
+  defp ops_children(port) do
     [
       {Pprof.Servers.Profile, []},
-      {Plug.Cowboy, scheme: :http, plug: Starcite.Pprof.Router, port: port, compress: true}
+      {Plug.Cowboy, scheme: :http, plug: StarciteWeb.OpsRouter, port: port, compress: true}
     ]
   end
 end

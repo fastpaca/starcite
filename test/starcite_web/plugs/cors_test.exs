@@ -8,11 +8,11 @@ defmodule StarciteWeb.Plugs.CORSTest do
 
   test "adds permissive CORS headers to regular responses" do
     conn =
-      conn(:get, "/health/live")
+      conn(:get, "/v1/sessions")
       |> put_req_header("origin", "https://ui.example")
       |> @endpoint.call(@endpoint.init([]))
 
-    assert conn.status == 200
+    assert conn.status == 401
     assert get_resp_header(conn, "access-control-allow-origin") == ["*"]
     assert get_resp_header(conn, "access-control-expose-headers") == ["*"]
     assert get_resp_header(conn, "access-control-allow-credentials") == []

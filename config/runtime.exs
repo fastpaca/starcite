@@ -596,6 +596,10 @@ if config_env() == :prod do
   host = System.get_env("PHX_HOST") || "example.com"
   port = String.to_integer(System.get_env("PORT") || "4000")
 
+  if ops_port = System.get_env("STARCITE_OPS_PORT") do
+    config :starcite, :ops_port, parse_positive_integer!.("STARCITE_OPS_PORT", ops_port)
+  end
+
   if pprof_port = System.get_env("STARCITE_PPROF_PORT") do
     config :starcite, :pprof_port, parse_positive_integer!.("STARCITE_PPROF_PORT", pprof_port)
   end

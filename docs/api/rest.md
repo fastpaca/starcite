@@ -1,7 +1,10 @@
 # REST API
 
-All endpoints are under `/v1`. The API is small by design — three operations on one
-resource type (sessions), plus health checks.
+All public API endpoints are under `/v1`. The API is small by design — three
+operations on one resource type (sessions).
+
+Operational endpoints such as `/health/*`, `/metrics`, and `pprof` live on a
+separate ops port and are not part of the public API surface.
 
 ## Authentication
 
@@ -79,16 +82,6 @@ WebSocket upgrade for replay + live stream. See the
 - Requires `session:read`
 - Session must match JWT `tenant_id`
 - If JWT has `session_id`, `:id` must match it
-
-### `GET /health/live` and `GET /health/ready`
-
-Health checks for load balancers and orchestrators.
-
-- Ready: `{"status":"ok","mode":"write_node|router_node"}`
-- Not ready: `{"status":"starting","mode":"...","reason":"raft_sync|router_sync|observer_sync|draining"}`
-
-Use `/health/ready` for routing decisions. A node that reports `starting` is still
-syncing state and shouldn't receive traffic yet.
 
 ## Behavioral rules
 

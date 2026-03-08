@@ -244,7 +244,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
       conn(:get, "/")
       |> put_req_header("authorization", "Bearer one two")
 
-    result = ServiceAuth.call(conn, %{})
+    result = ServiceAuth.call(conn, [])
 
     assert result.status == 401
     assert result.halted
@@ -252,6 +252,14 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     assert get_resp_header(result, "www-authenticate") == [
              ~s(Bearer realm="starcite", error="invalid_request", error_description="Malformed bearer token")
            ]
+  end
+
+  test "plug is a no-op when auth is already assigned" do
+    configure_jwt_auth!("http://localhost:1#{@jwks_path}")
+    auth = Context.none()
+    conn = conn(:get, "/v1/sessions") |> assign(:auth, auth)
+
+    assert ServiceAuth.call(conn, ServiceAuth.init([])) == conn
   end
 
   defp jwt_signing_fixture! do
