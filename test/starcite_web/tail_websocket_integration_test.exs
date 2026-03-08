@@ -1,15 +1,12 @@
 defmodule StarciteWeb.TailWebSocketIntegrationTest do
   use ExUnit.Case, async: false
 
-  import Bitwise
-
   alias Starcite.AuthTestSupport
+  alias Starcite.WebSocketTestClient
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
 
   @auth_env_key StarciteWeb.Auth
-  @host ~c"127.0.0.1"
-  @ws_timeout 2_500
   @issuer "https://issuer.example"
   @audience "starcite-api"
   @jwks_path "/.well-known/jwks.json"
@@ -97,7 +94,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token})
+      connect_tail_ws(port, session_id, 0, %{"access_token" => token})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
@@ -152,7 +149,7 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token, "batch_size" => "2"})
+      connect_tail_ws(port, session_id, 0, %{"access_token" => token, "batch_size" => "2"})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
@@ -200,11 +197,96 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
       )
 
     {:ok, socket, response_headers, buffer} =
-      connect_tail_ws(port, session_id, 0, [], %{"access_token" => token})
+      connect_tail_ws(port, session_id, 0, %{"access_token" => token})
 
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
     {{4001, "token_expired"}, _rest} = recv_close_frame(socket, buffer)
+    :ok = :gen_tcp.close(socket)
+  end
+
+  test "tail websocket append returns ack, streams the committed event, and serializes conflicts",
+       %{
+         port: port,
+         private_key: private_key,
+         kid: kid
+       } do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{
+          "sub" => "user:user-42",
+          "tenant_id" => "acme",
+          "scopes" => ["session:read", "session:append"]
+        }
+      )
+
+    {:ok, socket, response_headers, buffer} =
+      connect_tail_ws(port, session_id, 0, %{"access_token" => token})
+
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
+
+    :ok =
+      send_text_frame(
+        socket,
+        %{
+          "type" => "append",
+          "ref" => "append-1",
+          "event" => %{
+            "type" => "content",
+            "payload" => %{"text" => "hello"},
+            "producer_id" => "writer-1",
+            "producer_seq" => 1
+          }
+        }
+      )
+
+    {ack_frame, buffer} = recv_text_frame(socket, buffer)
+
+    assert Jason.decode!(ack_frame) == %{
+             "type" => "ack",
+             "ref" => "append-1",
+             "seq" => 1,
+             "last_seq" => 1,
+             "deduped" => false
+           }
+
+    {event_frame, buffer} = recv_text_frame(socket, buffer)
+    event = Jason.decode!(event_frame)
+
+    assert event["seq"] == 1
+    assert event["payload"]["text"] == "hello"
+    assert event["producer_id"] == "writer-1"
+
+    :ok =
+      send_text_frame(
+        socket,
+        %{
+          "type" => "append",
+          "ref" => "append-2",
+          "event" => %{
+            "type" => "content",
+            "payload" => %{"text" => "conflict"},
+            "producer_id" => "writer-1",
+            "producer_seq" => 2,
+            "expected_seq" => 0
+          }
+        }
+      )
+
+    {error_frame, _buffer} = recv_text_frame(socket, buffer)
+
+    assert Jason.decode!(error_frame) == %{
+             "type" => "error",
+             "ref" => "append-2",
+             "error" => "expected_seq_conflict",
+             "message" => "Expected seq 0, current seq is 1"
+           }
+
     :ok = :gen_tcp.close(socket)
   end
 
@@ -229,36 +311,11 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     seq
   end
 
-  defp connect_tail_ws(port, session_id, cursor, headers, query_params)
+  defp connect_tail_ws(port, session_id, cursor, query_params)
        when is_integer(port) and port > 0 and is_binary(session_id) and is_integer(cursor) and
-              cursor >= 0 and is_list(headers) and is_map(query_params) do
-    {:ok, socket} =
-      :gen_tcp.connect(@host, port, [:binary, active: false, packet: :raw], @ws_timeout)
-
-    key = :crypto.strong_rand_bytes(16) |> Base.encode64()
-    query = build_tail_query(cursor, query_params)
-
-    request = [
-      "GET /v1/sessions/#{session_id}/tail?#{query} HTTP/1.1\r\n",
-      "Host: localhost:#{port}\r\n",
-      "Connection: Upgrade\r\n",
-      "Upgrade: websocket\r\n",
-      "Sec-WebSocket-Version: 13\r\n",
-      "Sec-WebSocket-Key: #{key}\r\n",
-      Enum.map(headers, fn {name, value} -> "#{name}: #{value}\r\n" end),
-      "\r\n"
-    ]
-
-    :ok = :gen_tcp.send(socket, request)
-
-    case recv_until_headers(socket, <<>>) do
-      {:ok, response_headers, buffer} ->
-        {:ok, socket, response_headers, buffer}
-
-      {:error, reason} ->
-        :gen_tcp.close(socket)
-        {:error, reason}
-    end
+              cursor >= 0 and is_map(query_params) do
+    path = "/v1/sessions/#{session_id}/tail?" <> build_tail_query(cursor, query_params)
+    WebSocketTestClient.connect(port, path)
   end
 
   defp build_tail_query(cursor, query_params)
@@ -268,77 +325,12 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
     |> URI.encode_query()
   end
 
-  defp recv_until_headers(socket, buffer) do
-    case :binary.match(buffer, "\r\n\r\n") do
-      {index, _len} ->
-        header_bytes = binary_part(buffer, 0, index + 4)
-        rest = binary_part(buffer, index + 4, byte_size(buffer) - index - 4)
-        {:ok, header_bytes, rest}
+  defdelegate recv_text_frame(socket, buffer), to: WebSocketTestClient
+  defdelegate recv_close_frame(socket, buffer), to: WebSocketTestClient
 
-      :nomatch ->
-        case :gen_tcp.recv(socket, 0, @ws_timeout) do
-          {:ok, bytes} -> recv_until_headers(socket, buffer <> bytes)
-          {:error, reason} -> {:error, reason}
-        end
-    end
+  defp send_text_frame(socket, payload) when is_map(payload) do
+    WebSocketTestClient.send_text_frame(socket, Jason.encode!(payload))
   end
-
-  defp recv_text_frame(socket, buffer) do
-    case parse_ws_frame(buffer) do
-      {:ok, %{opcode: 0x1, payload: payload}, rest} ->
-        {payload, rest}
-
-      {:ok, %{opcode: _opcode}, _rest} ->
-        raise "expected text frame"
-
-      :more ->
-        case :gen_tcp.recv(socket, 0, @ws_timeout) do
-          {:ok, bytes} -> recv_text_frame(socket, buffer <> bytes)
-          {:error, reason} -> raise "failed to receive websocket frame: #{inspect(reason)}"
-        end
-    end
-  end
-
-  defp recv_close_frame(socket, buffer) do
-    case parse_ws_frame(buffer) do
-      {:ok, %{opcode: 0x8, payload: payload}, rest} ->
-        {decode_close_payload(payload), rest}
-
-      {:ok, %{opcode: _opcode}, _rest} ->
-        raise "expected close frame"
-
-      :more ->
-        case :gen_tcp.recv(socket, 0, @ws_timeout) do
-          {:ok, bytes} -> recv_close_frame(socket, buffer <> bytes)
-          {:error, reason} -> raise "failed to receive websocket close frame: #{inspect(reason)}"
-        end
-    end
-  end
-
-  defp parse_ws_frame(<<b1, b2, rest::binary>>) when (b2 &&& 0x80) == 0 and (b2 &&& 0x7F) < 126 do
-    length = b2 &&& 0x7F
-
-    if byte_size(rest) < length do
-      :more
-    else
-      <<payload::binary-size(length), tail::binary>> = rest
-      {:ok, %{opcode: b1 &&& 0x0F, payload: payload}, tail}
-    end
-  end
-
-  defp parse_ws_frame(<<b1, 126, length::16, payload::binary-size(length), rest::binary>>) do
-    {:ok, %{opcode: b1 &&& 0x0F, payload: payload}, rest}
-  end
-
-  defp parse_ws_frame(<<b1, 127, length::64, payload::binary-size(length), rest::binary>>) do
-    {:ok, %{opcode: b1 &&& 0x0F, payload: payload}, rest}
-  end
-
-  defp parse_ws_frame(_buffer), do: :more
-
-  defp decode_close_payload(<<code::16, reason::binary>>), do: {code, reason}
-  defp decode_close_payload(<<code::16>>), do: {code, ""}
-  defp decode_close_payload(_payload), do: {1006, "invalid_close_payload"}
 
   defp token_for(private_key, kid, overrides)
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do

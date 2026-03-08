@@ -1,12 +1,14 @@
 defmodule StarciteWeb.TailSocketTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Archive.Store
+  alias Starcite.ReadPath
   alias Starcite.WritePath
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
+  alias Phoenix.Socket.Broadcast
+  alias Starcite.DataPlane.{EventStore, RaftAccess, TailBroadcast}
   alias Starcite.Repo
+  alias StarciteWeb.Auth.Context
   alias StarciteWeb.TailSocket
 
   setup do
@@ -20,20 +22,18 @@ defmodule StarciteWeb.TailSocketTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  defp base_state(session_id, cursor, principal \\ nil) do
+  defp base_state(session_id, cursor) do
     %{
       session_id: session_id,
-      topic: CursorUpdate.topic(session_id),
-      principal: principal,
+      topic: TailBroadcast.topic(session_id),
       cursor: cursor,
       frame_batch_size: 1,
+      auth_context: Context.none(),
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
       drain_scheduled: false,
-      catchup_timer_ref: nil,
-      auth_expires_at: nil,
-      auth_expiry_timer_ref: nil
+      auth_expires_at: nil
     }
   end
 
@@ -95,18 +95,17 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, update_three} = cursor_update_for(session_id, 3)
+      {:ok, update_three} = tail_broadcast_for(session_id, 3)
 
       {:ok, state_with_buffered_live} =
-        TailSocket.handle_info({:cursor_update, update_three}, state_after_fetch)
+        TailSocket.handle_info(update_three, state_after_fetch)
 
       {frames, drained_state} = drain_until_idle(state_with_buffered_live)
 
       assert frames == [1, 2, 3]
       assert drained_state.cursor == 3
 
-      assert {:ok, ^drained_state} =
-               TailSocket.handle_info({:cursor_update, update_three}, drained_state)
+      assert {:ok, ^drained_state} = TailSocket.handle_info(update_three, drained_state)
     end
 
     test "pushes live events immediately after replay is complete" do
@@ -122,10 +121,10 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, update} = cursor_update_for(session_id, 1)
+      {:ok, update} = tail_broadcast_for(session_id, 1)
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:cursor_update, update}, drained_state)
+               TailSocket.handle_info(update, drained_state)
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
@@ -187,16 +186,16 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, update} = cursor_update_for(session_id, 1)
+      {:ok, update} = tail_broadcast_for(session_id, 1)
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:cursor_update, update}, state)
+               TailSocket.handle_info(update, state)
 
       assert [%{"seq" => 1, "payload" => %{"state" => "running"}}] = Jason.decode!(payload)
       assert next_state.cursor == 1
     end
 
-    test "uses cursor update event payload without performing lookup reads" do
+    test "uses live tail broadcast payload without performing lookup reads" do
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -207,14 +206,14 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, update} = cursor_update_for(session_id, 1)
+      {:ok, update} = tail_broadcast_for(session_id, 1)
       assert 1 == EventStore.delete_below(session_id, 2)
       assert :error = EventStore.get_event(session_id, 1)
 
       state = %{base_state(session_id, 0) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:cursor_update, update}, state)
+               TailSocket.handle_info(update, state)
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
@@ -222,7 +221,7 @@ defmodule StarciteWeb.TailSocketTest do
       assert next_state.cursor == 1
     end
 
-    test "falls back to storage when a live cursor update misses ETS" do
+    test "falls back to storage when a live tail broadcast misses ETS" do
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
@@ -242,21 +241,27 @@ defmodule StarciteWeb.TailSocketTest do
 
       assert :error = EventStore.get_event(session_id, 1)
 
-      update = %{
-        version: 1,
-        session_id: session_id,
-        seq: 1,
-        last_seq: 1,
-        type: "content",
-        actor: "agent:test",
-        source: nil,
-        inserted_at: NaiveDateTime.utc_now()
+      update = %Broadcast{
+        topic: TailBroadcast.topic(session_id),
+        event: TailBroadcast.event_name(),
+        payload: %{
+          version: 1,
+          session_id: session_id,
+          tenant_id: "acme",
+          owner_principal: nil,
+          seq: 1,
+          last_seq: 1,
+          type: "content",
+          actor: "agent:test",
+          source: nil,
+          inserted_at: NaiveDateTime.utc_now()
+        }
       }
 
-      state = %{base_state(session_id, 0, principal_for_tenant("acme")) | replay_done: true}
+      state = %{base_state(session_id, 0) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:cursor_update, update}, state)
+               TailSocket.handle_info(update, state)
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
@@ -277,7 +282,7 @@ defmodule StarciteWeb.TailSocketTest do
 
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id)
-      :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
+      :ok = Phoenix.PubSub.subscribe(Starcite.PubSub, TailBroadcast.topic(session_id))
 
       {:ok, _} =
         append_event(session_id, %{
@@ -286,7 +291,13 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      assert_receive {:cursor_update, %{session_id: ^session_id, seq: 1} = update}
+      assert_receive %Broadcast{
+        topic: topic,
+        event: "tail_event",
+        payload: %{session_id: ^session_id, seq: 1} = update
+      }
+
+      assert topic == TailBroadcast.topic(session_id)
 
       send(Starcite.Archive, :flush_tick)
 
@@ -299,7 +310,14 @@ defmodule StarciteWeb.TailSocketTest do
       state = %{base_state(session_id, 0) | replay_done: true}
 
       assert {:push, {:text, payload}, next_state} =
-               TailSocket.handle_info({:cursor_update, update}, state)
+               TailSocket.handle_info(
+                 %Broadcast{
+                   topic: TailBroadcast.topic(session_id),
+                   event: TailBroadcast.event_name(),
+                   payload: update
+                 },
+                 state
+               )
 
       frame = Jason.decode!(payload)
       assert frame["seq"] == 1
@@ -375,7 +393,7 @@ defmodule StarciteWeb.TailSocketTest do
       assert is_integer(duration_ms) and duration_ms >= 0
     end
 
-    test "live cursor update emits read telemetry with tail_live operation" do
+    test "live tail broadcast emits read telemetry with tail_live operation" do
       session_id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -386,11 +404,11 @@ defmodule StarciteWeb.TailSocketTest do
           actor: "agent:test"
         })
 
-      {:ok, update} = cursor_update_for(session_id, 1)
+      {:ok, update} = tail_broadcast_for(session_id, 1)
       state = %{base_state(session_id, 0) | replay_done: true}
 
       assert {:push, {:text, _payload}, _next_state} =
-               TailSocket.handle_info({:cursor_update, update}, state)
+               TailSocket.handle_info(update, state)
 
       assert_receive {:read_event, %{count: 1, duration_ms: duration_ms},
                       %{operation: :tail_live, phase: :deliver, outcome: :ok}},
@@ -455,10 +473,6 @@ defmodule StarciteWeb.TailSocketTest do
     seq
   end
 
-  defp principal_for_tenant(tenant_id) when is_binary(tenant_id) and tenant_id != "" do
-    %Principal{tenant_id: tenant_id, id: "tail-test", type: :service}
-  end
-
   describe "auth lifetime" do
     test "stops socket when auth lifetime expires" do
       state =
@@ -470,10 +484,88 @@ defmodule StarciteWeb.TailSocketTest do
     end
   end
 
-  defp cursor_update_for(session_id, seq) do
-    with {:ok, event} <- EventStore.get_event(session_id, seq) do
-      {:cursor_update, update} = CursorUpdate.message(session_id, event, seq)
-      {:ok, update}
+  describe "append frames" do
+    test "appends and acknowledges over the raw tail socket" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      state =
+        base_state(session_id, 0)
+        |> Map.put(:replay_done, true)
+
+      frame =
+        Jason.encode!(%{
+          "type" => "append",
+          "ref" => "append-1",
+          "event" => %{
+            "type" => "content",
+            "payload" => %{"text" => "hello"},
+            "producer_id" => "writer-1",
+            "producer_seq" => 1
+          }
+        })
+
+      assert {:push, {:text, payload}, ^state} =
+               TailSocket.handle_in({frame, opcode: :text}, state)
+
+      assert Jason.decode!(payload) == %{
+               "type" => "ack",
+               "ref" => "append-1",
+               "seq" => 1,
+               "last_seq" => 1,
+               "deduped" => false
+             }
+
+      assert {:ok, [%{seq: 1, payload: %{"text" => "hello"}}]} =
+               ReadPath.get_events_from_cursor(session_id, 0, 10)
+    end
+
+    test "returns an error frame when append scope is missing" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      state =
+        base_state(session_id, 0)
+        |> Map.put(:replay_done, true)
+        |> Map.put(:auth_context, %Context{
+          kind: :jwt,
+          principal: %Starcite.Auth.Principal{tenant_id: "acme", id: "user-42", type: :user},
+          scopes: ["session:read"]
+        })
+
+      frame =
+        Jason.encode!(%{
+          "type" => "append",
+          "ref" => "append-1",
+          "event" => %{
+            "type" => "content",
+            "payload" => %{"text" => "hello"},
+            "producer_id" => "writer-1",
+            "producer_seq" => 1
+          }
+        })
+
+      assert {:push, {:text, payload}, ^state} =
+               TailSocket.handle_in({frame, opcode: :text}, state)
+
+      assert Jason.decode!(payload) == %{
+               "type" => "error",
+               "ref" => "append-1",
+               "error" => "forbidden_scope",
+               "message" => "Token scope does not allow this operation"
+             }
+    end
+  end
+
+  defp tail_broadcast_for(session_id, seq) do
+    with {:ok, session} <- ReadPath.get_session(session_id),
+         {:ok, event} <- EventStore.get_event(session_id, seq) do
+      {:ok,
+       %Broadcast{
+         topic: TailBroadcast.topic(session_id),
+         event: TailBroadcast.event_name(),
+         payload: TailBroadcast.payload(session, event, seq)
+       }}
     end
   end
 

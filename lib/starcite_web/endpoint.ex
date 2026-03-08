@@ -1,6 +1,10 @@
 defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
+  socket "/v1/tail/socket", StarciteWeb.TailUserSocket,
+    websocket: [auth_token: true],
+    longpoll: false
+
   plug CORSPlug,
     origin: "*",
     credentials: false,

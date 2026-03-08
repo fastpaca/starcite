@@ -2,8 +2,9 @@ defmodule Starcite.DataPlane.EventStoreMirrorTest do
   use ExUnit.Case, async: false
 
   alias Phoenix.PubSub
+  alias Phoenix.Socket.Broadcast
   alias Starcite.WritePath
-  alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.DataPlane.{EventStore, TailBroadcast}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -43,11 +44,11 @@ defmodule Starcite.DataPlane.EventStoreMirrorTest do
     assert EventStore.session_size(session_id) == 1
   end
 
-  test "publishes cursor updates with the committed event payload" do
+  test "publishes tail broadcasts with the committed event payload" do
     session_id = "ses-cursor-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = WritePath.create_session(id: session_id)
 
-    :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
+    :ok = PubSub.subscribe(Starcite.PubSub, TailBroadcast.topic(session_id))
 
     {:ok, %{seq: 1}} =
       WritePath.append_event(session_id, %{
@@ -59,7 +60,7 @@ defmodule Starcite.DataPlane.EventStoreMirrorTest do
         producer_seq: 1
       })
 
-    assert_receive {:cursor_update, update}, 1_000
+    assert_receive %Broadcast{event: "tail_event", payload: update}, 1_000
     assert update.version == 1
     assert update.session_id == session_id
     assert update.seq == 1
