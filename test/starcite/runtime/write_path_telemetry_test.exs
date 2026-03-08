@@ -9,6 +9,11 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
     handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
     role_count_handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
+    group_role_handler_id = "raft-group-role-#{System.unique_integer([:positive, :monotonic])}"
+
+    leadership_transfer_handler_id =
+      "raft-leadership-transfer-#{System.unique_integer([:positive, :monotonic])}"
+
     request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
     session_handler_id = "session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
@@ -29,6 +34,26 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
         [:starcite, :raft, :role_count],
         fn _event, measurements, metadata, pid ->
           send(pid, {:raft_role_count_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    :ok =
+      :telemetry.attach(
+        group_role_handler_id,
+        [:starcite, :raft, :group_role],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:raft_group_role_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    :ok =
+      :telemetry.attach(
+        leadership_transfer_handler_id,
+        [:starcite, :raft, :leadership_transfer],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:raft_leadership_transfer_event, measurements, metadata})
         end,
         test_pid
       )
@@ -60,6 +85,8 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     on_exit(fn ->
       :telemetry.detach(handler_id)
       :telemetry.detach(role_count_handler_id)
+      :telemetry.detach(group_role_handler_id)
+      :telemetry.detach(leadership_transfer_handler_id)
       :telemetry.detach(request_handler_id)
       :telemetry.detach(session_handler_id)
     end)
@@ -171,6 +198,35 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
     assert_receive {:raft_role_count_event, %{groups: 32},
                     %{node: "shared-1@127.0.0.1", role: :leader}},
+                   1_000
+  end
+
+  test "telemetry helper exposes per-group raft role dimensions" do
+    assert :ok = Telemetry.raft_group_role_presence("shared-1@127.0.0.1", 7, :follower, 1)
+
+    assert_receive {:raft_group_role_event, %{present: 1},
+                    %{node: "shared-1@127.0.0.1", group_id: 7, role: :follower}},
+                   1_000
+  end
+
+  test "telemetry helper exposes leadership transfer dimensions" do
+    assert :ok =
+             Telemetry.raft_leadership_transfer(
+               7,
+               "shared-0@127.0.0.1",
+               "shared-1@127.0.0.1",
+               :timeout,
+               :timeout
+             )
+
+    assert_receive {:raft_leadership_transfer_event, %{count: 1},
+                    %{
+                      group_id: 7,
+                      source_node: "shared-0@127.0.0.1",
+                      target_node: "shared-1@127.0.0.1",
+                      outcome: :timeout,
+                      reason: :timeout
+                    }},
                    1_000
   end
 

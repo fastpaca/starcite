@@ -374,6 +374,76 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit a per-group snapshot for the local Raft role on this node.
+
+  Measurements:
+    - `:present` – `1` when the group is currently in this role on this node, else `0`
+
+  Metadata:
+    - `:node` – local Erlang node name as a string
+    - `:group_id`
+    - `:role` (`:leader`, `:follower`, `:candidate`, `:other`, or `:down`)
+  """
+  @spec raft_group_role_presence(
+          String.t(),
+          non_neg_integer(),
+          raft_group_role_count_role(),
+          0 | 1
+        ) :: :ok
+  def raft_group_role_presence(node_name, group_id, role, present)
+      when is_binary(node_name) and node_name != "" and is_integer(group_id) and group_id >= 0 and
+             role in [:leader, :follower, :candidate, :other, :down] and present in [0, 1] do
+    execute_if_enabled(
+      [:starcite, :raft, :group_role],
+      %{present: present},
+      %{node: node_name, group_id: group_id, role: role}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit one leadership-transfer attempt outcome.
+
+  Measurements:
+    - `:count` – fixed at 1 per transfer attempt
+
+  Metadata:
+    - `:group_id`
+    - `:source_node`
+    - `:target_node`
+    - `:outcome` (`:ok`, `:already_leader`, `:error`, or `:timeout`)
+    - `:reason`
+  """
+  @type raft_leadership_transfer_outcome :: :ok | :already_leader | :error | :timeout
+
+  @spec raft_leadership_transfer(
+          non_neg_integer(),
+          String.t(),
+          String.t(),
+          raft_leadership_transfer_outcome(),
+          atom()
+        ) :: :ok
+  def raft_leadership_transfer(group_id, source_node, target_node, outcome, reason)
+      when is_integer(group_id) and group_id >= 0 and is_binary(source_node) and
+             source_node != "" and is_binary(target_node) and target_node != "" and
+             outcome in [:ok, :already_leader, :error, :timeout] and is_atom(reason) do
+    execute_if_enabled(
+      [:starcite, :raft, :leadership_transfer],
+      %{count: 1},
+      %{
+        group_id: group_id,
+        source_node: source_node,
+        target_node: target_node,
+        outcome: outcome,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one write/read-path routing decision before execution.
 
   Measurements:
