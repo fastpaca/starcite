@@ -348,6 +348,32 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit a snapshot of local Raft group counts by role for this node.
+
+  Measurements:
+    - `:groups` – number of local groups currently observed in this role
+
+  Metadata:
+    - `:node` – local Erlang node name as a string
+    - `:role` (`:leader`, `:follower`, `:candidate`, `:other`, or `:down`)
+  """
+  @type raft_group_role_count_role :: :leader | :follower | :candidate | :other | :down
+
+  @spec raft_group_role_count(String.t(), raft_group_role_count_role(), non_neg_integer()) :: :ok
+  def raft_group_role_count(node_name, role, groups)
+      when is_binary(node_name) and node_name != "" and
+             role in [:leader, :follower, :candidate, :other, :down] and
+             is_integer(groups) and groups >= 0 do
+    execute_if_enabled(
+      [:starcite, :raft, :role_count],
+      %{groups: groups},
+      %{node: node_name, role: role}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one write/read-path routing decision before execution.
 
   Measurements:

@@ -16,14 +16,13 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   alias Starcite.ControlPlane.WriteNodes
   alias Starcite.DataPlane.{RaftHealth, RaftManager}
+  alias Starcite.Observability.Telemetry
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
   @group_task_timeout_ms 60_000
   @readiness_refresh_call_timeout_ms 5_000
   @runtime_reconcile_interval_ms 5_000
-  @group_leader_probe_timeout_ms 250
-  @group_election_timeout_ms 500
 
   def start_link(opts) do
     GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -158,6 +157,10 @@ defmodule Starcite.DataPlane.RaftBootstrap do
     else
       Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
 
+      if mode == :write do
+        :ok = emit_local_raft_role_counts()
+      end
+
       {:noreply,
        state
        |> Map.put(:startup_complete?, true)
@@ -213,13 +216,17 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   def handle_info(:runtime_reconcile, %{sync_ref: sync_ref} = state)
       when is_reference(sync_ref) do
     schedule_runtime_reconcile()
+
+    :ok = emit_local_raft_role_counts()
     {:noreply, state}
   end
 
   @impl true
   def handle_info(:runtime_reconcile, state) do
     schedule_runtime_reconcile()
-    {:noreply, maybe_reconcile_local_groups(state)}
+    next_state = maybe_reconcile_local_groups(state)
+    :ok = emit_local_raft_role_counts()
+    {:noreply, next_state}
   end
 
   @impl true
@@ -269,7 +276,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       )
 
       run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
-      ensure_local_group_leaders(my_groups)
 
       send(owner, {:startup_complete, :write})
     else
@@ -300,50 +306,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
       RaftManager.start_group(group_id)
     else
       :ok
-    end
-  end
-
-  defp ensure_local_group_leaders(groups) do
-    run_groups_parallel(groups, "ensure-leader", &ensure_group_has_leader/1)
-  end
-
-  defp ensure_group_has_leader(group_id) do
-    if RaftManager.should_participate?(group_id) and group_running?(group_id) do
-      server_ref = {RaftManager.server_id(group_id), Node.self()}
-
-      case :ra.member_overview(server_ref, @group_leader_probe_timeout_ms) do
-        {:ok, %{leader_id: {_, _}}, _} ->
-          :ok
-
-        {:ok, _overview, _} ->
-          trigger_group_election(group_id, server_ref, :leader_unknown)
-
-        {:timeout, _} ->
-          trigger_group_election(group_id, server_ref, :leader_query_timeout)
-
-        {:error, reason} ->
-          trigger_group_election(group_id, server_ref, {:leader_query_error, reason})
-      end
-    else
-      :ok
-    end
-  end
-
-  defp trigger_group_election(group_id, server_ref, reason) do
-    Logger.debug(
-      "RaftBootstrap: triggering election for group #{group_id} (reason=#{inspect(reason)})"
-    )
-
-    try do
-      :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
-      :ok
-    catch
-      :exit, exit_reason ->
-        Logger.warning(
-          "RaftBootstrap: trigger_election failed for group #{group_id}: #{inspect(exit_reason)}"
-        )
-
-        :ok
     end
   end
 
@@ -444,7 +406,6 @@ defmodule Starcite.DataPlane.RaftBootstrap do
         )
 
         run_groups_parallel(down_groups, "runtime-reconcile", &ensure_local_group_running/1)
-        ensure_local_group_leaders(down_groups)
         Map.put(state, :consensus_last_probe_at_ms, nil)
       end
     else
@@ -456,5 +417,46 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp schedule_runtime_reconcile do
     Process.send_after(self(), :runtime_reconcile, @runtime_reconcile_interval_ms)
+  end
+
+  defp emit_local_raft_role_counts do
+    if WriteNodes.write_node?(Node.self()) do
+      node_name = Atom.to_string(Node.self())
+
+      compute_local_raft_role_counts()
+      |> Enum.each(fn {role, groups} ->
+        :ok = Telemetry.raft_group_role_count(node_name, role, groups)
+      end)
+    end
+
+    :ok
+  end
+
+  defp compute_local_raft_role_counts do
+    counts = %{leader: 0, follower: 0, candidate: 0, other: 0, down: 0}
+
+    Enum.reduce(compute_my_groups(), counts, fn group_id, acc ->
+      Map.update!(acc, local_group_role(group_id), &(&1 + 1))
+    end)
+  end
+
+  defp local_group_role(group_id) when is_integer(group_id) and group_id >= 0 do
+    if group_running?(group_id) do
+      server_ref = {RaftManager.server_id(group_id), Node.self()}
+
+      try do
+        case :ra.key_metrics(server_ref) do
+          %{state: :leader} -> :leader
+          %{state: :follower} -> :follower
+          %{state: :candidate} -> :candidate
+          _metrics -> :other
+        end
+      catch
+        :exit, _reason ->
+          :down
+      end
+    else
+      :down
+    end
   end
 end

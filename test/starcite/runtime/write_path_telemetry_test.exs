@@ -8,6 +8,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     Starcite.Runtime.TestHelper.reset()
 
     handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
+    role_count_handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
     request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
     session_handler_id = "session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
@@ -18,6 +19,16 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
         [:starcite, :raft, :command],
         fn _event, measurements, metadata, pid ->
           send(pid, {:raft_command_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    :ok =
+      :telemetry.attach(
+        role_count_handler_id,
+        [:starcite, :raft, :role_count],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:raft_role_count_event, measurements, metadata})
         end,
         test_pid
       )
@@ -48,6 +59,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
 
     on_exit(fn ->
       :telemetry.detach(handler_id)
+      :telemetry.detach(role_count_handler_id)
       :telemetry.detach(request_handler_id)
       :telemetry.detach(session_handler_id)
     end)
@@ -152,6 +164,14 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
 
     assert_receive_raft_command(:append_event, :leader_retry_timeout, "acme")
+  end
+
+  test "telemetry helper exposes raft group role count dimensions" do
+    assert :ok = Telemetry.raft_group_role_count("shared-1@127.0.0.1", :leader, 32)
+
+    assert_receive {:raft_role_count_event, %{groups: 32},
+                    %{node: "shared-1@127.0.0.1", role: :leader}},
+                   1_000
   end
 
   test "create_session emits session lifecycle telemetry" do

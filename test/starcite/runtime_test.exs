@@ -4,9 +4,10 @@ defmodule Starcite.RuntimeTest do
   import ExUnit.CaptureLog
 
   alias Starcite.Auth.Principal
+  alias Starcite.ControlPlane.WriteNodes
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Archive.Store
-  alias Starcite.DataPlane.{EventStore, RaftAccess, SessionStore}
+  alias Starcite.DataPlane.{EventStore, RaftAccess, RaftBootstrap, SessionStore}
   alias Starcite.DataPlane.RaftManager
   alias Starcite.Session
   alias Starcite.Repo
@@ -434,6 +435,64 @@ defmodule Starcite.RuntimeTest do
   end
 
   describe "Raft failover and recovery" do
+    test "runtime reconcile emits local raft leader count telemetry" do
+      handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:starcite, :raft, :role_count],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:raft_role_count_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
+      on_exit(fn ->
+        :telemetry.detach(handler_id)
+      end)
+
+      eventually(
+        fn ->
+          assert RaftBootstrap.ready?()
+        end,
+        timeout: 10_000
+      )
+
+      send(RaftBootstrap, :runtime_reconcile)
+
+      assert_receive_raft_role_count(:leader, WriteNodes.num_groups(), Node.self())
+    end
+
+    test "starting a multi-replica local group does not trigger a local election" do
+      previous_num_groups = Application.get_env(:starcite, :num_groups)
+      previous_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+      previous_write_node_ids = Application.get_env(:starcite, :write_node_ids)
+
+      on_exit(fn ->
+        restore_env(:num_groups, previous_num_groups)
+        restore_env(:write_replication_factor, previous_replication_factor)
+        restore_env(:write_node_ids, previous_write_node_ids)
+        Starcite.Runtime.TestHelper.reset()
+      end)
+
+      Application.put_env(:starcite, :num_groups, 1)
+      Application.put_env(:starcite, :write_replication_factor, 3)
+
+      Application.put_env(:starcite, :write_node_ids, [
+        Node.self(),
+        :"peer-a@127.0.0.1",
+        :"peer-b@127.0.0.1"
+      ])
+
+      Starcite.Runtime.TestHelper.reset()
+
+      assert_no_trigger_election(fn ->
+        assert :ok = RaftManager.start_group(0)
+      end)
+    end
+
     test "recovers state after server crash and restart" do
       id = unique_id("ses-failover")
 
@@ -538,6 +597,67 @@ defmodule Starcite.RuntimeTest do
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
   end
+
+  defp assert_no_trigger_election(fun) when is_function(fun, 0) do
+    parent = self()
+
+    {:ok, _tracer} =
+      :dbg.tracer(
+        :process,
+        {fn msg, _state ->
+           send(parent, {:dbg, msg})
+           {:ok, nil}
+         end, nil}
+      )
+
+    {:ok, _} = :dbg.p(self(), [:call])
+    {:ok, matches} = :dbg.tpl(:ra, :trigger_election, :x)
+
+    assert Enum.any?(matches, fn
+             {:matched, _node, matched} when is_integer(matched) and matched >= 1 -> true
+             _ -> false
+           end)
+
+    try do
+      fun.()
+
+      refute_receive(
+        {:dbg, {:trace, _pid, :call, {:ra, :trigger_election, _args}}},
+        200,
+        "unexpected :ra.trigger_election/2 during local recovery"
+      )
+    after
+      :dbg.stop()
+    end
+  end
+
+  defp assert_receive_raft_role_count(role, groups, node_name)
+       when role in [:leader, :follower, :candidate, :other, :down] and
+              is_integer(groups) and groups >= 0 and is_atom(node_name) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_raft_role_count(role, groups, Atom.to_string(node_name), deadline)
+  end
+
+  defp do_assert_receive_raft_role_count(role, groups, node_name, deadline)
+       when is_binary(node_name) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:raft_role_count_event, %{groups: ^groups}, %{node: ^node_name, role: ^role}} ->
+        :ok
+
+      {:raft_role_count_event, _measurements, _metadata} ->
+        do_assert_receive_raft_role_count(role, groups, node_name, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for raft role count telemetry role=#{inspect(role)} groups=#{inspect(groups)} node=#{inspect(node_name)}"
+        )
+    end
+  end
+
+  defp restore_env(key, nil) when is_atom(key), do: Application.delete_env(:starcite, key)
+  defp restore_env(key, value) when is_atom(key), do: Application.put_env(:starcite, key, value)
 
   defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 1_000)
