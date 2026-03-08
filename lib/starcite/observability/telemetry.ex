@@ -117,23 +117,38 @@ defmodule Starcite.Observability.Telemetry do
     - `:duration_ms` – elapsed request time in milliseconds
 
   Metadata:
+    - `:node` – local Erlang node name as a string
     - `:operation` (`:append_event` or `:append_events`)
-    - `:phase` (`:ack`)
+    - `:phase` (`:total`, `:route`, or `:ack`)
     - `:outcome` (`:ok`, `:error`, or `:timeout`)
   """
   @spec request(
           :append_event | :append_events,
-          :ack,
+          :total | :route | :ack,
           :ok | :error | :timeout,
           non_neg_integer()
         ) :: :ok
   def request(operation, phase, outcome, duration_ms)
-      when operation in [:append_event, :append_events] and phase in [:ack] and
+      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 do
+    request(operation, phase, outcome, duration_ms, current_node_name())
+  end
+
+  @spec request(
+          :append_event | :append_events,
+          :total | :route | :ack,
+          :ok | :error | :timeout,
+          non_neg_integer(),
+          String.t()
+        ) :: :ok
+  def request(operation, phase, outcome, duration_ms, node_name)
+      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+             outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_binary(node_name) and node_name != "" do
     execute_if_enabled(
       [:starcite, :request],
       %{count: 1, duration_ms: duration_ms},
-      %{operation: operation, phase: phase, outcome: outcome}
+      %{node: node_name, operation: operation, phase: phase, outcome: outcome}
     )
 
     :ok
@@ -312,8 +327,8 @@ defmodule Starcite.Observability.Telemetry do
     - `:count` – fixed at 1 per command execution
 
   Metadata:
+    - `:node` – execution node name as a string
     - `:command` (`:create_session`, `:append_event`, `:append_events`, `:ack_archived`, `:other`)
-    - `:tenant_id` – normalized tenancy label
     - `:outcome`
       (`:local_ok`, `:local_error`, `:local_timeout`, `:leader_retry_ok`,
       `:leader_retry_error`, or `:leader_retry_timeout`)
@@ -325,10 +340,9 @@ defmodule Starcite.Observability.Telemetry do
           | :local_timeout
           | :leader_retry_ok
           | :leader_retry_error
-          | :leader_retry_timeout,
-          String.t()
+          | :leader_retry_timeout
         ) :: :ok
-  def raft_command_result(command, outcome, tenant_id)
+  def raft_command_result(command, outcome)
       when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
              outcome in [
                :local_ok,
@@ -337,11 +351,34 @@ defmodule Starcite.Observability.Telemetry do
                :leader_retry_ok,
                :leader_retry_error,
                :leader_retry_timeout
-             ] and is_binary(tenant_id) and tenant_id != "" do
+             ] do
+    raft_command_result(command, outcome, current_node_name())
+  end
+
+  @spec raft_command_result(
+          :create_session | :append_event | :append_events | :ack_archived | :other,
+          :local_ok
+          | :local_error
+          | :local_timeout
+          | :leader_retry_ok
+          | :leader_retry_error
+          | :leader_retry_timeout,
+          String.t()
+        ) :: :ok
+  def raft_command_result(command, outcome, node_name)
+      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
+             outcome in [
+               :local_ok,
+               :local_error,
+               :local_timeout,
+               :leader_retry_ok,
+               :leader_retry_error,
+               :leader_retry_timeout
+             ] and is_binary(node_name) and node_name != "" do
     execute_if_enabled(
       [:starcite, :raft, :command],
       %{count: 1},
-      %{command: command, outcome: outcome, tenant_id: tenant_id}
+      %{node: node_name, command: command, outcome: outcome}
     )
 
     :ok
@@ -382,15 +419,14 @@ defmodule Starcite.Observability.Telemetry do
     - `:ready_count` – currently ready replicas for the group
 
   Metadata:
+    - `:node` – routing node name as a string
     - `:group_id`
-    - `:tenant_id`
     - `:target` (`:local` or `:remote`)
     - `:prefer_leader` (`true` or `false`)
     - `:leader_hint` (`:disabled`, `:hit`, or `:miss`)
   """
   @spec routing_decision(
           non_neg_integer(),
-          String.t(),
           :local | :remote,
           boolean(),
           :disabled | :hit | :miss,
@@ -399,23 +435,22 @@ defmodule Starcite.Observability.Telemetry do
         ) :: :ok
   def routing_decision(
         group_id,
-        tenant_id,
         target,
         prefer_leader,
         leader_hint,
         replica_count,
         ready_count
       )
-      when is_integer(group_id) and group_id >= 0 and is_binary(tenant_id) and tenant_id != "" and
-             target in [:local, :remote] and is_boolean(prefer_leader) and
+      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
+             is_boolean(prefer_leader) and
              leader_hint in [:disabled, :hit, :miss] and is_integer(replica_count) and
              replica_count >= 0 and is_integer(ready_count) and ready_count >= 0 do
     execute_if_enabled(
       [:starcite, :routing, :decision],
       %{count: 1, replica_count: replica_count, ready_count: ready_count},
       %{
+        node: current_node_name(),
         group_id: group_id,
-        tenant_id: tenant_id,
         target: target,
         prefer_leader: prefer_leader,
         leader_hint: leader_hint
@@ -435,23 +470,21 @@ defmodule Starcite.Observability.Telemetry do
     - `:leader_redirects` – number of leader redirect hints observed
 
   Metadata:
+    - `:node` – routing node name as a string
     - `:group_id`
-    - `:tenant_id`
     - `:path` (`:local` or `:remote`)
     - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)
   """
   @spec routing_result(
           non_neg_integer(),
-          String.t(),
           :local | :remote,
           :ok | :error | :timeout | :badrpc | :no_candidates | :other,
           non_neg_integer(),
           non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def routing_result(group_id, tenant_id, path, outcome, attempts, retries, leader_redirects)
-      when is_integer(group_id) and group_id >= 0 and is_binary(tenant_id) and tenant_id != "" and
-             path in [:local, :remote] and
+  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
+      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
              outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
              is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
              is_integer(leader_redirects) and leader_redirects >= 0 do
@@ -463,7 +496,7 @@ defmodule Starcite.Observability.Telemetry do
         retries: retries,
         leader_redirects: leader_redirects
       },
-      %{group_id: group_id, tenant_id: tenant_id, path: path, outcome: outcome}
+      %{node: current_node_name(), group_id: group_id, path: path, outcome: outcome}
     )
 
     :ok
@@ -688,5 +721,10 @@ defmodule Starcite.Observability.Telemetry do
     end
 
     :ok
+  end
+
+  defp current_node_name do
+    Node.self()
+    |> Atom.to_string()
   end
 end

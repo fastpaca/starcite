@@ -138,6 +138,31 @@ defmodule StarciteWeb.SessionControllerTest do
     :ok
   end
 
+  defp assert_receive_request_event(operation, phase, outcome) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_request_event(operation, phase, outcome, deadline)
+  end
+
+  defp do_assert_receive_request_event(operation, phase, outcome, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    node_name = Atom.to_string(Node.self())
+
+    receive do
+      {:request_event, %{count: 1, duration_ms: duration_ms},
+       %{node: ^node_name, operation: ^operation, phase: ^phase, outcome: ^outcome}}
+      when is_integer(duration_ms) and duration_ms >= 0 ->
+        duration_ms
+
+      {:request_event, _measurements, _metadata} ->
+        do_assert_receive_request_event(operation, phase, outcome, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)}"
+        )
+    end
+  end
+
   describe "POST /v1/sessions" do
     test "creates session with server-generated id" do
       conn =
@@ -357,7 +382,7 @@ defmodule StarciteWeb.SessionControllerTest do
   end
 
   describe "POST /v1/sessions/:id/append" do
-    test "emits write request telemetry at the web edge for success" do
+    test "emits total write request telemetry at the web edge for success" do
       :ok = attach_request_telemetry()
 
       id = unique_id("ses")
@@ -374,14 +399,11 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 201
 
-      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
-                      %{operation: :append_event, phase: :ack, outcome: :ok}},
-                     1_000
-
+      duration_ms = assert_receive_request_event(:append_event, :total, :ok)
       assert is_integer(duration_ms) and duration_ms >= 0
     end
 
-    test "emits write request telemetry at the web edge for errors" do
+    test "emits total write request telemetry at the web edge for errors" do
       :ok = attach_request_telemetry()
 
       id = unique_id("missing")
@@ -397,10 +419,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 404
 
-      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
-                      %{operation: :append_event, phase: :ack, outcome: :error}},
-                     1_000
-
+      duration_ms = assert_receive_request_event(:append_event, :total, :error)
       assert is_integer(duration_ms) and duration_ms >= 0
     end
 

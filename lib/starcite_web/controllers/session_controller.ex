@@ -429,7 +429,7 @@ defmodule StarciteWeb.SessionController do
     started_at = System.monotonic_time()
     result = fun.()
     duration_ms = elapsed_ms_since(started_at)
-    :ok = Telemetry.request(:append_event, :ack, request_outcome(result), duration_ms)
+    :ok = Telemetry.request(:append_event, :total, request_outcome(result), duration_ms)
     result
   end
 

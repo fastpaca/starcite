@@ -10,6 +10,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
     [
       ingestion_metrics(),
       raft_metrics(),
+      routing_metrics(),
       request_slo_metrics(),
       archive_metrics(),
       session_metrics(),
@@ -129,14 +130,14 @@ defmodule Starcite.Observability.PromEx.Metrics do
         counter("starcite_request_total",
           event_name: [:starcite, :request],
           measurement: :count,
-          description: "Write request outcomes by operation",
-          tags: [:operation, :outcome]
+          description: "Write request outcomes by node, operation, phase, and outcome",
+          tags: [:node, :operation, :phase, :outcome]
         ),
         distribution("starcite_request_duration_ms",
           event_name: [:starcite, :request],
           measurement: :duration_ms,
-          description: "Write request duration in milliseconds by operation and phase",
-          tags: [:operation, :phase],
+          description: "Write request duration in milliseconds by node, operation, and phase",
+          tags: [:node, :operation, :phase],
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
@@ -164,11 +165,59 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_raft_metrics,
       [
+        counter("starcite_raft_command_total",
+          event_name: [:starcite, :raft, :command],
+          measurement: :count,
+          description: "Raft command execution outcomes by node, command, and outcome",
+          tags: [:node, :command, :outcome]
+        ),
         last_value("starcite_raft_groups",
           event_name: [:starcite, :raft, :role_count],
           measurement: :groups,
           description: "Local Raft groups observed by role on this node",
           tags: [:role, :node]
+        )
+      ]
+    )
+  end
+
+  defp routing_metrics do
+    Event.build(
+      :starcite_routing_metrics,
+      [
+        counter("starcite_routing_decision_total",
+          event_name: [:starcite, :routing, :decision],
+          measurement: :count,
+          description:
+            "Routing decisions by node, target, leader preference, and leader hint status",
+          tags: [:node, :target, :prefer_leader, :leader_hint]
+        ),
+        counter("starcite_routing_result_total",
+          event_name: [:starcite, :routing, :result],
+          measurement: :count,
+          description: "Routing execution outcomes by node, path, and outcome",
+          tags: [:node, :path, :outcome]
+        ),
+        distribution("starcite_routing_attempts",
+          event_name: [:starcite, :routing, :result],
+          measurement: :attempts,
+          description: "Replica attempts per routed write request",
+          tags: [:node, :path],
+          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        ),
+        distribution("starcite_routing_retries",
+          event_name: [:starcite, :routing, :result],
+          measurement: :retries,
+          description: "Routing retries per routed write request",
+          tags: [:node, :path],
+          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        ),
+        distribution("starcite_routing_leader_redirects",
+          event_name: [:starcite, :routing, :result],
+          measurement: :leader_redirects,
+          description: "Leader redirect hints observed per routed write request",
+          tags: [:node, :path],
+          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
         )
       ]
     )
