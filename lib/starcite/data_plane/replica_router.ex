@@ -44,15 +44,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
     telemetry_operation = Keyword.get(route_opts, :telemetry_operation)
 
     if telemetry_operation do
-      :ok =
-        Telemetry.routing_decision(
-          group_id,
-          meta.target,
-          meta.prefer_leader,
-          meta.leader_hint,
-          meta.replica_count,
-          meta.ready_count
-        )
+      :ok = Telemetry.routing_decision(group_id, meta)
     end
 
     case target do
@@ -60,7 +52,8 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         result = apply(local_module, local_fun, local_args)
 
         if telemetry_operation do
-          :ok = Telemetry.routing_result(group_id, :local, routing_outcome(result), 0, 0, 0)
+          :ok =
+            Telemetry.routing_result(group_id, :local, result, %{attempts: 0, leader_redirects: 0})
         end
 
         result
@@ -69,7 +62,11 @@ defmodule Starcite.DataPlane.ReplicaRouter do
         result = {:error, {:no_available_replicas, []}}
 
         if telemetry_operation do
-          :ok = Telemetry.routing_result(group_id, :remote, :no_candidates, 0, 0, 0)
+          :ok =
+            Telemetry.routing_result(group_id, :remote, result, %{
+              attempts: 0,
+              leader_redirects: 0
+            })
         end
 
         result
@@ -90,18 +87,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
           )
 
         if telemetry_operation do
-          attempts = stats.attempts
-          retries = max(attempts - 1, 0)
-
-          :ok =
-            Telemetry.routing_result(
-              group_id,
-              :remote,
-              routing_outcome(result),
-              attempts,
-              retries,
-              stats.leader_redirects
-            )
+          :ok = Telemetry.routing_result(group_id, :remote, result, stats)
         end
 
         result
@@ -536,11 +522,4 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
   defp node_hint?(value) when is_atom(value) and not is_nil(value), do: true
   defp node_hint?(_value), do: false
-
-  defp routing_outcome({:ok, _reply}), do: :ok
-  defp routing_outcome({:timeout, _leader}), do: :timeout
-  defp routing_outcome({:error, {:no_available_replicas, _failures}}), do: :no_candidates
-  defp routing_outcome({:badrpc, _reason}), do: :badrpc
-  defp routing_outcome({:error, _reason}), do: :error
-  defp routing_outcome(_result), do: :other
 end

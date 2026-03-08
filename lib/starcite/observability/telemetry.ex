@@ -134,6 +134,18 @@ defmodule Starcite.Observability.Telemetry do
     request(operation, phase, outcome, duration_ms, current_node_name())
   end
 
+  @spec request_result(
+          :append_event | :append_events,
+          :total | :route | :ack,
+          {:ok, term()} | {:error, term()} | {:timeout, term()},
+          non_neg_integer()
+        ) :: :ok
+  def request_result(operation, phase, result, duration_ms)
+      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+             is_integer(duration_ms) and duration_ms >= 0 do
+    request(operation, phase, request_outcome(result), duration_ms)
+  end
+
   @spec request(
           :append_event | :append_events,
           :total | :route | :ack,
@@ -385,6 +397,90 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one write-path Raft command attempt.
+
+  This emits the Raft command outcome event and, for append operations, the
+  write request `:ack` phase event on the same node.
+  """
+  @spec raft_command_attempt(
+          :create_session | :append_event | :append_events | :ack_archived | :other,
+          :local_ok
+          | :local_error
+          | :local_timeout
+          | :leader_retry_ok
+          | :leader_retry_error
+          | :leader_retry_timeout,
+          String.t(),
+          :append_event | :append_events | nil,
+          {:ok, term()} | {:error, term()} | {:timeout, term()},
+          non_neg_integer()
+        ) :: :ok
+  def raft_command_attempt(command, outcome, node_name, request_operation, result, duration_ms)
+      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
+             outcome in [
+               :local_ok,
+               :local_error,
+               :local_timeout,
+               :leader_retry_ok,
+               :leader_retry_error,
+               :leader_retry_timeout
+             ] and is_binary(node_name) and node_name != "" and
+             request_operation in [:append_event, :append_events, nil] and
+             is_integer(duration_ms) and duration_ms >= 0 do
+    :ok = raft_command_result(command, outcome, node_name)
+
+    if request_operation in [:append_event, :append_events] do
+      :ok =
+        request(
+          request_operation,
+          :ack,
+          request_outcome(result),
+          duration_ms,
+          node_name
+        )
+    end
+
+    :ok
+  end
+
+  @doc """
+  Classify a write-path command into the exported Raft command dimension.
+  """
+  @spec write_path_command(term()) ::
+          :create_session | :append_event | :append_events | :ack_archived | :other
+  def write_path_command(
+        {:create_session, _id, _title, _creator_principal, _tenant_id, _metadata}
+      ),
+      do: :create_session
+
+  def write_path_command({:append_event, _id, _event, _expected_seq}), do: :append_event
+  def write_path_command({:append_events, _id, _events, _expected_seq}), do: :append_events
+  def write_path_command({:ack_archived, _entries}), do: :ack_archived
+  def write_path_command({:ack_archived, _id, _upto_seq}), do: :ack_archived
+  def write_path_command(_command), do: :other
+
+  @doc """
+  Classify a write-path command into the exported request-operation dimension.
+  """
+  @spec write_path_request_operation(term()) :: :append_event | :append_events | nil
+  def write_path_request_operation({:append_event, _id, _event, _expected_seq}), do: :append_event
+
+  def write_path_request_operation({:append_events, _id, _events, _expected_seq}),
+    do: :append_events
+
+  def write_path_request_operation(_command), do: nil
+
+  @doc """
+  Classify a routed write-path dispatch into the exported request-operation dimension.
+  """
+  @spec write_path_routing_operation(module(), atom()) ::
+          :create_session | :append_event | :append_events | nil
+  def write_path_routing_operation(Starcite.WritePath, :create_session_local), do: :create_session
+  def write_path_routing_operation(Starcite.WritePath, :append_event_local), do: :append_event
+  def write_path_routing_operation(Starcite.WritePath, :append_events_local), do: :append_events
+  def write_path_routing_operation(_remote_mod, _remote_fun), do: nil
+
+  @doc """
   Emit a snapshot of local Raft group counts by role for this node.
 
   Measurements:
@@ -460,6 +556,33 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
+  @spec routing_decision(
+          non_neg_integer(),
+          %{
+            target: :local | :remote,
+            prefer_leader: boolean(),
+            leader_hint: :disabled | :hit | :miss,
+            replica_count: non_neg_integer(),
+            ready_count: non_neg_integer()
+          }
+        ) :: :ok
+  def routing_decision(
+        group_id,
+        %{
+          target: target,
+          prefer_leader: prefer_leader,
+          leader_hint: leader_hint,
+          replica_count: replica_count,
+          ready_count: ready_count
+        }
+      )
+      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
+             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
+             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
+             ready_count >= 0 do
+    routing_decision(group_id, target, prefer_leader, leader_hint, replica_count, ready_count)
+  end
+
   @doc """
   Emit telemetry for one routing execution result after request execution.
 
@@ -500,6 +623,29 @@ defmodule Starcite.Observability.Telemetry do
     )
 
     :ok
+  end
+
+  @spec routing_result(
+          non_neg_integer(),
+          :local | :remote,
+          {:ok, term()} | {:error, term()} | {:timeout, term()} | term(),
+          %{attempts: non_neg_integer(), leader_redirects: non_neg_integer()}
+        ) :: :ok
+  def routing_result(group_id, path, result, %{
+        attempts: attempts,
+        leader_redirects: leader_redirects
+      })
+      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
+             is_integer(attempts) and attempts >= 0 and is_integer(leader_redirects) and
+             leader_redirects >= 0 do
+    routing_result(
+      group_id,
+      path,
+      routing_outcome(result),
+      attempts,
+      max(attempts - 1, 0),
+      leader_redirects
+    )
   end
 
   @doc """
@@ -727,4 +873,15 @@ defmodule Starcite.Observability.Telemetry do
     Node.self()
     |> Atom.to_string()
   end
+
+  defp request_outcome({:ok, _reply}), do: :ok
+  defp request_outcome({:timeout, _reason}), do: :timeout
+  defp request_outcome(_result), do: :error
+
+  defp routing_outcome({:ok, _reply}), do: :ok
+  defp routing_outcome({:timeout, _leader}), do: :timeout
+  defp routing_outcome({:error, {:no_available_replicas, _failures}}), do: :no_candidates
+  defp routing_outcome({:badrpc, _reason}), do: :badrpc
+  defp routing_outcome({:error, _reason}), do: :error
+  defp routing_outcome(_result), do: :other
 end

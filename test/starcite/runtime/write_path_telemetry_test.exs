@@ -171,6 +171,26 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     assert_receive_raft_command(:append_event, :leader_retry_timeout, node_name)
   end
 
+  test "telemetry helper emits command attempt telemetry for append acknowledgements" do
+    node_name = "shared-1@127.0.0.1"
+
+    assert :ok =
+             Telemetry.raft_command_attempt(
+               :append_event,
+               :leader_retry_ok,
+               node_name,
+               :append_event,
+               {:ok, %{seq: 1}},
+               9
+             )
+
+    assert_receive_raft_command(:append_event, :leader_retry_ok, node_name)
+
+    assert_receive {:request_event, %{count: 1, duration_ms: 9},
+                    %{node: ^node_name, operation: :append_event, phase: :ack, outcome: :ok}},
+                   1_000
+  end
+
   test "telemetry helper exposes raft group role count dimensions" do
     assert :ok = Telemetry.raft_group_role_count("shared-1@127.0.0.1", :leader, 32)
 
