@@ -214,7 +214,13 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
     if target_node == Node.self() do
       {:ok, local_group_probe(group_id)}
     else
-      case :rpc.call(target_node, __MODULE__, :local_group_probe, [group_id], @target_probe_timeout_ms) do
+      case :rpc.call(
+             target_node,
+             __MODULE__,
+             :local_group_probe,
+             [group_id],
+             @target_probe_timeout_ms
+           ) do
         %{role: role, running?: running?}
         when role in @group_roles and is_boolean(running?) ->
           {:ok, %{role: role, running?: running?}}
@@ -294,7 +300,6 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   defp normalize_transfer_result({:error, :invalid_group_id}), do: {:error, :invalid_group_id}
   defp normalize_transfer_result({:error, other}) when is_atom(other), do: {:error, other}
   defp normalize_transfer_result({:error, _other}), do: {:error, :error}
-  defp normalize_transfer_result(_other), do: {:error, :unexpected_result}
 
   defp lookup_group_leader(group_id) when is_integer(group_id) and group_id >= 0 do
     server_id = RaftManager.server_id(group_id)
@@ -350,6 +355,6 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
     %{leader: 0, follower: 0, candidate: 0, other: 0, down: 0}
   end
 
-  defp normalize_node_name(node) when is_atom(node), do: Atom.to_string(node)
+  defp normalize_node_name(node) when is_atom(node) and not is_nil(node), do: Atom.to_string(node)
   defp normalize_node_name(nil), do: "unknown"
 end

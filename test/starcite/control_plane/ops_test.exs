@@ -2,7 +2,7 @@ defmodule Starcite.ControlPlane.OpsTest do
   use ExUnit.Case, async: false
 
   alias Starcite.ControlPlane.{Observer, Ops, WriteNodes}
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.DataPlane.{RaftBootstrap, RaftManager}
 
   setup do
     Ops.undrain_node(Node.self())
@@ -170,9 +170,16 @@ defmodule Starcite.ControlPlane.OpsTest do
   end
 
   test "leadership helpers expose local single-node state" do
-    eventually(fn ->
-      assert RaftBootstrap.ready?()
+    Enum.each(Ops.local_write_groups(), fn group_id ->
+      assert :ok = RaftManager.start_group(group_id)
     end)
+
+    eventually(
+      fn ->
+        assert Ops.raft_role_counts().leader == WriteNodes.num_groups()
+      end,
+      timeout: 5_000
+    )
 
     states = Ops.local_raft_group_states()
 

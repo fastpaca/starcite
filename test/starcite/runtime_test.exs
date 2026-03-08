@@ -653,10 +653,18 @@ defmodule Starcite.RuntimeTest do
   end
 
   defp assert_receive_raft_group_role(group_id, role, present, node_name)
-       when is_integer(group_id) and group_id >= 0 and role in [:leader, :follower, :candidate, :other, :down] and
+       when is_integer(group_id) and group_id >= 0 and
+              role in [:leader, :follower, :candidate, :other, :down] and
               present in [0, 1] and is_atom(node_name) do
     deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_raft_group_role(group_id, role, present, Atom.to_string(node_name), deadline)
+
+    do_assert_receive_raft_group_role(
+      group_id,
+      role,
+      present,
+      Atom.to_string(node_name),
+      deadline
+    )
   end
 
   defp do_assert_receive_raft_role_count(role, groups, node_name, deadline)

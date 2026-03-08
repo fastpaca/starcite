@@ -10,8 +10,10 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
     role_count_handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
     group_role_handler_id = "raft-group-role-#{System.unique_integer([:positive, :monotonic])}"
+
     leadership_transfer_handler_id =
       "raft-leadership-transfer-#{System.unique_integer([:positive, :monotonic])}"
+
     request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
     session_handler_id = "session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
