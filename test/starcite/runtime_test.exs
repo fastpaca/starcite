@@ -437,6 +437,7 @@ defmodule Starcite.RuntimeTest do
   describe "Raft failover and recovery" do
     test "runtime reconcile emits local raft leader count telemetry" do
       handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
+      group_role_handler_id = "raft-group-role-#{System.unique_integer([:positive, :monotonic])}"
       test_pid = self()
 
       :ok =
@@ -449,8 +450,19 @@ defmodule Starcite.RuntimeTest do
           test_pid
         )
 
+      :ok =
+        :telemetry.attach(
+          group_role_handler_id,
+          [:starcite, :raft, :group_role],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:raft_group_role_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
       on_exit(fn ->
         :telemetry.detach(handler_id)
+        :telemetry.detach(group_role_handler_id)
       end)
 
       eventually(
@@ -463,6 +475,8 @@ defmodule Starcite.RuntimeTest do
       send(RaftBootstrap, :runtime_reconcile)
 
       assert_receive_raft_role_count(:leader, WriteNodes.num_groups(), Node.self())
+      assert_receive_raft_group_role(0, :leader, 1, Node.self())
+      assert_receive_raft_group_role(0, :follower, 0, Node.self())
     end
 
     test "starting a multi-replica local group does not trigger a local election" do
@@ -638,6 +652,13 @@ defmodule Starcite.RuntimeTest do
     do_assert_receive_raft_role_count(role, groups, Atom.to_string(node_name), deadline)
   end
 
+  defp assert_receive_raft_group_role(group_id, role, present, node_name)
+       when is_integer(group_id) and group_id >= 0 and role in [:leader, :follower, :candidate, :other, :down] and
+              present in [0, 1] and is_atom(node_name) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_raft_group_role(group_id, role, present, Atom.to_string(node_name), deadline)
+  end
+
   defp do_assert_receive_raft_role_count(role, groups, node_name, deadline)
        when is_binary(node_name) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
@@ -652,6 +673,25 @@ defmodule Starcite.RuntimeTest do
       remaining ->
         flunk(
           "timed out waiting for raft role count telemetry role=#{inspect(role)} groups=#{inspect(groups)} node=#{inspect(node_name)}"
+        )
+    end
+  end
+
+  defp do_assert_receive_raft_group_role(group_id, role, present, node_name, deadline)
+       when is_binary(node_name) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:raft_group_role_event, %{present: ^present},
+       %{node: ^node_name, group_id: ^group_id, role: ^role}} ->
+        :ok
+
+      {:raft_group_role_event, _measurements, _metadata} ->
+        do_assert_receive_raft_group_role(group_id, role, present, node_name, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for raft group role telemetry group_id=#{inspect(group_id)} role=#{inspect(role)} present=#{inspect(present)} node=#{inspect(node_name)}"
         )
     end
   end

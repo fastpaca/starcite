@@ -28,6 +28,9 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert is_integer(status.num_groups)
     assert status.num_groups > 0
     assert is_list(status.local_groups)
+    assert is_list(status.local_leader_groups)
+    assert is_map(status.raft_role_counts)
+    assert status.raft_role_counts.leader >= 0
     assert is_map(status.raft_storage)
     assert is_binary(status.raft_storage.starcite_data_dir)
     assert is_binary(status.raft_storage.ra_data_dir)
@@ -164,6 +167,43 @@ defmodule Starcite.ControlPlane.OpsTest do
     refute non_write_node in WriteNodes.nodes()
     assert {:error, :invalid_write_node} = Ops.drain_node(non_write_node)
     assert {:error, :invalid_write_node} = Ops.undrain_node(non_write_node)
+  end
+
+  test "leadership helpers expose local single-node state" do
+    eventually(fn ->
+      assert RaftBootstrap.ready?()
+    end)
+
+    states = Ops.local_raft_group_states()
+
+    assert length(states) == WriteNodes.num_groups()
+    assert Ops.local_leader_groups() == Ops.local_write_groups()
+    assert Ops.group_leader(0) == Node.self()
+    assert :ok = Ops.wait_group_leader(0, Node.self(), 1_000)
+    assert :already_leader = Ops.transfer_group_leadership(0, Node.self())
+
+    assert Ops.raft_role_counts() == %{
+             leader: WriteNodes.num_groups(),
+             follower: 0,
+             candidate: 0,
+             other: 0,
+             down: 0
+           }
+
+    assert Enum.all?(states, fn state ->
+             state.role == :leader and state.leader_node == Node.self() and
+               state.replicas == [Node.self()]
+           end)
+  end
+
+  test "transfer_group_leadership rejects targets outside the replica set" do
+    assert {:error, :target_not_replica} =
+             Ops.transfer_group_leadership(0, :"router-1@starcite.internal")
+  end
+
+  test "wait_group_leader rejects targets outside the replica set" do
+    assert {:error, :target_not_replica} =
+             Ops.wait_group_leader(0, :"router-1@starcite.internal", 100)
   end
 
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do

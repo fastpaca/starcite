@@ -169,6 +169,18 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :groups,
           description: "Local Raft groups observed by role on this node",
           tags: [:role, :node]
+        ),
+        last_value("starcite_raft_group_role",
+          event_name: [:starcite, :raft, :group_role],
+          measurement: :present,
+          description: "Whether a local Raft group is currently observed in a specific role",
+          tags: [:node, :group_id, :role]
+        ),
+        counter("starcite_raft_leadership_transfers_total",
+          event_name: [:starcite, :raft, :leadership_transfer],
+          measurement: :count,
+          description: "Leadership transfer attempts by group, target, outcome, and reason",
+          tags: [:group_id, :source_node, :target_node, :outcome, :reason]
         )
       ]
     )

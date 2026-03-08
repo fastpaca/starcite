@@ -14,9 +14,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
   use GenServer
   require Logger
 
+  alias Starcite.ControlPlane.Ops.Leadership
   alias Starcite.ControlPlane.WriteNodes
   alias Starcite.DataPlane.{RaftHealth, RaftManager}
-  alias Starcite.Observability.Telemetry
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
@@ -421,42 +421,9 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   defp emit_local_raft_role_counts do
     if WriteNodes.write_node?(Node.self()) do
-      node_name = Atom.to_string(Node.self())
-
-      compute_local_raft_role_counts()
-      |> Enum.each(fn {role, groups} ->
-        :ok = Telemetry.raft_group_role_count(node_name, role, groups)
-      end)
+      :ok = Leadership.emit_local_raft_role_telemetry()
     end
 
     :ok
-  end
-
-  defp compute_local_raft_role_counts do
-    counts = %{leader: 0, follower: 0, candidate: 0, other: 0, down: 0}
-
-    Enum.reduce(compute_my_groups(), counts, fn group_id, acc ->
-      Map.update!(acc, local_group_role(group_id), &(&1 + 1))
-    end)
-  end
-
-  defp local_group_role(group_id) when is_integer(group_id) and group_id >= 0 do
-    if group_running?(group_id) do
-      server_ref = {RaftManager.server_id(group_id), Node.self()}
-
-      try do
-        case :ra.key_metrics(server_ref) do
-          %{state: :leader} -> :leader
-          %{state: :follower} -> :follower
-          %{state: :candidate} -> :candidate
-          _metrics -> :other
-        end
-      catch
-        :exit, _reason ->
-          :down
-      end
-    else
-      :down
-    end
   end
 end
