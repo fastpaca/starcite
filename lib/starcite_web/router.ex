@@ -17,9 +17,4 @@ defmodule StarciteWeb.Router do
     post "/sessions/:id/append", SessionController, :append
     get "/sessions/:id/tail", TailController, :tail
   end
-
-  scope "/", StarciteWeb do
-    get "/health/live", HealthController, :live
-    get "/health/ready", HealthController, :ready
-  end
 end

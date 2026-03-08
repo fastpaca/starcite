@@ -1,6 +1,7 @@
-defmodule StarciteWeb.HealthControllerTest do
+defmodule StarciteWeb.OpsRouterTest do
   use ExUnit.Case, async: false
 
+  import Plug.Conn
   import Plug.Test
 
   alias Starcite.ControlPlane.{Observer, Ops}
@@ -8,6 +9,7 @@ defmodule StarciteWeb.HealthControllerTest do
   alias Starcite.DataPlane.RaftBootstrap
 
   @endpoint StarciteWeb.Endpoint
+  @ops_router StarciteWeb.OpsRouter
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -15,6 +17,11 @@ defmodule StarciteWeb.HealthControllerTest do
   end
 
   defp request(path) when is_binary(path) do
+    conn(:get, path)
+    |> @ops_router.call(@ops_router.init([]))
+  end
+
+  defp public_request(path) when is_binary(path) do
     conn(:get, path)
     |> @endpoint.call(@endpoint.init([]))
   end
@@ -293,6 +300,43 @@ defmodule StarciteWeb.HealthControllerTest do
         else
           fun.()
         end
+    end
+  end
+
+  describe "public endpoint" do
+    test "does not expose health checks on the API port" do
+      conn = public_request("/health/live")
+
+      assert conn.status == 401
+    end
+
+    test "does not expose metrics on the API port" do
+      conn = public_request("/metrics")
+
+      assert conn.status == 401
+    end
+
+    test "does not expose pprof on the API port" do
+      conn = public_request("/pprof")
+
+      assert conn.status == 401
+    end
+  end
+
+  describe "ops router" do
+    test "exposes Prometheus metrics on the ops port" do
+      conn = request("/metrics")
+
+      assert conn.status == 200
+      assert List.first(get_resp_header(conn, "content-type")) =~ "text/plain"
+      assert conn.resp_body =~ "starcite"
+    end
+
+    test "exposes pprof on the ops port" do
+      conn = request("/pprof")
+
+      assert conn.status == 200
+      assert conn.resp_body == "Welcome"
     end
   end
 end

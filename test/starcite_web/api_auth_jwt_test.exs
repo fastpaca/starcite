@@ -62,6 +62,19 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert get_resp_header(conn, "www-authenticate") == [~s(Bearer realm="starcite")]
   end
 
+  test "returns 401 before JSON parsing when token is missing" do
+    bypass = Bypass.open()
+    configure_jwt_auth!(bypass)
+
+    conn =
+      conn(:post, "/v1/sessions", "{\"id\":")
+      |> put_req_header("content-type", "application/json")
+      |> @endpoint.call(@endpoint.init([]))
+
+    assert conn.status == 401
+    assert Jason.decode!(conn.resp_body)["error"] == "unauthorized"
+  end
+
   test "returns 401 for invalid JWT audience" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()

@@ -24,14 +24,18 @@ defmodule StarciteWeb.Plugs.RedactSensitiveQuery do
 
   @impl true
   def call(%Conn{query_string: query_string} = conn, _opts) when is_binary(query_string) do
-    case URI.decode_query(query_string) do
-      %{"access_token" => access_token} = params when is_binary(access_token) ->
-        conn
-        |> put_private(@ws_access_token_private_key, access_token)
-        |> put_redacted_query_string(params)
+    if String.contains?(query_string, "access_token=") do
+      case URI.decode_query(query_string) do
+        %{"access_token" => access_token} = params when is_binary(access_token) ->
+          conn
+          |> put_private(@ws_access_token_private_key, access_token)
+          |> put_redacted_query_string(params)
 
-      _params ->
-        conn
+        _params ->
+          conn
+      end
+    else
+      conn
     end
   rescue
     _error ->

@@ -16,10 +16,12 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   alias StarciteWeb.Plugs.RedactSensitiveQuery
 
   @impl true
-  def init(_opts), do: %{}
+  def init(_opts), do: []
 
   @impl true
-  def call(conn, _opts) do
+  def call(%Conn{assigns: %{auth: %Context{}}} = conn, _opts), do: conn
+
+  def call(%Conn{} = conn, _opts) do
     case authenticate_conn(conn) do
       {:ok, auth_context} ->
         assign(conn, :auth, auth_context)
@@ -41,13 +43,13 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   @spec authenticate_conn(Conn.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_conn(%Conn{} = conn) do
-    case mode() do
-      :none ->
+    case config() do
+      %{mode: :none} ->
         {:ok, Context.none()}
 
-      :jwt ->
+      %{mode: :jwt} = cfg ->
         with {:ok, token} <- bearer_token(conn),
-             {:ok, auth_context} <- authenticate_token(token) do
+             {:ok, auth_context} <- authenticate_token(token, cfg) do
           {:ok, auth_context}
         end
     end
@@ -55,21 +57,23 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   @spec authenticate_token(String.t()) :: {:ok, Context.t()} | {:error, atom()}
   def authenticate_token(token) when is_binary(token) and token != "" do
-    case mode() do
-      :none ->
+    case config() do
+      %{mode: :none} ->
         {:ok, Context.none()}
 
-      :jwt ->
-        cfg = config()
-
-        with {:ok, claims} <- JWT.verify(token, cfg),
-             {:ok, auth_context} <- Identity.from_jwt_claims(claims) do
-          {:ok, auth_context}
-        end
+      cfg ->
+        authenticate_token(token, cfg)
     end
   end
 
   def authenticate_token(_token), do: {:error, :invalid_bearer_token}
+
+  defp authenticate_token(token, %{mode: :jwt} = cfg) when is_binary(token) and token != "" do
+    with {:ok, claims} <- JWT.verify(token, cfg),
+         {:ok, auth_context} <- Identity.from_jwt_claims(claims) do
+      {:ok, auth_context}
+    end
+  end
 
   @spec bearer_token(Conn.t()) :: {:ok, String.t()} | {:error, atom()}
   def bearer_token(%Conn{} = conn) do
