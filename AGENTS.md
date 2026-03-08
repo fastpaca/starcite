@@ -26,7 +26,7 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 - For storage formats, prefer off-the-shelf encoding/decoding (`Jason` for JSON/JSONL) over custom codecs unless there is a concrete performance or compatibility need.
 - Keep adapters thin: isolate transport/client calls from layout/serialization concerns, but avoid fragmenting logic into many tiny helper modules without clear payoff.
 - Remove generic “just in case” guards in internal paths. Crash loudly on impossible states rather than silently normalizing them.
-- Prefer direct control flow. Avoid `maybe_*`, `normalize_*`, or pass-through helpers that only forward to another function without changing representation or behavior.
+- Never introduce `maybe_*`, `normalize_*` functions, or pass-through helpers that only forward to another function without changing representation or behavior.
 - Minimize bespoke parsing (regexes, hand-rolled XML/date parsing, etc.) unless required by an unavoidable external protocol.
 - Optimize for fewer lines and clearer control flow. Deleting code is preferred to adding abstraction when behavior stays correct.
 - For prototype work, bias toward readability and explicitness over hardening.
@@ -112,12 +112,14 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 ## Frontend Notes
 
 - Tailwind v4 import block must stay:
+
   ```
   @import "tailwindcss" source(none);
   @source "../css";
   @source "../js";
   @source "../../lib/starcite_web";
   ```
+
 - No inline `<script>` tags. Extend behaviour via `assets/js/app.js` and Phoenix hooks with `phx-update="ignore"` when hooks own the DOM.
 - Build micro-interactions via Tailwind utility classes and CSS transitions; avoid component libraries like daisyUI.
 
