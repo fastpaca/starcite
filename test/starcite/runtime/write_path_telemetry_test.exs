@@ -94,7 +94,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     :ok
   end
 
-  test "append does not emit per-command telemetry from write path" do
+  test "append emits per-command telemetry from write path" do
     id = unique_id("ses")
     assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
 
@@ -108,10 +108,10 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    refute_receive {:raft_command_event, _measurements, _metadata}, 100
+    assert_receive_raft_command(:append_event, :local_ok)
   end
 
-  test "append does not emit write request telemetry from write path" do
+  test "append emits write request telemetry from write path" do
     id = unique_id("ses")
     assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
 
@@ -125,10 +125,11 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    refute_receive {:request_event, _measurements, _metadata}, 100
+    assert_receive_request_event(:append_event, :ack, :ok)
+    assert_receive_request_event(:append_event, :route, :ok)
   end
 
-  test "append missing session does not emit per-command telemetry from write path" do
+  test "append missing session emits per-command telemetry from write path" do
     id = unique_id("missing")
 
     assert {:error, :session_not_found} =
@@ -141,10 +142,10 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    refute_receive {:raft_command_event, _measurements, _metadata}, 100
+    assert_receive_raft_command(:append_event, :local_error)
   end
 
-  test "append missing session does not emit write request telemetry from write path" do
+  test "append missing session emits write request telemetry from write path" do
     id = unique_id("missing")
 
     assert {:error, :session_not_found} =
@@ -157,10 +158,11 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                producer_seq: 1
              })
 
-    refute_receive {:request_event, _measurements, _metadata}, 100
+    assert_receive_request_event(:append_event, :ack, :error)
+    assert_receive_request_event(:append_event, :route, :error)
   end
 
-  test "append_events does not emit write request telemetry from write path" do
+  test "append_events emits write request telemetry from write path" do
     id = unique_id("ses")
     assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
 
@@ -184,13 +186,36 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     ]
 
     assert {:ok, _reply} = WritePath.append_events(id, events)
-    refute_receive {:request_event, _measurements, _metadata}, 100
+    assert_receive_raft_command(:append_events, :local_ok)
+    assert_receive_request_event(:append_events, :ack, :ok)
+    assert_receive_request_event(:append_events, :route, :ok)
   end
 
   test "telemetry helper exposes leader_retry outcome dimension" do
-    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
+    node_name = "shared-1@127.0.0.1"
+    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, node_name)
 
-    assert_receive_raft_command(:append_event, :leader_retry_timeout, "acme")
+    assert_receive_raft_command(:append_event, :leader_retry_timeout, node_name)
+  end
+
+  test "telemetry helper emits command attempt telemetry for append acknowledgements" do
+    node_name = "shared-1@127.0.0.1"
+
+    assert :ok =
+             Telemetry.raft_command_attempt(
+               :append_event,
+               :leader_retry_ok,
+               node_name,
+               :append_event,
+               {:ok, %{seq: 1}},
+               9
+             )
+
+    assert_receive_raft_command(:append_event, :leader_retry_ok, node_name)
+
+    assert_receive {:request_event, %{count: 1, duration_ms: 9},
+                    %{node: ^node_name, operation: :append_event, phase: :ack, outcome: :ok}},
+                   1_000
   end
 
   test "telemetry helper exposes raft group role count dimensions" do
@@ -259,10 +284,11 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
   end
 
   test "telemetry helper exposes write request dimensions" do
-    assert :ok = Telemetry.request(:append_event, :ack, :timeout, 7)
+    node_name = "shared-1@127.0.0.1"
+    assert :ok = Telemetry.request(:append_event, :ack, :timeout, 7, node_name)
 
     assert_receive {:request_event, %{count: 1, duration_ms: 7},
-                    %{operation: :append_event, phase: :ack, outcome: :timeout}},
+                    %{node: ^node_name, operation: :append_event, phase: :ack, outcome: :timeout}},
                    1_000
   end
 
@@ -274,7 +300,13 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
       Application.put_env(:starcite, :telemetry_enabled, original)
     end)
 
-    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, "acme")
+    assert :ok =
+             Telemetry.raft_command_result(
+               :append_event,
+               :leader_retry_timeout,
+               "shared-1@127.0.0.1"
+             )
+
     refute_receive {:raft_command_event, _measurements, _metadata}, 100
   end
 
@@ -291,25 +323,50 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     refute_receive {:request_event, _measurements, _metadata}, 100
   end
 
-  defp assert_receive_raft_command(command, outcome, tenant_id) do
+  defp assert_receive_raft_command(command, outcome, node_name \\ Atom.to_string(Node.self())) do
     deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_raft_command(command, outcome, tenant_id, deadline)
+    do_assert_receive_raft_command(command, outcome, node_name, deadline)
   end
 
-  defp do_assert_receive_raft_command(command, outcome, tenant_id, deadline) do
+  defp do_assert_receive_raft_command(command, outcome, node_name, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:raft_command_event, %{count: 1},
-       %{command: ^command, outcome: ^outcome, tenant_id: ^tenant_id}} ->
+       %{node: ^node_name, command: ^command, outcome: ^outcome}} ->
         :ok
 
       {:raft_command_event, _measurements, _metadata} ->
-        do_assert_receive_raft_command(command, outcome, tenant_id, deadline)
+        do_assert_receive_raft_command(command, outcome, node_name, deadline)
     after
       remaining ->
         flunk(
           "timed out waiting for raft command telemetry command=#{inspect(command)} outcome=#{inspect(outcome)}"
+        )
+    end
+  end
+
+  defp assert_receive_request_event(operation, phase, outcome) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_request_event(operation, phase, outcome, deadline)
+  end
+
+  defp do_assert_receive_request_event(operation, phase, outcome, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+    node_name = Atom.to_string(Node.self())
+
+    receive do
+      {:request_event, %{count: 1, duration_ms: duration_ms},
+       %{node: ^node_name, operation: ^operation, phase: ^phase, outcome: ^outcome}}
+      when is_integer(duration_ms) and duration_ms >= 0 ->
+        :ok
+
+      {:request_event, _measurements, _metadata} ->
+        do_assert_receive_request_event(operation, phase, outcome, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)}"
         )
     end
   end

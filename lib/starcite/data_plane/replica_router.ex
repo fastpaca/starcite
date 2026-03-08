@@ -10,6 +10,7 @@ defmodule Starcite.DataPlane.ReplicaRouter do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.DataPlane.RaftManager
+  alias Starcite.Observability.Telemetry
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache
@@ -39,19 +40,41 @@ defmodule Starcite.DataPlane.ReplicaRouter do
       when is_integer(group_id) and group_id >= 0 and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    target = route_target(group_id, route_opts)
+    {target, meta} = route_target_with_meta(group_id, route_opts)
+    telemetry_operation = Keyword.get(route_opts, :telemetry_operation)
+
+    if telemetry_operation do
+      :ok = Telemetry.routing_decision(group_id, meta)
+    end
 
     case target do
       {:local, _node} ->
-        apply(local_module, local_fun, local_args)
+        result = apply(local_module, local_fun, local_args)
+
+        if telemetry_operation do
+          :ok =
+            Telemetry.routing_result(group_id, :local, result, %{attempts: 0, leader_redirects: 0})
+        end
+
+        result
 
       {:remote, []} ->
-        {:error, {:no_available_replicas, []}}
+        result = {:error, {:no_available_replicas, []}}
+
+        if telemetry_operation do
+          :ok =
+            Telemetry.routing_result(group_id, :remote, result, %{
+              attempts: 0,
+              leader_redirects: 0
+            })
+        end
+
+        result
 
       {:remote, nodes} ->
         allowed_nodes = MapSet.new(nodes)
 
-        {result, _stats} =
+        {result, stats} =
           try_remote(
             nodes,
             remote_module,
@@ -62,6 +85,10 @@ defmodule Starcite.DataPlane.ReplicaRouter do
             [],
             %{attempts: 0, leader_redirects: 0}
           )
+
+        if telemetry_operation do
+          :ok = Telemetry.routing_result(group_id, :remote, result, stats)
+        end
 
         result
     end
