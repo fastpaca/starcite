@@ -106,7 +106,10 @@ defmodule Starcite.MixProject do
   defp releases do
     [
       starcite: [
-        applications: [pprof: :load]
+        applications: [
+          pprof: :load,
+          recon: :load
+        ]
       ]
     ]
   end
