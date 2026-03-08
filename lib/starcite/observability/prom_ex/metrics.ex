@@ -9,6 +9,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def event_metrics(_opts) do
     [
       ingestion_metrics(),
+      raft_metrics(),
       request_slo_metrics(),
       archive_metrics(),
       session_metrics(),
@@ -154,6 +155,20 @@ defmodule Starcite.Observability.PromEx.Metrics do
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
+        )
+      ]
+    )
+  end
+
+  defp raft_metrics do
+    Event.build(
+      :starcite_raft_metrics,
+      [
+        last_value("starcite_raft_groups",
+          event_name: [:starcite, :raft, :role_count],
+          measurement: :groups,
+          description: "Local Raft groups observed by role on this node",
+          tags: [:role, :node]
         )
       ]
     )

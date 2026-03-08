@@ -251,15 +251,23 @@ defmodule Starcite.DataPlane.RaftManager do
   end
 
   defp maybe_trigger_local_election(group_id) when is_integer(group_id) and group_id >= 0 do
-    server_ref = {server_id(group_id), Node.self()}
+    if single_replica_group?(group_id) do
+      server_ref = {server_id(group_id), Node.self()}
 
-    try do
-      :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
-      :ok
-    catch
-      :exit, _reason ->
+      try do
+        :ok = :ra.trigger_election(server_ref, @group_election_timeout_ms)
         :ok
+      catch
+        :exit, _reason ->
+          :ok
+      end
+    else
+      :ok
     end
+  end
+
+  defp single_replica_group?(group_id) when is_integer(group_id) and group_id >= 0 do
+    length(replicas_for_group(group_id)) == 1
   end
 
   @doc false
