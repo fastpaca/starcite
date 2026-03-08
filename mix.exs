@@ -60,6 +60,7 @@ defmodule Starcite.MixProject do
       {:finch, "~> 0.19"},
       {:req, "~> 0.5"},
       {:pprof, "~> 0.1.0", runtime: false},
+      {:recon, "~> 2.5", only: [:dev, :test], runtime: false},
       {:ex_aws, "~> 2.5"},
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},
