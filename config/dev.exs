@@ -62,4 +62,4 @@ config :starcite, :storage_flush_interval_ms, 500
 # Single-node defaults for local development.
 config :starcite,
   routing_replication_factor: 1,
-  routing_node_ids: [:nonode@nohost]
+  cluster_node_ids: [:nonode@nohost]

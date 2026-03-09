@@ -6,7 +6,7 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
   alias Starcite.Session
 
   setup do
-    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
     original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
     handler_id = "session-replication-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
@@ -22,7 +22,7 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
       )
 
     on_exit(fn ->
-      Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+      Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
       Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       :telemetry.detach(handler_id)
     end)
@@ -31,7 +31,7 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
   end
 
   test "succeeds locally when no remote acknowledgements are required" do
-    Application.put_env(:starcite, :routing_node_ids, [Node.self()])
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self()])
     Application.put_env(:starcite, :routing_replication_factor, 1)
 
     session = Session.new("ses-repl-local")
@@ -57,7 +57,7 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
     missing = :"missing-replica@127.0.0.1"
     session_id = "ses-repl-missing"
 
-    Application.put_env(:starcite, :routing_node_ids, [Node.self(), missing])
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), missing])
     Application.put_env(:starcite, :routing_replication_factor, 2)
 
     session = Session.new(session_id)
@@ -116,7 +116,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   setup_all do
-    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
     original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
     original_routing_store_dir = Application.get_env(:starcite, :routing_store_dir)
 
@@ -128,17 +128,17 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     peers = start_peers(2)
     peer_nodes = Enum.map(peers, fn {_pid, node} -> node end)
-    routing_nodes = [Node.self() | peer_nodes]
+    cluster_nodes = [Node.self() | peer_nodes]
 
     Application.put_env(:starcite, :routing_store_dir, routing_store_dir)
-    Application.put_env(:starcite, :routing_node_ids, routing_nodes)
+    Application.put_env(:starcite, :cluster_node_ids, cluster_nodes)
     Application.put_env(:starcite, :routing_replication_factor, 3)
 
     Enum.with_index(peers, 2)
     |> Enum.each(fn {{_peer_pid, peer_node}, expected_cluster_size} ->
       true = Node.connect(peer_node)
       :ok = add_code_paths(peer_node)
-      :ok = configure_peer(peer_node, routing_nodes, routing_store_dir)
+      :ok = configure_peer(peer_node, cluster_nodes, routing_store_dir)
       :ok = start_peer_data_plane(peer_node)
       :ok = wait_for_cluster_size(expected_cluster_size)
     end)
@@ -152,7 +152,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
       end)
 
       restore_env(:routing_store_dir, original_routing_store_dir)
-      restore_env(:routing_node_ids, original_routing_node_ids)
+      restore_env(:cluster_node_ids, original_cluster_node_ids)
       restore_env(:routing_replication_factor, original_replication_factor)
       File.rm_rf(routing_store_dir)
     end)
@@ -368,8 +368,8 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end
   end
 
-  defp configure_peer(peer_node, routing_nodes, routing_store_dir)
-       when is_atom(peer_node) and is_list(routing_nodes) and is_binary(routing_store_dir) do
+  defp configure_peer(peer_node, cluster_nodes, routing_store_dir)
+       when is_atom(peer_node) and is_list(cluster_nodes) and is_binary(routing_store_dir) do
     routing_lease_ttl_ms = Application.get_env(:starcite, :routing_lease_ttl_ms, 5_000)
 
     :ok =
@@ -381,7 +381,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
       )
 
     :ok =
-      :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_node_ids, routing_nodes])
+      :rpc.call(peer_node, Application, :put_env, [:starcite, :cluster_node_ids, cluster_nodes])
 
     :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_replication_factor, 3])
 

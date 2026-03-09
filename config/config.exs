@@ -10,7 +10,7 @@ import Config
 config :starcite,
   ecto_repos: [Starcite.Repo],
   routing_replication_factor: 3,
-  routing_node_ids: [:nonode@nohost],
+  cluster_node_ids: [:nonode@nohost],
   routing_store_id: :starcite_routing,
   routing_store_dir: "priv/khepri",
   telemetry_enabled: true,

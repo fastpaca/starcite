@@ -5,11 +5,11 @@ defmodule Starcite.Routing.StoreTest do
   alias Starcite.Runtime.TestHelper
 
   setup do
-    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
     original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
     on_exit(fn ->
-      Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+      Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
       Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       TestHelper.reset()
     end)
@@ -23,7 +23,7 @@ defmodule Starcite.Routing.StoreTest do
     transfer_id = "xfer-local-1"
     now_ms = System.system_time(:millisecond)
 
-    Application.put_env(:starcite, :routing_node_ids, [Node.self(), peer])
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
     Application.put_env(:starcite, :routing_replication_factor, 2)
     TestHelper.reset()
 

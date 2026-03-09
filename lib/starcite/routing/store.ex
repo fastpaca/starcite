@@ -720,10 +720,10 @@ defmodule Starcite.Routing.Store do
 
     case candidates do
       [] ->
-        {:error, :no_ready_routing_nodes}
+        {:error, :no_ready_cluster_nodes}
 
       nodes when length(nodes) < desired ->
-        {:error, :no_ready_routing_nodes}
+        {:error, :no_ready_cluster_nodes}
 
       nodes ->
         {:ok, Enum.take(nodes, desired)}

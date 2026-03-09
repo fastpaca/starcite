@@ -121,7 +121,7 @@ defmodule StarciteWeb.SessionController do
   defp ingest_edge_error_reason({:error, {:routing_rpc_failed, _node, _reason}}),
     do: :unavailable
 
-  defp ingest_edge_error_reason({:error, :no_ready_routing_nodes}), do: :unavailable
+  defp ingest_edge_error_reason({:error, :no_ready_cluster_nodes}), do: :unavailable
 
   defp ingest_edge_error_reason({:error, reason})
        when reason in [:archive_read_unavailable, :event_gap_detected, :event_store_backpressure],
@@ -145,7 +145,7 @@ defmodule StarciteWeb.SessionController do
               :invalid_tail_batch_size,
               :invalid_limit,
               :invalid_list_query,
-              :invalid_routing_node,
+              :invalid_cluster_node,
               :invalid_group_id,
               :invalid_websocket_upgrade,
               :invalid_session,

@@ -3,7 +3,7 @@ defmodule Starcite.Routing.TopologyTest do
 
   alias Starcite.Routing.Topology
 
-  @config_keys [:routing_replication_factor, :routing_node_ids]
+  @config_keys [:routing_replication_factor, :cluster_node_ids]
 
   setup do
     original =
@@ -23,14 +23,14 @@ defmodule Starcite.Routing.TopologyTest do
     :ok
   end
 
-  test "config! reads normalized routing-node config" do
+  test "config! reads normalized cluster-node config" do
     self_node = Node.self()
 
     Application.put_env(:starcite, :routing_replication_factor, 2)
 
     Application.put_env(
       :starcite,
-      :routing_node_ids,
+      :cluster_node_ids,
       [self_node, self_node, :"peer-a@cluster"]
     )
 
@@ -38,27 +38,27 @@ defmodule Starcite.Routing.TopologyTest do
     assert nodes == [self_node, :"peer-a@cluster"]
   end
 
-  test "validate returns tagged error when replication factor exceeds routing-node count" do
+  test "validate returns tagged error when replication factor exceeds cluster-node count" do
     self_node = Node.self()
 
     Application.put_env(:starcite, :routing_replication_factor, 4)
 
     Application.put_env(
       :starcite,
-      :routing_node_ids,
+      :cluster_node_ids,
       [self_node, :"peer-a@cluster", :"peer-b@cluster"]
     )
 
     assert {:error, message} = Topology.validate()
-    assert message =~ "routing_replication_factor=4 exceeds routing_node_ids=3"
+    assert message =~ "routing_replication_factor=4 exceeds cluster_node_ids=3"
   end
 
-  test "validate returns tagged error when local node is missing from routing-node config" do
+  test "validate returns tagged error when local node is missing from cluster-node config" do
     Application.put_env(:starcite, :routing_replication_factor, 2)
-    Application.put_env(:starcite, :routing_node_ids, [:"peer-a@cluster", :"peer-b@cluster"])
+    Application.put_env(:starcite, :cluster_node_ids, [:"peer-a@cluster", :"peer-b@cluster"])
 
     assert {:error, message} = Topology.validate()
     assert message =~ "local node"
-    assert message =~ "routing_node_ids"
+    assert message =~ "cluster_node_ids"
   end
 end

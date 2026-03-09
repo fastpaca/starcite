@@ -93,15 +93,15 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "create_session rolls back local owner/session cache when replication quorum fails" do
-      original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
       on_exit(fn ->
-        Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
         Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
-      Application.put_env(:starcite, :routing_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
       Application.put_env(:starcite, :routing_replication_factor, 2)
 
       id = unique_id("ses")
@@ -113,18 +113,18 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "local_owner? promotes a follower log after routing ownership changes" do
-      original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
       on_exit(fn ->
-        Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
         Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
       peer = :"runtime-owner-peer@127.0.0.1"
       id = unique_id("ses")
 
-      Application.put_env(:starcite, :routing_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
       Application.put_env(:starcite, :routing_replication_factor, 2)
       Starcite.Runtime.TestHelper.reset()
 
