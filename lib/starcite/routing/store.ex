@@ -500,25 +500,13 @@ defmodule Starcite.Routing.Store do
            assignment_from_khepri(do_get_assignment_local(session_id, :consistency)),
          :ok <- ensure_matching_transfer(current, transfer_id),
          {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      ready_nodes = ready_node_list(node_records, committed_at_ms)
-
       next =
-        current
-        |> Map.put(:owner, current.target_owner)
-        |> Map.put(:epoch, current.epoch + 1)
-        |> Map.put(:status, :active)
-        |> Map.put(:updated_at_ms, committed_at_ms)
-        |> Map.put(
-          :replicas,
-          Policy.rebalance_replicas(
-            current.replicas,
-            current.target_owner,
-            ready_nodes,
-            Topology.replication_factor()
-          )
+        activate_assignment(
+          current,
+          current.target_owner,
+          ready_node_list(node_records, committed_at_ms),
+          committed_at_ms
         )
-        |> Map.delete(:target_owner)
-        |> Map.delete(:transfer_id)
 
       case :khepri.compare_and_swap(
              store_id(),
@@ -647,25 +635,13 @@ defmodule Starcite.Routing.Store do
       when is_binary(session_id) and session_id != "" and is_map(current) and is_atom(target_node) and
              is_integer(failed_at_ms) and failed_at_ms >= 0 do
     with {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      ready_nodes = ready_node_list(node_records, failed_at_ms)
-
       next =
-        current
-        |> Map.put(:owner, target_node)
-        |> Map.put(:epoch, current.epoch + 1)
-        |> Map.put(:status, :active)
-        |> Map.put(:updated_at_ms, failed_at_ms)
-        |> Map.put(
-          :replicas,
-          Policy.rebalance_replicas(
-            current.replicas,
-            target_node,
-            ready_nodes,
-            Topology.replication_factor()
-          )
+        activate_assignment(
+          current,
+          target_node,
+          ready_node_list(node_records, failed_at_ms),
+          failed_at_ms
         )
-        |> Map.delete(:target_owner)
-        |> Map.delete(:transfer_id)
 
       case :khepri.compare_and_swap(
              store_id(),
@@ -780,6 +756,27 @@ defmodule Starcite.Routing.Store do
     node_records
     |> eligible_ready_nodes(now_ms)
     |> Enum.map(fn {node, _record} -> node end)
+  end
+
+  defp activate_assignment(assignment, owner, ready_nodes, updated_at_ms)
+       when is_map(assignment) and is_atom(owner) and is_list(ready_nodes) and
+              is_integer(updated_at_ms) and updated_at_ms >= 0 do
+    assignment
+    |> Map.put(:owner, owner)
+    |> Map.put(:epoch, assignment.epoch + 1)
+    |> Map.put(:status, :active)
+    |> Map.put(:updated_at_ms, updated_at_ms)
+    |> Map.put(
+      :replicas,
+      Policy.rebalance_replicas(
+        assignment.replicas,
+        owner,
+        ready_nodes,
+        Topology.replication_factor()
+      )
+    )
+    |> Map.delete(:target_owner)
+    |> Map.delete(:transfer_id)
   end
 
   defp new_transfer_id do
