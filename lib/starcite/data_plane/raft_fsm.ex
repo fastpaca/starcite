@@ -7,7 +7,7 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   @behaviour :ra_machine
 
-  alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.DataPlane.{EventStore, TailBroadcast}
   alias Starcite.Session
   alias Starcite.Session.ProducerIndex
 
@@ -86,7 +86,7 @@ defmodule Starcite.DataPlane.RaftFSM do
           :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
           new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
-          effect = build_effect_for_event(session_id, event_to_store)
+          effect = build_effect_for_event(updated_session, event_to_store)
           reply = {:reply, {:ok, reply}}
           effects = if is_nil(effect), do: [], else: [effect]
 
@@ -118,7 +118,7 @@ defmodule Starcite.DataPlane.RaftFSM do
           :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
           new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
 
-          effects = build_effects_for_events(session_id, events_to_store)
+          effects = build_effects_for_events(updated_session, events_to_store)
           reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
           reply_with_optional_effects(meta, new_state, reply, effects)
         else
@@ -413,36 +413,37 @@ defmodule Starcite.DataPlane.RaftFSM do
     |> Map.put(:sessions, sessions)
   end
 
-  defp build_effects_for_events(_session_id, []), do: []
+  defp build_effects_for_events(_session, []), do: []
 
-  defp build_effects_for_events(session_id, events)
-       when is_binary(session_id) and is_list(events) do
+  defp build_effects_for_events(%Session{} = session, events) when is_list(events) do
     Enum.map(events, fn %{seq: seq} = event ->
       {
         :mod_call,
-        Phoenix.PubSub,
+        Phoenix.Channel.Server,
         :broadcast,
         [
           Starcite.PubSub,
-          CursorUpdate.topic(session_id),
-          CursorUpdate.message(session_id, event, seq)
+          TailBroadcast.topic(session.id),
+          TailBroadcast.event_name(),
+          TailBroadcast.payload(session, event, seq)
         ]
       }
     end)
   end
 
-  defp build_effect_for_event(_session_id, nil), do: nil
+  defp build_effect_for_event(_session, nil), do: nil
 
-  defp build_effect_for_event(session_id, %{seq: seq} = event)
-       when is_binary(session_id) and is_integer(seq) and seq > 0 do
+  defp build_effect_for_event(%Session{} = session, %{seq: seq} = event)
+       when is_integer(seq) and seq > 0 do
     {
       :mod_call,
-      Phoenix.PubSub,
+      Phoenix.Channel.Server,
       :broadcast,
       [
         Starcite.PubSub,
-        CursorUpdate.topic(session_id),
-        CursorUpdate.message(session_id, event, seq)
+        TailBroadcast.topic(session.id),
+        TailBroadcast.event_name(),
+        TailBroadcast.payload(session, event, seq)
       ]
     }
   end

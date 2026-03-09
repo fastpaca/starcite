@@ -1,97 +1,103 @@
 # WebSocket API
 
-Starcite exposes `tail` as a WebSocket endpoint.
+Starcite exposes session tailing through Phoenix sockets + channels at
+`/v1/tail/socket/websocket`.
 
-## Endpoint
+Each joined `tail:<session_id>` topic replays committed events after a cursor
+and then continues with live committed events.
 
-```
-ws://HOST/v1/sessions/:id/tail?cursor=41
-```
+## Auth
 
-Optional query params:
-
-- `batch_size` (`1..1000`, default `1`) controls how many events are included per text frame.
-
-Token transport during WebSocket upgrade:
-
-- non-browser clients: `Authorization: Bearer <jwt>` header
-- browser clients: include `access_token=<jwt>` query param
-
-Example (browser):
-
-```js
-const ws = new WebSocket(
-  `wss://HOST/v1/sessions/${sessionId}/tail?cursor=0&access_token=${encodeURIComponent(token)}`
-)
-```
-
-Starcite redacts `access_token` from application-level logs/telemetry metadata. If you run a reverse proxy or load balancer, redact query strings there too.
-
-JWT requirements for tail:
+JWT requirements for tail channels:
 
 - valid JWT signature via JWKS
 - `session:read` scope
-- JWT `tenant_id` must match session tenant
-- if JWT has `session_id`, it must match `:id`
+- JWT `tenant_id` must match the session tenant
+- if JWT has `session_id`, it must match the tailed session
 
-Auth behavior:
+Appending over an established tail transport requires `session:append` in
+addition to the read access needed to join or upgrade the tail itself.
 
-- missing/invalid/expired token: HTTP `401` during upgrade
-- valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
-- after successful upgrade, socket lifetime is bounded by token `exp`
-- on expiry, server closes with code `4001` and reason `token_expired`
+Token transport:
 
-## Semantics
+- non-browser clients can use `Authorization: Bearer <jwt>`
+- browser clients can use `access_token=<jwt>`
 
-On connect:
+Starcite redacts `access_token` from application-level logs and telemetry
+metadata. If you run a reverse proxy or load balancer, redact query strings
+there too.
 
-1. Replay committed events where `seq > cursor`, in ascending order.
-2. Continue streaming newly committed events on the same socket.
-3. On reconnect, use the last processed `seq` as the next `cursor`.
+## Tail Channels
 
-## Server frames
+Endpoint:
 
-When `batch_size=1` (default), Starcite emits one JSON event object per WebSocket text frame:
+```text
+ws://HOST/v1/tail/socket/websocket?vsn=2.0.0
+```
+
+Auth model:
+
+- socket connection is authenticated once in `TailUserSocket.connect/3`
+- each topic join is authorized independently in `TailChannel.join/3`
+- token expiry disconnects the Phoenix socket and all joined tail topics
+- one Phoenix socket can join multiple `tail:<session_id>` topics concurrently
+
+Topic model:
+
+```text
+tail:<session_id>
+```
+
+Join payload:
+
+- `cursor` (`>= 0`, default `0`)
+- `batch_size` (`1..1000`, default `1`)
+
+Server pushes:
+
+- event: `"events"`
+- payload:
+
+```json
+{
+  "events": [
+    {
+      "seq": 42,
+      "type": "state",
+      "payload": { "state": "running" },
+      "actor": "agent:researcher",
+      "producer_id": "writer_123",
+      "producer_seq": 8,
+      "source": "agent",
+      "metadata": { "role": "worker", "identity": { "provider": "codex" } },
+      "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
+      "idempotency_key": "run_123-step_8",
+      "inserted_at": "2026-02-08T15:00:01Z"
+    }
+  ]
+}
+```
+
+Client pushes:
+
+- event: `"append"`
+- payload: the same append payload accepted by `POST /v1/sessions/:id/append`
+
+Successful channel append replies use the normal Phoenix `"ok"` reply payload:
 
 ```json
 {
   "seq": 42,
-  "type": "state",
-  "payload": { "state": "running" },
-  "actor": "agent:researcher",
-  "producer_id": "writer_123",
-  "producer_seq": 8,
-  "source": "agent",
-  "metadata": { "role": "worker", "identity": { "provider": "codex" } },
-  "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
-  "idempotency_key": "run_123-step_8",
-  "inserted_at": "2026-02-08T15:00:01Z"
+  "last_seq": 42,
+  "deduped": false
 }
 ```
 
-When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batch_size` event objects:
+Failed channel append replies use the normal Phoenix `"error"` reply payload:
 
 ```json
-[
-  {
-    "seq": 42,
-    "type": "state",
-    "payload": { "state": "running" },
-    "actor": "agent:researcher",
-    "producer_id": "writer_123",
-    "producer_seq": 8,
-    "source": "agent",
-    "metadata": { "role": "worker", "identity": { "provider": "codex" } },
-    "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
-    "idempotency_key": "run_123-step_8",
-    "inserted_at": "2026-02-08T15:00:01Z"
-  }
-]
+{
+  "error": "forbidden_scope",
+  "message": "Token scope does not allow this operation"
+}
 ```
-
-Notes:
-
-- no `gap` event in the primary contract
-- no `tombstone` event in the primary contract
-- no `tail_synced` event
-- tail is server-to-client only; inbound client frames are ignored

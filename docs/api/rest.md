@@ -36,7 +36,7 @@ Optional JWT claim:
 Scopes:
 
 - `session:create` for `POST /v1/sessions`
-- `session:read` for `GET /v1/sessions` and `GET /v1/sessions/:id/tail`
+- `session:read` for `GET /v1/sessions` and tail-channel joins documented in [WebSocket API](websocket.md)
 - `session:append` for `POST /v1/sessions/:id/append`
 
 Unauthorized requests fail with `401`.
@@ -72,17 +72,6 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
 - `actor` is derived from JWT `sub` when omitted; if provided, it must equal JWT `sub`
 - Response: `{"seq", "last_seq", "deduped"}`
 
-### `GET /v1/sessions/:id/tail?cursor=N[&batch_size=M]`
-
-WebSocket upgrade for replay + live stream. See the
-[WebSocket API](websocket.md) for frame format and reconnection semantics.
-
-- Optional `batch_size` (`1..1000`): when `M > 1`, server emits JSON array frames
-  with up to `M` events per frame
-- Requires `session:read`
-- Session must match JWT `tenant_id`
-- If JWT has `session_id`, `:id` must match it
-
 ## Behavioral rules
 
 - Append is sequenced per-session; response includes a monotonic `seq`.
@@ -91,7 +80,7 @@ WebSocket upgrade for replay + live stream. See the
   - same IDs + different payload → conflict error
 - `expected_seq` enables optimistic concurrency — if the session's current `seq`
   doesn't match, the append is rejected with `409`.
-- `tail` replay is ordered by `seq` and continues with live commits after replay.
+- Tail-channel replay is ordered by `seq` and continues with live commits after replay.
 
 ## Error shape
 
