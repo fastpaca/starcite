@@ -1,8 +1,6 @@
 defmodule Mix.Tasks.Starcite.Ops do
   @moduledoc """
-  Operator commands for routing and lease state.
-
-  This task affects routing readiness only and never mutates Raft membership.
+  Operator commands for routing state.
 
   Usage:
 
@@ -12,7 +10,6 @@ defmodule Mix.Tasks.Starcite.Ops do
       mix starcite.ops drain routing-1@starcite.internal
       mix starcite.ops undrain
       mix starcite.ops undrain routing-1@starcite.internal
-      mix starcite.ops group-replicas 42
       mix starcite.ops wait-ready
       mix starcite.ops wait-ready 60000
       mix starcite.ops wait-drained
@@ -24,7 +21,7 @@ defmodule Mix.Tasks.Starcite.Ops do
   alias Starcite.Operations, as: Ops
 
   @default_wait_timeout_ms 30_000
-  @shortdoc "Routing and lease operations"
+  @shortdoc "Routing operations"
 
   @impl Mix.Task
   def run(args) do
@@ -63,13 +60,6 @@ defmodule Mix.Tasks.Starcite.Ops do
       ["undrain", raw_node] ->
         with {:ok, node} <- parse_node(raw_node) do
           undrain(node)
-        else
-          {:error, reason} -> Mix.raise(reason)
-        end
-
-      ["group-replicas", raw_group_id] ->
-        with {:ok, group_id} <- parse_group_id(raw_group_id) do
-          print_nodes("group_#{group_id}_replicas", Ops.group_replicas(group_id))
         else
           {:error, reason} -> Mix.raise(reason)
         end
@@ -116,16 +106,6 @@ defmodule Mix.Tasks.Starcite.Ops do
       |> Enum.join(",")
 
     IO.puts("#{label}=#{rendered}")
-  end
-
-  defp parse_group_id(raw_group_id) when is_binary(raw_group_id) do
-    case Ops.parse_group_id(raw_group_id) do
-      {:ok, group_id} ->
-        {:ok, group_id}
-
-      {:error, :invalid_group_id} ->
-        {:error, "invalid group id #{inspect(raw_group_id)} (expected configured group range)"}
-    end
   end
 
   defp parse_timeout_ms(raw_timeout_ms) when is_binary(raw_timeout_ms) do
@@ -184,7 +164,6 @@ defmodule Mix.Tasks.Starcite.Ops do
       mix starcite.ops ready-nodes
       mix starcite.ops drain [node]
       mix starcite.ops undrain [node]
-      mix starcite.ops group-replicas <group_id>
       mix starcite.ops wait-ready [timeout_ms]
       mix starcite.ops wait-drained [timeout_ms]
     """

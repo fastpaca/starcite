@@ -65,6 +65,10 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
   end
 
+  def call(conn, {:error, {:routing_rpc_failed, _node, _reason}}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
   def call(conn, {:error, {:replication_quorum_not_met, _details}}) do
     error(
       conn,

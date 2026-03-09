@@ -8,7 +8,7 @@ defmodule Starcite.DataPlane.SessionLog do
 
   @behaviour :gen_statem
 
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
@@ -16,8 +16,19 @@ defmodule Starcite.DataPlane.SessionLog do
   @registry Starcite.DataPlane.SessionLogRegistry
 
   @type role :: :owner | :follower
+  @type state_name :: :owner | :owner_pending | :follower
+  @type pending_kind :: :append_event | :append_events | :ack_archived
+  @type pending_operation :: %{
+          required(:id) => reference(),
+          required(:kind) => pending_kind(),
+          required(:next_session) => Session.t(),
+          required(:events) => [map()],
+          required(:reply) => map(),
+          required(:previous_archived_seq) => non_neg_integer()
+        }
   @type data :: %{
-          required(:session) => Session.t()
+          required(:session) => Session.t(),
+          required(:pending) => pending_operation() | nil
         }
 
   @spec start_link(keyword()) :: :gen_statem.start_ret()
@@ -60,12 +71,13 @@ defmodule Starcite.DataPlane.SessionLog do
       |> normalize_session_epoch()
       |> apply_routing_epoch()
 
-    {:ok, role_for_session(log_session.id), %{session: log_session}}
+    {:ok, role_for_session(log_session.id), %{session: log_session, pending: nil}}
   end
 
   @impl true
-  def handle_event({:call, from}, :get_role, role, _data) when role in [:owner, :follower] do
-    {:keep_state_and_data, [{:reply, from, role}]}
+  def handle_event({:call, from}, :get_role, state, _data)
+      when state in [:owner, :owner_pending, :follower] do
+    {:keep_state_and_data, [{:reply, from, role_for_state(state)}]}
   end
 
   def handle_event({:call, from}, :get_session, _role, %{session: session}) do
@@ -82,70 +94,63 @@ defmodule Starcite.DataPlane.SessionLog do
 
   def handle_event(
         {:call, from},
-        {:append_event, input, expected_seq},
+        {:prepare_append_event, input, expected_seq},
         :owner,
         %{session: session} = data
       )
       when is_map(input) do
     with :ok <- guard_expected_seq(session, expected_seq),
          {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input),
-         normalized_session <- normalize_session_epoch(updated_session),
-         :ok <-
-           SessionQuorum.replicate_state(normalized_session, maybe_event_list(event_to_store)) do
-      :ok =
-        maybe_put_appended_event(
-          normalized_session.id,
-          normalized_session.tenant_id,
-          event_to_store
+         normalized_session <- normalize_session_epoch(updated_session) do
+      pending =
+        build_pending_append(
+          :append_event,
+          normalized_session,
+          maybe_event_list(event_to_store),
+          decorate_append_reply(reply, normalized_session.epoch, normalized_session.archived_seq),
+          session.archived_seq
         )
 
-      :ok = maybe_publish_event(normalized_session.id, event_to_store)
-      :ok = SessionStore.put_session(normalized_session)
-
-      decorated_reply =
-        decorate_append_reply(
-          reply,
-          normalized_session.epoch,
-          normalized_session.archived_seq
-        )
-
-      {:keep_state, %{data | session: normalized_session},
-       [{:reply, from, {:ok, decorated_reply}}]}
+      {:next_state, :owner_pending, %{data | pending: pending},
+       [{:reply, from, {:ok, pending_reply(pending)}}]}
     else
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def handle_event({:call, from}, {:append_event, _input, _expected_seq}, :owner, _data) do
+  def handle_event({:call, from}, {:prepare_append_event, _input, _expected_seq}, :owner, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_event({:call, from}, {:append_event, _input, _expected_seq}, :follower, _data) do
+  def handle_event(
+        {:call, _from},
+        {:prepare_append_event, _input, _expected_seq},
+        :owner_pending,
+        _data
+      ) do
+    {:keep_state_and_data, [:postpone]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:prepare_append_event, _input, _expected_seq},
+        :follower,
+        _data
+      ) do
     {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
   end
 
   def handle_event(
         {:call, from},
-        {:append_events, inputs, expected_seq},
+        {:prepare_append_events, inputs, expected_seq},
         :owner,
         %{session: session} = data
       )
       when is_list(inputs) do
     with :ok <- guard_expected_seq(session, expected_seq),
          {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs),
-         normalized_session <- normalize_session_epoch(updated_session),
-         :ok <- SessionQuorum.replicate_state(normalized_session, events_to_store) do
-      :ok =
-        maybe_put_appended_events(
-          normalized_session.id,
-          normalized_session.tenant_id,
-          events_to_store
-        )
-
-      :ok = publish_events(normalized_session.id, events_to_store)
-      :ok = SessionStore.put_session(normalized_session)
-
+         normalized_session <- normalize_session_epoch(updated_session) do
       decorated_replies =
         Enum.map(replies, fn reply ->
           decorate_append_reply(
@@ -166,86 +171,162 @@ defmodule Starcite.DataPlane.SessionLog do
         }
       }
 
-      {:keep_state, %{data | session: normalized_session}, [{:reply, from, {:ok, response}}]}
+      pending =
+        build_pending_append(
+          :append_events,
+          normalized_session,
+          events_to_store,
+          response,
+          session.archived_seq
+        )
+
+      {:next_state, :owner_pending, %{data | pending: pending},
+       [{:reply, from, {:ok, pending_reply(pending)}}]}
     else
       {:error, reason} ->
         {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def handle_event({:call, from}, {:append_events, _inputs, _expected_seq}, :owner, _data) do
+  def handle_event({:call, from}, {:prepare_append_events, _inputs, _expected_seq}, :owner, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_event({:call, from}, {:append_events, _inputs, _expected_seq}, :follower, _data) do
+  def handle_event(
+        {:call, _from},
+        {:prepare_append_events, _inputs, _expected_seq},
+        :owner_pending,
+        _data
+      ) do
+    {:keep_state_and_data, [:postpone]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:prepare_append_events, _inputs, _expected_seq},
+        :follower,
+        _data
+      ) do
     {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
   end
 
-  def handle_event({:call, from}, {:ack_archived, upto_seq}, :owner, %{session: session} = data)
+  def handle_event(
+        {:call, from},
+        {:prepare_ack_archived, upto_seq},
+        :owner,
+        %{session: session} = data
+      )
       when is_integer(upto_seq) and upto_seq >= 0 do
     previous_archived_seq = session.archived_seq
     {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
     normalized_session = normalize_session_epoch(updated_session)
 
-    with :ok <- SessionQuorum.replicate_state(normalized_session, []) do
-      evicted =
-        evict_archived_events(
-          normalized_session.id,
-          previous_archived_seq,
-          normalized_session.archived_seq
-        )
+    pending =
+      build_pending_ack(normalized_session, previous_archived_seq)
 
-      tail_size = Session.tail_size(normalized_session)
-      tenant_id = normalized_session.tenant_id
-
-      Telemetry.archive_ack_applied(
-        normalized_session.id,
-        tenant_id,
-        normalized_session.last_seq,
-        normalized_session.archived_seq,
-        evicted,
-        normalized_session.retention.tail_keep,
-        tail_size
-      )
-
-      :ok = SessionStore.put_session(normalized_session)
-
-      response = %{
-        archived_seq: normalized_session.archived_seq,
-        trimmed: evicted,
-        committed_cursor: %{
-          epoch: normalized_session.epoch,
-          seq: normalized_session.archived_seq
-        }
-      }
-
-      {:keep_state, %{data | session: normalized_session}, [{:reply, from, {:ok, response}}]}
-    else
-      {:error, reason} ->
-        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
-    end
+    {:next_state, :owner_pending, %{data | pending: pending},
+     [{:reply, from, {:ok, pending_reply(pending)}}]}
   end
 
-  def handle_event({:call, from}, {:ack_archived, _upto_seq}, :owner, _data) do
+  def handle_event({:call, from}, {:prepare_ack_archived, _upto_seq}, :owner, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_event({:call, from}, {:ack_archived, _upto_seq}, :follower, _data) do
+  def handle_event({:call, _from}, {:prepare_ack_archived, _upto_seq}, :owner_pending, _data) do
+    {:keep_state_and_data, [:postpone]}
+  end
+
+  def handle_event({:call, from}, {:prepare_ack_archived, _upto_seq}, :follower, _data) do
     {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:commit_prepared, op_id},
+        :owner_pending,
+        %{pending: %{id: pending_id} = pending} = data
+      )
+      when op_id == pending_id do
+    next_session = pending.next_session
+    :ok = maybe_put_appended_events(next_session.id, next_session.tenant_id, pending.events)
+    :ok = publish_events(next_session.id, pending.events)
+
+    reply =
+      case pending.kind do
+        :ack_archived ->
+          evicted =
+            evict_archived_events(
+              next_session.id,
+              pending.previous_archived_seq,
+              next_session.archived_seq
+            )
+
+          tail_size = Session.tail_size(next_session)
+
+          Telemetry.archive_ack_applied(
+            next_session.id,
+            next_session.tenant_id,
+            next_session.last_seq,
+            next_session.archived_seq,
+            evicted,
+            next_session.retention.tail_keep,
+            tail_size
+          )
+
+          Map.put(pending.reply, :trimmed, evicted)
+
+        _other ->
+          pending.reply
+      end
+
+    :ok = SessionStore.put_session(next_session)
+
+    {:next_state, role_for_session(next_session.id),
+     %{data | session: next_session, pending: nil}, [{:reply, from, {:ok, reply}}]}
+  end
+
+  def handle_event({:call, from}, {:commit_prepared, _op_id}, :owner_pending, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_pending_operation}}]}
+  end
+
+  def handle_event({:call, from}, {:commit_prepared, _op_id}, _role, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :no_pending_operation}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:abort_prepared, op_id},
+        :owner_pending,
+        %{pending: %{id: pending_id}} = data
+      )
+      when op_id == pending_id do
+    session_id = data.session.id
+
+    {:next_state, role_for_session(session_id), %{data | pending: nil}, [{:reply, from, :ok}]}
+  end
+
+  def handle_event({:call, from}, {:abort_prepared, _op_id}, :owner_pending, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_pending_operation}}]}
+  end
+
+  def handle_event({:call, from}, {:abort_prepared, _op_id}, _role, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :no_pending_operation}}]}
   end
 
   def handle_event(
         {:call, from},
         {:apply_replica, %Session{id: session_id} = incoming_session, incoming_events},
         role,
-        %{session: current_session} = data
+        %{session: current_session, pending: pending} = data
       )
-      when role in [:owner, :follower] and is_binary(session_id) and session_id != "" and
+      when role in [:owner, :owner_pending, :follower] and is_binary(session_id) and
+             session_id != "" and
              is_list(incoming_events) do
     normalized_session = normalize_session_epoch(incoming_session)
     normalized_events = put_events_epoch(incoming_events, normalized_session.epoch)
+    comparison_session = comparison_session(current_session, pending)
 
-    if should_apply_replication?(normalized_session, current_session) do
+    if should_apply_replication?(normalized_session, comparison_session) do
       previous_archived_seq = current_session.archived_seq
 
       :ok =
@@ -264,7 +345,8 @@ defmodule Starcite.DataPlane.SessionLog do
 
       :ok = SessionStore.put_session(normalized_session)
 
-      {:next_state, :follower, %{data | session: normalized_session}, [{:reply, from, :ok}]}
+      {:next_state, :follower, %{data | session: normalized_session, pending: nil},
+       [{:reply, from, :ok}]}
     else
       {:keep_state_and_data, [{:reply, from, :ok}]}
     end
@@ -285,6 +367,10 @@ defmodule Starcite.DataPlane.SessionLog do
       _other -> :follower
     end
   end
+
+  defp role_for_state(:owner_pending), do: :owner
+  defp role_for_state(:owner), do: :owner
+  defp role_for_state(:follower), do: :follower
 
   defp cursor_snapshot(%Session{} = session) do
     %{
@@ -377,18 +463,6 @@ defmodule Starcite.DataPlane.SessionLog do
   defp maybe_event_list(nil), do: []
   defp maybe_event_list(event) when is_map(event), do: [event]
 
-  defp maybe_put_appended_event(_session_id, _tenant_id, nil), do: :ok
-
-  defp maybe_put_appended_event(
-         session_id,
-         tenant_id,
-         %{seq: seq} = event
-       )
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and is_integer(seq) and seq > 0 do
-    EventStore.put_event(session_id, tenant_id, event)
-  end
-
   defp maybe_put_appended_events(_session_id, _tenant_id, []), do: :ok
 
   defp maybe_put_appended_events(
@@ -400,8 +474,6 @@ defmodule Starcite.DataPlane.SessionLog do
               tenant_id != "" and is_integer(seq) and seq > 0 do
     EventStore.put_events(session_id, tenant_id, events)
   end
-
-  defp maybe_publish_event(_session_id, nil), do: :ok
 
   defp maybe_publish_event(session_id, %{seq: seq} = event)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
@@ -473,4 +545,49 @@ defmodule Starcite.DataPlane.SessionLog do
       committed_cursor: %{epoch: epoch, seq: committed_seq}
     })
   end
+
+  defp build_pending_append(kind, %Session{} = next_session, events, reply, previous_archived_seq)
+       when kind in [:append_event, :append_events] and is_list(events) and is_map(reply) and
+              is_integer(previous_archived_seq) and previous_archived_seq >= 0 do
+    %{
+      id: make_ref(),
+      kind: kind,
+      next_session: next_session,
+      events: put_events_epoch(events, next_session.epoch),
+      reply: reply,
+      previous_archived_seq: previous_archived_seq
+    }
+  end
+
+  defp build_pending_ack(%Session{} = next_session, previous_archived_seq)
+       when is_integer(previous_archived_seq) and previous_archived_seq >= 0 do
+    %{
+      id: make_ref(),
+      kind: :ack_archived,
+      next_session: next_session,
+      events: [],
+      reply: %{
+        archived_seq: next_session.archived_seq,
+        committed_cursor: %{
+          epoch: next_session.epoch,
+          seq: next_session.archived_seq
+        }
+      },
+      previous_archived_seq: previous_archived_seq
+    }
+  end
+
+  defp pending_reply(%{id: id, next_session: next_session, events: events})
+       when is_reference(id) and is_struct(next_session, Session) and is_list(events) do
+    %{
+      op_id: id,
+      session: next_session,
+      events: events
+    }
+  end
+
+  defp comparison_session(%Session{} = current_session, nil), do: current_session
+
+  defp comparison_session(%Session{}, %{next_session: %Session{} = pending_session}),
+    do: pending_session
 end

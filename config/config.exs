@@ -7,20 +7,13 @@
 # General application configuration
 import Config
 
-default_raft_data_dir = "priv/raft"
-default_ra_system_data_dir = Path.join(default_raft_data_dir, "ra_system")
-
 config :starcite,
   ecto_repos: [Starcite.Repo],
-  num_groups: 256,
   routing_replication_factor: 3,
   routing_node_ids: [:nonode@nohost],
-  raft_data_dir: default_raft_data_dir,
-  raft_flush_interval_ms: 5000,
+  routing_store_id: :starcite_routing,
+  routing_store_dir: "priv/khepri",
   telemetry_enabled: true,
-  use_ra_pipeline: true,
-  route_leader_probe_on_miss: false,
-  route_leader_cache_ttl_ms: 10_000,
   archive_flush_interval_ms: 5_000,
   archive_name: Starcite.Archive,
   archive_adapter: Starcite.Archive.Adapter.S3,
@@ -38,23 +31,6 @@ config :starcite,
   ops_port: nil,
   pprof_port: nil,
   pprof_profile_timeout_ms: 60_000
-
-config :ra,
-  data_dir: String.to_charlist(default_ra_system_data_dir),
-  wal_data_dir: String.to_charlist(default_ra_system_data_dir),
-  wal_write_strategy: :default,
-  wal_sync_method: :none,
-  wal_compute_checksums: true,
-  segment_compute_checksums: true,
-  low_priority_commands_flush_size: 1_024,
-  wal_max_batch_size: 262_144,
-  default_max_pipeline_count: 16_384,
-  default_max_append_entries_rpc_batch_size: 512,
-  server_message_queue_data: :off_heap,
-  wal_min_heap_size: 1_024,
-  server_min_heap_size: 1_024,
-  wal_min_bin_vheap_size: 131_072,
-  server_min_bin_vheap_size: 131_072
 
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,

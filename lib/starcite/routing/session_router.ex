@@ -1,19 +1,18 @@
 defmodule Starcite.Routing.SessionRouter do
   @moduledoc """
-  Control-plane routing helper for session-scoped operations.
+  Khepri-backed routing helper for session-scoped operations.
 
-  Hot-path modules should call this boundary instead of direct Raft/router APIs.
+  The routing contract consumed by the data plane stays small:
+
+  - route a call to the current owner
+  - check whether the local node is the owner
+  - fetch the current fencing epoch
+  - fetch replica membership for in-memory data-plane replication
   """
 
-  alias Starcite.Routing.ReplicaRouter
-  alias Starcite.Routing.LeaseManager
+  alias Starcite.Routing.Store
 
-  @owner_probe_timeout_ms Application.compile_env(:starcite, :session_log_probe_timeout_ms, 50)
-  @owner_epoch_probe_timeout_ms Application.compile_env(
-                                  :starcite,
-                                  :session_log_epoch_probe_timeout_ms,
-                                  50
-                                )
+  @rpc_timeout_ms Application.compile_env(:starcite, :session_router_rpc_timeout_ms, 5_000)
 
   @spec call(
           String.t(),
@@ -33,50 +32,42 @@ defmodule Starcite.Routing.SessionRouter do
         local_module,
         local_fun,
         local_args,
-        route_opts \\ []
+        _route_opts \\ []
       )
       when is_binary(session_id) and session_id != "" and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
-             is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    group_id = LeaseManager.group_for_session(session_id)
-
-    ReplicaRouter.call_on_replica(
-      group_id,
-      remote_module,
-      remote_fun,
-      remote_args,
-      local_module,
-      local_fun,
-      local_args,
-      route_opts
-    )
+             is_atom(local_fun) and is_list(local_args) do
+    with {:ok, assignment} <- Store.ensure_assignment(session_id) do
+      dispatch_to_owner(
+        assignment.owner,
+        remote_module,
+        remote_fun,
+        remote_args,
+        local_module,
+        local_fun,
+        local_args
+      )
+    end
   end
 
   @spec ensure_local_owner(String.t(), keyword()) ::
           :ok | {:error, :not_leader | {:not_leader, {atom(), node()}}}
   def ensure_local_owner(session_id, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_list(opts) do
-    group_id = LeaseManager.group_for_session(session_id)
-    server_id = LeaseManager.server_id(group_id)
     self_node = Keyword.get(opts, :self, Node.self())
 
-    if singleton_replica_group_owner?(group_id, self_node) do
-      :ok
-    else
-      leader_hint = resolve_leader_hint(group_id, server_id, self_node, opts)
+    case assignment_for_owner_check(session_id, opts) do
+      {:ok, %{owner: ^self_node}} ->
+        :ok
 
-      case leader_hint do
-        {^server_id, leader_node}
-        when is_atom(leader_node) and not is_nil(leader_node) and leader_node == self_node ->
-          :ok
+      {:ok, %{owner: owner}} when is_atom(owner) ->
+        {:error, {:not_leader, {:session_owner, owner}}}
 
-        {^server_id, leader_node}
-        when is_atom(leader_node) and not is_nil(leader_node) ->
-          {:error, {:not_leader, {server_id, leader_node}}}
+      {:error, :not_found} ->
+        {:error, :not_leader}
 
-        _other ->
-          {:error, :not_leader}
-      end
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -84,99 +75,83 @@ defmodule Starcite.Routing.SessionRouter do
   def local_owner_epoch(session_id, fallback_epoch \\ 0, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_integer(fallback_epoch) and
              fallback_epoch >= 0 and is_list(opts) do
-    group_id = LeaseManager.group_for_session(session_id)
-    server_id = LeaseManager.server_id(group_id)
-    self_node = Keyword.get(opts, :self, Node.self())
-
-    case Keyword.fetch(opts, :metrics) do
-      {:ok, metrics} ->
-        term_from_metrics(metrics, fallback_epoch)
-
-      :error ->
-        timeout = owner_epoch_probe_timeout_ms(opts)
-
-        case :ra.key_metrics({server_id, self_node}, timeout) do
-          metrics when is_map(metrics) -> term_from_metrics(metrics, fallback_epoch)
-          _other -> fallback_epoch
-        end
-    end
-  end
-
-  @spec replica_nodes(String.t()) :: [node()]
-  def replica_nodes(session_id) when is_binary(session_id) and session_id != "" do
-    session_id
-    |> LeaseManager.group_for_session()
-    |> LeaseManager.replicas_for_group()
-  end
-
-  defp resolve_leader_hint(group_id, server_id, self_node, opts)
-       when is_integer(group_id) and group_id >= 0 and is_atom(server_id) and
-              is_atom(self_node) and is_list(opts) do
-    case Keyword.fetch(opts, :leader_hint) do
-      {:ok, leader_hint} ->
-        leader_hint
-
-      :error ->
-        lookup_or_probe_leader(group_id, server_id, self_node, opts)
-    end
-  end
-
-  defp lookup_or_probe_leader(group_id, server_id, self_node, opts)
-       when is_integer(group_id) and group_id >= 0 and is_atom(server_id) and
-              is_atom(self_node) and is_list(opts) do
-    cluster_name = LeaseManager.cluster_name(group_id)
-
-    case :ra_leaderboard.lookup_leader(cluster_name) do
-      {^server_id, leader_node} = leader_hint
-      when is_atom(leader_node) and not is_nil(leader_node) ->
-        leader_hint
-
-      _other ->
-        probe_leader(server_id, self_node, opts)
-    end
-  end
-
-  defp probe_leader(server_id, self_node, opts)
-       when is_atom(server_id) and is_atom(self_node) and is_list(opts) do
-    probe_timeout_ms =
-      case Keyword.get(opts, :probe_timeout_ms, @owner_probe_timeout_ms) do
-        timeout when is_integer(timeout) and timeout > 0 -> timeout
-        _other -> @owner_probe_timeout_ms
-      end
-
-    case :ra.members({server_id, self_node}, probe_timeout_ms) do
-      {:ok, _members, {^server_id, leader_node}}
-      when is_atom(leader_node) and not is_nil(leader_node) ->
-        {server_id, leader_node}
-
-      _other ->
-        nil
-    end
-  end
-
-  defp owner_epoch_probe_timeout_ms(opts) when is_list(opts) do
-    case Keyword.get(opts, :epoch_probe_timeout_ms, @owner_epoch_probe_timeout_ms) do
-      timeout when is_integer(timeout) and timeout > 0 -> timeout
-      _other -> @owner_epoch_probe_timeout_ms
-    end
-  end
-
-  defp term_from_metrics(metrics, fallback_epoch)
-       when is_map(metrics) and is_integer(fallback_epoch) and fallback_epoch >= 0 do
-    case Map.get(metrics, :term) do
-      term when is_integer(term) and term >= 0 ->
-        max(term, fallback_epoch)
+    case assignment_for_epoch(session_id, opts) do
+      {:ok, %{epoch: epoch}} when is_integer(epoch) and epoch >= 0 ->
+        max(epoch, fallback_epoch)
 
       _other ->
         fallback_epoch
     end
   end
 
-  defp singleton_replica_group_owner?(group_id, self_node)
-       when is_integer(group_id) and group_id >= 0 and is_atom(self_node) do
-    case LeaseManager.replicas_for_group(group_id) do
-      [^self_node] -> true
-      _other -> false
+  @spec replica_nodes(String.t()) :: [node()]
+  def replica_nodes(session_id) when is_binary(session_id) and session_id != "" do
+    case Store.ensure_assignment(session_id) do
+      {:ok, %{replicas: replicas}} when is_list(replicas) and replicas != [] ->
+        replicas
+
+      _other ->
+        [Node.self()]
+    end
+  end
+
+  defp assignment_for_owner_check(session_id, opts)
+       when is_binary(session_id) and session_id != "" and is_list(opts) do
+    case Keyword.fetch(opts, :assignment) do
+      {:ok, assignment} when is_map(assignment) ->
+        {:ok, assignment}
+
+      _other ->
+        Store.get_assignment(session_id, favor: :consistency)
+    end
+  end
+
+  defp assignment_for_epoch(session_id, opts)
+       when is_binary(session_id) and session_id != "" and is_list(opts) do
+    case Keyword.fetch(opts, :assignment) do
+      {:ok, assignment} when is_map(assignment) ->
+        {:ok, assignment}
+
+      _other ->
+        Store.get_assignment(session_id, favor: :consistency)
+    end
+  end
+
+  defp dispatch_to_owner(
+         owner,
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args
+       )
+       when is_atom(owner) and is_atom(remote_module) and is_atom(remote_fun) and
+              is_list(remote_args) and is_atom(local_module) and is_atom(local_fun) and
+              is_list(local_args) do
+    if owner == Node.self() do
+      apply(local_module, local_fun, local_args)
+    else
+      case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
+        {:error, {:not_leader, {:session_owner, redirect_owner}}}
+        when is_atom(redirect_owner) and redirect_owner != owner ->
+          reroute_to_redirect(redirect_owner, remote_module, remote_fun, remote_args)
+
+        {:badrpc, reason} ->
+          {:error, {:routing_rpc_failed, owner, reason}}
+
+        other ->
+          other
+      end
+    end
+  end
+
+  defp reroute_to_redirect(owner, remote_module, remote_fun, remote_args)
+       when is_atom(owner) and is_atom(remote_module) and is_atom(remote_fun) and
+              is_list(remote_args) do
+    case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
+      {:badrpc, reason} -> {:error, {:routing_rpc_failed, owner, reason}}
+      other -> other
     end
   end
 end

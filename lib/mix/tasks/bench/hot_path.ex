@@ -108,27 +108,20 @@ defmodule Mix.Tasks.Bench.HotPath do
 
   defp ensure_apps_stopped do
     _ = Application.stop(:starcite)
-    _ = Application.stop(:ra)
+    _ = Application.stop(:khepri)
     :ok
   end
 
   defp configure_runtime(config) do
     Application.put_env(:logger, :level, config.log_level)
     Logger.configure(level: config.log_level)
-    Application.put_env(:starcite, :num_groups, config.num_groups)
-    Application.put_env(:starcite, :raft_data_dir, config.raft_data_dir)
-    Application.put_env(:ra, :wal_write_strategy, config.ra_wal_write_strategy)
-    Application.put_env(:ra, :wal_sync_method, config.ra_wal_sync_method)
+    Application.put_env(:starcite, :routing_store_dir, config.routing_store_dir)
 
-    if config.clean_raft_data_dir do
-      File.rm_rf!(config.raft_data_dir)
+    if config.clean_routing_store_dir do
+      File.rm_rf!(config.routing_store_dir)
     end
 
-    File.mkdir_p!(config.raft_data_dir)
-    ra_system_dir = Path.join(config.raft_data_dir, "ra_system")
-    File.mkdir_p!(ra_system_dir)
-    Application.put_env(:ra, :data_dir, to_charlist(ra_system_dir))
-    Application.delete_env(:ra, :wal_data_dir)
+    File.mkdir_p!(config.routing_store_dir)
 
     Application.put_env(:starcite, :archive_flush_interval_ms, config.archive_flush_interval_ms)
 
@@ -145,17 +138,14 @@ defmodule Mix.Tasks.Bench.HotPath do
     parallel = env_integer("BENCH_PARALLEL", 3)
     warmup_seconds = env_integer("BENCH_WARMUP_SECONDS", 5)
     time_seconds = env_integer("BENCH_TIME_SECONDS", 30)
-    ra_wal_write_strategy_default = Application.get_env(:ra, :wal_write_strategy, :default)
-    ra_wal_sync_method_default = Application.get_env(:ra, :wal_sync_method, :datasync)
 
     archive_flush_interval_ms_default =
       Application.get_env(:starcite, :archive_flush_interval_ms, 5_000)
 
     %{
-      raft_data_dir: System.get_env("BENCH_RAFT_DATA_DIR", "tmp/bench_raft"),
-      clean_raft_data_dir: env_boolean("BENCH_CLEAN_RAFT_DATA_DIR", true),
+      routing_store_dir: System.get_env("BENCH_ROUTING_STORE_DIR", "tmp/bench_routing_store"),
+      clean_routing_store_dir: env_boolean("BENCH_CLEAN_ROUTING_STORE_DIR", true),
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
-      num_groups: env_integer("BENCH_NUM_GROUPS", 256),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
       batch_size: env_integer("BENCH_BATCH_SIZE", 1),
@@ -164,10 +154,6 @@ defmodule Mix.Tasks.Bench.HotPath do
       parallel: parallel,
       warmup_seconds: warmup_seconds,
       time_seconds: time_seconds,
-      ra_wal_write_strategy:
-        env_wal_write_strategy("BENCH_RA_WAL_WRITE_STRATEGY", ra_wal_write_strategy_default),
-      ra_wal_sync_method:
-        env_wal_sync_method("BENCH_RA_WAL_SYNC_METHOD", ra_wal_sync_method_default),
       archive_flush_interval_ms:
         env_integer("BENCH_ARCHIVE_FLUSH_INTERVAL_MS", archive_flush_interval_ms_default)
     }
@@ -180,10 +166,9 @@ defmodule Mix.Tasks.Bench.HotPath do
     archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts, [])
 
     IO.puts("Hot-path Benchee config:")
-    IO.puts("  raft_data_dir: #{config.raft_data_dir}")
-    IO.puts("  clean_raft_data_dir: #{config.clean_raft_data_dir}")
+    IO.puts("  routing_store_dir: #{config.routing_store_dir}")
+    IO.puts("  clean_routing_store_dir: #{config.clean_routing_store_dir}")
     IO.puts("  log_level: #{config.log_level}")
-    IO.puts("  num_groups: #{config.num_groups}")
     IO.puts("  sessions: #{config.session_count}")
     IO.puts("  payload_bytes: #{config.payload_bytes}")
     IO.puts("  batch_size: #{config.batch_size}")
@@ -192,8 +177,6 @@ defmodule Mix.Tasks.Bench.HotPath do
     IO.puts("  parallel: #{config.parallel}")
     IO.puts("  warmup_seconds: #{config.warmup_seconds}")
     IO.puts("  time_seconds: #{config.time_seconds}")
-    IO.puts("  ra_wal_write_strategy: #{config.ra_wal_write_strategy}")
-    IO.puts("  ra_wal_sync_method: #{config.ra_wal_sync_method}")
     IO.puts("  archive_adapter: #{inspect(archive_adapter)}")
     IO.puts("  archive_flush_interval_ms: #{config.archive_flush_interval_ms}")
 
@@ -411,45 +394,6 @@ defmodule Mix.Tasks.Bench.HotPath do
       "warning" -> :warning
       "error" -> :error
       value -> raise ArgumentError, "invalid log level for #{name}: #{inspect(value)}"
-    end
-  end
-
-  defp env_wal_write_strategy(name, default)
-       when is_binary(name) and default in [:default, :o_sync, :sync_after_notify] do
-    case System.get_env(name) do
-      nil ->
-        default
-
-      value ->
-        case value |> String.trim() |> String.downcase() do
-          "default" ->
-            :default
-
-          "o_sync" ->
-            :o_sync
-
-          "sync_after_notify" ->
-            :sync_after_notify
-
-          other ->
-            raise ArgumentError, "invalid wal_write_strategy for #{name}: #{inspect(other)}"
-        end
-    end
-  end
-
-  defp env_wal_sync_method(name, default)
-       when is_binary(name) and default in [:datasync, :sync, :none] do
-    case System.get_env(name) do
-      nil ->
-        default
-
-      value ->
-        case value |> String.trim() |> String.downcase() do
-          "datasync" -> :datasync
-          "sync" -> :sync
-          "none" -> :none
-          other -> raise ArgumentError, "invalid wal_sync_method for #{name}: #{inspect(other)}"
-        end
     end
   end
 end

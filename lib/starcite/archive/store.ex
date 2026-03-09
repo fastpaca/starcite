@@ -196,7 +196,7 @@ defmodule Starcite.Archive.Store do
   @spec update_session_archived_seq(String.t(), String.t(), non_neg_integer()) ::
           :ok | {:error, term()}
   @doc """
-  Persist archived progress for one session without querying Raft state.
+  Persist archived progress for one session without querying live routing state.
   """
   def update_session_archived_seq(session_id, tenant_id, archived_seq)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and

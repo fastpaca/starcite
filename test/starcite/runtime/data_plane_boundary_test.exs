@@ -15,10 +15,13 @@ defmodule Starcite.Runtime.DataPlaneBoundaryTest do
   @forbidden_references [
     ":ra.",
     "LeaseManager",
-    "LeaseBootstrap"
+    "LeaseBootstrap",
+    "ReplicaRouter",
+    "Observer",
+    "ShardLeaseMachine"
   ]
 
-  test "hot path modules are decoupled from raft control-plane internals" do
+  test "hot path modules are decoupled from routing-store internals" do
     Enum.each(@hot_path_files, fn relative_path ->
       source = File.read!(Path.join(File.cwd!(), relative_path))
 

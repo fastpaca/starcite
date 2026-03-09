@@ -2,6 +2,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   @moduledoc false
 
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Routing.{Store, Topology}
 
   @registry Starcite.DataPlane.SessionLogRegistry
   @supervisor Starcite.DataPlane.SessionLogSupervisor
@@ -47,6 +48,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   end
 
   def clear do
+    clear_routing_store()
     :ok = SessionQuorum.clear()
     :ok = SessionStore.clear()
     :ok = EventStore.clear()
@@ -76,9 +78,10 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   defp start_runtime do
     {:ok, _apps} = Application.ensure_all_started(:elixir)
     {:ok, _apps} = Application.ensure_all_started(:cachex)
-    {:ok, _apps} = Application.ensure_all_started(:ra)
+    {:ok, _apps} = Application.ensure_all_started(:khepri)
     :ok = start_process({Registry, keys: :unique, name: @registry})
     :ok = start_process({DynamicSupervisor, strategy: :one_for_one, name: @supervisor})
+    maybe_start_store()
     :ok = start_process({SessionStore, []})
     :ok = start_process({EventStore, []})
     clear()
@@ -89,6 +92,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     clear()
     :ok = stop_process(EventStore)
     :ok = stop_process(:starcite_session_store)
+    :ok = stop_process(Store)
     :ok = stop_process(@supervisor)
     :ok = stop_process(@registry)
     :ok
@@ -105,8 +109,27 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
 
   defp start_child({Registry, opts}), do: Registry.start_link(opts)
   defp start_child({DynamicSupervisor, opts}), do: DynamicSupervisor.start_link(opts)
+  defp start_child({Store, opts}), do: Store.start_link(opts)
   defp start_child({SessionStore, opts}), do: SessionStore.start_link(opts)
   defp start_child({EventStore, opts}), do: EventStore.start_link(opts)
+
+  defp maybe_start_store do
+    if Topology.routing_node?(Node.self()) do
+      start_process({Store, []})
+    else
+      :ok
+    end
+  end
+
+  defp clear_routing_store do
+    if Store.running?() and Topology.routing_node?(Node.self()) do
+      _ = :khepri.delete_many(Store.store_id(), "/:sessions/*")
+      _ = :khepri.delete_many(Store.store_id(), "/:nodes/*")
+      _ = Store.mark_node_ready(Node.self())
+    end
+
+    :ok
+  end
 
   defp stop_process(name) when is_atom(name) do
     case Process.whereis(name) do

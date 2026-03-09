@@ -20,10 +20,6 @@ if System.get_env("PHX_SERVER") do
   config :starcite, StarciteWeb.Endpoint, server: true
 end
 
-# Suppress Ra (Raft library) verbose logs
-# Call :logger.set_application_level(:ra, :error) at runtime to filter Ra logs
-# This is set in LeaseBootstrap.init/1
-
 # Cluster configuration (works in all environments, not just prod)
 cluster_nodes = System.get_env("CLUSTER_NODES")
 
@@ -61,79 +57,8 @@ get_optional_env = fn env_name ->
   end
 end
 
-parse_ra_wal_write_strategy! = fn env_name, raw ->
-  case raw do
-    "default" -> :default
-    "o_sync" -> :o_sync
-    "sync_after_notify" -> :sync_after_notify
-    _ -> raise ArgumentError, "invalid wal write strategy for #{env_name}: #{inspect(raw)}"
-  end
-end
-
-parse_ra_wal_sync_method! = fn env_name, raw ->
-  case raw do
-    "datasync" -> :datasync
-    "sync" -> :sync
-    "none" -> :none
-    _ -> raise ArgumentError, "invalid wal sync method for #{env_name}: #{inspect(raw)}"
-  end
-end
-
-ra_runtime_config =
-  case get_optional_env.("STARCITE_RAFT_DATA_DIR") do
-    nil ->
-      []
-
-    raft_dir ->
-      ra_system_dir = Path.join(raft_dir, "ra_system")
-
-      config :starcite, :raft_data_dir, raft_dir
-
-      [
-        data_dir: String.to_charlist(ra_system_dir),
-        wal_data_dir: String.to_charlist(ra_system_dir)
-      ]
-  end
-
-ra_runtime_config =
-  case get_optional_env.("STARCITE_RA_WAL_DATA_DIR") do
-    nil ->
-      ra_runtime_config
-
-    wal_data_dir ->
-      config :starcite, :raft_wal_data_dir, wal_data_dir
-
-      Keyword.put(ra_runtime_config, :wal_data_dir, String.to_charlist(wal_data_dir))
-  end
-
-ra_runtime_config =
-  case get_optional_env.("STARCITE_RA_WAL_WRITE_STRATEGY") do
-    nil ->
-      ra_runtime_config
-
-    write_strategy ->
-      Keyword.put(
-        ra_runtime_config,
-        :wal_write_strategy,
-        parse_ra_wal_write_strategy!.("STARCITE_RA_WAL_WRITE_STRATEGY", write_strategy)
-      )
-  end
-
-ra_runtime_config =
-  case get_optional_env.("STARCITE_RA_WAL_SYNC_METHOD") do
-    nil ->
-      ra_runtime_config
-
-    sync_method ->
-      Keyword.put(
-        ra_runtime_config,
-        :wal_sync_method,
-        parse_ra_wal_sync_method!.("STARCITE_RA_WAL_SYNC_METHOD", sync_method)
-      )
-  end
-
-if ra_runtime_config != [] do
-  config :ra, ra_runtime_config
+if routing_store_dir = get_optional_env.("STARCITE_ROUTING_STORE_DIR") do
+  config :starcite, :routing_store_dir, routing_store_dir
 end
 
 parse_positive_integer! = fn env_name, raw ->
@@ -186,10 +111,6 @@ if routing_node_ids = System.get_env("STARCITE_ROUTING_NODE_IDS") do
          parse_node_ids!.("STARCITE_ROUTING_NODE_IDS", routing_node_ids)
 end
 
-if num_groups = System.get_env("STARCITE_NUM_GROUPS") do
-  config :starcite, :num_groups, parse_positive_integer!.("STARCITE_NUM_GROUPS", num_groups)
-end
-
 if routing_replication_factor = System.get_env("STARCITE_ROUTING_REPLICATION_FACTOR") do
   config :starcite,
          :routing_replication_factor,
@@ -206,24 +127,6 @@ if enable_telemetry = System.get_env("STARCITE_ENABLE_TELEMETRY") do
 
   prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
   config :starcite, Starcite.Observability.PromEx, Keyword.put(prom_ex_opts, :enabled, enabled)
-end
-
-if route_leader_probe_on_miss = System.get_env("STARCITE_ROUTE_LEADER_PROBE_ON_MISS") do
-  config :starcite,
-         :route_leader_probe_on_miss,
-         Starcite.Env.parse_bool!(
-           route_leader_probe_on_miss,
-           "STARCITE_ROUTE_LEADER_PROBE_ON_MISS"
-         )
-end
-
-if route_leader_cache_ttl_ms = System.get_env("STARCITE_ROUTE_LEADER_CACHE_TTL_MS") do
-  config :starcite,
-         :route_leader_cache_ttl_ms,
-         parse_positive_integer!.(
-           "STARCITE_ROUTE_LEADER_CACHE_TTL_MS",
-           route_leader_cache_ttl_ms
-         )
 end
 
 parse_size_bytes! = fn env_name, raw ->
