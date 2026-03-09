@@ -114,8 +114,8 @@ defmodule Starcite.Routing.Store do
         |> Enum.filter(fn {_session_id, assignment} ->
           assignment.owner == owner_node and assignment.status == :active
         end)
-        |> Enum.reduce({0, effective_session_counts(assignments)}, fn {session_id, assignment},
-                                                                      {acc, counts} ->
+        |> Enum.reduce({0, Policy.session_counts(assignments)}, fn {session_id, assignment},
+                                                                   {acc, counts} ->
           case Policy.next_owner(assignment, owner_node, ready_nodes, counts) do
             nil ->
               {acc, counts}
@@ -131,7 +131,7 @@ defmodule Starcite.Routing.Store do
                 |> Map.put(:updated_at_ms, started_at_ms)
 
               case compare_and_swap_assignment(session_id, assignment, next) do
-                :ok -> {acc + 1, increment_session_count(counts, target_node)}
+                :ok -> {acc + 1, Map.update(counts, target_node, 1, &(&1 + 1))}
                 {:error, _reason} -> {acc, counts}
               end
           end
@@ -184,8 +184,8 @@ defmodule Starcite.Routing.Store do
       {moved, _counts} =
         assignments
         |> Enum.filter(fn {_session_id, assignment} -> assignment.owner == owner_node end)
-        |> Enum.reduce({0, effective_session_counts(assignments)}, fn {session_id, assignment},
-                                                                      {acc, counts} ->
+        |> Enum.reduce({0, Policy.session_counts(assignments)}, fn {session_id, assignment},
+                                                                   {acc, counts} ->
           case Policy.failover_target(assignment, owner_node, ready_nodes, counts) do
             nil ->
               {acc, counts}
@@ -195,7 +195,7 @@ defmodule Starcite.Routing.Store do
                      :failover_assignment,
                      [session_id, assignment, target_node, failed_at_ms]
                    ) do
-                :ok -> {acc + 1, increment_session_count(counts, target_node)}
+                :ok -> {acc + 1, Map.update(counts, target_node, 1, &(&1 + 1))}
                 {:error, _reason} -> {acc, counts}
               end
           end
@@ -284,8 +284,8 @@ defmodule Starcite.Routing.Store do
     Process.flag(:trap_exit, true)
     :ok = :net_kernel.monitor_nodes(true, node_type: :visible)
     :ok = start_store()
-    :ok = maybe_join_cluster()
-    :ok = wait_for_leader()
+    :ok = join_cluster()
+    :ok = :khepri_cluster.wait_for_leader(store_id(), @join_timeout_ms)
     :ok = do_bootstrap_local_node_local(now_ms(), lease_ttl_ms())
     send(self(), :cluster_bootstrap)
     schedule_cluster_reconcile()
@@ -300,30 +300,22 @@ defmodule Starcite.Routing.Store do
 
   @impl true
   def handle_info(:cluster_bootstrap, state) do
-    :ok = maybe_join_cluster()
+    :ok = join_cluster()
     {:noreply, state}
   end
 
   def handle_info(:cluster_reconcile, state) do
-    :ok = maybe_join_cluster()
+    :ok = join_cluster()
     schedule_cluster_reconcile()
     {:noreply, state}
   end
 
   def handle_info({:nodeup, node, _info}, state) when is_atom(node) do
-    if node in Topology.nodes() do
-      :ok = maybe_join_cluster()
-    end
-
-    {:noreply, state}
+    {:noreply, maybe_join_node(node, state)}
   end
 
   def handle_info({:nodeup, node}, state) when is_atom(node) do
-    if node in Topology.nodes() do
-      :ok = maybe_join_cluster()
-    end
-
-    {:noreply, state}
+    {:noreply, maybe_join_node(node, state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -341,7 +333,7 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp maybe_join_cluster do
+  defp join_cluster do
     cond do
       cluster_bootstrap_node?() ->
         :ok
@@ -379,13 +371,6 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp wait_for_leader do
-    case :khepri_cluster.wait_for_leader(store_id(), @join_timeout_ms) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
   defp bootstrap_node do
     Topology.nodes() |> List.first()
   end
@@ -418,9 +403,17 @@ defmodule Starcite.Routing.Store do
     Process.send_after(self(), :cluster_reconcile, @cluster_reconcile_interval_ms)
   end
 
+  defp maybe_join_node(node, state) when is_atom(node) and is_map(state) do
+    if node in Topology.nodes() do
+      :ok = join_cluster()
+    end
+
+    state
+  end
+
   defp do_get_assignment(session_id, favor)
        when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
-    with {:ok, result} <- route_query(:get_assignment, [session_id, favor]) do
+    with {:ok, result} <- local_call(:get_assignment, [session_id, favor]) do
       normalize_get_assignment(result)
     end
   end
@@ -452,7 +445,11 @@ defmodule Starcite.Routing.Store do
                {:ok, node_records} <-
                  normalize_node_records(do_all_node_records_local(:consistency)),
                {:ok, [owner | _rest] = replicas} <-
-                 choose_claim_nodes(assignments, node_records, claimed_at_ms) do
+                 Policy.choose_claim_nodes(
+                   assignments,
+                   ready_node_list(node_records, claimed_at_ms),
+                   Topology.replication_factor()
+                 ) do
             assignment =
               normalize_assignment(%{
                 owner: owner,
@@ -545,7 +542,7 @@ defmodule Starcite.Routing.Store do
   end
 
   defp do_all_assignments(favor) when favor in [:low_latency, :consistency] do
-    with {:ok, result} <- route_query(:all_assignments, [favor]),
+    with {:ok, result} <- local_call(:all_assignments, [favor]),
          {:ok, assignments} <- normalize_assignments(result) do
       {:ok, assignments}
     end
@@ -556,7 +553,7 @@ defmodule Starcite.Routing.Store do
   end
 
   defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
-    with {:ok, result} <- route_query(:all_node_records, [favor]),
+    with {:ok, result} <- local_call(:all_node_records, [favor]),
          {:ok, node_records} <- normalize_node_records(result) do
       {:ok, node_records}
     end
@@ -644,7 +641,7 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_node_state(node, favor)
        when is_atom(node) and favor in [:low_latency, :consistency] do
-    case route_query(:get_node_state, [node, favor]) do
+    case local_call(:get_node_state, [node, favor]) do
       {:ok, {:ok, state}} when is_map(state) -> {:ok, normalize_node_record(state)}
       {:ok, {:error, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
@@ -693,10 +690,6 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp route_query(fun, args) when is_atom(fun) and is_list(args) do
-    local_call(fun, args)
-  end
-
   defp route_command(fun, args) when is_atom(fun) and is_list(args) do
     case local_call(fun, args) do
       {:ok, result} -> result
@@ -716,23 +709,6 @@ defmodule Starcite.Routing.Store do
       nil ->
         {:error, :routing_store_unavailable}
     end
-  end
-
-  defp choose_claim_nodes(assignments, node_records, now_ms)
-       when is_map(assignments) and is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
-    Policy.choose_claim_nodes(
-      assignments,
-      ready_node_list(node_records, now_ms),
-      Topology.replication_factor()
-    )
-  end
-
-  defp effective_session_counts(assignments) when is_map(assignments) do
-    Policy.session_counts(assignments)
-  end
-
-  defp increment_session_count(counts, node) when is_map(counts) and is_atom(node) do
-    Map.update(counts, node, 1, &(&1 + 1))
   end
 
   defp mutate_node_record(node, updated_at_ms, updater, attempt \\ 0)

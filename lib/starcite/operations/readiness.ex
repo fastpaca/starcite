@@ -44,7 +44,7 @@ defmodule Starcite.Operations.Readiness do
   end
 
   defp drain_complete?(node) when is_atom(node) do
-    maybe_progress_local_drain(node)
+    progress_local_drain(node)
 
     with status when status in [:draining, :drained] <- Store.node_status(node),
          {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} <- Store.drain_status(node) do
@@ -71,19 +71,20 @@ defmodule Starcite.Operations.Readiness do
 
   defp do_wait_until(predicate, deadline_ms)
        when is_function(predicate, 0) and is_integer(deadline_ms) do
-    if predicate.() do
-      :ok
-    else
-      if System.monotonic_time(:millisecond) >= deadline_ms do
+    cond do
+      predicate.() ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline_ms ->
         {:error, :timeout}
-      else
+
+      true ->
         Process.sleep(@default_wait_interval_ms)
         do_wait_until(predicate, deadline_ms)
-      end
     end
   end
 
-  defp maybe_progress_local_drain(node) do
+  defp progress_local_drain(node) when is_atom(node) do
     if node == Node.self() do
       _ = Watcher.run_once()
       _ = Watcher.progress_local_transfers()
