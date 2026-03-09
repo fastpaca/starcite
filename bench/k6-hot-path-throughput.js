@@ -23,7 +23,7 @@ const rate = Number(__ENV.RATE || 1000);
 const duration = __ENV.DURATION || '30s';
 const timeUnit = __ENV.TIME_UNIT || '1s';
 const preAllocatedVUs = Number(__ENV.PRE_ALLOCATED_VUS || maxVUs);
-const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || '').trim();
+const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || __ENV.BENCH_ACTOR || '').trim();
 const skipClusterReadyCheck = (__ENV.SKIP_CLUSTER_READY_CHECK || 'false').trim() === 'true';
 const vuRuntime = {};
 
@@ -149,11 +149,9 @@ export default function (data) {
     const producerId = session.producerIds[producerSlot];
     const producerSeq = readProducerSeq(session, producerSlot);
     const text = `starcite hot-path run=${data.runId} vu=${vuId} p=${producerSlot} seq=${producerSeq}`;
-
-    const { res, json } = lib.appendEvent(sessionId, {
+    const event = {
       type: 'content',
       payload: { text },
-      actor: benchmarkActor === '' ? undefined : benchmarkActor,
       producer_id: producerId,
       producer_seq: producerSeq,
       source: 'benchmark',
@@ -164,7 +162,13 @@ export default function (data) {
         producer_slot: producerSlot,
         producer_seq: producerSeq,
       },
-    });
+    };
+
+    if (benchmarkActor !== '') {
+      event.actor = benchmarkActor;
+    }
+
+    const { res, json } = lib.appendEvent(sessionId, event);
 
     appendLatency.add(res.timings.duration);
     eventsSent.add(1);

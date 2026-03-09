@@ -10,6 +10,7 @@ defmodule Mix.Tasks.Bench do
 
       mix bench
       mix bench hot-path
+      mix bench single-session
       mix bench routing
       mix bench internal
       mix bench raft
@@ -37,6 +38,7 @@ defmodule Mix.Tasks.Bench do
 
   defp parse_scenario([]), do: :hot_path
   defp parse_scenario(["hot-path"]), do: :hot_path
+  defp parse_scenario(["single-session"]), do: :single_session
   defp parse_scenario(["routing"]), do: :routing
   defp parse_scenario(["internal"]), do: :internal
   defp parse_scenario(["raft"]), do: :raft
@@ -45,7 +47,7 @@ defmodule Mix.Tasks.Bench do
   defp parse_scenario([value]) do
     Mix.raise("""
     unknown benchmark scenario: #{inspect(value)}
-    expected one of: hot-path, routing, internal, raft, k6
+    expected one of: hot-path, single-session, routing, internal, raft, k6
     """)
   end
 
@@ -56,6 +58,11 @@ defmodule Mix.Tasks.Bench do
   defp run_scenario(:hot_path) do
     configure_local_archive_adapter()
     Mix.Tasks.Bench.HotPath.run()
+  end
+
+  defp run_scenario(:single_session) do
+    configure_local_archive_adapter()
+    Mix.Tasks.Bench.SingleSession.run()
   end
 
   defp run_scenario(:routing) do
@@ -121,6 +128,44 @@ defmodule Mix.Tasks.Bench do
       :archive_adapter_opts,
       Keyword.merge(default_opts, Application.get_env(:starcite, :archive_adapter_opts, []))
     )
+
+    ensure_bench_s3_schema_compatibility!()
+  end
+
+  defp ensure_bench_s3_schema_compatibility! do
+    if env_bool("BENCH_S3_AUTO_MIGRATE_SCHEMA", true) do
+      ensure_s3_client_apps_started!()
+
+      runtime_opts = Application.get_env(:starcite, :archive_adapter_opts, [])
+      config = Starcite.Archive.Adapter.S3.Config.build!(runtime_opts, [])
+
+      case Starcite.Archive.Adapter.S3.SchemaControl.migrate(config, actor: "bench") do
+        {:ok, _stats} ->
+          :ok
+
+        {:error, reason} ->
+          Mix.raise("""
+          failed to ensure S3 archive schema compatibility for benchmark startup: #{inspect(reason)}
+          endpoint=#{inspect(Keyword.get(runtime_opts, :endpoint))}
+          bucket=#{inspect(Keyword.get(runtime_opts, :bucket))}
+          if using local MinIO, ensure it is reachable and the bucket exists.
+          """)
+      end
+    else
+      :ok
+    end
+  end
+
+  defp ensure_s3_client_apps_started! do
+    Enum.each([:req, :ex_aws_s3], fn app ->
+      case Application.ensure_all_started(app) do
+        {:ok, _started_apps} ->
+          :ok
+
+        {:error, reason} ->
+          Mix.raise("failed to start #{app} for benchmark S3 schema setup: #{inspect(reason)}")
+      end
+    end)
   end
 
   defp env_bool(name, default) when is_binary(name) and is_boolean(default) do

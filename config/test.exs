@@ -30,3 +30,7 @@ config :starcite,
   archive_adapter: Starcite.Archive.Adapter.Postgres,
   archive_adapter_opts: [],
   archive_flush_interval_ms: 3_600_000
+
+config :ra,
+  wal_write_strategy: :o_sync,
+  wal_sync_method: :datasync
