@@ -357,7 +357,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp ensure_log_loaded_from_lookup(session_id, {:ok, pid})
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    {:ok, pid}
+    if Process.alive?(pid) do
+      {:ok, pid}
+    else
+      ensure_log_loaded_from_lookup(session_id, :error)
+    end
   end
 
   defp ensure_log_loaded_from_lookup(session_id, :error)
@@ -393,8 +397,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp lookup_log(session_id) when is_binary(session_id) and session_id != "" do
     case Registry.lookup(@registry, session_id) do
-      [{pid, _value} | _rest] when is_pid(pid) -> {:ok, pid}
-      _ -> :error
+      [{pid, _value} | _rest] when is_pid(pid) ->
+        if Process.alive?(pid), do: {:ok, pid}, else: :error
+
+      _ ->
+        :error
     end
   end
 
