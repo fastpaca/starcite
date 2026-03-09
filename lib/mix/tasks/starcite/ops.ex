@@ -36,6 +36,34 @@ defmodule Mix.Tasks.Starcite.Ops do
       ["ready-nodes"] ->
         print_nodes("ready_nodes", Ops.ready_nodes())
 
+      ["node-status"] ->
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          print_node_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["node-status", raw_node] ->
+        with {:ok, node} <- parse_node(raw_node) do
+          print_node_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["drain-status"] ->
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          print_drain_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["drain-status", raw_node] ->
+        with {:ok, node} <- parse_node(raw_node) do
+          print_drain_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
       ["drain"] ->
         with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
           drain(node)
@@ -108,6 +136,20 @@ defmodule Mix.Tasks.Starcite.Ops do
     IO.puts("#{label}=#{rendered}")
   end
 
+  defp print_node_status(node) when is_atom(node) do
+    IO.puts("node_status=#{Ops.node_status(node)}")
+  end
+
+  defp print_drain_status(node) when is_atom(node) do
+    case Ops.drain_status(node) do
+      {:ok, status} ->
+        IO.puts("drain_status=#{inspect(status, pretty: true)}")
+
+      {:error, reason} ->
+        Mix.raise("failed to fetch drain status for #{node}: #{inspect(reason)}")
+    end
+  end
+
   defp parse_timeout_ms(raw_timeout_ms) when is_binary(raw_timeout_ms) do
     case Integer.parse(String.trim(raw_timeout_ms)) do
       {timeout_ms, ""} when timeout_ms > 0 ->
@@ -162,6 +204,8 @@ defmodule Mix.Tasks.Starcite.Ops do
     usage:
       mix starcite.ops status
       mix starcite.ops ready-nodes
+      mix starcite.ops node-status [node]
+      mix starcite.ops drain-status [node]
       mix starcite.ops drain [node]
       mix starcite.ops undrain [node]
       mix starcite.ops wait-ready [timeout_ms]

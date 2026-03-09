@@ -58,6 +58,127 @@ defmodule Starcite.Routing.StoreTest do
     assert stored == assignment
   end
 
+  test "start_drain_transfers falls back to a ready node outside the stale replica set" do
+    replica_a = :"routing-store-replica-a@127.0.0.1"
+    replica_b = :"routing-store-replica-b@127.0.0.1"
+    standby = :"routing-store-standby@127.0.0.1"
+    session_id = "routing-store-drain-fallback-#{System.unique_integer([:positive, :monotonic])}"
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(
+      :starcite,
+      :cluster_node_ids,
+      [Node.self(), replica_a, replica_b, standby]
+    )
+
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok = Store.mark_node_draining(Node.self())
+
+    assert :ok =
+             put_node_record(replica_a, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(replica_b, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(standby, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), replica_a, replica_b],
+               status: :active,
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.start_drain_transfers(Node.self())
+
+    assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+    assert assignment.owner == Node.self()
+    assert assignment.status == :moving
+    assert assignment.target_owner == standby
+  end
+
+  test "reassign_sessions_from falls back outside the stale replica set when replicas are unavailable" do
+    replica_a = :"routing-store-failover-a@127.0.0.1"
+    replica_b = :"routing-store-failover-b@127.0.0.1"
+    standby = :"routing-store-failover-standby@127.0.0.1"
+
+    session_id =
+      "routing-store-failover-fallback-#{System.unique_integer([:positive, :monotonic])}"
+
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(
+      :starcite,
+      :cluster_node_ids,
+      [Node.self(), replica_a, replica_b, standby]
+    )
+
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(replica_a, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(replica_b, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(standby, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), replica_a, replica_b],
+               status: :active,
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.reassign_sessions_from(Node.self())
+
+    assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+    assert assignment.owner == standby
+    assert assignment.epoch == 2
+    assert assignment.status == :active
+    assert standby in assignment.replicas
+  end
+
   defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
     :khepri.put(Store.store_id(), [:sessions, session_id], assignment, khepri_opts())
   end

@@ -28,6 +28,14 @@ defmodule Starcite.Operations do
   @spec ready_nodes() :: [node()]
   def ready_nodes, do: Store.ready_nodes()
 
+  @spec node_status(node()) :: :ready | :draining | :drained | :unknown
+  def node_status(node) when is_atom(node), do: Store.node_status(node)
+
+  @spec drain_status(node()) ::
+          {:ok, %{active_owned_sessions: non_neg_integer(), moving_sessions: non_neg_integer()}}
+          | {:error, term()}
+  def drain_status(node) when is_atom(node), do: Store.drain_status(node)
+
   @spec local_mode() :: :cluster_node
   def local_mode, do: :cluster_node
 
