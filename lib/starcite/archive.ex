@@ -16,10 +16,10 @@ defmodule Starcite.Archive do
   @dialyzer {:nowarn_function, [persist_rows: 5, put_archived_seq: 3]}
 
   alias Starcite.Archive.Store
-  alias Starcite.Routing.SessionRouter
   alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
-  alias Starcite.DataPlane.{EventStore, SessionQuorum}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Routing.Store, as: RoutingStore
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -49,7 +49,11 @@ defmodule Starcite.Archive do
   @impl true
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
-    session_ids = EventStore.session_ids()
+
+    session_ids =
+      EventStore.session_ids()
+      |> local_owned_session_ids()
+
     ordered_session_ids = fair_session_order(session_ids, state.tenant_cache)
 
     {stats, archived_seq_cache, tenant_cache} =
@@ -99,8 +103,7 @@ defmodule Starcite.Archive do
        )
        when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) and
               is_map(tenant_cache) do
-    with :ok <- SessionRouter.ensure_local_owner(session_id),
-         {:ok, max_seq} <- EventStore.max_seq(session_id),
+    with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
            load_archived_seq(session_id, archived_seq_cache) do
       pending_before = max(max_seq - archived_seq, 0)
@@ -269,11 +272,43 @@ defmodule Starcite.Archive do
         {:ok, archived_seq, archived_seq_cache}
 
       _ ->
-        with {:ok, archived_seq} <- SessionQuorum.fetch_archived_seq(session_id) do
+        with {:ok, archived_seq} <- archived_seq_for_session(session_id) do
           {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
         else
           _ -> {:error, :session_lookup_failed}
         end
+    end
+  end
+
+  defp archived_seq_for_session(session_id) when is_binary(session_id) and session_id != "" do
+    case SessionStore.get_session_cached(session_id) do
+      {:ok, %{archived_seq: archived_seq}}
+      when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq}
+
+      :error ->
+        SessionQuorum.fetch_archived_seq(session_id)
+    end
+  end
+
+  defp local_owned_session_ids(session_ids) when is_list(session_ids) do
+    local_node = Node.self()
+
+    case RoutingStore.all_assignments(:low_latency) do
+      {:ok, assignments} ->
+        Enum.filter(session_ids, fn session_id ->
+          case assignments do
+            %{^session_id => %{owner: ^local_node, status: status}}
+            when status in [:active, :moving] ->
+              true
+
+            _other ->
+              false
+          end
+        end)
+
+      {:error, _reason} ->
+        []
     end
   end
 
