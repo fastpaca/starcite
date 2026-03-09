@@ -1,10 +1,10 @@
 defmodule Starcite.Routing.Topology do
   @moduledoc """
-  Static routing-node inventory and replication-factor config.
+  Static cluster-node inventory and replication-factor config.
   """
 
   @default_replication_factor 3
-  @default_routing_nodes [:nonode@nohost]
+  @default_cluster_nodes [:nonode@nohost]
   @config_cache_key {__MODULE__, :config}
 
   @type config :: %{
@@ -30,7 +30,7 @@ defmodule Starcite.Routing.Topology do
     raw_replication_factor =
       Application.get_env(:starcite, :routing_replication_factor, @default_replication_factor)
 
-    raw_nodes = Application.get_env(:starcite, :routing_node_ids, @default_routing_nodes)
+    raw_nodes = Application.get_env(:starcite, :cluster_node_ids, @default_cluster_nodes)
     node_self = Node.self()
     cache_key = {raw_replication_factor, raw_nodes, node_self}
 
@@ -63,17 +63,17 @@ defmodule Starcite.Routing.Topology do
 
     if replication_factor > length(nodes) do
       raise ArgumentError,
-            "invalid routing-node config: routing_replication_factor=#{replication_factor} exceeds routing_node_ids=#{length(nodes)}"
+            "invalid cluster-node config: routing_replication_factor=#{replication_factor} exceeds cluster_node_ids=#{length(nodes)}"
     end
 
-    if node_self != :nonode@nohost and nodes == @default_routing_nodes do
+    if node_self != :nonode@nohost and nodes == @default_cluster_nodes do
       raise ArgumentError,
-            "invalid routing-node config: STARCITE_ROUTING_NODE_IDS must be configured for distributed nodes"
+            "invalid cluster-node config: STARCITE_CLUSTER_NODE_IDS must be configured for distributed nodes"
     end
 
     if node_self not in nodes do
       raise ArgumentError,
-            "invalid routing-node config: local node #{inspect(node_self)} is missing from routing_node_ids=#{inspect(nodes)}"
+            "invalid cluster-node config: local node #{inspect(node_self)} is missing from cluster_node_ids=#{inspect(nodes)}"
     end
 
     %{
@@ -94,12 +94,12 @@ defmodule Starcite.Routing.Topology do
       Enum.uniq(nodes)
     else
       raise ArgumentError,
-            "invalid value for :routing_node_ids: #{inspect(nodes)} (expected list of node atoms)"
+            "invalid value for :cluster_node_ids: #{inspect(nodes)} (expected list of node atoms)"
     end
   end
 
   defp validate_nodes!(value) do
     raise ArgumentError,
-          "invalid value for :routing_node_ids: #{inspect(value)} (expected non-empty list of node atoms)"
+          "invalid value for :cluster_node_ids: #{inspect(value)} (expected non-empty list of node atoms)"
   end
 end

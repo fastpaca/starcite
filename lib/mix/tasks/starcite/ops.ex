@@ -125,7 +125,7 @@ defmodule Mix.Tasks.Starcite.Ops do
       {:ok, node} ->
         {:ok, node}
 
-      {:error, :invalid_routing_node} ->
+      {:error, :invalid_cluster_node} ->
         node_name = String.trim(raw_node)
 
         known =

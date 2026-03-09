@@ -6,7 +6,7 @@
 
 ## How it works
 
-Starcite runs as a cluster of routing nodes (typically 3 or 5). When a client appends
+Starcite runs as a cluster of Starcite nodes (typically 3 or 5). When a client appends
 an event, the event is replicated to an in-memory group before the client gets an
 acknowledgment. That improves failover safety, but only durability comes from your
 configured archive backend.
@@ -67,7 +67,7 @@ lag separately from Starcite's own replication.
 | `RELEASE_NODE` | Erlang node identity (`name@host`). Must survive restarts. |
 | `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
 | `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. |
-| `STARCITE_ROUTING_NODE_IDS` | Comma-separated static routing-node identities. Same value on every node. |
+| `STARCITE_CLUSTER_NODE_IDS` | Comma-separated cluster membership list. Same value on every node. |
 | `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
@@ -109,10 +109,10 @@ unsupported.
 
 First-time cluster setup:
 
-1. Provision three routing nodes with persistent volumes.
+1. Provision three cluster nodes with persistent volumes.
 2. Set a stable `RELEASE_NODE` on each — this identity must survive restarts.
-3. Set identical `CLUSTER_NODES` and `STARCITE_ROUTING_NODE_IDS` on all nodes.
-4. Start all routing nodes.
+3. Set identical `CLUSTER_NODES` and `STARCITE_CLUSTER_NODE_IDS` on all nodes.
+4. Start all cluster nodes.
 5. Verify:
 
 ```bash
@@ -121,8 +121,8 @@ bin/starcite rpc "Starcite.Operations.status()"
 bin/starcite rpc "Starcite.Operations.ready_nodes()"
 ```
 
-You should see each node report ready, and the ready routing-node set should match your
-configured `STARCITE_ROUTING_NODE_IDS`. If a node isn't ready, check its logs — the
+You should see each node report ready, and the ready node set should match your
+configured `STARCITE_CLUSTER_NODE_IDS`. If a node isn't ready, check its logs — the
 most common issue is misconfigured `CLUSTER_NODES` or unreachable peers.
 
 Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
@@ -131,11 +131,11 @@ served there instead of the public API port.
 
 ## Rolling restarts
 
-The key constraint: never restart more than one routing node at a time. Starcite uses
+The key constraint: never restart more than one node at a time. Starcite uses
 in-memory replication with quorum writes — taking two nodes down simultaneously means
 some groups lose quorum and can't accept writes.
 
-For each routing node, one at a time:
+For each node, one at a time:
 
 1. **Drain** — tells the cluster to stop routing new requests to this node:
    ```bash
@@ -202,7 +202,7 @@ topology back to health. Membership changes during a partition can make things w
 
 Run these periodically — they're cheap and catch problems before your users do:
 
-1. **Restart drill** — restart a single routing node under load. Verify no churn in
+1. **Restart drill** — restart a single cluster node under load. Verify no churn in
    session distribution and that clients reconnect cleanly.
 2. **Drain/undrain drill** — verify the ready-node set transitions correctly and that
    traffic stops/resumes as expected.

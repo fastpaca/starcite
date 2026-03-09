@@ -190,15 +190,15 @@ defmodule StarciteWeb.SessionControllerTest do
     end
 
     test "returns 503 when in-memory replication quorum cannot be reached" do
-      original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
       on_exit(fn ->
-        Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
         Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
-      Application.put_env(:starcite, :routing_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
       Application.put_env(:starcite, :routing_replication_factor, 2)
 
       conn =

@@ -351,7 +351,7 @@ defmodule Starcite.Observability.Telemetry do
     - `:ready_count` – currently ready replicas for the group
 
   Metadata:
-    - `:node` – routing node name as a string
+    - `:node` – cluster node name as a string
     - `:group_id`
     - `:target` (`:local` or `:remote`)
     - `:prefer_leader` (`true` or `false`)
@@ -429,7 +429,7 @@ defmodule Starcite.Observability.Telemetry do
     - `:leader_redirects` – number of leader redirect hints observed
 
   Metadata:
-    - `:node` – routing node name as a string
+    - `:node` – cluster node name as a string
     - `:group_id`
     - `:path` (`:local` or `:remote`)
     - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)

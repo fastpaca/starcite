@@ -10,11 +10,11 @@ defmodule Starcite.Operations do
   def status do
     %{
       node: Node.self(),
-      local_routing_node: true,
+      local_cluster_node: true,
       local_mode: local_mode(),
       local_ready: local_ready(),
       local_drained: local_drained(),
-      routing_nodes: Topology.nodes(),
+      cluster_nodes: Topology.nodes(),
       routing_replication_factor: Topology.replication_factor(),
       routing_store: %{
         running?: Store.running?(),
@@ -28,8 +28,8 @@ defmodule Starcite.Operations do
   @spec ready_nodes() :: [node()]
   def ready_nodes, do: Store.ready_nodes()
 
-  @spec local_mode() :: :routing_node
-  def local_mode, do: :routing_node
+  @spec local_mode() :: :cluster_node
+  def local_mode, do: :cluster_node
 
   @spec local_ready(keyword()) :: boolean()
   def local_ready(opts \\ []) when is_list(opts), do: Readiness.local_ready(opts)
@@ -50,24 +50,24 @@ defmodule Starcite.Operations do
     Readiness.wait_local_drained(timeout_ms)
   end
 
-  @spec drain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  @spec drain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def drain_node(node \\ Node.self()) when is_atom(node), do: Maintenance.drain_node(node)
 
-  @spec undrain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  @spec undrain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def undrain_node(node \\ Node.self()) when is_atom(node), do: Maintenance.undrain_node(node)
 
   @spec known_nodes() :: [node()]
   def known_nodes, do: Topology.nodes()
 
-  @spec parse_known_node(term()) :: {:ok, node()} | {:error, :invalid_routing_node}
+  @spec parse_known_node(term()) :: {:ok, node()} | {:error, :invalid_cluster_node}
   def parse_known_node(raw_node) when is_binary(raw_node) do
     node_name = String.trim(raw_node)
 
     case Enum.find(known_nodes(), fn node -> Atom.to_string(node) == node_name end) do
-      nil -> {:error, :invalid_routing_node}
+      nil -> {:error, :invalid_cluster_node}
       node -> {:ok, node}
     end
   end
 
-  def parse_known_node(_raw_node), do: {:error, :invalid_routing_node}
+  def parse_known_node(_raw_node), do: {:error, :invalid_cluster_node}
 end

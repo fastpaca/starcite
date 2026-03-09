@@ -22,7 +22,7 @@ config :phoenix, :plug_init_mode, :runtime
 config :starcite,
   routing_store_dir: "tmp/test_routing_store",
   routing_replication_factor: 1,
-  routing_node_ids: [:nonode@nohost],
+  cluster_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
   archive_name: Starcite.Runtime.Archive,
   archive_adapter: Starcite.Archive.Adapter.Postgres,

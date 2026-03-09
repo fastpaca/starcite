@@ -3,9 +3,9 @@ defmodule Starcite.Operations.Maintenance do
 
   alias Starcite.Routing.{Store, Topology, Watcher}
 
-  @spec drain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  @spec drain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def drain_node(node) when is_atom(node) do
-    with :ok <- ensure_routing_node(node),
+    with :ok <- ensure_cluster_node(node),
          :ok <- Store.mark_node_draining(node) do
       _ = maybe_kick_local_watcher(node)
       _ = maybe_progress_local_transfers(node)
@@ -13,19 +13,19 @@ defmodule Starcite.Operations.Maintenance do
     end
   end
 
-  @spec undrain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  @spec undrain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def undrain_node(node) when is_atom(node) do
-    with :ok <- ensure_routing_node(node),
+    with :ok <- ensure_cluster_node(node),
          :ok <- Store.mark_node_ready(node) do
       :ok
     end
   end
 
-  defp ensure_routing_node(node) when is_atom(node) do
+  defp ensure_cluster_node(node) when is_atom(node) do
     if node in Topology.nodes() do
       :ok
     else
-      {:error, :invalid_routing_node}
+      {:error, :invalid_cluster_node}
     end
   end
 

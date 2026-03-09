@@ -423,11 +423,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp execute_prepared_operation(session_id, pid, prepare_message)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    with {:ok, %{op_id: op_id, session: %Session{} = session, events: events}} <-
-           normalize_prepared_result(safe_log_call(session_id, pid, prepare_message)) do
+    with {:ok, prepare_pid, %{op_id: op_id, session: %Session{} = session, events: events}} <-
+           call_prepared_operation(session_id, pid, prepare_message) do
       case replicate_state(session, events) do
         :ok ->
-          case normalize_commit_result(safe_call(pid, {:commit_prepared, op_id})) do
+          case normalize_commit_result(safe_call(prepare_pid, {:commit_prepared, op_id})) do
             {:ok, reply} ->
               {:ok, reply}
 
@@ -450,6 +450,23 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
       {:timeout, _reason} = timeout ->
         timeout
+    end
+  end
+
+  defp call_prepared_operation(session_id, pid, prepare_message)
+       when is_binary(session_id) and session_id != "" and is_pid(pid) do
+    case safe_call(pid, prepare_message) do
+      {:timeout, :session_log_unavailable} ->
+        with {:ok, replacement_pid} <- ensure_log_loaded(session_id),
+             {:ok, prepared} <-
+               normalize_prepared_result(safe_call(replacement_pid, prepare_message)) do
+          {:ok, replacement_pid, prepared}
+        end
+
+      other ->
+        with {:ok, prepared} <- normalize_prepared_result(other) do
+          {:ok, pid, prepared}
+        end
     end
   end
 

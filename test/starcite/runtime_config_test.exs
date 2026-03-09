@@ -2,12 +2,12 @@ defmodule Starcite.RuntimeConfigTest do
   use ExUnit.Case, async: false
 
   @routing_store_dir_env "STARCITE_ROUTING_STORE_DIR"
-  @routing_node_ids_env "STARCITE_ROUTING_NODE_IDS"
+  @cluster_node_ids_env "STARCITE_CLUSTER_NODE_IDS"
   @routing_replication_factor_env "STARCITE_ROUTING_REPLICATION_FACTOR"
   @enable_telemetry_env "STARCITE_ENABLE_TELEMETRY"
   @runtime_envs [
     @routing_store_dir_env,
-    @routing_node_ids_env,
+    @cluster_node_ids_env,
     @routing_replication_factor_env,
     @enable_telemetry_env
   ]
@@ -34,14 +34,14 @@ defmodule Starcite.RuntimeConfigTest do
     assert Keyword.fetch!(starcite_config, :routing_store_dir) == routing_store_dir
   end
 
-  test "runtime config applies routing node ids and replication factor overrides" do
-    System.put_env(@routing_node_ids_env, "node-a@host,node-b@host,node-c@host")
+  test "runtime config applies cluster node ids and replication factor overrides" do
+    System.put_env(@cluster_node_ids_env, "node-a@host,node-b@host,node-c@host")
     System.put_env(@routing_replication_factor_env, "2")
 
     config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
     starcite_config = Keyword.fetch!(config, :starcite)
 
-    assert Keyword.fetch!(starcite_config, :routing_node_ids) == [
+    assert Keyword.fetch!(starcite_config, :cluster_node_ids) == [
              :"node-a@host",
              :"node-b@host",
              :"node-c@host"
