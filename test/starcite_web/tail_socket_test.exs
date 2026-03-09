@@ -4,8 +4,9 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Archive.Store
+  alias Starcite.ReadPath
   alias Starcite.WritePath
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Repo
   alias StarciteWeb.TailSocket
 
@@ -25,7 +26,9 @@ defmodule StarciteWeb.TailSocketTest do
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
       principal: principal,
+      requested_cursor: %{epoch: nil, seq: cursor},
       cursor: cursor,
+      cursor_epoch: nil,
       frame_batch_size: 1,
       replay_queue: :queue.new(),
       replay_done: false,
@@ -235,11 +238,7 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 1)
       insert_cold_rows(session_id, cold_rows)
-
-      assert {:ok,
-              %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}} =
-               WritePath.ack_archived(session_id, 1)
-
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
       assert :error = EventStore.get_event(session_id, 1)
 
       update = %{
@@ -291,8 +290,8 @@ defmodule StarciteWeb.TailSocketTest do
       send(Starcite.Archive, :flush_tick)
 
       eventually(fn ->
-        {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-        assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
+        {:ok, session} = ReadPath.get_session(session_id)
+        assert session.archived_seq == 1
         assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)
 
@@ -321,14 +320,96 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 2)
       insert_cold_rows(session_id, cold_rows)
-
-      assert {:ok,
-              %{applied: [%{session_id: ^session_id, archived_seq: 2, trimmed: 2}], failed: []}} =
-               WritePath.ack_archived(session_id, 2)
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
 
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]
       assert final_state.cursor == 4
+    end
+
+    test "emits epoch_stale gap when requested epoch is no longer active" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      stale_epoch_state = %{
+        base_state(session_id, 0)
+        | requested_cursor: %{epoch: 99, seq: 0},
+          cursor_epoch: 99
+      }
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, stale_epoch_state)
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "epoch_stale"
+      assert gap["from_cursor"] == %{"epoch" => 99, "seq" => 0}
+      assert is_map(gap["next_cursor"])
+      assert next_state.cursor_epoch == gap["next_cursor"]["epoch"]
+    end
+
+    test "emits rollback gap when stale epoch cursor points beyond active lineage head" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      stale_epoch_state = %{
+        base_state(session_id, 10)
+        | requested_cursor: %{epoch: 99, seq: 10},
+          cursor_epoch: 99
+      }
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, stale_epoch_state)
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "rollback"
+      assert gap["from_cursor"] == %{"epoch" => 99, "seq" => 10}
+      assert gap["next_cursor"]["seq"] == 1
+      assert next_state.cursor == 1
+      assert next_state.cursor_epoch == gap["next_cursor"]["epoch"]
+    end
+
+    test "emits cursor_expired gap when cursor falls below available floor" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      for n <- 1..3 do
+        {:ok, _} =
+          append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:test"
+          })
+      end
+
+      # Evict older hot entries without seeding cold storage to force an explicit
+      # replay floor jump.
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, base_state(session_id, 0))
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "cursor_expired"
+      assert gap["from_cursor"] == %{"epoch" => nil, "seq" => 0}
+      assert gap["next_cursor"]["seq"] == 2
+      assert next_state.cursor == 2
     end
   end
 
@@ -558,18 +639,12 @@ defmodule StarciteWeb.TailSocketTest do
       :ok
     end
 
-    checked_out? =
-      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-        :ok -> true
-        {:already, _owner} -> false
-      end
-
-    if checked_out? do
-      on_exit(fn ->
-        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
-      end)
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
     end
 
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
 end

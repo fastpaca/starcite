@@ -25,7 +25,9 @@ defmodule Starcite.Runtime.TestHelper do
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
       clear_session_store()
+      clear_session_owners()
       clear_archive_read_cache()
+      reset_repo_sandbox_mode()
 
       # Brief wait to ensure all cleanup completes
       Process.sleep(50)
@@ -119,9 +121,23 @@ defmodule Starcite.Runtime.TestHelper do
     end
   end
 
+  defp clear_session_owners do
+    if Code.ensure_loaded?(Starcite.DataPlane.SessionOwners) do
+      Starcite.DataPlane.SessionOwners.clear()
+    end
+  end
+
   defp clear_archive_read_cache do
     if Process.whereis(:starcite_archive_read_cache) do
       _ = Cachex.clear(:starcite_archive_read_cache)
     end
+  end
+
+  defp reset_repo_sandbox_mode do
+    if Code.ensure_loaded?(Starcite.Repo) do
+      Ecto.Adapters.SQL.Sandbox.mode(Starcite.Repo, :auto)
+    end
+  rescue
+    _ -> :ok
   end
 end

@@ -4,7 +4,6 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -19,7 +18,7 @@ defmodule StarciteWeb.SessionControllerTest do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
     previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
-    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
+    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
@@ -41,11 +40,6 @@ defmodule StarciteWeb.SessionControllerTest do
       jwks_refresh_ms: 1_000
     )
 
-    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
-    Application.put_env(:starcite, :archive_adapter_opts, [])
-    start_supervised!({IdempotentTestAdapter, []})
-    :ok = IdempotentTestAdapter.clear_writes()
-
     token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
 
@@ -60,12 +54,6 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.delete_env(:starcite, :archive_adapter)
       else
         Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
-      end
-
-      if is_nil(previous_archive_adapter_opts) do
-        Application.delete_env(:starcite, :archive_adapter_opts)
-      else
-        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()
@@ -136,31 +124,6 @@ defmodule StarciteWeb.SessionControllerTest do
     end)
 
     :ok
-  end
-
-  defp assert_receive_request_event(operation, phase, outcome) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_request_event(operation, phase, outcome, deadline)
-  end
-
-  defp do_assert_receive_request_event(operation, phase, outcome, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-    node_name = Atom.to_string(Node.self())
-
-    receive do
-      {:request_event, %{count: 1, duration_ms: duration_ms},
-       %{node: ^node_name, operation: ^operation, phase: ^phase, outcome: ^outcome}}
-      when is_integer(duration_ms) and duration_ms >= 0 ->
-        duration_ms
-
-      {:request_event, _measurements, _metadata} ->
-        do_assert_receive_request_event(operation, phase, outcome, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)}"
-        )
-    end
   end
 
   describe "POST /v1/sessions" do
@@ -247,6 +210,34 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
+    test "returns 503 when in-memory replication quorum cannot be reached" do
+      original_write_node_ids = Application.get_env(:starcite, :write_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :write_node_ids, original_write_node_ids)
+        Application.put_env(:starcite, :write_replication_factor, original_replication_factor)
+      end)
+
+      Application.put_env(:starcite, :write_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :write_replication_factor, 2)
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "id" => unique_id("ses"),
+            "metadata" => %{"workflow" => "replication-failure"}
+          })
+        )
+
+      assert conn.status == 503
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] in ["owner_unavailable", "replication_unavailable"]
+      assert is_binary(body["message"])
+    end
+
     test "supports explicit no-auth mode for local runs" do
       Application.put_env(:starcite, @auth_env_key, mode: :none)
       Process.delete(:default_auth_header)
@@ -317,10 +308,6 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert ids == [id1]
       assert body["next_cursor"] in [nil, id1]
-
-      Enum.each(body["sessions"], fn session ->
-        refute Map.has_key?(session["metadata"], "__starcite_runtime_v1")
-      end)
     end
 
     test "supports cursor pagination" do
@@ -382,7 +369,7 @@ defmodule StarciteWeb.SessionControllerTest do
   end
 
   describe "POST /v1/sessions/:id/append" do
-    test "emits total write request telemetry at the web edge for success" do
+    test "emits write request telemetry at the web edge for success" do
       :ok = attach_request_telemetry()
 
       id = unique_id("ses")
@@ -399,11 +386,14 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 201
 
-      duration_ms = assert_receive_request_event(:append_event, :total, :ok)
+      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :append_event, phase: :ack, outcome: :ok}},
+                     1_000
+
       assert is_integer(duration_ms) and duration_ms >= 0
     end
 
-    test "emits total write request telemetry at the web edge for errors" do
+    test "emits write request telemetry at the web edge for errors" do
       :ok = attach_request_telemetry()
 
       id = unique_id("missing")
@@ -419,7 +409,10 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 404
 
-      duration_ms = assert_receive_request_event(:append_event, :total, :error)
+      assert_receive {:request_event, %{count: 1, duration_ms: duration_ms},
+                      %{operation: :append_event, phase: :ack, outcome: :error}},
+                     1_000
+
       assert is_integer(duration_ms) and duration_ms >= 0
     end
 
@@ -441,6 +434,9 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["seq"] == 1
       assert body["last_seq"] == 1
       assert body["deduped"] == false
+      assert is_integer(body["epoch"]) and body["epoch"] >= 0
+      assert body["cursor"] == %{"epoch" => body["epoch"], "seq" => 1}
+      assert body["committed_cursor"] == %{"epoch" => body["epoch"], "seq" => 0}
     end
 
     test "expected_seq conflict returns 409" do
@@ -528,20 +524,9 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body2["deduped"] == true
     end
 
-    test "producer sequence conflict returns 409 after first seen producer sequence" do
+    test "producer sequence conflict returns 409" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
-
-      first =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "state",
-          "payload" => %{"state" => "running"},
-          "actor" => "user:user-test",
-          "producer_id" => "writer-1",
-          "producer_seq" => 2
-        })
-
-      assert first.status == 201
 
       conn =
         json_conn(:post, "/v1/sessions/#{id}/append", %{
@@ -549,7 +534,7 @@ defmodule StarciteWeb.SessionControllerTest do
           "payload" => %{"state" => "running"},
           "actor" => "user:user-test",
           "producer_id" => "writer-1",
-          "producer_seq" => 4
+          "producer_seq" => 2
         })
 
       assert conn.status == 409
