@@ -80,6 +80,12 @@ defmodule Starcite.DataPlane.SessionLog do
     {:keep_state_and_data, [{:reply, from, role_for_state(state)}]}
   end
 
+  def handle_event({:call, from}, :describe, state, %{session: session})
+      when state in [:owner, :owner_pending, :follower] do
+    {:keep_state_and_data,
+     [{:reply, from, {:ok, %{role: role_for_state(state), session: session}}}]}
+  end
+
   def handle_event({:call, from}, :get_session, _role, %{session: session}) do
     {:keep_state_and_data, [{:reply, from, {:ok, session}}]}
   end
@@ -281,8 +287,8 @@ defmodule Starcite.DataPlane.SessionLog do
 
     :ok = SessionStore.put_session(next_session)
 
-    {:next_state, role_for_session(next_session.id),
-     %{data | session: next_session, pending: nil}, [{:reply, from, {:ok, reply}}]}
+    {:next_state, :owner, %{data | session: next_session, pending: nil},
+     [{:reply, from, {:ok, reply}}]}
   end
 
   def handle_event({:call, from}, {:commit_prepared, _op_id}, :owner_pending, _data) do
@@ -300,9 +306,7 @@ defmodule Starcite.DataPlane.SessionLog do
         %{pending: %{id: pending_id}} = data
       )
       when op_id == pending_id do
-    session_id = data.session.id
-
-    {:next_state, role_for_session(session_id), %{data | pending: nil}, [{:reply, from, :ok}]}
+    {:next_state, :owner, %{data | pending: nil}, [{:reply, from, :ok}]}
   end
 
   def handle_event({:call, from}, {:abort_prepared, _op_id}, :owner_pending, _data) do
