@@ -135,7 +135,9 @@ The key constraint: never restart more than one node at a time. Starcite uses
 in-memory replication with quorum writes — taking two nodes down simultaneously means
 some groups lose quorum and can't accept writes.
 
-For each node, one at a time:
+For the explicit local Compose drill, use [local-testing.md](local-testing.md).
+
+For production rollouts, operate one node at a time:
 
 1. **Drain** — tells the cluster to stop routing new requests to this node:
    ```bash
@@ -155,8 +157,8 @@ For each node, one at a time:
    bin/starcite rpc "Starcite.Operations.undrain_node()"
    ```
 
-5. **Wait for readiness** — the node needs to sync its Raft state before it can serve
-   traffic. This blocks until sync is complete:
+5. **Wait for readiness** — the node needs to rejoin the Khepri routing store and
+   restore its local runtime before it can accept fresh ownership:
    ```bash
    bin/starcite rpc "Starcite.Operations.wait_local_ready(60000)"
    curl -sS http://<node>:4001/health/ready
@@ -186,14 +188,14 @@ topology migration — a more involved procedure. Don't mix it with routine roll
 
 ## Failure scenarios
 
-**Single node failure:** This is the expected failure mode, and it's handled
-gracefully. The remaining 2 of 3 replicas maintain quorum. Writes continue. Leaders
-on the failed node are re-elected on surviving nodes within seconds. Clients see a
-brief latency spike, not data loss.
+**Single node failure:** This is the expected failure mode. The remaining replicas can
+continue serving sessions whose owners still have quorum, and lease expiry will
+authoritatively move ownership away from a catastrophically failed node. Clients may
+see a brief availability gap while ownership is reassigned.
 
-**Two-node failure (3-node cluster):** Quorum is lost for affected groups. Reads
-(tail replay from local state) may still work on the surviving node, but new appends
-are rejected. Priority is restoring the failed nodes, not making membership changes.
+**Two-node failure (3-node cluster):** In-memory replication quorum is lost for many
+sessions. Reads may still work from surviving local state, but new appends are
+rejected for affected sessions until the cluster is restored.
 
 **During incidents:** Don't attempt membership changes. Focus on getting the existing
 topology back to health. Membership changes during a partition can make things worse.
