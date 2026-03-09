@@ -23,18 +23,6 @@ defmodule Starcite.Routing.Watcher do
     call_if_running(:run_once, 5_000, {:error, :not_running})
   end
 
-  @spec progress_local_transfers() :: :ok
-  def progress_local_transfers do
-    case Store.all_assignments(:consistency) do
-      {:ok, assignments} ->
-        progress_transfers(assignments)
-        :ok
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
   def start_link(arg) do
     GenServer.start_link(__MODULE__, arg, name: __MODULE__)
   end
