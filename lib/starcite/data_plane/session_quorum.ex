@@ -12,7 +12,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   alias Starcite.DataPlane.{EventStore, SessionLog, SessionStore}
   alias Starcite.Observability.Telemetry
-  alias Starcite.Routing.SessionRouter
+  alias Starcite.Routing.{SessionRouter, Store}
   alias Starcite.Session
 
   @registry Starcite.DataPlane.SessionLogRegistry
@@ -31,6 +31,15 @@ defmodule Starcite.DataPlane.SessionQuorum do
           required(:op_id) => reference(),
           required(:session) => Session.t(),
           required(:events) => [map()]
+        }
+  @type routing_assignment :: %{
+          required(:owner) => node(),
+          required(:epoch) => non_neg_integer(),
+          required(:replicas) => [node()]
+        }
+  @type log_description :: %{
+          required(:role) => SessionLog.role(),
+          required(:session) => Session.t()
         }
   @type replication_error ::
           {:replication_quorum_not_met,
@@ -61,9 +70,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
       when is_binary(session_id) and session_id != "" and is_map(input) do
     log_lookup = lookup_log(session_id)
 
-    with :ok <- ensure_local_owner(session_id),
+    with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
-         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
       execute_prepared_operation(
         session_id,
         current_pid,
@@ -81,9 +90,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
     expected_seq = opts[:expected_seq]
     log_lookup = lookup_log(session_id)
 
-    with :ok <- ensure_local_owner(session_id),
+    with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
-         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
       execute_prepared_operation(
         session_id,
         current_pid,
@@ -100,9 +109,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
       when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and upto_seq >= 0 do
     log_lookup = lookup_log(session_id)
 
-    with :ok <- ensure_local_owner(session_id),
+    with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
-         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
       execute_prepared_operation(
         session_id,
         current_pid,
@@ -149,9 +158,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def fetch_cursor_snapshot(session_id) when is_binary(session_id) and session_id != "" do
     log_lookup = lookup_log(session_id)
 
-    with :ok <- ensure_local_owner(session_id),
+    with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
-         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
       safe_log_call(session_id, current_pid, :fetch_cursor_snapshot)
     end
   end
@@ -232,7 +241,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   @spec local_owner?(String.t()) :: boolean()
   def local_owner?(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, pid} <- lookup_log(session_id),
-         :owner <- safe_call(pid, :get_role) do
+         {:ok, %{role: :owner}} <- describe_log(session_id, pid) do
       true
     else
       _other -> false
@@ -432,29 +441,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
-  defp ensure_log_epoch_current(session_id, pid)
+  defp ensure_log_epoch_current(session_id, pid, assignment \\ nil)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    case {safe_call(pid, :get_role), safe_call(pid, :get_session)} do
-      {role, {:ok, %Session{} = session}} when role in [:owner, :follower] ->
-        current_epoch =
-          SessionRouter.local_owner_epoch(session_id, normalize_epoch(session.epoch))
+    with {:ok, %{role: role, session: %Session{} = session}} <- describe_log(session_id, pid) do
+      current_epoch = effective_epoch(session_id, session, assignment)
+      desired_role = desired_role(session_id, assignment)
 
-        desired_role =
-          case SessionRouter.ensure_local_owner(session_id) do
-            :ok -> :owner
-            _other -> :follower
-          end
-
-        if current_epoch > normalize_epoch(session.epoch) or desired_role != role do
-          restart_log_for_epoch(session_id, session, current_epoch)
-        else
-          {:ok, pid}
-        end
-
-      {{:timeout, :session_log_unavailable}, _other} ->
-        ensure_log_loaded(session_id)
-
-      {_other, {:timeout, :session_log_unavailable}} ->
+      if current_epoch > normalize_epoch(session.epoch) or desired_role != role do
+        restart_log_for_epoch(session_id, session, current_epoch)
+      else
+        {:ok, pid}
+      end
+    else
+      {:timeout, :session_log_unavailable} ->
         ensure_log_loaded(session_id)
 
       other ->
@@ -462,8 +461,59 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
-  defp ensure_local_owner(session_id) when is_binary(session_id) and session_id != "" do
-    SessionRouter.ensure_local_owner(session_id)
+  defp describe_log(session_id, pid)
+       when is_binary(session_id) and session_id != "" and is_pid(pid) do
+    case safe_log_call(session_id, pid, :describe) do
+      {:ok, %{role: role, session: %Session{} = session}}
+      when role in [:owner, :follower] ->
+        {:ok, %{role: role, session: session}}
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:timeout, reason} ->
+        {:timeout, reason}
+
+      other ->
+        {:error, {:invalid_log_description, other}}
+    end
+  end
+
+  defp require_local_owner_assignment(session_id)
+       when is_binary(session_id) and session_id != "" do
+    with {:ok, assignment} <- Store.get_assignment(session_id, favor: :consistency),
+         :ok <- SessionRouter.ensure_local_owner(session_id, assignment: assignment) do
+      {:ok, assignment}
+    end
+  end
+
+  defp effective_epoch(session_id, %Session{} = session, nil)
+       when is_binary(session_id) and session_id != "" do
+    SessionRouter.local_owner_epoch(session_id, normalize_epoch(session.epoch))
+  end
+
+  defp effective_epoch(session_id, %Session{} = session, assignment)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+    SessionRouter.local_owner_epoch(
+      session_id,
+      normalize_epoch(session.epoch),
+      assignment: assignment
+    )
+  end
+
+  defp desired_role(session_id, nil) when is_binary(session_id) and session_id != "" do
+    case SessionRouter.ensure_local_owner(session_id) do
+      :ok -> :owner
+      _other -> :follower
+    end
+  end
+
+  defp desired_role(session_id, assignment)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+    case SessionRouter.ensure_local_owner(session_id, assignment: assignment) do
+      :ok -> :owner
+      _other -> :follower
+    end
   end
 
   defp load_bootstrap_source(session_id) when is_binary(session_id) and session_id != "" do
