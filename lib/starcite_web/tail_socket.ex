@@ -30,7 +30,6 @@ defmodule StarciteWeb.TailSocket do
              is_integer(frame_batch_size) and frame_batch_size >= @default_frame_batch_size do
     topic = TailBroadcast.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
-    auth_expires_at = auth_expires_at(auth_context)
 
     state = %{
       session_id: session_id,
@@ -41,8 +40,7 @@ defmodule StarciteWeb.TailSocket do
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
-      drain_scheduled: false,
-      auth_expires_at: auth_expires_at
+      drain_scheduled: false
     }
 
     {:ok,
@@ -78,7 +76,8 @@ defmodule StarciteWeb.TailSocket do
     drain_replay(state)
   end
 
-  def handle_info(:auth_expired, state), do: close_for_auth_error(:token_expired, state)
+  def handle_info(:auth_expired, state),
+    do: {:stop, :token_expired, {4001, "token_expired"}, state}
 
   def handle_info(
         %Broadcast{topic: topic, event: "tail_event", payload: payload},
@@ -214,18 +213,16 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp resolve_live_event(session_id, %{seq: seq, event: %{seq: seq} = event})
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp resolve_live_event(_session_id, %{seq: seq, event: %{seq: seq} = event})
+       when is_integer(seq) and seq > 0 do
     measure_read(:tail_live, fn -> {:ok, event} end)
   end
 
-  defp resolve_live_event(session_id, %{seq: seq})
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp resolve_live_event(session_id, %{seq: seq}) when is_integer(seq) and seq > 0 do
     measure_read(:tail_live, fn -> read_event_for_tail(session_id, seq) end)
   end
 
-  defp read_event_for_tail(session_id, seq)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp read_event_for_tail(session_id, seq) when is_integer(seq) and seq > 0 do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
         {:ok, event}
@@ -235,8 +232,7 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp read_event_from_storage(session_id, seq)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp read_event_from_storage(session_id, seq) when is_integer(seq) and seq > 0 do
     case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
         {:ok, event}
@@ -279,7 +275,7 @@ defmodule StarciteWeb.TailSocket do
     state
   end
 
-  defp schedule_auth_expiry(%{auth_expires_at: expires_at} = state)
+  defp schedule_auth_expiry(%{auth_context: %Context{expires_at: expires_at}} = state)
        when is_integer(expires_at) and expires_at > 0 do
     now_ms = System.system_time(:millisecond)
     expires_at_ms = expires_at * 1000
@@ -293,17 +289,7 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp schedule_auth_expiry(state), do: state
-
-  defp close_for_auth_error(:token_expired, state) do
-    {:stop, :token_expired, {4001, "token_expired"}, state}
-  end
-
-  defp auth_expires_at(%Context{expires_at: expires_at})
-       when is_integer(expires_at) and expires_at > 0,
-       do: expires_at
-
-  defp auth_expires_at(%Context{}), do: nil
+  defp schedule_auth_expiry(%{auth_context: %Context{}} = state), do: state
 
   defp take_replay_events(queue, max_count)
        when is_integer(max_count) and max_count >= @default_frame_batch_size do
@@ -347,12 +333,13 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp decode_append_frame(payload) when is_binary(payload) do
-    with {:ok, %{"type" => "append", "ref" => ref, "event" => params}} <- Jason.decode(payload),
-         true <- is_binary(ref) and ref != "",
-         true <- is_map(params) do
-      {:ok, ref, params}
-    else
-      _error -> {:error, :invalid_event}
+    case Jason.decode(payload) do
+      {:ok, %{"type" => "append", "ref" => ref, "event" => %{} = params}}
+      when is_binary(ref) and ref != "" ->
+        {:ok, ref, params}
+
+      _error ->
+        {:error, :invalid_event}
     end
   end
 
@@ -363,18 +350,20 @@ defmodule StarciteWeb.TailSocket do
     |> Jason.encode!()
   end
 
-  defp encode_append_error(ref, error) do
+  defp encode_append_error(ref, error) when is_binary(ref) and ref != "" do
     error
     |> ErrorInfo.payload()
-    |> maybe_put_ref(ref)
+    |> Map.put(:ref, ref)
     |> Map.put(:type, "error")
     |> Jason.encode!()
   end
 
-  defp maybe_put_ref(payload, ref) when is_binary(ref) and ref != "",
-    do: Map.put(payload, :ref, ref)
-
-  defp maybe_put_ref(payload, _ref), do: payload
+  defp encode_append_error(_ref, error) do
+    error
+    |> ErrorInfo.payload()
+    |> Map.put(:type, "error")
+    |> Jason.encode!()
+  end
 
   defp iso8601_utc(%NaiveDateTime{} = datetime) do
     datetime
@@ -383,7 +372,6 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-  defp iso8601_utc(other), do: other
 
   defp measure_read(operation, fun)
        when operation in [:tail_catchup, :tail_live] and is_function(fun, 0) do

@@ -8,22 +8,12 @@ defmodule StarciteWeb.TailParams do
           {:ok, %{cursor: non_neg_integer(), frame_batch_size: pos_integer()}}
           | {:error, atom()}
   def parse(%{} = params) do
-    with {:ok, cursor} <- parse_cursor_param(params),
-         {:ok, frame_batch_size} <- parse_frame_batch_size_param(params) do
+    with {:ok, cursor} <- parse_cursor(Map.get(params, "cursor", 0)),
+         {:ok, frame_batch_size} <-
+           parse_frame_batch_size(Map.get(params, "batch_size", @default_tail_frame_batch_size)) do
       {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}}
     end
   end
-
-  @spec parse_cursor_param(map()) :: {:ok, non_neg_integer()} | {:error, :invalid_cursor}
-  def parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
-  def parse_cursor_param(%{}), do: {:ok, 0}
-
-  @spec parse_frame_batch_size_param(map()) ::
-          {:ok, pos_integer()} | {:error, :invalid_tail_batch_size}
-  def parse_frame_batch_size_param(%{"batch_size" => batch_size}),
-    do: parse_frame_batch_size(batch_size)
-
-  def parse_frame_batch_size_param(%{}), do: {:ok, @default_tail_frame_batch_size}
 
   defp parse_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: {:ok, cursor}
 

@@ -7,6 +7,8 @@ defmodule StarciteWeb.TailUserSocket do
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Plugs.ServiceAuth
 
+  defguardp present_token(token) when is_binary(token) and token != ""
+
   channel "tail:*", StarciteWeb.TailChannel
 
   @impl true
@@ -43,28 +45,23 @@ defmodule StarciteWeb.TailUserSocket do
     end
   end
 
-  defp connect_token(params, connect_info) when is_map(params) and is_map(connect_info) do
-    auth_token = Map.get(connect_info, :auth_token)
-    access_token = Map.get(params, "access_token")
+  defp connect_token(%{"access_token" => token}, %{auth_token: token}) when present_token(token),
+    do: {:ok, token}
 
-    case {auth_token, access_token} do
-      {token, nil} when is_binary(token) and token != "" ->
-        {:ok, token}
+  defp connect_token(%{"access_token" => _query_token}, %{auth_token: _header_token}),
+    do: {:error, :invalid_bearer_token}
 
-      {nil, token} when is_binary(token) and token != "" ->
-        {:ok, token}
+  defp connect_token(_params, %{auth_token: token}) when present_token(token), do: {:ok, token}
 
-      {token, token} when is_binary(token) and token != "" ->
-        {:ok, token}
+  defp connect_token(%{"access_token" => token}, _connect_info) when present_token(token),
+    do: {:ok, token}
 
-      {token, query_token}
-      when is_binary(token) and token != "" and is_binary(query_token) and query_token != "" ->
-        {:error, :invalid_bearer_token}
+  defp connect_token(_params, %{auth_token: _token}), do: {:error, :invalid_bearer_token}
 
-      _ ->
-        {:error, :missing_bearer_token}
-    end
-  end
+  defp connect_token(%{"access_token" => _token}, _connect_info),
+    do: {:error, :invalid_bearer_token}
+
+  defp connect_token(_params, _connect_info), do: {:error, :missing_bearer_token}
 
   defp socket_id do
     "tail_socket:" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)

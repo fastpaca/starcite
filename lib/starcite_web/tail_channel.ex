@@ -77,7 +77,7 @@ defmodule StarciteWeb.TailChannel do
   end
 
   def handle_info(:auth_expired, %Socket{} = socket) do
-    disconnect_socket(socket)
+    socket.endpoint.broadcast(socket.assigns.socket_id, "disconnect", %{})
     {:stop, :token_expired, socket}
   end
 
@@ -209,18 +209,16 @@ defmodule StarciteWeb.TailChannel do
     end
   end
 
-  defp resolve_live_event(session_id, %{seq: seq, event: %{seq: seq} = event})
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp resolve_live_event(_session_id, %{seq: seq, event: %{seq: seq} = event})
+       when is_integer(seq) and seq > 0 do
     measure_read(:tail_live, fn -> {:ok, event} end)
   end
 
-  defp resolve_live_event(session_id, %{seq: seq})
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp resolve_live_event(session_id, %{seq: seq}) when is_integer(seq) and seq > 0 do
     measure_read(:tail_live, fn -> read_event_for_tail(session_id, seq) end)
   end
 
-  defp read_event_for_tail(session_id, seq)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp read_event_for_tail(session_id, seq) when is_integer(seq) and seq > 0 do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
         {:ok, event}
@@ -314,7 +312,6 @@ defmodule StarciteWeb.TailChannel do
   end
 
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-  defp iso8601_utc(other), do: other
 
   defp measure_read(operation, fun)
        when operation in [:tail_catchup, :tail_live] and is_function(fun, 0) do
@@ -340,11 +337,4 @@ defmodule StarciteWeb.TailChannel do
   end
 
   defp put_tail_state(%Socket{} = socket, state), do: assign(socket, @tail_state_assign, state)
-
-  defp disconnect_socket(%Socket{assigns: %{socket_id: socket_id}, endpoint: endpoint})
-       when is_binary(socket_id) and socket_id != "" do
-    endpoint.broadcast(socket_id, "disconnect", %{})
-  end
-
-  defp disconnect_socket(_socket), do: :ok
 end

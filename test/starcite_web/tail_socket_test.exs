@@ -32,8 +32,7 @@ defmodule StarciteWeb.TailSocketTest do
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
-      drain_scheduled: false,
-      auth_expires_at: nil
+      drain_scheduled: false
     }
   end
 

@@ -77,12 +77,16 @@ defmodule StarciteWeb.SessionController do
   # Validation
 
   defp validate_create(params, %Context{} = auth) when is_map(params) do
+    requested_id = Map.get(params, "id")
+    title = Map.get(params, "title")
+    metadata = Map.get(params, "metadata", %{})
+
     with {:ok, %Starcite.Auth.Principal{} = creator_principal} <-
            Policy.can_create_session(auth, params),
-         {:ok, requested_id} <- optional_non_empty_string(params["id"]),
+         :ok <- validate_optional_non_empty_string(requested_id),
          {:ok, id} <- Policy.resolve_create_session_id(auth, requested_id),
-         {:ok, title} <- optional_string(params["title"]),
-         {:ok, metadata} <- optional_object(params["metadata"]) do
+         :ok <- validate_optional_string(title),
+         {:ok, metadata} <- validate_metadata(metadata) do
       {:ok,
        [
          id: id,
@@ -97,9 +101,9 @@ defmodule StarciteWeb.SessionController do
   defp validate_create(_params, _auth), do: {:error, :invalid_session}
 
   defp validate_list(params) when is_map(params) do
-    with {:ok, limit} <- optional_limit(params["limit"]),
-         {:ok, cursor} <- optional_cursor(params["cursor"]),
-         {:ok, metadata} <- optional_metadata_filters(params) do
+    with {:ok, limit} <- parse_limit(Map.get(params, "limit", @default_list_limit)),
+         {:ok, cursor} <- parse_cursor(Map.get(params, "cursor")),
+         {:ok, metadata} <- parse_metadata_filters(params, Map.get(params, "metadata", %{})) do
       {:ok, %{limit: limit, cursor: cursor, metadata: metadata}}
     end
   end
@@ -147,38 +151,35 @@ defmodule StarciteWeb.SessionController do
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
-  defp optional_non_empty_string(nil), do: {:ok, nil}
-  defp optional_non_empty_string(value) when is_binary(value) and value != "", do: {:ok, value}
-  defp optional_non_empty_string(_value), do: {:error, :invalid_event}
+  defp validate_optional_non_empty_string(nil), do: :ok
+  defp validate_optional_non_empty_string(value) when is_binary(value) and value != "", do: :ok
+  defp validate_optional_non_empty_string(_value), do: {:error, :invalid_event}
 
-  defp optional_object(nil), do: {:ok, %{}}
-  defp optional_object(value) when is_map(value) and not is_list(value), do: {:ok, value}
-  defp optional_object(_value), do: {:error, :invalid_metadata}
+  defp validate_metadata(%{} = metadata), do: {:ok, metadata}
+  defp validate_metadata(_value), do: {:error, :invalid_metadata}
 
-  defp optional_string(nil), do: {:ok, nil}
-  defp optional_string(value) when is_binary(value), do: {:ok, value}
-  defp optional_string(_value), do: {:error, :invalid_event}
+  defp validate_optional_string(nil), do: :ok
+  defp validate_optional_string(value) when is_binary(value), do: :ok
+  defp validate_optional_string(_value), do: {:error, :invalid_event}
 
-  defp optional_limit(nil), do: {:ok, @default_list_limit}
-
-  defp optional_limit(value) when is_integer(value) and value > 0 and value <= @max_list_limit,
+  defp parse_limit(value) when is_integer(value) and value > 0 and value <= @max_list_limit,
     do: {:ok, value}
 
-  defp optional_limit(value) when is_binary(value) do
+  defp parse_limit(value) when is_binary(value) do
     case Integer.parse(value) do
       {parsed, ""} when parsed > 0 and parsed <= @max_list_limit -> {:ok, parsed}
       _ -> {:error, :invalid_limit}
     end
   end
 
-  defp optional_limit(_value), do: {:error, :invalid_limit}
+  defp parse_limit(_value), do: {:error, :invalid_limit}
 
-  defp optional_cursor(nil), do: {:ok, nil}
-  defp optional_cursor(value) when is_binary(value) and value != "", do: {:ok, value}
-  defp optional_cursor(_value), do: {:error, :invalid_cursor}
+  defp parse_cursor(nil), do: {:ok, nil}
+  defp parse_cursor(value) when is_binary(value) and value != "", do: {:ok, value}
+  defp parse_cursor(_value), do: {:error, :invalid_cursor}
 
-  defp optional_metadata_filters(params) when is_map(params) do
-    with {:ok, nested} <- optional_metadata_filter_map(params["metadata"]) do
+  defp parse_metadata_filters(params, %{} = nested) when is_map(params) do
+    with {:ok, nested} <- validate_metadata_filters(nested) do
       dotted =
         Enum.reduce(params, %{}, fn
           {<<"metadata.", key::binary>>, value}, acc when key != "" ->
@@ -195,9 +196,9 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
-  defp optional_metadata_filter_map(nil), do: {:ok, %{}}
+  defp parse_metadata_filters(_params, _metadata), do: {:error, :invalid_metadata}
 
-  defp optional_metadata_filter_map(value) when is_map(value) do
+  defp validate_metadata_filters(value) when is_map(value) do
     Enum.reduce_while(value, {:ok, %{}}, fn
       {key, entry}, {:ok, acc} when is_binary(key) and key != "" ->
         case metadata_filter_value(entry) do
@@ -209,8 +210,6 @@ defmodule StarciteWeb.SessionController do
         {:halt, {:error, :invalid_metadata}}
     end)
   end
-
-  defp optional_metadata_filter_map(_value), do: {:error, :invalid_metadata}
 
   defp metadata_filter_value(value)
        when is_binary(value) or is_boolean(value) or is_number(value),
