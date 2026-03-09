@@ -71,17 +71,14 @@ defmodule Mix.Tasks.Bench.SingleSession do
 
   defp ensure_apps_stopped do
     _ = Application.stop(:starcite)
-    _ = Application.stop(:ra)
+    _ = Application.stop(:khepri)
     :ok
   end
 
   defp configure_runtime(config) do
     Application.put_env(:logger, :level, config.log_level)
     Logger.configure(level: config.log_level)
-    Application.put_env(:starcite, :raft_data_dir, config.raft_data_dir)
-    Application.put_env(:starcite, :num_groups, config.num_groups)
-    Application.put_env(:ra, :wal_write_strategy, config.ra_wal_write_strategy)
-    Application.put_env(:ra, :wal_sync_method, config.ra_wal_sync_method)
+    Application.put_env(:starcite, :routing_store_dir, config.routing_store_dir)
     Application.put_env(:starcite, :archive_flush_interval_ms, config.archive_flush_interval_ms)
     Application.put_env(:starcite, StarciteWeb.Auth, mode: :none)
 
@@ -95,55 +92,41 @@ defmodule Mix.Tasks.Bench.SingleSession do
       )
     )
 
-    if config.clean_raft_data_dir do
-      File.rm_rf!(config.raft_data_dir)
+    if config.clean_routing_store_dir do
+      File.rm_rf!(config.routing_store_dir)
     end
 
-    File.mkdir_p!(config.raft_data_dir)
-    ra_system_dir = Path.join(config.raft_data_dir, "ra_system")
-    File.mkdir_p!(ra_system_dir)
-    Application.put_env(:ra, :data_dir, to_charlist(ra_system_dir))
-    Application.delete_env(:ra, :wal_data_dir)
+    File.mkdir_p!(config.routing_store_dir)
   end
 
   defp benchmark_config do
     parallel = env_integer("BENCH_PARALLEL", 4)
-    ra_wal_write_strategy_default = Application.get_env(:ra, :wal_write_strategy, :default)
-    ra_wal_sync_method_default = Application.get_env(:ra, :wal_sync_method, :datasync)
 
     %{
-      raft_data_dir: System.get_env("BENCH_RAFT_DATA_DIR", "tmp/bench_raft_single_session"),
-      clean_raft_data_dir: env_boolean("BENCH_CLEAN_RAFT_DATA_DIR", true),
+      routing_store_dir: System.get_env("BENCH_ROUTING_STORE_DIR", "tmp/bench_routing_store"),
+      clean_routing_store_dir: env_boolean("BENCH_CLEAN_ROUTING_STORE_DIR", true),
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
-      num_groups: env_integer("BENCH_NUM_GROUPS", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
       producer_pool_size: env_integer("BENCH_PRODUCER_POOL_SIZE", max(parallel * 8, 64)),
       parallel: parallel,
       warmup_seconds: env_integer("BENCH_WARMUP_SECONDS", 3),
       time_seconds: env_integer("BENCH_TIME_SECONDS", 12),
       memory_time_seconds: env_integer("BENCH_MEMORY_TIME_SECONDS", 2),
-      ra_wal_write_strategy:
-        env_wal_write_strategy("BENCH_RA_WAL_WRITE_STRATEGY", ra_wal_write_strategy_default),
-      ra_wal_sync_method:
-        env_wal_sync_method("BENCH_RA_WAL_SYNC_METHOD", ra_wal_sync_method_default),
       archive_flush_interval_ms: env_integer("BENCH_ARCHIVE_FLUSH_INTERVAL_MS", 60_000)
     }
   end
 
   defp print_config(config) do
     IO.puts("Single-session Benchee config:")
-    IO.puts("  raft_data_dir: #{config.raft_data_dir}")
-    IO.puts("  clean_raft_data_dir: #{config.clean_raft_data_dir}")
+    IO.puts("  routing_store_dir: #{config.routing_store_dir}")
+    IO.puts("  clean_routing_store_dir: #{config.clean_routing_store_dir}")
     IO.puts("  log_level: #{config.log_level}")
-    IO.puts("  num_groups: #{config.num_groups}")
     IO.puts("  payload_bytes: #{config.payload_bytes}")
     IO.puts("  producer_pool_size: #{config.producer_pool_size}")
     IO.puts("  parallel: #{config.parallel}")
     IO.puts("  warmup_seconds: #{config.warmup_seconds}")
     IO.puts("  time_seconds: #{config.time_seconds}")
     IO.puts("  memory_time_seconds: #{config.memory_time_seconds}")
-    IO.puts("  ra_wal_write_strategy: #{config.ra_wal_write_strategy}")
-    IO.puts("  ra_wal_sync_method: #{config.ra_wal_sync_method}")
     IO.puts("  archive_flush_interval_ms: #{config.archive_flush_interval_ms}")
 
     IO.puts(
@@ -360,41 +343,6 @@ defmodule Mix.Tasks.Bench.SingleSession do
       "warning" -> :warning
       "error" -> :error
       value -> raise ArgumentError, "invalid log level for #{name}: #{inspect(value)}"
-    end
-  end
-
-  defp env_wal_write_strategy(name, default)
-       when is_binary(name) and is_atom(default) do
-    case System.get_env(name) do
-      nil ->
-        default
-
-      value ->
-        case String.downcase(String.trim(value)) do
-          "default" ->
-            :default
-
-          "o_sync" ->
-            :o_sync
-
-          other ->
-            raise ArgumentError, "invalid WAL write strategy for #{name}: #{inspect(other)}"
-        end
-    end
-  end
-
-  defp env_wal_sync_method(name, default) when is_binary(name) and is_atom(default) do
-    case System.get_env(name) do
-      nil ->
-        default
-
-      value ->
-        case String.downcase(String.trim(value)) do
-          "datasync" -> :datasync
-          "sync" -> :sync
-          "none" -> :none
-          other -> raise ArgumentError, "invalid WAL sync method for #{name}: #{inspect(other)}"
-        end
     end
   end
 end

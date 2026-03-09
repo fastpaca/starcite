@@ -1,19 +1,22 @@
 defmodule Starcite.Operations.Maintenance do
   @moduledoc false
 
-  alias Starcite.Routing.{Observer, Topology}
+  alias Starcite.Routing.{Store, Topology}
 
-  @spec drain_node(node()) :: :ok | {:error, :invalid_routing_node}
-  def drain_node(node \\ Node.self()) when is_atom(node) do
-    with :ok <- ensure_routing_node(node) do
-      Observer.mark_node_draining(node)
+  @spec drain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  def drain_node(node) when is_atom(node) do
+    with :ok <- ensure_routing_node(node),
+         :ok <- Store.mark_node_draining(node),
+         {:ok, _moved} <- Store.reassign_sessions_from(node) do
+      :ok
     end
   end
 
-  @spec undrain_node(node()) :: :ok | {:error, :invalid_routing_node}
-  def undrain_node(node \\ Node.self()) when is_atom(node) do
-    with :ok <- ensure_routing_node(node) do
-      Observer.mark_node_ready(node)
+  @spec undrain_node(node()) :: :ok | {:error, :invalid_routing_node | term()}
+  def undrain_node(node) when is_atom(node) do
+    with :ok <- ensure_routing_node(node),
+         :ok <- Store.mark_node_ready(node) do
+      :ok
     end
   end
 

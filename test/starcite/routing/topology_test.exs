@@ -1,9 +1,9 @@
-defmodule Starcite.Routing.WriteNodesTest do
+defmodule Starcite.Routing.TopologyTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Routing.Topology
 
-  @config_keys [:num_groups, :routing_replication_factor, :routing_node_ids]
+  @config_keys [:routing_replication_factor, :routing_node_ids]
 
   setup do
     original =
@@ -23,20 +23,17 @@ defmodule Starcite.Routing.WriteNodesTest do
     :ok
   end
 
-  test "config! reads normalized static routing-node config" do
-    Application.put_env(:starcite, :num_groups, 32)
+  test "config! reads normalized routing-node config" do
     Application.put_env(:starcite, :routing_replication_factor, 2)
     Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w1@cluster, :w2@cluster])
 
     assert %{
-             num_groups: 32,
              replication_factor: 2,
              nodes: [:w1@cluster, :w2@cluster]
            } = Topology.config!()
   end
 
   test "validate returns tagged error when replication factor exceeds routing-node count" do
-    Application.put_env(:starcite, :num_groups, 16)
     Application.put_env(:starcite, :routing_replication_factor, 4)
     Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w2@cluster, :w3@cluster])
 
@@ -44,13 +41,14 @@ defmodule Starcite.Routing.WriteNodesTest do
     assert message =~ "routing_replication_factor=4 exceeds routing_node_ids=3"
   end
 
-  test "validate! raises for invalid num_groups" do
-    Application.put_env(:starcite, :num_groups, 0)
-    Application.put_env(:starcite, :routing_replication_factor, 1)
-    Application.put_env(:starcite, :routing_node_ids, [:nonode@nohost])
+  test "replicas_for_session rotates deterministically across configured nodes" do
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w2@cluster, :w3@cluster])
 
-    assert_raise ArgumentError, ~r/invalid value for :num_groups/, fn ->
-      Topology.validate!()
-    end
+    replicas = Topology.replicas_for_session("session-a")
+
+    assert length(replicas) == 2
+    assert Enum.all?(replicas, &(&1 in [:w1@cluster, :w2@cluster, :w3@cluster]))
+    assert replicas == Topology.replicas_for_session("session-a")
   end
 end

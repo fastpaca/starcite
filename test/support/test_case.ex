@@ -3,7 +3,7 @@ defmodule Starcite.TestCase do
   Lean ExUnit case template for Starcite.
 
   Provides a clean runtime after each test and a small set of helpers tailored
-  for the Raft-only runtime.
+  for the in-memory session-log runtime.
   """
 
   use ExUnit.CaseTemplate

@@ -19,10 +19,8 @@ config :logger, level: :warning
 # Initialize plugs at runtime for faster test compilation
 config :phoenix, :plug_init_mode, :runtime
 
-# Raft test configuration
 config :starcite,
-  raft_data_dir: "tmp/test_routing_raft",
-  raft_flush_interval_ms: 100,
+  routing_store_dir: "tmp/test_routing_store",
   routing_replication_factor: 1,
   routing_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
@@ -30,7 +28,3 @@ config :starcite,
   archive_adapter: Starcite.Archive.Adapter.Postgres,
   archive_adapter_opts: [],
   archive_flush_interval_ms: 3_600_000
-
-config :ra,
-  wal_write_strategy: :o_sync,
-  wal_sync_method: :datasync

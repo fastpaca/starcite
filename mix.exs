@@ -64,7 +64,7 @@ defmodule Starcite.MixProject do
       {:ex_aws_s3, "~> 2.5"},
       {:sweet_xml, "~> 0.7"},
       {:joken, "~> 2.6"},
-      {:ra, "~> 2.13"},
+      {:khepri, "~> 0.17.5"},
       {:benchee, "~> 1.5.0", only: :dev},
       {:bypass, "~> 2.1", only: :test},
       {:dialyxir, "~> 1.4", only: [:dev, :test], runtime: false}

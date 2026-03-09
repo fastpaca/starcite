@@ -147,24 +147,20 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp ensure_apps_stopped do
     _ = Application.stop(:starcite)
-    _ = Application.stop(:ra)
+    _ = Application.stop(:khepri)
     :ok
   end
 
   defp configure_runtime(config) do
     Application.put_env(:logger, :level, config.log_level)
     Logger.configure(level: config.log_level)
-    Application.put_env(:starcite, :raft_data_dir, config.raft_data_dir)
+    Application.put_env(:starcite, :routing_store_dir, config.routing_store_dir)
 
-    if config.clean_raft_data_dir do
-      File.rm_rf!(config.raft_data_dir)
+    if config.clean_routing_store_dir do
+      File.rm_rf!(config.routing_store_dir)
     end
 
-    File.mkdir_p!(config.raft_data_dir)
-    ra_system_dir = Path.join(config.raft_data_dir, "ra_system")
-    File.mkdir_p!(ra_system_dir)
-    Application.put_env(:ra, :data_dir, to_charlist(ra_system_dir))
-    Application.delete_env(:ra, :wal_data_dir)
+    File.mkdir_p!(config.routing_store_dir)
 
     archive_flush_interval_ms = env_integer("BENCH_ARCHIVE_FLUSH_INTERVAL_MS", 60_000)
     Application.put_env(:starcite, :archive_flush_interval_ms, archive_flush_interval_ms)
@@ -182,8 +178,8 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp benchmark_config do
     %{
-      raft_data_dir: System.get_env("BENCH_RAFT_DATA_DIR", "tmp/bench_raft_internal"),
-      clean_raft_data_dir: env_boolean("BENCH_CLEAN_RAFT_DATA_DIR", true),
+      routing_store_dir: System.get_env("BENCH_ROUTING_STORE_DIR", "tmp/bench_routing_store"),
+      clean_routing_store_dir: env_boolean("BENCH_CLEAN_ROUTING_STORE_DIR", true),
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
@@ -196,8 +192,8 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp print_config(config) do
     IO.puts("Internal attribution config:")
-    IO.puts("  raft_data_dir: #{config.raft_data_dir}")
-    IO.puts("  clean_raft_data_dir: #{config.clean_raft_data_dir}")
+    IO.puts("  routing_store_dir: #{config.routing_store_dir}")
+    IO.puts("  clean_routing_store_dir: #{config.clean_routing_store_dir}")
     IO.puts("  log_level: #{config.log_level}")
     IO.puts("  sessions: #{config.session_count}")
     IO.puts("  payload_bytes: #{config.payload_bytes}")

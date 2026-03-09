@@ -1,10 +1,9 @@
 defmodule Starcite.Operations.Readiness do
   @moduledoc false
 
-  alias Starcite.Routing.{LeaseBootstrap, Observer, Topology}
+  alias Starcite.Routing.{Store, Topology}
 
   @default_wait_interval_ms 200
-  @status_call_timeout_ms 1_000
 
   @spec local_ready(keyword()) :: boolean()
   def local_ready(opts \\ []) when is_list(opts) do
@@ -12,19 +11,31 @@ defmodule Starcite.Operations.Readiness do
   end
 
   @spec local_readiness(keyword()) :: map()
-  def local_readiness(opts \\ []) when is_list(opts) do
+  def local_readiness(_opts \\ []) do
     mode = local_mode()
-    refresh? = Keyword.get(opts, :refresh?, false)
-    checks = readiness_checks(mode, refresh?)
 
-    compose_readiness(mode, checks)
+    cond do
+      mode == :ingress_node ->
+        ready_result(%{routing_store: %{ready?: true, reason: :ok, detail: %{}}})
+
+      local_drained() ->
+        not_ready_result(:draining, %{}, %{
+          routing_store: %{ready?: false, reason: :draining, detail: %{}}
+        })
+
+      Store.running?() ->
+        ready_result(%{routing_store: %{ready?: true, reason: :ok, detail: %{}}})
+
+      true ->
+        not_ready_result(:routing_sync, %{}, %{
+          routing_store: %{ready?: false, reason: :routing_sync, detail: %{}}
+        })
+    end
   end
 
   @spec local_drained() :: boolean()
   def local_drained do
-    local_mode() == :routing_node and
-      local_node_status() == :draining and
-      Node.self() not in Observer.ready_nodes()
+    local_mode() == :routing_node and Store.node_status(Node.self()) == :draining
   end
 
   @spec wait_local_ready(pos_integer()) :: :ok | {:error, :timeout}
@@ -36,138 +47,20 @@ defmodule Starcite.Operations.Readiness do
   @spec wait_local_drained(pos_integer()) :: :ok | {:error, :timeout}
   def wait_local_drained(timeout_ms \\ 30_000)
       when is_integer(timeout_ms) and timeout_ms > 0 do
-    wait_until(&local_drain_complete/0, timeout_ms)
+    wait_until(&local_drained/0, timeout_ms)
   end
 
-  defp local_node_status do
-    local = Node.self()
-
-    case Observer.status() do
-      %{status: :ok, node_statuses: %{^local => %{status: status}}} when is_atom(status) ->
-        status
-
-      _other ->
-        nil
-    end
-  end
-
-  defp readiness_checks(mode, refresh?)
-       when mode in [:routing_node, :ingress_node] and is_boolean(refresh?) do
-    %{
-      in_service: in_service_gate(mode),
-      routing: LeaseBootstrap.readiness_status(refresh?: refresh?)
-    }
-  end
-
-  defp in_service_gate(:ingress_node) do
-    %{
-      ready?: true,
-      reason: :ok,
-      detail: %{}
-    }
-  end
-
-  defp in_service_gate(:routing_node) do
-    cond do
-      local_drained() ->
-        %{
-          ready?: false,
-          reason: :draining,
-          detail: %{}
-        }
-
-      Node.self() in Observer.ready_nodes() ->
-        %{
-          ready?: true,
-          reason: :ok,
-          detail: %{}
-        }
-
-      true ->
-        %{
-          ready?: false,
-          reason: :observer_sync,
-          detail: %{}
-        }
-    end
-  end
-
-  defp compose_readiness(:ingress_node, %{routing: routing} = checks) when is_map(checks) do
-    if routing.ready? do
-      ready_result(checks)
-    else
-      not_ready_result(routing.reason, routing.detail, checks)
-    end
-  end
-
-  defp compose_readiness(:routing_node, %{in_service: in_service, routing: routing} = checks)
-       when is_map(checks) do
-    cond do
-      in_service.reason == :draining ->
-        not_ready_result(:draining, %{}, checks)
-
-      not routing.ready? ->
-        not_ready_result(routing.reason, routing.detail, checks)
-
-      not in_service.ready? ->
-        not_ready_result(:observer_sync, %{}, checks)
-
-      true ->
-        ready_result(checks)
-    end
+  defp local_mode do
+    if Topology.routing_node?(Node.self()), do: :routing_node, else: :ingress_node
   end
 
   defp ready_result(checks) when is_map(checks) do
-    %{
-      ready?: true,
-      reason: :ok,
-      detail: %{},
-      checks: checks
-    }
+    %{ready?: true, reason: :ok, detail: %{}, checks: checks}
   end
 
   defp not_ready_result(reason, detail, checks)
        when is_atom(reason) and is_map(detail) and is_map(checks) do
-    %{
-      ready?: false,
-      reason: reason,
-      detail: detail,
-      checks: checks
-    }
-  end
-
-  defp local_drain_complete do
-    local = Node.self()
-
-    local_mode() == :routing_node and
-      local_drained() and
-      drained_on_visible_nodes?(local)
-  end
-
-  defp drained_on_visible_nodes?(node) when is_atom(node) do
-    Observer.all_nodes()
-    |> Enum.all?(fn observer_node ->
-      observer_node_status(observer_node, node) == :draining
-    end)
-  end
-
-  defp observer_node_status(observer_node, target_node)
-       when is_atom(observer_node) and is_atom(target_node) do
-    status =
-      if observer_node == Node.self() do
-        Observer.status()
-      else
-        :rpc.call(observer_node, Observer, :status, [], @status_call_timeout_ms)
-      end
-
-    case status do
-      %{status: :ok, node_statuses: %{^target_node => %{status: node_status}}}
-      when is_atom(node_status) ->
-        node_status
-
-      _other ->
-        nil
-    end
+    %{ready?: false, reason: reason, detail: detail, checks: checks}
   end
 
   defp wait_until(predicate, timeout_ms)
@@ -187,14 +80,6 @@ defmodule Starcite.Operations.Readiness do
         Process.sleep(@default_wait_interval_ms)
         do_wait_until(predicate, deadline_ms)
       end
-    end
-  end
-
-  defp local_mode do
-    if Topology.routing_node?(Node.self()) do
-      :routing_node
-    else
-      :ingress_node
     end
   end
 end

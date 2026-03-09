@@ -9,7 +9,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def event_metrics(_opts) do
     [
       ingestion_metrics(),
-      raft_metrics(),
       routing_metrics(),
       request_slo_metrics(),
       archive_metrics(),
@@ -110,13 +109,13 @@ defmodule Starcite.Observability.PromEx.Metrics do
         last_value("starcite_archive_tail_size",
           event_name: [:starcite, :archive, :ack],
           measurement: :tail_size,
-          description: "In-Raft tail size after trim",
+          description: "In-memory hot-tail size after trim",
           tags: [:tenant_id]
         ),
         counter("starcite_archive_trimmed_total",
           event_name: [:starcite, :archive, :ack],
           measurement: :trimmed,
-          description: "Total entries trimmed from Raft tail",
+          description: "Total entries trimmed from the in-memory hot tail",
           tags: [:tenant_id]
         )
       ]
@@ -156,32 +155,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
-        )
-      ]
-    )
-  end
-
-  defp raft_metrics do
-    Event.build(
-      :starcite_raft_metrics,
-      [
-        last_value("starcite_raft_groups",
-          event_name: [:starcite, :raft, :role_count],
-          measurement: :groups,
-          description: "Local Raft groups observed by role on this node",
-          tags: [:role, :node]
-        ),
-        last_value("starcite_raft_group_role",
-          event_name: [:starcite, :raft, :group_role],
-          measurement: :present,
-          description: "Whether a local Raft group is currently observed in a specific role",
-          tags: [:node, :group_id, :role]
-        ),
-        counter("starcite_raft_leadership_transfers_total",
-          event_name: [:starcite, :raft, :leadership_transfer],
-          measurement: :count,
-          description: "Leadership transfer attempts by group, target, outcome, and reason",
-          tags: [:group_id, :source_node, :target_node, :outcome, :reason]
         )
       ]
     )
