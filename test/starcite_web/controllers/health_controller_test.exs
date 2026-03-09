@@ -6,7 +6,7 @@ defmodule StarciteWeb.OpsRouterTest do
 
   alias Starcite.ControlPlane.{Observer, Ops}
   alias Starcite.ControlPlane.ObserverState
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.ControlPlane.RaftBootstrap
 
   @endpoint StarciteWeb.Endpoint
   @ops_router StarciteWeb.OpsRouter

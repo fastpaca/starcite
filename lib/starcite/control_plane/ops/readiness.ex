@@ -3,7 +3,7 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.ControlPlane.Ops.Topology
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.ControlPlane.RaftBootstrap
 
   @default_wait_interval_ms 200
   @status_call_timeout_ms 1_000

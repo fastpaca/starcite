@@ -1,4 +1,4 @@
-defmodule Starcite.DataPlane.RaftHealth do
+defmodule Starcite.ControlPlane.RaftHealth do
   @moduledoc """
   Intrinsic Raft readiness checks used by health and routing gates.
 
@@ -7,7 +7,7 @@ defmodule Starcite.DataPlane.RaftHealth do
   """
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   @consensus_probe_ttl_ms 3_000
 

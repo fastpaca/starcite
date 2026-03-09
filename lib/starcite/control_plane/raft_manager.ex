@@ -1,4 +1,4 @@
-defmodule Starcite.DataPlane.RaftManager do
+defmodule Starcite.ControlPlane.RaftManager do
   @moduledoc """
   Utility module for static Raft write-group placement and lifecycle.
 
@@ -12,7 +12,7 @@ defmodule Starcite.DataPlane.RaftManager do
   require Logger
 
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.RaftFSM
+  alias Starcite.ControlPlane.RaftMachine
   @server_ids_cache_key {__MODULE__, :server_ids}
   @cluster_names_cache_key {__MODULE__, :cluster_names}
   @replicas_cache_key {__MODULE__, :replicas}
@@ -190,7 +190,7 @@ defmodule Starcite.DataPlane.RaftManager do
   defp start_local_server(group_id) do
     server_name = server_id(group_id)
     cluster_name = cluster_name(group_id)
-    machine = {:module, RaftFSM, %{group_id: group_id}}
+    machine = {:module, RaftMachine, %{group_id: group_id}}
     my_node = Node.self()
     node_name = safe_node_name(my_node)
 
@@ -264,12 +264,6 @@ defmodule Starcite.DataPlane.RaftManager do
 
   defp single_replica_group?(group_id) when is_integer(group_id) and group_id >= 0 do
     length(replicas_for_group(group_id)) == 1
-  end
-
-  @doc false
-  @spec machine(non_neg_integer()) :: {:module, module(), map()}
-  def machine(group_id) when is_integer(group_id) and group_id >= 0 do
-    {:module, RaftFSM, %{group_id: group_id}}
   end
 
   @doc false

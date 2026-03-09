@@ -2,9 +2,7 @@ defmodule Mix.Tasks.Bench.Routing do
   require Logger
 
   alias Starcite.WritePath
-  alias Starcite.DataPlane.RaftManager
 
-  @raft_timeout 2_000
   @rpc_timeout 5_000
 
   def run do
@@ -75,37 +73,11 @@ defmodule Mix.Tasks.Bench.Routing do
       end
     end
 
-    append_ra_direct = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
-      group = RaftManager.group_for_session(session_id)
-      server_id = RaftManager.server_id(group)
-
-      case :ra.process_command(
-             {server_id, Node.self()},
-             {:append_event, session_id, event_with_producer, nil},
-             @raft_timeout
-           ) do
-        {:ok, {:reply, {:ok, _reply}}, _leader} ->
-          :ok
-
-        {:ok, {:reply, {:error, reason}}, _leader} ->
-          raise "append_ra_direct failed: #{inspect(reason)}"
-
-        {:timeout, leader} ->
-          raise "append_ra_direct timeout: #{inspect(leader)}"
-
-        {:error, reason} ->
-          raise "append_ra_direct error: #{inspect(reason)}"
-      end
-    end
-
     run_benchee(
       %{
         "append_public" => append_public,
         "append_local" => append_local,
-        "append_rpc_self_local" => append_rpc_self_local,
-        "append_ra_direct" => append_ra_direct
+        "append_rpc_self_local" => append_rpc_self_local
       },
       parallel: config.parallel,
       warmup: config.warmup_seconds,

@@ -7,16 +7,16 @@
 ## How it works
 
 Starcite runs as a cluster of write nodes (typically 3 or 5). When a client appends
-an event, the event is replicated across multiple nodes before the client gets an
-acknowledgment. This means no acknowledged event is ever lost — even if a node dies
-mid-write.
+an event, the event is replicated to an in-memory group before the client gets an
+acknowledgment. That improves failover safety, but only durability comes from your
+configured archive backend.
 
 A background archiver flushes committed events to your chosen storage backend (S3 or
 Postgres) every few seconds. This is fully asynchronous — it never touches the hot
 path, so archive performance doesn't affect append latency.
 
 Sessions are distributed across the cluster automatically. Clients don't need to know
-which node owns a session — any node can route the request to the right place.
+which node owns a session — any node can route the request to the active owner.
 
 For the full picture of how sharding, replication, and recovery work internally, see
 [Architecture](architecture.md).
@@ -24,9 +24,9 @@ For the full picture of how sharding, replication, and recovery work internally,
 ## Choosing an archive backend
 
 The archive backend stores committed events for long-term durability and historical
-replay. Appends never touch the archive — they commit to replicated in-memory state
-and return immediately. Tail replay reads from a two-tier store: recent events come
-from memory (hot), older evicted events are fetched from the archive (cold).
+replay. Appends never touch the archive on the hot path — they commit to replicated
+in-memory state and return immediately. Tail replay reads from a two-tier store: recent
+events come from memory (hot), older evicted events are fetched from the archive (cold).
 
 In practice, most tail connections replay recent history and never hit the archive.
 But if a client reconnects with a very old cursor, archive read latency matters. Pick
@@ -132,7 +132,7 @@ served there instead of the public API port.
 ## Rolling restarts
 
 The key constraint: never restart more than one write node at a time. Starcite uses
-3-way replication with quorum writes — taking two nodes down simultaneously means
+in-memory replication with quorum writes — taking two nodes down simultaneously means
 some groups lose quorum and can't accept writes.
 
 For each write node, one at a time:

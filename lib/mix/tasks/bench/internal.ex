@@ -5,7 +5,6 @@ defmodule Mix.Tasks.Bench.Internal do
   alias Starcite.DataPlane.EventStore
   alias Starcite.Session
   alias Starcite.WritePath
-  alias Starcite.DataPlane.RaftFSM
 
   def run do
     ensure_apps_stopped()
@@ -23,7 +22,6 @@ defmodule Mix.Tasks.Bench.Internal do
     archived_cached_events_template = archived_cached_events_template(config.archived_read_window)
 
     runtime_sessions = prepare_runtime_sessions(sessions)
-    fsm_initial_state = build_fsm_state(runtime_sessions)
     archived_session_id = "internal-cache-benchee-#{System.system_time(:millisecond)}"
     :ok = EventStore.cache_archived_events(archived_session_id, archived_cached_events_template)
 
@@ -35,9 +33,6 @@ defmodule Mix.Tasks.Bench.Internal do
 
     runtime_counter = :atomics.new(1, [])
     :atomics.put(runtime_counter, 1, 0)
-
-    fsm_counter = :atomics.new(1, [])
-    :atomics.put(fsm_counter, 1, 0)
 
     session_counter = :atomics.new(1, [])
     :atomics.put(session_counter, 1, 0)
@@ -86,28 +81,6 @@ defmodule Mix.Tasks.Bench.Internal do
       :ok
     end
 
-    fsm_apply_append = fn ->
-      seq = :atomics.add_get(fsm_counter, 1, 1)
-      session_id = elem(runtime_sessions, rem(seq - 1, session_count))
-      producer_id = "bench-fsm-#{session_id}-#{seq}"
-      event_with_producer = with_bench_producer(input_event_template, producer_id, 1)
-      fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
-      meta = %{index: seq}
-
-      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, nil}, fsm_state) do
-        {updated_state, {:reply, {:ok, _reply}}, _effects} ->
-          Process.put(:bench_fsm_state, updated_state)
-          :ok
-
-        {updated_state, {:reply, {:ok, _reply}}} ->
-          Process.put(:bench_fsm_state, updated_state)
-          :ok
-
-        {_updated_state, {:reply, {:error, reason}}} ->
-          raise "raft_fsm.apply append failed: #{inspect(reason)}"
-      end
-    end
-
     runtime_append = fn ->
       seq = :atomics.add_get(runtime_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
@@ -152,7 +125,6 @@ defmodule Mix.Tasks.Bench.Internal do
         "event_store.read_archived_events_cached" => cached_archived_read,
         "event_store.cache_archived_events" => cache_promote_archived,
         "event_store.raw_ets_insert" => raw_ets_insert,
-        "raft_fsm.apply_append" => fsm_apply_append,
         "runtime.append_event" => runtime_append
       },
       parallel: config.parallel,
@@ -266,21 +238,6 @@ defmodule Mix.Tasks.Bench.Internal do
       end
     end)
     |> List.to_tuple()
-  end
-
-  defp build_fsm_state(session_ids) when is_tuple(session_ids) do
-    sessions =
-      session_ids
-      |> Tuple.to_list()
-      |> Enum.reduce(%{}, fn id, acc ->
-        Map.put(
-          acc,
-          id,
-          Session.new(id, metadata: %{bench: true, scenario: "internal_attribution_fsm"})
-        )
-      end)
-
-    %RaftFSM{group_id: 0, sessions: sessions}
   end
 
   defp input_event_template(payload_bytes) do

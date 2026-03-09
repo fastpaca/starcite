@@ -2,7 +2,7 @@ defmodule Starcite.ControlPlane.SessionRouterTest do
   use ExUnit.Case, async: true
 
   alias Starcite.ControlPlane.SessionRouter
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   test "ensure_local_owner/2 accepts the active leader node" do
     session_id = "session-router-local-owner"

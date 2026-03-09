@@ -3,7 +3,7 @@ defmodule Starcite.ControlPlane.OpsTest do
 
   alias Starcite.ControlPlane.{Observer, Ops, WriteNodes}
   alias Starcite.ControlPlane.Ops.Leadership
-  alias Starcite.DataPlane.{RaftBootstrap, RaftManager}
+  alias Starcite.ControlPlane.{RaftBootstrap, RaftManager}
 
   setup do
     Ops.undrain_node(Node.self())

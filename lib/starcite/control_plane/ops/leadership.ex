@@ -3,7 +3,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
 
   alias Starcite.ControlPlane.Observer
   alias Starcite.ControlPlane.Ops.Topology
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
   alias Starcite.Observability.Telemetry
 
   @default_wait_interval_ms 200

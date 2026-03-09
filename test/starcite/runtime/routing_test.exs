@@ -174,7 +174,7 @@ defmodule Starcite.Runtime.RoutingTest do
   defp unique_group_id do
     rem(
       System.unique_integer([:positive, :monotonic]),
-      Starcite.DataPlane.RaftManager.num_groups()
+      Starcite.ControlPlane.RaftManager.num_groups()
     )
   end
 
