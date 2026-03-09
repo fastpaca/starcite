@@ -5,8 +5,8 @@ defmodule Starcite.Runtime.DataPlaneBoundaryTest do
     "lib/starcite/write_path.ex",
     "lib/starcite/read_path.ex",
     "lib/starcite/archive.ex",
-    "lib/starcite/data_plane/session_owner.ex",
-    "lib/starcite/data_plane/session_owners.ex",
+    "lib/starcite/data_plane/session_log.ex",
+    "lib/starcite/data_plane/session_quorum.ex",
     "lib/starcite_web/controllers/session_controller.ex",
     "lib/starcite_web/controllers/tail_controller.ex",
     "lib/starcite_web/tail_socket.ex"

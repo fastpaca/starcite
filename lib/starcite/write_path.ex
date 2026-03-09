@@ -4,7 +4,7 @@ defmodule Starcite.WritePath do
   """
 
   alias Starcite.Auth.Principal
-  alias Starcite.DataPlane.{SessionOwners, SessionReplicator, SessionStore}
+  alias Starcite.DataPlane.{SessionQuorum, SessionStore}
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
 
@@ -109,11 +109,11 @@ defmodule Starcite.WritePath do
           tenant_id: tenant_id,
           metadata: metadata
         )
-        |> assign_owner_epoch()
+        |> assign_routing_epoch()
 
-      case SessionOwners.start_session(session) do
+      case SessionQuorum.start_session(session) do
         :ok ->
-          case SessionReplicator.replicate_state(session, []) do
+          case SessionQuorum.replicate_state(session, []) do
             :ok ->
               :ok = SessionStore.put_session(session)
               session_map = Session.to_map(session)
@@ -136,12 +136,12 @@ defmodule Starcite.WritePath do
 
   defp cleanup_uncommitted_session(session_id)
        when is_binary(session_id) and session_id != "" do
-    :ok = SessionOwners.stop_session(session_id)
+    :ok = SessionQuorum.stop_session(session_id)
     :ok = SessionStore.delete_session(session_id)
     :ok
   end
 
-  defp assign_owner_epoch(%Session{id: session_id, epoch: current_epoch} = session)
+  defp assign_routing_epoch(%Session{id: session_id, epoch: current_epoch} = session)
        when is_binary(session_id) and session_id != "" and is_integer(current_epoch) and
               current_epoch >= 0 do
     epoch = SessionRouter.local_owner_epoch(session_id, current_epoch)
@@ -184,13 +184,13 @@ defmodule Starcite.WritePath do
   @doc false
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
-    SessionOwners.append_event(id, event, nil)
+    SessionQuorum.append_event(id, event, nil)
   end
 
   @doc false
   def append_event_local(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
     expected_seq = expected_seq_from_opts(opts)
-    SessionOwners.append_event(id, event, expected_seq)
+    SessionQuorum.append_event(id, event, expected_seq)
   end
 
   @spec append_events(String.t(), [map()], keyword()) ::
@@ -219,7 +219,7 @@ defmodule Starcite.WritePath do
   @doc false
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    SessionOwners.append_events(id, events, opts)
+    SessionQuorum.append_events(id, events, opts)
   end
 
   @spec ack_archived(String.t(), non_neg_integer()) ::
@@ -237,7 +237,7 @@ defmodule Starcite.WritePath do
   @doc false
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
-    SessionOwners.ack_archived(id, upto_seq)
+    SessionQuorum.ack_archived(id, upto_seq)
   end
 
   defp route_to_replica(session_id, remote_fun, remote_args, local_fun, local_args)

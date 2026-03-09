@@ -5,7 +5,7 @@ defmodule Starcite.ReadPath do
 
   alias Starcite.Routing.SessionRouter
   alias Starcite.Cursor
-  alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Session
 
   @default_tail_batch_size 1_000
@@ -92,7 +92,7 @@ defmodule Starcite.ReadPath do
 
   @doc false
   def rpc_get_session(id) when is_binary(id) and id != "" do
-    SessionOwners.get_session(id)
+    SessionQuorum.get_session(id)
   end
 
   def rpc_get_session(_id), do: {:error, :invalid_session_id}
@@ -328,10 +328,10 @@ defmodule Starcite.ReadPath do
   defp fetch_cursor_snapshot_routed(id) when is_binary(id) and id != "" do
     SessionRouter.call(
       id,
-      SessionOwners,
+      SessionQuorum,
       :fetch_cursor_snapshot,
       [id],
-      SessionOwners,
+      SessionQuorum,
       :fetch_cursor_snapshot,
       [id],
       prefer_leader: true,

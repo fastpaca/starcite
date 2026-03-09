@@ -1,28 +1,29 @@
-defmodule Starcite.DataPlane.SessionOwner do
+defmodule Starcite.DataPlane.SessionLog do
   @moduledoc """
-  In-memory owner process for one session.
+  In-memory session log state machine for one session replica.
 
-  The owner is the sequencing authority for append operations and is
-  responsible for publishing cursor updates to tail subscribers.
+  The owner log sequences local writes. Follower logs only accept replicated
+  state from `SessionQuorum`.
   """
 
-  use GenServer
+  @behaviour :gen_statem
 
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionReplicator, SessionStore}
-  alias Starcite.Routing.SessionRouter
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
   alias Starcite.Observability.Telemetry
+  alias Starcite.Routing.SessionRouter
   alias Starcite.Session
 
-  @registry Starcite.DataPlane.SessionOwnerRegistry
+  @registry Starcite.DataPlane.SessionLogRegistry
 
-  @type state :: %{
+  @type role :: :owner | :follower
+  @type data :: %{
           required(:session) => Session.t()
         }
 
-  @spec start_link(keyword()) :: GenServer.on_start()
+  @spec start_link(keyword()) :: :gen_statem.start_ret()
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
-    GenServer.start_link(__MODULE__, session, name: via(session.id))
+    :gen_statem.start_link(via(session.id), __MODULE__, session, [])
   end
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -44,42 +45,53 @@ defmodule Starcite.DataPlane.SessionOwner do
   end
 
   @impl true
+  def callback_mode, do: :handle_event_function
+
+  @impl true
   def init(%Session{} = session) do
     resolved_session =
-      case SessionStore.get_session(session.id) do
+      case SessionStore.get_session_cached(session.id) do
         {:ok, %Session{} = loaded} -> loaded
-        _ -> session
+        :error -> session
       end
 
-    owner_session =
+    log_session =
       resolved_session
       |> normalize_session_epoch()
-      |> apply_owner_epoch()
+      |> apply_routing_epoch()
 
-    {:ok, %{session: owner_session}}
+    {:ok, role_for_session(log_session.id), %{session: log_session}}
   end
 
   @impl true
-  def handle_call(:get_session, _from, %{session: session} = state) do
-    {:reply, {:ok, session}, state}
+  def handle_event({:call, from}, :get_role, role, _data) when role in [:owner, :follower] do
+    {:keep_state_and_data, [{:reply, from, role}]}
   end
 
-  def handle_call(:fetch_cursor_snapshot, _from, %{session: session} = state) do
-    {:reply, {:ok, cursor_snapshot(session)}, state}
+  def handle_event({:call, from}, :get_session, _role, %{session: session}) do
+    {:keep_state_and_data, [{:reply, from, {:ok, session}}]}
   end
 
-  def handle_call(:fetch_archived_seq, _from, %{session: session} = state) do
-    {:reply, {:ok, session.archived_seq}, state}
+  def handle_event({:call, from}, :fetch_cursor_snapshot, _role, %{session: session}) do
+    {:keep_state_and_data, [{:reply, from, {:ok, cursor_snapshot(session)}}]}
   end
 
-  def handle_call({:append_event, input, expected_seq}, _from, %{session: session} = state)
+  def handle_event({:call, from}, :fetch_archived_seq, _role, %{session: session}) do
+    {:keep_state_and_data, [{:reply, from, {:ok, session.archived_seq}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:append_event, input, expected_seq},
+        :owner,
+        %{session: session} = data
+      )
       when is_map(input) do
     with :ok <- guard_expected_seq(session, expected_seq),
-         {:ok, updated_session, reply, event_to_store} <-
-           append_one_to_session(session, input),
+         {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input),
          normalized_session <- normalize_session_epoch(updated_session),
          :ok <-
-           SessionReplicator.replicate_state(normalized_session, maybe_event_list(event_to_store)) do
+           SessionQuorum.replicate_state(normalized_session, maybe_event_list(event_to_store)) do
       :ok =
         maybe_put_appended_event(
           normalized_session.id,
@@ -90,31 +102,40 @@ defmodule Starcite.DataPlane.SessionOwner do
       :ok = maybe_publish_event(normalized_session.id, event_to_store)
       :ok = SessionStore.put_session(normalized_session)
 
-      reply =
+      decorated_reply =
         decorate_append_reply(
           reply,
           normalized_session.epoch,
           normalized_session.archived_seq
         )
 
-      {:reply, {:ok, reply}, %{state | session: normalized_session}}
+      {:keep_state, %{data | session: normalized_session},
+       [{:reply, from, {:ok, decorated_reply}}]}
     else
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def handle_call({:append_event, _input, _expected_seq}, _from, state) do
-    {:reply, {:error, :invalid_event}, state}
+  def handle_event({:call, from}, {:append_event, _input, _expected_seq}, :owner, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_call({:append_events, inputs, expected_seq}, _from, %{session: session} = state)
+  def handle_event({:call, from}, {:append_event, _input, _expected_seq}, :follower, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:append_events, inputs, expected_seq},
+        :owner,
+        %{session: session} = data
+      )
       when is_list(inputs) do
     with :ok <- guard_expected_seq(session, expected_seq),
-         {:ok, updated_session, replies, events_to_store} <-
-           append_to_session(session, inputs),
+         {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs),
          normalized_session <- normalize_session_epoch(updated_session),
-         :ok <- SessionReplicator.replicate_state(normalized_session, events_to_store) do
+         :ok <- SessionQuorum.replicate_state(normalized_session, events_to_store) do
       :ok =
         maybe_put_appended_events(
           normalized_session.id,
@@ -125,7 +146,7 @@ defmodule Starcite.DataPlane.SessionOwner do
       :ok = publish_events(normalized_session.id, events_to_store)
       :ok = SessionStore.put_session(normalized_session)
 
-      replies =
+      decorated_replies =
         Enum.map(replies, fn reply ->
           decorate_append_reply(
             reply,
@@ -135,7 +156,7 @@ defmodule Starcite.DataPlane.SessionOwner do
         end)
 
       response = %{
-        results: replies,
+        results: decorated_replies,
         last_seq: normalized_session.last_seq,
         epoch: normalized_session.epoch,
         cursor: %{epoch: normalized_session.epoch, seq: normalized_session.last_seq},
@@ -145,24 +166,28 @@ defmodule Starcite.DataPlane.SessionOwner do
         }
       }
 
-      {:reply, {:ok, response}, %{state | session: normalized_session}}
+      {:keep_state, %{data | session: normalized_session}, [{:reply, from, {:ok, response}}]}
     else
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def handle_call({:append_events, _inputs, _expected_seq}, _from, state) do
-    {:reply, {:error, :invalid_event}, state}
+  def handle_event({:call, from}, {:append_events, _inputs, _expected_seq}, :owner, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_call({:ack_archived, upto_seq}, _from, %{session: session} = state)
+  def handle_event({:call, from}, {:append_events, _inputs, _expected_seq}, :follower, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
+  end
+
+  def handle_event({:call, from}, {:ack_archived, upto_seq}, :owner, %{session: session} = data)
       when is_integer(upto_seq) and upto_seq >= 0 do
     previous_archived_seq = session.archived_seq
     {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
     normalized_session = normalize_session_epoch(updated_session)
 
-    with :ok <- SessionReplicator.replicate_state(normalized_session, []) do
+    with :ok <- SessionQuorum.replicate_state(normalized_session, []) do
       evicted =
         evict_archived_events(
           normalized_session.id,
@@ -194,26 +219,31 @@ defmodule Starcite.DataPlane.SessionOwner do
         }
       }
 
-      {:reply, {:ok, response}, %{state | session: normalized_session}}
+      {:keep_state, %{data | session: normalized_session}, [{:reply, from, {:ok, response}}]}
     else
       {:error, reason} ->
-        {:reply, {:error, reason}, state}
+        {:keep_state_and_data, [{:reply, from, {:error, reason}}]}
     end
   end
 
-  def handle_call({:ack_archived, _upto_seq}, _from, state) do
-    {:reply, {:error, :invalid_event}, state}
+  def handle_event({:call, from}, {:ack_archived, _upto_seq}, :owner, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
   end
 
-  def handle_call(
-        {:replicate_state, %Session{id: session_id} = incoming_session, incoming_events},
-        _from,
-        state
+  def handle_event({:call, from}, {:ack_archived, _upto_seq}, :follower, _data) do
+    {:keep_state_and_data, [{:reply, from, {:error, :not_owner}}]}
+  end
+
+  def handle_event(
+        {:call, from},
+        {:apply_replica, %Session{id: session_id} = incoming_session, incoming_events},
+        role,
+        %{session: current_session} = data
       )
-      when is_binary(session_id) and session_id != "" and is_list(incoming_events) do
+      when role in [:owner, :follower] and is_binary(session_id) and session_id != "" and
+             is_list(incoming_events) do
     normalized_session = normalize_session_epoch(incoming_session)
     normalized_events = put_events_epoch(incoming_events, normalized_session.epoch)
-    current_session = state.session
 
     if should_apply_replication?(normalized_session, current_session) do
       previous_archived_seq = current_session.archived_seq
@@ -233,14 +263,27 @@ defmodule Starcite.DataPlane.SessionOwner do
         )
 
       :ok = SessionStore.put_session(normalized_session)
-      {:reply, :ok, %{state | session: normalized_session}}
+
+      {:next_state, :follower, %{data | session: normalized_session}, [{:reply, from, :ok}]}
     else
-      {:reply, :ok, state}
+      {:keep_state_and_data, [{:reply, from, :ok}]}
     end
   end
 
-  def handle_call({:replicate_state, _incoming_session, _incoming_events}, _from, state) do
-    {:reply, {:error, :invalid_event}, state}
+  def handle_event(
+        {:call, from},
+        {:apply_replica, _incoming_session, _incoming_events},
+        _role,
+        _data
+      ) do
+    {:keep_state_and_data, [{:reply, from, {:error, :invalid_event}}]}
+  end
+
+  defp role_for_session(session_id) when is_binary(session_id) and session_id != "" do
+    case SessionRouter.ensure_local_owner(session_id) do
+      :ok -> :owner
+      _other -> :follower
+    end
   end
 
   defp cursor_snapshot(%Session{} = session) do
@@ -311,12 +354,12 @@ defmodule Starcite.DataPlane.SessionOwner do
 
   defp normalize_session_epoch(%Session{} = session), do: %Session{session | epoch: 0}
 
-  defp apply_owner_epoch(%Session{id: session_id} = session)
+  defp apply_routing_epoch(%Session{id: session_id} = session)
        when is_binary(session_id) and session_id != "" do
     normalized_session = normalize_session_epoch(session)
     fallback_epoch = normalize_epoch(normalized_session.epoch)
-    owner_epoch = SessionRouter.local_owner_epoch(session_id, fallback_epoch)
-    %Session{normalized_session | epoch: owner_epoch}
+    routing_epoch = SessionRouter.local_owner_epoch(session_id, fallback_epoch)
+    %Session{normalized_session | epoch: routing_epoch}
   end
 
   defp put_event_epoch(nil, _epoch), do: nil
