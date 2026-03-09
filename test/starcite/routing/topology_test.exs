@@ -24,31 +24,41 @@ defmodule Starcite.Routing.TopologyTest do
   end
 
   test "config! reads normalized routing-node config" do
-    Application.put_env(:starcite, :routing_replication_factor, 2)
-    Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w1@cluster, :w2@cluster])
+    self_node = Node.self()
 
-    assert %{
-             replication_factor: 2,
-             nodes: [:w1@cluster, :w2@cluster]
-           } = Topology.config!()
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+
+    Application.put_env(
+      :starcite,
+      :routing_node_ids,
+      [self_node, self_node, :"peer-a@cluster"]
+    )
+
+    assert %{replication_factor: 2, nodes: nodes} = Topology.config!()
+    assert nodes == [self_node, :"peer-a@cluster"]
   end
 
   test "validate returns tagged error when replication factor exceeds routing-node count" do
+    self_node = Node.self()
+
     Application.put_env(:starcite, :routing_replication_factor, 4)
-    Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w2@cluster, :w3@cluster])
+
+    Application.put_env(
+      :starcite,
+      :routing_node_ids,
+      [self_node, :"peer-a@cluster", :"peer-b@cluster"]
+    )
 
     assert {:error, message} = Topology.validate()
     assert message =~ "routing_replication_factor=4 exceeds routing_node_ids=3"
   end
 
-  test "replicas_for_session rotates deterministically across configured nodes" do
+  test "validate returns tagged error when local node is missing from routing-node config" do
     Application.put_env(:starcite, :routing_replication_factor, 2)
-    Application.put_env(:starcite, :routing_node_ids, [:w1@cluster, :w2@cluster, :w3@cluster])
+    Application.put_env(:starcite, :routing_node_ids, [:"peer-a@cluster", :"peer-b@cluster"])
 
-    replicas = Topology.replicas_for_session("session-a")
-
-    assert length(replicas) == 2
-    assert Enum.all?(replicas, &(&1 in [:w1@cluster, :w2@cluster, :w3@cluster]))
-    assert replicas == Topology.replicas_for_session("session-a")
+    assert {:error, message} = Topology.validate()
+    assert message =~ "local node"
+    assert message =~ "routing_node_ids"
   end
 end

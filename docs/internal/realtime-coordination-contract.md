@@ -1,6 +1,6 @@
 # Starcite Realtime Coordination Contract (Internal)
 
-Status: Draft v0.1  
+Status: Draft v0.2  
 Visibility: Internal only
 
 ## Product Identity
@@ -11,22 +11,27 @@ Starcite guarantees ordered, resumable session streams for participants such as 
 Starcite is not a general-purpose database.
 
 ## Control-Plane / Data-Plane Split
-Starcite uses consensus for control-plane coordination, not per-event payload commit.
+Starcite uses consensus for routing and ownership, not for per-event payload commit.
 
 Control plane:
-- Ownership and fencing (`epoch`) for writable session shards.
-- Routing metadata publication.
-- Node lifecycle coordination (drain, add, remove).
+- Khepri-backed authoritative routing state.
+- Session ownership claims and monotonic fencing epoch (`epoch`).
+- Node lifecycle state (`ready`, `draining`, `drained`).
+- Node leases for catastrophic-failure detection.
+- Session placement for new claims.
+- Manual drain and ownership transfer orchestration.
 - Consensus-backed durable frontier publication (`committed_cursor` / current `archived_seq` shape).
-- One Raft-backed shard lease group per routing shard; these groups elect leaders but do not store session payload state.
 
 Data plane:
 - Owner-assigned `(epoch, seq)` event ordering.
 - In-memory replication quorum for fast ack.
-- Async fan-out and async archival.
+- Async fan-out to clients.
+- Async archival.
 
-Non-goal for control-plane consensus:
+Non-goals for control-plane consensus:
 - Per-event payload consensus commit on append hot path.
+- Recomputing ownership from topology on every request.
+- Using `nodedown` as authoritative failover input.
 
 ## Core Contract
 1. Ack means replicated to in-memory quorum (`2/3` replicas) for the session group.
@@ -39,15 +44,41 @@ Non-goal for control-plane consensus:
 8. Events above `committed_cursor` may be lost under correlated failures.
 9. Any discontinuity is explicit via a `gap` signal; discontinuities are never silent.
 
+## Control-Plane State Model
+Khepri is the authoritative store for routing and ownership state.
+
+Node records:
+- `node_id`
+- `status: :ready | :draining | :drained`
+- `lease_until_ms`
+- `updated_at_ms`
+
+Session assignment records:
+- `session_id`
+- `owner`
+- `epoch`
+- `replicas`
+- `status: :active | :moving`
+- `target_owner` when `status == :moving`
+- `transfer_id` when `status == :moving`
+- `updated_at_ms`
+
+Local ephemeral state, not consensus-backed:
+- `suspect_nodes` derived from `nodeup` / `nodedown`
+- routing caches
+- local session runtime state
+
 ## Terms
 - `session`: Ordered stream boundary.
-- `epoch`: Leader lineage/version for a session group.
+- `epoch`: Writer lineage/version for a session assignment.
 - `seq`: Monotonic sequence number assigned by leader.
 - `cursor`: `(epoch, seq)` pair used for resume.
 - `head_cursor`: Highest delivered cursor currently known.
 - `committed_cursor`: Highest durably archived cursor.
 - `earliest_available_cursor`: Oldest cursor currently replayable from Starcite hot tier.
 - `archived_seq`: Current internal durable frontier (`seq` only) used before full epoch-aware cursor migration.
+- `lease`: Time-bounded control-plane claim proving the owning node is still alive.
+- `suspect`: Local routing hint derived from cluster visibility, not an ownership signal.
 
 ## Write Path Semantics
 1. Client appends event to a session.
@@ -59,11 +90,18 @@ Non-goal for control-plane consensus:
 7. Event is archived asynchronously in the background.
 8. `committed_cursor` advances after storage confirmation.
 
+## Lease and Failure Semantics
+1. Node leases are renewed in Khepri on a fixed heartbeat interval.
+2. Lease expiry is the only catastrophic-failure trigger for ownership failover.
+3. `nodedown` is a live routing hint only; it is not authoritative for ownership transfer.
+4. During rolling operations, the expected path is `draining -> drained -> stop`; lease-expiry failover should be exceptional.
+5. If a node is locally suspected down but its lease is still valid, routing may fail fast or refresh, but ownership must not move.
+
 ## Epoch Semantics
-1. `epoch` represents writer lineage and should map directly to Ra leader term for the owning group.
-2. `epoch` increments on each successful leader election or term change, including clean failovers.
-3. Clean failover with no lineage break should not emit a gap if requested cursor remains on active lineage.
-4. `rollback` gap reason is required when requested cursor is no longer on active lineage after term change.
+1. `epoch` represents authoritative writer lineage for a session assignment.
+2. `epoch` increments on each committed ownership cutover or lease-expiry failover.
+3. `epoch` does not increment for mere suspicion (`nodedown`) without committed ownership change.
+4. `rollback` gap reason is required when requested cursor is no longer on active lineage after ownership change.
 5. `epoch_stale` indicates cursor references an older lineage context and requires server-provided resume cursor.
 
 ## Read and Resume Semantics
@@ -112,17 +150,19 @@ Operational example (non-contractual):
 - With 10 nodes, RF=3, and 2 failed nodes, expected unavailable groups are approximately 6.67 percent.
 
 Control-plane note:
-- Control-plane consensus availability governs ownership/routing transitions.
+- Control-plane consensus availability governs ownership, routing, leases, and node-state transitions.
 - Data-plane append availability additionally depends on active owner and replica health for the session group.
 
 ## Control-Plane Responsibilities
 Consensus-backed responsibilities:
 1. Membership state for writable nodes.
-2. Ownership map for session shards (or equivalent routing partition).
-3. Fencing epoch issuance and validation on owner changes.
-4. Drain coordination state.
-5. Watermark (`committed_cursor` / `archived_seq`) publication metadata.
-6. Routing table publication for ingress and tail services.
+2. Session ownership claims.
+3. Node lifecycle state (`ready`, `draining`, `drained`).
+4. Node lease renewal and expiry detection.
+5. Fencing epoch issuance and validation on owner changes.
+6. Drain coordination state.
+7. Watermark (`committed_cursor` / `archived_seq`) publication metadata.
+8. Routing table publication for ingress and tail services.
 
 Non-consensus data-plane responsibilities:
 1. Per-event append processing.
@@ -131,24 +171,40 @@ Non-consensus data-plane responsibilities:
 4. Archive batching and write execution.
 
 ## Operational Lifecycle Flows
-Node drain flow:
-1. Mark node as `draining` in control plane.
-2. Stop assigning new ownership to draining node.
-3. Transfer ownership off draining node in bounded batches.
-4. Bump epoch for each transferred ownership domain.
-5. Verify in-flight activity and replication lag are below thresholds.
-6. Mark node as `drained`.
+Manual drain flow:
+1. Mark node as `draining` in Khepri.
+2. New session claims stop landing on that node.
+3. Existing owned sessions enter `status: :moving` one-by-one or in bounded batches.
+4. Source owner primes the target replica with current session snapshot and hot tail.
+5. Control plane commits cutover:
+   - `owner = target_owner`
+   - `epoch = epoch + 1`
+   - `status = :active`
+   - clear `target_owner` / `transfer_id`
+6. Source owner demotes or stops locally.
+7. When the node owns zero active sessions and has zero in-flight moves, mark node `:drained`.
+
+Graceful shutdown flow:
+1. Enter `:draining`.
+2. Wait until local node reports `:drained`.
+3. Stop the application.
+
+Catastrophic failover flow:
+1. A node lease expires in Khepri.
+2. Session assignments owned by that node are reassigned to a replica or other ready node.
+3. Each reassignment bumps `epoch`.
+4. Target owner promotes locally after observing the committed assignment.
 
 Node add flow:
 1. Add node to control-plane membership.
-2. Mark node as `joining` until health checks pass.
-3. Include node in rebalancing plans.
-4. Publish updated routing after ownership transitions commit.
+2. Renew node lease.
+3. Mark node `:ready`.
+4. New sessions may now claim onto that node.
 
 Node remove flow:
-1. Require node `drained` state before removal unless emergency procedure is invoked.
+1. Require node `:drained` before removal unless emergency procedure is invoked.
 2. Remove node from control-plane membership.
-3. Publish updated routing map and ownership state.
+3. Existing session claims remain explicit; topology changes must not implicitly reshuffle ownership.
 
 ## Ordering and Delivery Model
 1. Delivery is at-least-once on active lineage, subject to bounded-loss behavior above `committed_cursor` in correlated failures.
@@ -179,6 +235,27 @@ Session lifecycle and stream primitives remain:
 3. Session tail with optional resume cursor.
 
 Transport details, field naming, and wire format are implementation details as long as the core contract above is preserved.
+
+## Routing Semantics
+1. Requests route to the session assignment owner recorded in Khepri.
+2. A local routing cache is allowed, but Khepri remains the source of truth.
+3. On `not_owner` / epoch-fence failure, router refreshes from Khepri and retries once.
+4. `nodedown` may be used to fail fast locally, but must not change ownership.
+5. Replicas are durability and promotion candidates; they are not arbitrary front-door failover targets while the owner lease remains valid.
+
+## Claim and Placement Policy
+1. New sessions claim onto the least-loaded `:ready` node with a valid lease.
+2. Session ownership is explicit and sticky once claimed.
+3. Topology changes must not implicitly reshuffle all sessions.
+4. Session movement is only triggered by:
+   - manual drain
+   - lease-expiry failover
+   - future explicit operator workflows
+
+Out of scope for the current implementation:
+1. Automatic live rebalancing.
+2. Ownership movement on `nodedown`.
+3. Per-session lease renewals.
 
 ## SDK Behavior Contract (No Implementation)
 Any official client SDK must provide:
@@ -223,8 +300,27 @@ Use this external framing:
 - Cursor resume with explicit discontinuity handling.
 - Bounded loss window above durable frontier.
 - Pluggable storage archival.
+- Consensus-backed routing and ownership.
 
 Avoid this external framing:
 - Never loses messages.
 - Durable-on-ack behavior.
 - General-purpose database replacement.
+- Automatic perfect failover on every transient node visibility change.
+
+## Implementation Plan (Current)
+Phase 1:
+1. Replace deterministic ownership routing with explicit Khepri session claims.
+2. Add node lease renewal and node-state records.
+3. Add least-loaded placement for new sessions using current assignment counts over ready nodes.
+4. Add manual drain state machine using `:moving` assignments.
+5. Route strictly to the claimed owner, with refresh-on-fence.
+
+Phase 2:
+1. Add lease-expiry catastrophic failover.
+2. Harden balancing metadata and operator tooling.
+
+Explicitly deferred:
+1. Automatic session rebalancing.
+2. Ownership failover on `nodedown`.
+3. Per-session lease heartbeats.

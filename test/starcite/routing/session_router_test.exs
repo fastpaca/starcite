@@ -32,6 +32,17 @@ defmodule Starcite.Routing.SessionRouterTest do
     assert {:error, :not_leader} = SessionRouter.ensure_local_owner(session_id, self: Node.self())
   end
 
+  test "ensure_local_owner/2 rejects moving assignments" do
+    session_id = "session-router-moving"
+    assignment = %{owner: Node.self(), epoch: 4, status: :moving}
+
+    assert {:error, :ownership_transfer_in_progress} =
+             SessionRouter.ensure_local_owner(session_id,
+               self: Node.self(),
+               assignment: assignment
+             )
+  end
+
   test "local_owner_epoch/3 uses assignment epoch when available" do
     assert 11 ==
              SessionRouter.local_owner_epoch(

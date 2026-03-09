@@ -69,12 +69,25 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
   end
 
+  def call(conn, {:error, :no_ready_routing_nodes}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
   def call(conn, {:error, {:replication_quorum_not_met, _details}}) do
     error(
       conn,
       :service_unavailable,
       "replication_unavailable",
       "In-memory replication quorum was not met"
+    )
+  end
+
+  def call(conn, {:error, :ownership_transfer_in_progress}) do
+    error(
+      conn,
+      :service_unavailable,
+      "ownership_transfer_in_progress",
+      "Session ownership transfer is in progress"
     )
   end
 

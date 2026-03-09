@@ -1,7 +1,7 @@
 defmodule Starcite.Operations.Readiness do
   @moduledoc false
 
-  alias Starcite.Routing.{Store, Topology}
+  alias Starcite.Routing.{Store, Watcher}
 
   @default_wait_interval_ms 200
 
@@ -12,12 +12,7 @@ defmodule Starcite.Operations.Readiness do
 
   @spec local_readiness(keyword()) :: map()
   def local_readiness(_opts \\ []) do
-    mode = local_mode()
-
     cond do
-      mode == :ingress_node ->
-        ready_result(%{routing_store: %{ready?: true, reason: :ok, detail: %{}}})
-
       local_drained() ->
         not_ready_result(:draining, %{}, %{
           routing_store: %{ready?: false, reason: :draining, detail: %{}}
@@ -34,9 +29,7 @@ defmodule Starcite.Operations.Readiness do
   end
 
   @spec local_drained() :: boolean()
-  def local_drained do
-    local_mode() == :routing_node and Store.node_status(Node.self()) == :draining
-  end
+  def local_drained, do: drain_complete?(Node.self())
 
   @spec wait_local_ready(pos_integer()) :: :ok | {:error, :timeout}
   def wait_local_ready(timeout_ms \\ 30_000)
@@ -50,8 +43,15 @@ defmodule Starcite.Operations.Readiness do
     wait_until(&local_drained/0, timeout_ms)
   end
 
-  defp local_mode do
-    if Topology.routing_node?(Node.self()), do: :routing_node, else: :ingress_node
+  defp drain_complete?(node) when is_atom(node) do
+    maybe_progress_local_drain(node)
+
+    with status when status in [:draining, :drained] <- Store.node_status(node),
+         {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} <- Store.drain_status(node) do
+      true
+    else
+      _other -> false
+    end
   end
 
   defp ready_result(checks) when is_map(checks) do
@@ -81,5 +81,14 @@ defmodule Starcite.Operations.Readiness do
         do_wait_until(predicate, deadline_ms)
       end
     end
+  end
+
+  defp maybe_progress_local_drain(node) do
+    if node == Node.self() do
+      _ = Watcher.run_once()
+      _ = Watcher.progress_local_transfers()
+    end
+
+    :ok
   end
 end

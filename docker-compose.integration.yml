@@ -2,6 +2,7 @@ x-node-env: &node-env
   SECRET_KEY_BASE: ${SECRET_KEY_BASE:-xuQnOFm6sH5Qdd7x4WJv5smuG2Xf2nG0BL8rJ4yX6HnKGeTjo6n8r5hQKsxNkZWz}
   PHX_HOST: localhost
   PORT: 4000
+  STARCITE_OPS_PORT: 4100
   DATABASE_URL: ecto://postgres:postgres@db:5432/${STARCITE_IT_DB_NAME:-starcite_it}
   STARCITE_ARCHIVE_ADAPTER: ${STARCITE_ARCHIVE_ADAPTER:-s3}
   STARCITE_AUTH_MODE: ${STARCITE_AUTH_MODE:-none}
@@ -13,14 +14,11 @@ x-node-env: &node-env
   STARCITE_S3_PATH_STYLE: ${STARCITE_S3_PATH_STYLE:-true}
   STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL: ${STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL:-512}
   CLUSTER_NODES: node1@node1,node2@node2,node3@node3
-  STARCITE_WRITE_NODE_IDS: ${STARCITE_WRITE_NODE_IDS:-node1@node1,node2@node2,node3@node3}
-  STARCITE_WRITE_REPLICATION_FACTOR: ${STARCITE_WRITE_REPLICATION_FACTOR:-3}
+  STARCITE_ROUTING_NODE_IDS: ${STARCITE_ROUTING_NODE_IDS:-node1@node1,node2@node2,node3@node3}
+  STARCITE_ROUTING_REPLICATION_FACTOR: ${STARCITE_ROUTING_REPLICATION_FACTOR:-3}
+  STARCITE_ROUTING_STORE_DIR: /var/lib/starcite/routing
   RELEASE_DISTRIBUTION: sname
   RELEASE_COOKIE: ${RELEASE_COOKIE:-starcite_it_cookie}
-  STARCITE_RAFT_DATA_DIR: /var/lib/starcite/raft
-  STARCITE_RA_WAL_DATA_DIR: ${STARCITE_RA_WAL_DATA_DIR:-}
-  STARCITE_RA_WAL_WRITE_STRATEGY: ${STARCITE_RA_WAL_WRITE_STRATEGY:-}
-  STARCITE_RA_WAL_SYNC_METHOD: ${STARCITE_RA_WAL_SYNC_METHOD:-}
   DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
   DNS_CLUSTER_QUERY: ""
   MIGRATE_ON_BOOT: "false"
@@ -46,7 +44,8 @@ services:
       NODE_NAME: node1
       MIGRATE_ON_BOOT: "true"
     ports:
-      - "${NODE1_PORT:-0}:4000"
+      - "${NODE1_PORT:-4001}:4000"
+      - "${NODE1_OPS_PORT:-4101}:4100"
     volumes:
       - node1-data:/var/lib/starcite
 
@@ -57,6 +56,9 @@ services:
       <<: *node-env
       RELEASE_NODE: node2@node2
       NODE_NAME: node2
+    ports:
+      - "${NODE2_PORT:-4002}:4000"
+      - "${NODE2_OPS_PORT:-4102}:4100"
     volumes:
       - node2-data:/var/lib/starcite
 
@@ -67,6 +69,9 @@ services:
       <<: *node-env
       RELEASE_NODE: node3@node3
       NODE_NAME: node3
+    ports:
+      - "${NODE3_PORT:-4003}:4000"
+      - "${NODE3_OPS_PORT:-4103}:4100"
     volumes:
       - node3-data:/var/lib/starcite
 

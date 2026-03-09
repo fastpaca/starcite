@@ -10,7 +10,7 @@ defmodule Starcite.Routing.SessionRouter do
   - fetch replica membership for in-memory data-plane replication
   """
 
-  alias Starcite.Routing.Store
+  alias Starcite.Routing.{Store, Watcher}
 
   @rpc_timeout_ms Application.compile_env(:starcite, :session_router_rpc_timeout_ms, 5_000)
 
@@ -57,8 +57,12 @@ defmodule Starcite.Routing.SessionRouter do
     self_node = Keyword.get(opts, :self, Node.self())
 
     case assignment_for_owner_check(session_id, opts) do
-      {:ok, %{owner: ^self_node}} ->
+      {:ok, %{owner: ^self_node} = assignment}
+      when not is_map_key(assignment, :status) or assignment.status == :active ->
         :ok
+
+      {:ok, %{status: :moving}} ->
+        {:error, :ownership_transfer_in_progress}
 
       {:ok, %{owner: owner}} when is_atom(owner) ->
         {:error, {:not_leader, {:session_owner, owner}}}
@@ -132,16 +136,20 @@ defmodule Starcite.Routing.SessionRouter do
     if owner == Node.self() do
       apply(local_module, local_fun, local_args)
     else
-      case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
-        {:error, {:not_leader, {:session_owner, redirect_owner}}}
-        when is_atom(redirect_owner) and redirect_owner != owner ->
-          reroute_to_redirect(redirect_owner, remote_module, remote_fun, remote_args)
+      if Watcher.suspect?(owner) do
+        {:error, {:routing_rpc_failed, owner, :suspect}}
+      else
+        case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
+          {:error, {:not_leader, {:session_owner, redirect_owner}}}
+          when is_atom(redirect_owner) and redirect_owner != owner ->
+            reroute_to_redirect(redirect_owner, remote_module, remote_fun, remote_args)
 
-        {:badrpc, reason} ->
-          {:error, {:routing_rpc_failed, owner, reason}}
+          {:badrpc, reason} ->
+            {:error, {:routing_rpc_failed, owner, reason}}
 
-        other ->
-          other
+          other ->
+            other
+        end
       end
     end
   end
