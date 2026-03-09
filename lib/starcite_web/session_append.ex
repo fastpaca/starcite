@@ -2,17 +2,16 @@ defmodule StarciteWeb.SessionAppend do
   @moduledoc false
 
   alias Starcite.Observability.Telemetry
-  alias Starcite.WritePath
+  alias Starcite.{ReadPath, Session, WritePath}
   alias StarciteWeb.Auth.{Context, Policy}
   alias StarciteWeb.ErrorInfo
-  alias StarciteWeb.TailAccess
 
   @spec append(Context.t(), String.t(), map()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append(%Context{} = auth, session_id, params)
       when is_binary(session_id) and session_id != "" and is_map(params) do
     measure_append_request(fn ->
-      with {:ok, _session} <- TailAccess.authorize_append(auth, session_id),
+      with {:ok, _session} <- authorize_append(auth, session_id),
            {:ok, event, expected_seq} <- validate(params, auth),
            {:ok, reply} <- append_event(session_id, event, expected_seq) do
         :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
@@ -33,6 +32,17 @@ defmodule StarciteWeb.SessionAppend do
   end
 
   def append(_auth, _session_id, _params), do: {:error, :invalid_event}
+
+  defp authorize_append(%Context{} = auth, session_id)
+       when is_binary(session_id) and session_id != "" do
+    with :ok <- Policy.allowed_to_access_session(auth, session_id),
+         {:ok, %Session{} = session} <- ReadPath.get_session(session_id),
+         :ok <- Policy.allowed_to_append_session(auth, session) do
+      {:ok, session}
+    end
+  end
+
+  defp authorize_append(_auth, _session_id), do: {:error, :invalid_session_id}
 
   defp append_event(session_id, event, nil), do: WritePath.append_event(session_id, event)
 

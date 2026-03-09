@@ -6,10 +6,13 @@ defmodule StarciteWeb.TailChannel do
   alias Phoenix.Socket
   alias Starcite.DataPlane.{EventStore, TailBroadcast}
   alias Starcite.Observability.Telemetry
-  alias Starcite.ReadPath
+  alias Starcite.{ReadPath, Session}
   alias StarciteWeb.Auth.Context
-  alias StarciteWeb.{ErrorInfo, SessionAppend, TailAccess, TailParams}
+  alias StarciteWeb.Auth.Policy
+  alias StarciteWeb.{ErrorInfo, SessionAppend}
 
+  @default_tail_frame_batch_size 1
+  @max_tail_frame_batch_size 1_000
   @replay_batch_size 1_000
   @catchup_interval_ms 5_000
   @tail_state_assign :tail_channel_state
@@ -24,8 +27,8 @@ defmodule StarciteWeb.TailChannel do
         %Socket{assigns: %{auth_context: %Context{} = auth_context}} = socket
       )
       when is_binary(session_id) and session_id != "" and is_map(params) do
-    with {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- TailParams.parse(params),
-         {:ok, _session} <- TailAccess.authorize_read(auth_context, session_id) do
+    with {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- parse_tail_params(params),
+         {:ok, _session} <- authorize_read(auth_context, session_id) do
       state =
         %{
           session_id: session_id,
@@ -338,4 +341,52 @@ defmodule StarciteWeb.TailChannel do
   end
 
   defp put_tail_state(%Socket{} = socket, state), do: assign(socket, @tail_state_assign, state)
+
+  defp authorize_read(%Context{} = auth, session_id)
+       when is_binary(session_id) and session_id != "" do
+    with :ok <- Policy.allowed_to_access_session(auth, session_id),
+         {:ok, %Session{} = session} <- ReadPath.get_session(session_id),
+         :ok <- Policy.allowed_to_read_session(auth, session) do
+      {:ok, session}
+    end
+  end
+
+  defp authorize_read(_auth, _session_id), do: {:error, :invalid_session_id}
+
+  defp parse_tail_params(params) when is_map(params) do
+    with {:ok, cursor} <- parse_cursor(Map.get(params, "cursor", 0)),
+         {:ok, frame_batch_size} <-
+           parse_frame_batch_size(Map.get(params, "batch_size", @default_tail_frame_batch_size)) do
+      {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}}
+    end
+  end
+
+  defp parse_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: {:ok, cursor}
+
+  defp parse_cursor(cursor) when is_binary(cursor) do
+    case Integer.parse(cursor) do
+      {parsed, ""} when parsed >= 0 -> {:ok, parsed}
+      _ -> {:error, :invalid_cursor}
+    end
+  end
+
+  defp parse_cursor(_cursor), do: {:error, :invalid_cursor}
+
+  defp parse_frame_batch_size(batch_size)
+       when is_integer(batch_size) and batch_size >= @default_tail_frame_batch_size and
+              batch_size <= @max_tail_frame_batch_size,
+       do: {:ok, batch_size}
+
+  defp parse_frame_batch_size(batch_size) when is_binary(batch_size) do
+    case Integer.parse(batch_size) do
+      {parsed, ""}
+      when parsed >= @default_tail_frame_batch_size and parsed <= @max_tail_frame_batch_size ->
+        {:ok, parsed}
+
+      _ ->
+        {:error, :invalid_tail_batch_size}
+    end
+  end
+
+  defp parse_frame_batch_size(_batch_size), do: {:error, :invalid_tail_batch_size}
 end
