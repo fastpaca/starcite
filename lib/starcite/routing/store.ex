@@ -432,42 +432,7 @@ defmodule Starcite.Routing.Store do
 
       {:error, reason} ->
         if missing_node_error?(reason) do
-          with {:ok, assignments} <-
-                 assignments_from_khepri(do_all_assignments_local(:consistency)),
-               {:ok, node_records} <-
-                 node_records_from_khepri(do_all_node_records_local(:consistency)),
-               {:ok, [owner | _rest] = replicas} <-
-                 Policy.choose_claim_nodes(
-                   assignments,
-                   ready_node_list(node_records, claimed_at_ms),
-                   Topology.replication_factor()
-                 ) do
-            assignment =
-              %{
-                owner: owner,
-                epoch: 1,
-                replicas: replicas,
-                status: :active,
-                updated_at_ms: claimed_at_ms
-              }
-
-            case :khepri.create(
-                   store_id(),
-                   session_path(session_id),
-                   assignment,
-                   command_options()
-                 ) do
-              :ok ->
-                {:ok, assignment}
-
-              {:error, reason} ->
-                if mismatching_node_error?(reason) do
-                  assignment_from_khepri(do_get_assignment_local(session_id, :consistency))
-                else
-                  {:error, reason}
-                end
-            end
-          end
+          claim_new_assignment(session_id, claimed_at_ms)
         else
           {:error, reason}
         end
@@ -559,6 +524,45 @@ defmodule Starcite.Routing.Store do
   end
 
   defp assignments_from_khepri(other), do: {:error, {:invalid_assignments, other}}
+
+  defp claim_new_assignment(session_id, claimed_at_ms)
+       when is_binary(session_id) and session_id != "" and is_integer(claimed_at_ms) and
+              claimed_at_ms >= 0 do
+    with {:ok, assignments} <- assignments_from_khepri(do_all_assignments_local(:consistency)),
+         {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)),
+         {:ok, [owner | _rest] = replicas} <-
+           Policy.choose_claim_nodes(
+             assignments,
+             ready_node_list(node_records, claimed_at_ms),
+             Topology.replication_factor()
+           ) do
+      create_assignment(
+        session_id,
+        %{
+          owner: owner,
+          epoch: 1,
+          replicas: replicas,
+          status: :active,
+          updated_at_ms: claimed_at_ms
+        }
+      )
+    end
+  end
+
+  defp create_assignment(session_id, assignment)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+    case :khepri.create(store_id(), session_path(session_id), assignment, command_options()) do
+      :ok ->
+        {:ok, assignment}
+
+      {:error, reason} ->
+        if mismatching_node_error?(reason) do
+          assignment_from_khepri(do_get_assignment_local(session_id, :consistency))
+        else
+          {:error, reason}
+        end
+    end
+  end
 
   defp node_records_from_khepri({:ok, payloads}) when is_map(payloads) do
     node_records =
