@@ -15,6 +15,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
   alias Starcite.Routing.{SessionRouter, Store}
   alias Starcite.Session
 
+  @dialyzer {:nowarn_function,
+             [
+               append_event: 3,
+               append_events: 3,
+               ack_archived: 2,
+               fetch_cursor_snapshot: 1,
+               execute_prepared_operation: 4,
+               call_prepared_operation: 3,
+               normalize_prepared_result: 1,
+               normalize_commit_result: 1,
+               abort_prepared_operation: 3
+             ]}
+
   @registry Starcite.DataPlane.SessionLogRegistry
   @supervisor Starcite.DataPlane.SessionLogSupervisor
   @call_timeout Application.compile_env(:starcite, :session_log_call_timeout_ms, 2_000)
@@ -37,6 +50,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
           required(:epoch) => non_neg_integer(),
           required(:replicas) => [node()]
         }
+  @type replication_membership :: [node()] | %{required(:replicas) => [node()]}
   @type log_description :: %{
           required(:role) => SessionLog.role(),
           required(:session) => Session.t()
@@ -76,7 +90,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
       execute_prepared_operation(
         session_id,
         current_pid,
-        {:prepare_append_event, input, expected_seq}
+        {:prepare_append_event, input, expected_seq},
+        assignment
       )
     end
   end
@@ -96,7 +111,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
       execute_prepared_operation(
         session_id,
         current_pid,
-        {:prepare_append_events, inputs, expected_seq}
+        {:prepare_append_events, inputs, expected_seq},
+        assignment
       )
     end
   end
@@ -115,7 +131,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
       execute_prepared_operation(
         session_id,
         current_pid,
-        {:prepare_ack_archived, upto_seq}
+        {:prepare_ack_archived, upto_seq},
+        assignment
       )
     end
   end
@@ -195,10 +212,18 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def apply_replica(_session, _events), do: {:error, :invalid_event}
 
   @spec replicate_state(Session.t(), [map()]) :: :ok | {:error, replication_error()}
-  def replicate_state(%Session{id: session_id, tenant_id: tenant_id} = session, events)
+  def replicate_state(%Session{} = session, events), do: replicate_state(session, events, nil)
+
+  @spec replicate_state(Session.t(), [map()], replication_membership() | nil) ::
+          :ok | {:error, replication_error()}
+  def replicate_state(
+        %Session{id: session_id, tenant_id: tenant_id} = session,
+        events,
+        assignment_or_replicas
+      )
       when is_binary(session_id) and session_id != "" and is_list(events) do
     started_ms = System.monotonic_time(:millisecond)
-    replicas = SessionRouter.replica_nodes(session_id)
+    replicas = replicas_for_replication(session_id, assignment_or_replicas)
     local_node = Node.self()
     quorum_size = quorum_size(length(replicas))
     local_acks = if local_node in replicas, do: 1, else: 0
@@ -421,11 +446,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
-  defp execute_prepared_operation(session_id, pid, prepare_message)
-       when is_binary(session_id) and session_id != "" and is_pid(pid) do
+  defp execute_prepared_operation(session_id, pid, prepare_message, %{replicas: replicas})
+       when is_binary(session_id) and session_id != "" and is_pid(pid) and is_list(replicas) do
     with {:ok, prepare_pid, %{op_id: op_id, session: %Session{} = session, events: events}} <-
            call_prepared_operation(session_id, pid, prepare_message) do
-      case replicate_state(session, events) do
+      case replicate_state(session, events, replicas) do
         :ok ->
           case normalize_commit_result(safe_call(prepare_pid, {:commit_prepared, op_id})) do
             {:ok, reply} ->
@@ -539,9 +564,34 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
+  @spec require_local_owner_assignment(String.t()) ::
+          {:ok, routing_assignment()} | {:error, term()}
   defp require_local_owner_assignment(session_id)
        when is_binary(session_id) and session_id != "" do
-    with {:ok, assignment} <- Store.get_assignment(session_id, favor: :consistency),
+    case local_owner_assignment(session_id, :low_latency) do
+      {:ok, assignment} ->
+        {:ok, assignment}
+
+      {:error, {:not_leader, _reason}} ->
+        local_owner_assignment(session_id, :consistency)
+
+      {:error, :ownership_transfer_in_progress} = error ->
+        error
+
+      {:error, :not_found} = error ->
+        error
+
+      {:error, reason} ->
+        case local_owner_assignment(session_id, :consistency) do
+          {:ok, assignment} -> {:ok, assignment}
+          _other -> {:error, reason}
+        end
+    end
+  end
+
+  defp local_owner_assignment(session_id, favor)
+       when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
+    with {:ok, assignment} <- Store.get_assignment(session_id, favor: favor),
          :ok <- SessionRouter.ensure_local_owner(session_id, assignment: assignment) do
       {:ok, assignment}
     end
@@ -553,7 +603,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp effective_epoch(session_id, %Session{} = session, assignment)
-       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+       when is_binary(session_id) and session_id != "" do
     SessionRouter.local_owner_epoch(
       session_id,
       normalize_epoch(session.epoch),
@@ -569,7 +619,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp desired_role(session_id, assignment)
-       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+       when is_binary(session_id) and session_id != "" do
     case SessionRouter.ensure_local_owner(session_id, assignment: assignment) do
       :ok -> :owner
       _other -> :follower
@@ -797,23 +847,66 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp collect_remote_results_parallel(standby_nodes, session, events)
        when is_list(standby_nodes) and is_struct(session, Session) and is_list(events) do
-    standby_nodes
-    |> Task.async_stream(
-      fn standby_node ->
-        {standby_node, replicate_to_standby(standby_node, session, events)}
-      end,
-      ordered: false,
-      timeout: @rpc_timeout_ms,
-      on_timeout: :kill_task,
-      max_concurrency: max_concurrency(length(standby_nodes))
-    )
-    |> Enum.reduce({0, []}, fn result, {acks, failures} ->
-      case result_to_ack_result(result) do
-        {:ack, _node} ->
+    case standby_nodes do
+      [] ->
+        {0, []}
+
+      [standby_node] ->
+        case replicate_to_standby(standby_node, session, events) do
+          :ok ->
+            {1, []}
+
+          {:error, reason} ->
+            {0, [{standby_node, {:error, reason}}]}
+        end
+
+      [first_node, second_node] ->
+        collect_two_remote_results(first_node, second_node, session, events)
+
+      _other ->
+        standby_nodes
+        |> Task.async_stream(
+          fn standby_node ->
+            {standby_node, replicate_to_standby(standby_node, session, events)}
+          end,
+          ordered: false,
+          timeout: @rpc_timeout_ms,
+          on_timeout: :kill_task,
+          max_concurrency: max_concurrency(length(standby_nodes))
+        )
+        |> Enum.reduce({0, []}, fn result, {acks, failures} ->
+          case result_to_ack_result(result) do
+            {:ack, _node} ->
+              {acks + 1, failures}
+
+            {:fail, failure} ->
+              {acks, [failure | failures]}
+          end
+        end)
+    end
+  end
+
+  defp collect_two_remote_results(first_node, second_node, session, events)
+       when is_atom(first_node) and is_atom(second_node) and is_struct(session, Session) and
+              is_list(events) do
+    tasks = [
+      {first_node, Task.async(fn -> replicate_to_standby(first_node, session, events) end)},
+      {second_node, Task.async(fn -> replicate_to_standby(second_node, session, events) end)}
+    ]
+
+    Enum.reduce(tasks, {0, []}, fn {standby_node, task}, {acks, failures} ->
+      case Task.yield(task, @rpc_timeout_ms) || Task.shutdown(task, :brutal_kill) do
+        {:ok, :ok} ->
           {acks + 1, failures}
 
-        {:fail, failure} ->
-          {acks, [failure | failures]}
+        {:ok, {:error, reason}} ->
+          {acks, [{standby_node, {:error, reason}} | failures]}
+
+        {:exit, reason} ->
+          {acks, [{standby_node, {:error, {:task_exit, reason}}} | failures]}
+
+        nil ->
+          {acks, [{standby_node, {:error, {:task_timeout, @rpc_timeout_ms}}} | failures]}
       end
     end)
   end
@@ -913,6 +1006,21 @@ defmodule Starcite.DataPlane.SessionQuorum do
   defp primary_failure_reason([{_node, {:badrpc, _reason}} | _]), do: :badrpc
   defp primary_failure_reason([{_node, reason} | _]) when is_atom(reason), do: reason
   defp primary_failure_reason([_ | _]), do: :error
+
+  defp replicas_for_replication(_session_id, %{replicas: replicas})
+       when is_list(replicas) and replicas != [] do
+    replicas
+  end
+
+  defp replicas_for_replication(_session_id, replicas)
+       when is_list(replicas) and replicas != [] do
+    replicas
+  end
+
+  defp replicas_for_replication(session_id, _assignment_or_replicas)
+       when is_binary(session_id) and session_id != "" do
+    SessionRouter.replica_nodes(session_id)
+  end
 
   defp fresher_session?(%Session{} = incoming, %Session{} = current) do
     incoming_epoch = normalize_epoch(incoming.epoch)

@@ -13,6 +13,8 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  @dialyzer {:nowarn_function, [persist_rows: 5, put_archived_seq: 3]}
+
   alias Starcite.Archive.Store
   alias Starcite.Routing.SessionRouter
   alias Starcite.Observability.Telemetry
