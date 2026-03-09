@@ -1,6 +1,6 @@
 defmodule Starcite.DataPlane.TailBroadcast do
   @moduledoc """
-  Live tail broadcast contract shared by Phoenix channels and raw tail sockets.
+  Live tail broadcast contract for Phoenix tail channels.
 
   Topic:
     - `"tail:<session_id>"`

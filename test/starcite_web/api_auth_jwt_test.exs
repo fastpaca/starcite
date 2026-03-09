@@ -7,12 +7,29 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.{ReadPath, WritePath}
+  alias Starcite.WebSocketTestClient
   alias StarciteWeb.Auth.JWKS
 
   @endpoint StarciteWeb.Endpoint
   @issuer "https://issuer.example"
   @audience "starcite-api"
   @jwks_path "/.well-known/jwks.json"
+
+  setup_all do
+    port = pick_available_port()
+
+    {:ok, _pid} =
+      start_supervised(
+        {Bandit,
+         plug: StarciteWeb.Endpoint,
+         scheme: :http,
+         ip: {127, 0, 0, 1},
+         port: port,
+         startup_log: false}
+      )
+
+    {:ok, port: port}
+  end
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -235,7 +252,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(list_conn.resp_body)["error"] == "forbidden_scope"
   end
 
-  test "enforces tenant boundary for append, list, and tail" do
+  test "enforces tenant boundary for append, list, and tail channel joins", %{port: port} do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tenant-boundary"
@@ -281,14 +298,22 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     ids = Jason.decode!(list_conn.resp_body)["sessions"] |> Enum.map(& &1["id"])
     refute beta_session_id in ids
 
-    tail_conn =
-      conn_get("/v1/sessions/#{beta_session_id}/tail?cursor=0", [
-        auth_header
-        | websocket_headers()
-      ])
+    {:ok, socket, response_headers, buffer} = connect_tail_socket(port, token)
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
-    assert tail_conn.status == 403
-    assert Jason.decode!(tail_conn.resp_body)["error"] == "forbidden_tenant"
+    :ok =
+      send_phoenix_message(socket, "1", "1", "tail:#{beta_session_id}", "phx_join", %{
+        "cursor" => 0
+      })
+
+    {%{"status" => "error", "response" => error}, _buffer} =
+      recv_phoenix_reply(socket, buffer, "tail:#{beta_session_id}", "1")
+
+    assert error == %{
+             "reason" => "forbidden_tenant"
+           }
+
+    :ok = :gen_tcp.close(socket)
   end
 
   test "session_id claim locks list and append to one session" do
@@ -364,7 +389,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(blocked_append.resp_body)["error"] == "forbidden_session"
   end
 
-  test "protects tail websocket upgrade with JWT auth and session lock" do
+  test "protects phoenix tail socket connect and session-scoped joins", %{port: port} do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tail-auth"
@@ -381,8 +406,9 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
-    without_auth = conn_get("/v1/sessions/#{session_id}/tail?cursor=0", websocket_headers())
-    assert without_auth.status == 401
+    {:ok, unauth_socket, response_headers, _buffer} = connect_tail_socket(port, nil)
+    assert String.starts_with?(response_headers, "HTTP/1.1 403")
+    :ok = :gen_tcp.close(unauth_socket)
 
     scoped_token =
       token_for(private_key, kid, %{
@@ -391,14 +417,20 @@ defmodule StarciteWeb.ApiAuthJwtTest do
         "session_id" => unique_id("ses")
       })
 
-    denied_tail =
-      conn_get(
-        "/v1/sessions/#{session_id}/tail?cursor=0&access_token=#{URI.encode_www_form(scoped_token)}",
-        websocket_headers()
-      )
+    {:ok, socket, response_headers, buffer} = connect_tail_socket(port, scoped_token)
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
-    assert denied_tail.status == 403
-    assert Jason.decode!(denied_tail.resp_body)["error"] == "forbidden_session"
+    :ok =
+      send_phoenix_message(socket, "1", "1", "tail:#{session_id}", "phx_join", %{"cursor" => 0})
+
+    {%{"status" => "error", "response" => error}, _buffer} =
+      recv_phoenix_reply(socket, buffer, "tail:#{session_id}", "1")
+
+    assert error == %{
+             "reason" => "forbidden_session"
+           }
+
+    :ok = :gen_tcp.close(socket)
   end
 
   defp configure_jwt_auth!(bypass) do
@@ -431,23 +463,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
     claims = valid_claims(overrides)
     AuthTestSupport.sign_rs256(private_key, claims, kid)
-  end
-
-  defp websocket_headers do
-    [
-      {"connection", "upgrade"},
-      {"upgrade", "websocket"},
-      {"sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="},
-      {"sec-websocket-version", "13"}
-    ]
-  end
-
-  defp conn_get(path, headers) do
-    conn =
-      conn(:get, path)
-      |> put_headers(headers)
-
-    @endpoint.call(conn, @endpoint.init([]))
   end
 
   defp json_conn(method, path, body, headers \\ []) do
@@ -509,5 +524,50 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   defp unique_id(prefix) do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
+  end
+
+  defp connect_tail_socket(port, nil) when is_integer(port) and port > 0 do
+    WebSocketTestClient.connect(port, "/v1/tail/socket/websocket?vsn=2.0.0")
+  end
+
+  defp connect_tail_socket(port, token) when is_integer(port) and port > 0 and is_binary(token) do
+    WebSocketTestClient.connect(
+      port,
+      "/v1/tail/socket/websocket?vsn=2.0.0&access_token=#{URI.encode_www_form(token)}"
+    )
+  end
+
+  defp send_phoenix_message(socket, join_ref, ref, topic, event, payload)
+       when is_binary(join_ref) and is_binary(ref) and is_binary(topic) and is_binary(event) and
+              is_map(payload) do
+    WebSocketTestClient.send_text_frame(
+      socket,
+      Jason.encode!([join_ref, ref, topic, event, payload])
+    )
+  end
+
+  defp recv_phoenix_reply(socket, buffer, topic, ref)
+       when is_binary(topic) and is_binary(ref) do
+    receive_phoenix_message(socket, buffer, fn
+      [_join_ref, ^ref, ^topic, "phx_reply", payload] -> {:match, payload}
+      _message -> :skip
+    end)
+  end
+
+  defp receive_phoenix_message(socket, buffer, matcher) when is_function(matcher, 1) do
+    {frame, next_buffer} = WebSocketTestClient.recv_text_frame(socket, buffer)
+    payload = Jason.decode!(frame)
+
+    case matcher.(payload) do
+      {:match, result} -> {result, next_buffer}
+      :skip -> receive_phoenix_message(socket, next_buffer, matcher)
+    end
+  end
+
+  defp pick_available_port do
+    {:ok, socket} = :gen_tcp.listen(0, [:binary, {:active, false}, {:ip, {127, 0, 0, 1}}])
+    {:ok, port} = :inet.port(socket)
+    :ok = :gen_tcp.close(socket)
+    port
   end
 end

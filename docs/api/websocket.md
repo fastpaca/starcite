@@ -1,16 +1,14 @@
 # WebSocket API
 
-Starcite exposes two tail transports:
+Starcite exposes session tailing through Phoenix sockets + channels at
+`/v1/tail/socket/websocket`.
 
-- raw session WebSocket at `/v1/sessions/:id/tail`
-- Phoenix socket + channels at `/v1/tail/socket/websocket`
-
-Both transports replay committed events after a cursor and then continue with
-live committed events.
+Each joined `tail:<session_id>` topic replays committed events after a cursor
+and then continues with live committed events.
 
 ## Auth
 
-JWT requirements for all tail transports:
+JWT requirements for tail channels:
 
 - valid JWT signature via JWKS
 - `session:read` scope
@@ -29,89 +27,7 @@ Starcite redacts `access_token` from application-level logs and telemetry
 metadata. If you run a reverse proxy or load balancer, redact query strings
 there too.
 
-## Raw Tail WebSocket
-
-Endpoint:
-
-```text
-ws://HOST/v1/sessions/:id/tail?cursor=41
-```
-
-Optional query params:
-
-- `batch_size` (`1..1000`, default `1`) controls how many events are included per text frame.
-
-Raw tail auth behavior:
-
-- missing, invalid, or expired token: HTTP `401` during upgrade
-- valid token but forbidden by scope, session, or tenant policy: HTTP `403` during upgrade
-- after successful upgrade, socket lifetime is bounded by token `exp`
-- on expiry, server closes with code `4001` and reason `token_expired`
-
-When `batch_size=1` (default), Starcite emits one JSON event object per text
-frame:
-
-```json
-{
-  "seq": 42,
-  "type": "state",
-  "payload": { "state": "running" },
-  "actor": "agent:researcher",
-  "producer_id": "writer_123",
-  "producer_seq": 8,
-  "source": "agent",
-  "metadata": { "role": "worker", "identity": { "provider": "codex" } },
-  "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
-  "idempotency_key": "run_123-step_8",
-  "inserted_at": "2026-02-08T15:00:01Z"
-}
-```
-
-When `batch_size>1`, Starcite emits a JSON array per text frame with up to
-`batch_size` event objects.
-
-Raw tail also accepts append frames from the client. The frame must be a JSON
-text frame with this shape:
-
-```json
-{
-  "type": "append",
-  "ref": "append-1",
-  "event": {
-    "type": "content",
-    "payload": { "text": "hello" },
-    "producer_id": "writer_123",
-    "producer_seq": 8
-  }
-}
-```
-
-The `event` object uses the same append payload as `POST /v1/sessions/:id/append`.
-
-Successful append acks are emitted as JSON text frames:
-
-```json
-{
-  "type": "ack",
-  "ref": "append-1",
-  "seq": 42,
-  "last_seq": 42,
-  "deduped": false
-}
-```
-
-Append failures are emitted as JSON text frames:
-
-```json
-{
-  "type": "error",
-  "ref": "append-1",
-  "error": "forbidden_scope",
-  "message": "Token scope does not allow this operation"
-}
-```
-
-## Phoenix Tail Channels
+## Tail Channels
 
 Endpoint:
 
@@ -119,7 +35,7 @@ Endpoint:
 ws://HOST/v1/tail/socket/websocket?vsn=2.0.0
 ```
 
-Phoenix auth model:
+Auth model:
 
 - socket connection is authenticated once in `TailUserSocket.connect/3`
 - each topic join is authorized independently in `TailChannel.join/3`
