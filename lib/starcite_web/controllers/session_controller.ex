@@ -116,8 +116,12 @@ defmodule StarciteWeb.SessionController do
   defp ingest_edge_error_reason({:error, {:replication_quorum_not_met, _details}}),
     do: :unavailable
 
+  defp ingest_edge_error_reason({:error, :ownership_transfer_in_progress}), do: :unavailable
+
   defp ingest_edge_error_reason({:error, {:routing_rpc_failed, _node, _reason}}),
     do: :unavailable
+
+  defp ingest_edge_error_reason({:error, :no_ready_routing_nodes}), do: :unavailable
 
   defp ingest_edge_error_reason({:error, reason})
        when reason in [:archive_read_unavailable, :event_gap_detected, :event_store_backpressure],

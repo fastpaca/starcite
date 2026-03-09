@@ -3,7 +3,7 @@ defmodule Starcite.Runtime.TestHelper do
 
   require ExUnit.CaptureLog
 
-  alias Starcite.Routing.{Store, Topology}
+  alias Starcite.Routing.Store
 
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->
@@ -20,7 +20,7 @@ defmodule Starcite.Runtime.TestHelper do
   end
 
   defp clear_routing_store do
-    if Code.ensure_loaded?(Store) and Store.running?() and Topology.routing_node?(Node.self()) do
+    if Code.ensure_loaded?(Store) and Store.running?() do
       _ = Store.clear()
     end
   end

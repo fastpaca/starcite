@@ -28,7 +28,7 @@ async archival.
 
 ### Session logs
 
-One GenServer log process exists per active session replica on a node.
+One session-log process exists per active session replica on a node.
 
 Log responsibilities:
 - Assign monotonic `seq` per session.
@@ -37,7 +37,7 @@ Log responsibilities:
 - Broadcast cursor updates to PubSub for tail subscribers.
 - Track archive progress (`archived_seq`) and apply archive acknowledgements.
 
-The append hot path is owner-based and does not call Raft.
+The append hot path is owner-based and does not call control-plane consensus.
 
 ### Write path
 
@@ -98,27 +98,37 @@ Archive writes are idempotent. Archiver failures do not block append/tail hot pa
 
 ## Control plane
 
-The control plane manages shard ownership, routing readiness, and operator
-workflows. It does not sequence or store per-event payloads.
+The control plane manages routing, ownership, fencing, and operator workflows.
+It does not sequence or store per-event payloads.
 
-Current responsibilities:
-- Static routing-node topology configuration.
-- One Raft group per write shard to elect the active shard owner.
-- Ownership fencing via Raft term (`epoch`) for routed writes and failover.
-- Node liveness and drain/undrain intent.
-- Raft runtime/bootstrap/readiness management for shard lease groups.
-- Cluster status and operational tooling.
+Current direction:
+- One Khepri store is the authoritative control-plane state.
+- Session ownership is an explicit claim, not a deterministic hash lookup.
+- Ownership is fenced by monotonic session `epoch`.
+- Nodes publish lifecycle state (`ready`, `draining`, `drained`) and renew a
+  node-level lease in Khepri.
+- Manual drain moves sessions away from a node via explicit ownership transfer.
+- Catastrophic failover is driven by lease expiry, not by raw `nodedown`.
+- `nodedown` is only a routing hint for faster local failure handling.
 
-Raft remains in the system as shard-lease control-plane infrastructure, but it is
-not the append state machine and it is not on the per-event hot path.
+Control-plane state:
+- `nodes/<node>`: node state and lease.
+- `sessions/<session_id>`: owner, epoch, replicas, and transfer state.
+
+This keeps consensus off the append path while still making ownership changes
+deterministic and durable.
 
 ## Failure modes
 
 **Session log crash:** The local log process restarts and rehydrates from session cache.
 Short blips may return temporary timeout; retries succeed after restart.
 
-**Node failure:** Sessions owned on that node become unavailable until clients
-reconnect/reroute to available capacity based on deployment topology.
+**Node failure:** Sessions owned on that node remain fenced to the existing owner
+until its control-plane lease expires. After lease expiry, ownership is moved and
+`epoch` is bumped.
+
+**Rolling maintenance:** Expected path is `draining -> drained -> stop`. Sessions
+move explicitly before the node is taken down.
 
 **Archive lag/failure:** Live delivery continues; archival watermark stops advancing
 until storage recovers.

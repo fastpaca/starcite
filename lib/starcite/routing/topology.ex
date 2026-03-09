@@ -1,6 +1,6 @@
 defmodule Starcite.Routing.Topology do
   @moduledoc """
-  Static routing-node inventory and replica placement helpers.
+  Static routing-node inventory and replication-factor config.
   """
 
   @default_replication_factor 3
@@ -57,26 +57,6 @@ defmodule Starcite.Routing.Topology do
     nodes
   end
 
-  @spec routing_node?(node()) :: boolean()
-  def routing_node?(node) when is_atom(node), do: node in nodes()
-
-  @spec replicas_for_session(String.t(), [node()]) :: [node()]
-  def replicas_for_session(session_id, candidate_nodes \\ nodes())
-      when is_binary(session_id) and session_id != "" and is_list(candidate_nodes) do
-    candidates = candidate_nodes |> Enum.uniq() |> Enum.filter(&is_atom/1) |> Enum.sort()
-
-    if candidates == [] do
-      raise ArgumentError, "cannot place session without candidate routing nodes"
-    end
-
-    desired = min(replication_factor(), length(candidates))
-    start_index = :erlang.phash2(session_id, length(candidates))
-
-    candidates
-    |> rotate(start_index)
-    |> Enum.take(desired)
-  end
-
   defp build_config!(raw_replication_factor, raw_nodes, node_self) do
     replication_factor = validate_replication_factor!(raw_replication_factor)
     nodes = validate_nodes!(raw_nodes)
@@ -89,6 +69,11 @@ defmodule Starcite.Routing.Topology do
     if node_self != :nonode@nohost and nodes == @default_routing_nodes do
       raise ArgumentError,
             "invalid routing-node config: STARCITE_ROUTING_NODE_IDS must be configured for distributed nodes"
+    end
+
+    if node_self not in nodes do
+      raise ArgumentError,
+            "invalid routing-node config: local node #{inspect(node_self)} is missing from routing_node_ids=#{inspect(nodes)}"
     end
 
     %{
@@ -116,13 +101,5 @@ defmodule Starcite.Routing.Topology do
   defp validate_nodes!(value) do
     raise ArgumentError,
           "invalid value for :routing_node_ids: #{inspect(value)} (expected non-empty list of node atoms)"
-  end
-
-  defp rotate(nodes, 0), do: nodes
-
-  defp rotate(nodes, start_index)
-       when is_list(nodes) and is_integer(start_index) and start_index > 0 do
-    {left, right} = Enum.split(nodes, start_index)
-    right ++ left
   end
 end

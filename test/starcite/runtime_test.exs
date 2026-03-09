@@ -20,6 +20,15 @@ defmodule Starcite.RuntimeTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{:rand.uniform(999_999_999)}"
   end
 
+  defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
+    :khepri.put(
+      Starcite.Routing.Store.store_id(),
+      [:sessions, session_id],
+      assignment,
+      %{async: false, reply_from: :local, timeout: 5_000}
+    )
+  end
+
   describe "create/get session" do
     test "creates a new session with generated id" do
       {:ok, session} = WritePath.create_session(title: "Draft", metadata: %{workflow: "legal"})
@@ -101,6 +110,49 @@ defmodule Starcite.RuntimeTest do
       refute SessionQuorum.local_owner?(id)
       assert :error == SessionStore.get_session_cached(id)
       assert {:error, :session_not_found} = ReadPath.get_session(id)
+    end
+
+    test "local_owner? promotes a follower log after routing ownership changes" do
+      original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      peer = :"runtime-owner-peer@127.0.0.1"
+      id = unique_id("ses")
+
+      Application.put_env(:starcite, :routing_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Starcite.Runtime.TestHelper.reset()
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: peer,
+                 epoch: 1,
+                 replicas: [peer, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      session = %Session{Session.new(id) | epoch: 1}
+      assert :ok = SessionStore.put_session(session)
+      assert {:ok, loaded} = SessionQuorum.get_session(id)
+      assert loaded.id == id
+      refute SessionQuorum.local_owner?(id)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 2,
+                 replicas: [Node.self(), peer],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      assert SessionQuorum.local_owner?(id)
     end
   end
 

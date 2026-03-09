@@ -40,6 +40,12 @@ defmodule Starcite.Application do
     Supervisor.start_link(children, opts)
   end
 
+  @impl true
+  def prep_stop(state) do
+    maybe_drain_before_stop()
+    state
+  end
+
   defp prom_ex_spec do
     prom_ex_opts = Application.get_env(:starcite, Starcite.Observability.PromEx, [])
     enabled = Keyword.get(prom_ex_opts, :enabled, true)
@@ -141,5 +147,25 @@ defmodule Starcite.Application do
       {Pprof.Servers.Profile, []},
       {Plug.Cowboy, scheme: :http, plug: StarciteWeb.OpsRouter, port: port, compress: true}
     ]
+  end
+
+  defp maybe_drain_before_stop do
+    if length(Starcite.Routing.Topology.nodes()) > 1 do
+      _ = Starcite.Operations.drain_node(Node.self())
+      _ = Starcite.Operations.wait_local_drained(drain_timeout_ms())
+    end
+
+    :ok
+  end
+
+  defp drain_timeout_ms do
+    case Application.get_env(:starcite, :shutdown_drain_timeout_ms, 5_000) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :shutdown_drain_timeout_ms: #{inspect(value)} (expected positive integer)"
+    end
   end
 end

@@ -240,8 +240,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   @spec local_owner?(String.t()) :: boolean()
   def local_owner?(session_id) when is_binary(session_id) and session_id != "" do
-    with {:ok, pid} <- lookup_log(session_id),
-         {:ok, %{role: :owner}} <- describe_log(session_id, pid) do
+    with {:ok, pid} <- ensure_log_loaded(session_id),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid),
+         {:ok, %{role: :owner}} <- describe_log(session_id, current_pid) do
       true
     else
       _other -> false
@@ -249,6 +250,43 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   def local_owner?(_session_id), do: false
+
+  @spec handoff_snapshot(String.t()) ::
+          {:ok, %{session: Session.t(), events: [map()]}} | {:error, term()} | {:timeout, term()}
+  def handoff_snapshot(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, session} <- get_session(session_id) do
+      tail_count = max(session.last_seq - session.archived_seq, 0)
+
+      events =
+        if tail_count == 0 do
+          []
+        else
+          EventStore.from_cursor(session_id, session.archived_seq, tail_count)
+        end
+
+      {:ok, %{session: session, events: events}}
+    end
+  end
+
+  def handoff_snapshot(_session_id), do: {:error, :invalid_session_id}
+
+  @spec receive_handoff(Session.t(), [map()]) :: :ok | {:error, term()} | {:timeout, term()}
+  def receive_handoff(%Session{} = session, events) when is_list(events) do
+    apply_replica(session, events)
+  end
+
+  def receive_handoff(_session, _events), do: {:error, :invalid_event}
+
+  @spec local_session_ids() :: [String.t()]
+  def local_session_ids do
+    @supervisor
+    |> DynamicSupervisor.which_children()
+    |> Enum.flat_map(fn
+      {_id, pid, _type, _modules} when is_pid(pid) -> Registry.keys(@registry, pid)
+      _other -> []
+    end)
+    |> Enum.uniq()
+  end
 
   @doc false
   @spec clear() :: :ok
@@ -447,10 +485,15 @@ defmodule Starcite.DataPlane.SessionQuorum do
       current_epoch = effective_epoch(session_id, session, assignment)
       desired_role = desired_role(session_id, assignment)
 
-      if current_epoch > normalize_epoch(session.epoch) or desired_role != role do
-        restart_log_for_epoch(session_id, session, current_epoch)
-      else
-        {:ok, pid}
+      cond do
+        current_epoch > normalize_epoch(session.epoch) or desired_role != role ->
+          restart_log_for_epoch(session_id, session, current_epoch)
+
+        follower_refresh_needed?(session_id, role, desired_role, session) ->
+          restart_log_for_epoch(session_id, session, current_epoch)
+
+        true ->
+          {:ok, pid}
       end
     else
       {:timeout, :session_log_unavailable} ->
@@ -515,6 +558,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
       _other -> :follower
     end
   end
+
+  defp follower_refresh_needed?(session_id, :follower, :follower, %Session{} = session)
+       when is_binary(session_id) and session_id != "" do
+    case freshest_peer_bootstrap(session_id) do
+      %{session: %Session{} = peer_session} ->
+        fresher_session?(peer_session, session)
+
+      _other ->
+        false
+    end
+  end
+
+  defp follower_refresh_needed?(_session_id, _role, _desired_role, _session), do: false
 
   defp load_bootstrap_source(session_id) when is_binary(session_id) and session_id != "" do
     local_session = local_cached_session(session_id)

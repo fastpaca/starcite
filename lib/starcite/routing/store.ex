@@ -5,11 +5,11 @@ defmodule Starcite.Routing.Store do
   The routing store is the durable control-plane record for active sessions:
 
   - `session_id -> %{owner, epoch, replicas, status}`
-  - node drain state under `[:nodes, node_name]`
+  - node lifecycle and lease state under `[:nodes, node_name]`
 
   It is intentionally small. The data plane owns sequencing and
-  replication; this store only answers who owns a session and which epoch that
-  ownership is fenced with.
+  replication; this store only answers who owns a session, which epoch that
+  ownership is fenced with, and which nodes are eligible to receive traffic.
   """
 
   use GenServer
@@ -18,15 +18,38 @@ defmodule Starcite.Routing.Store do
 
   alias Starcite.Routing.Topology
 
-  @join_timeout_ms 5_000
+  @dialyzer {:nowarn_function,
+             [
+               do_compare_and_swap_assignment_local: 3,
+               do_commit_transfer_local: 3,
+               do_failover_assignment_local: 4,
+               mutate_node_record: 4,
+               exact_match_pattern: 1
+             ]}
+
+  @join_timeout_ms 15_000
+  @cas_retry_limit 8
   @default_store_id :starcite_routing
   @default_store_dir "priv/khepri"
+  @cluster_reconcile_interval_ms Application.compile_env(
+                                   :starcite,
+                                   :routing_store_reconcile_interval_ms,
+                                   1_000
+                                 )
 
   @type assignment :: %{
           required(:owner) => node(),
           required(:epoch) => non_neg_integer(),
           required(:replicas) => [node()],
           required(:status) => :active | :moving,
+          required(:updated_at_ms) => integer(),
+          optional(:target_owner) => node(),
+          optional(:transfer_id) => String.t()
+        }
+  @type node_lifecycle :: :ready | :draining | :drained
+  @type node_record :: %{
+          required(:status) => node_lifecycle(),
+          required(:lease_until_ms) => integer(),
           required(:updated_at_ms) => integer()
         }
 
@@ -71,61 +94,101 @@ defmodule Starcite.Routing.Store do
         {:ok, assignment}
 
       {:error, :not_found} ->
-        assignment = initial_assignment(session_id)
-
-        case do_create_assignment(session_id, assignment) do
-          :ok ->
-            {:ok, assignment}
-
-          {:error, _reason} ->
-            do_get_assignment(session_id, :consistency)
-        end
+        route_command(:claim_assignment, [session_id, now_ms()])
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  @spec transfer_session(String.t(), node()) :: :ok | {:error, term()}
-  def transfer_session(session_id, target_node)
-      when is_binary(session_id) and session_id != "" and is_atom(target_node) do
-    with {:ok, current} <- do_get_assignment(session_id, :consistency),
-         :ok <- ensure_routable_node(target_node) do
-      next =
-        current
-        |> Map.put(:owner, target_node)
-        |> Map.put(:epoch, current.epoch + 1)
-        |> Map.put(:updated_at_ms, now_ms())
-        |> Map.put(:replicas, rebalance_replicas(session_id, current.replicas, target_node))
+  @spec start_drain_transfers(node()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def start_drain_transfers(owner_node) when is_atom(owner_node) do
+    started_at_ms = now_ms()
 
-      compare_and_swap_assignment(session_id, current, next)
+    with {:ok, assignments} <- all_assignments(:consistency),
+         {:ok, node_records} <- all_node_records(:consistency) do
+      started =
+        assignments
+        |> Enum.filter(fn {_session_id, assignment} ->
+          assignment.owner == owner_node and assignment.status == :active
+        end)
+        |> Enum.reduce(0, fn {session_id, assignment}, acc ->
+          case next_owner(assignment, owner_node, node_records, started_at_ms) do
+            nil ->
+              acc
+
+            target_node ->
+              transfer_id = new_transfer_id()
+
+              next =
+                assignment
+                |> Map.put(:status, :moving)
+                |> Map.put(:target_owner, target_node)
+                |> Map.put(:transfer_id, transfer_id)
+                |> Map.put(:updated_at_ms, started_at_ms)
+
+              case compare_and_swap_assignment(session_id, assignment, next) do
+                :ok -> acc + 1
+                {:error, _reason} -> acc
+              end
+          end
+        end)
+
+      {:ok, started}
+    end
+  end
+
+  @spec commit_transfer(String.t(), String.t()) :: {:ok, assignment()} | {:error, term()}
+  def commit_transfer(session_id, transfer_id)
+      when is_binary(session_id) and session_id != "" and is_binary(transfer_id) and
+             transfer_id != "" do
+    route_command(:commit_transfer, [session_id, transfer_id, now_ms()])
+  end
+
+  @spec drain_status(node()) ::
+          {:ok, %{active_owned_sessions: non_neg_integer(), moving_sessions: non_neg_integer()}}
+          | {:error, term()}
+  def drain_status(node) when is_atom(node) do
+    with {:ok, assignments} <- all_assignments(:consistency) do
+      {active_owned_sessions, moving_sessions} =
+        Enum.reduce(assignments, {0, 0}, fn
+          {_session_id, %{owner: ^node, status: :active}}, {active_acc, moving_acc} ->
+            {active_acc + 1, moving_acc}
+
+          {_session_id, %{owner: ^node, status: :moving}}, {active_acc, moving_acc} ->
+            {active_acc, moving_acc + 1}
+
+          _other, acc ->
+            acc
+        end)
+
+      {:ok,
+       %{
+         active_owned_sessions: active_owned_sessions,
+         moving_sessions: moving_sessions
+       }}
     end
   end
 
   @spec reassign_sessions_from(node()) :: {:ok, non_neg_integer()} | {:error, term()}
   def reassign_sessions_from(owner_node) when is_atom(owner_node) do
-    with {:ok, assignments} <- all_assignments(:consistency) do
+    failed_at_ms = now_ms()
+
+    with {:ok, assignments} <- all_assignments(:consistency),
+         {:ok, node_records} <- all_node_records(:consistency) do
       moved =
         assignments
         |> Enum.filter(fn {_session_id, assignment} -> assignment.owner == owner_node end)
         |> Enum.reduce(0, fn {session_id, assignment}, acc ->
-          case next_owner(assignment, owner_node) do
+          case failover_target(assignment, owner_node, node_records, failed_at_ms) do
             nil ->
               acc
 
             target_node ->
-              next =
-                assignment
-                |> Map.put(:owner, target_node)
-                |> Map.put(:epoch, assignment.epoch + 1)
-                |> Map.put(:status, :active)
-                |> Map.put(:updated_at_ms, now_ms())
-                |> Map.put(
-                  :replicas,
-                  rebalance_replicas(session_id, assignment.replicas, target_node)
-                )
-
-              case compare_and_swap_assignment(session_id, assignment, next) do
+              case route_command(
+                     :failover_assignment,
+                     [session_id, assignment, target_node, failed_at_ms]
+                   ) do
                 :ok -> acc + 1
                 {:error, _reason} -> acc
               end
@@ -142,6 +205,12 @@ defmodule Starcite.Routing.Store do
     do_all_assignments(favor)
   end
 
+  @spec all_node_records(:low_latency | :consistency) ::
+          {:ok, %{node() => node_record()}} | {:error, term()}
+  def all_node_records(favor \\ :low_latency) when favor in [:low_latency, :consistency] do
+    do_all_node_records(favor)
+  end
+
   @spec mark_node_draining(node()) :: :ok | {:error, term()}
   def mark_node_draining(node) when is_atom(node) do
     put_node_state(node, :draining)
@@ -152,34 +221,69 @@ defmodule Starcite.Routing.Store do
     put_node_state(node, :ready)
   end
 
-  @spec node_status(node()) :: :ready | :draining | :unknown
+  @spec mark_node_drained(node()) :: :ok | {:error, term()}
+  def mark_node_drained(node) when is_atom(node) do
+    put_node_state(node, :drained)
+  end
+
+  @spec node_status(node()) :: :ready | :draining | :drained | :unknown
   def node_status(node) when is_atom(node) do
     case do_get_node_state(node, :low_latency) do
-      {:ok, %{status: status}} when status in [:ready, :draining] -> status
+      {:ok, %{status: status}} when status in [:ready, :draining, :drained] -> status
       _other -> :unknown
+    end
+  end
+
+  @spec node_record(node(), keyword()) :: {:ok, node_record()} | {:error, term()}
+  def node_record(node, opts \\ []) when is_atom(node) and is_list(opts) do
+    do_get_node_state(node, Keyword.get(opts, :favor, :low_latency))
+  end
+
+  @spec renew_local_lease() :: :ok | {:error, term()}
+  def renew_local_lease do
+    route_command(:renew_node_lease, [Node.self(), now_ms(), lease_ttl_ms()])
+  end
+
+  @spec expired_nodes(non_neg_integer()) :: [node()]
+  def expired_nodes(now_ms \\ now_ms()) when is_integer(now_ms) and now_ms >= 0 do
+    case all_node_records(:consistency) do
+      {:ok, records} ->
+        records
+        |> Enum.filter(fn {_node, record} -> lease_expired?(record, now_ms) end)
+        |> Enum.map(fn {node, _record} -> node end)
+
+      {:error, _reason} ->
+        []
     end
   end
 
   @spec ready_nodes() :: [node()]
   def ready_nodes do
-    Topology.nodes()
-    |> Enum.filter(fn node -> node_status(node) != :draining end)
+    now_ms = now_ms()
+
+    case all_node_records(:low_latency) do
+      {:ok, records} ->
+        records
+        |> eligible_ready_nodes(now_ms)
+        |> Enum.map(fn {node, _record} -> node end)
+        |> Enum.sort()
+
+      {:error, _reason} ->
+        []
+    end
   end
 
   @impl true
   def init(_arg) do
     Process.flag(:trap_exit, true)
-
-    if Topology.routing_node?(Node.self()) do
-      :net_kernel.monitor_nodes(true, node_type: :visible)
-      :ok = start_store()
-      :ok = maybe_join_cluster()
-      :ok = wait_for_leader()
-      :ok = do_put_node_state_local(Node.self(), :ready)
-      {:ok, %{}}
-    else
-      {:ok, %{}}
-    end
+    :ok = :net_kernel.monitor_nodes(true, node_type: :visible)
+    :ok = start_store()
+    :ok = maybe_join_cluster()
+    :ok = wait_for_leader()
+    :ok = do_bootstrap_local_node_local(now_ms(), lease_ttl_ms())
+    send(self(), :cluster_bootstrap)
+    schedule_cluster_reconcile()
+    {:ok, %{}}
   end
 
   @impl true
@@ -189,17 +293,28 @@ defmodule Starcite.Routing.Store do
   end
 
   @impl true
+  def handle_info(:cluster_bootstrap, state) do
+    :ok = maybe_join_cluster()
+    {:noreply, state}
+  end
+
+  def handle_info(:cluster_reconcile, state) do
+    :ok = maybe_join_cluster()
+    schedule_cluster_reconcile()
+    {:noreply, state}
+  end
+
   def handle_info({:nodeup, node, _info}, state) when is_atom(node) do
-    if Topology.routing_node?(node) do
+    if node in Topology.nodes() do
       :ok = maybe_join_cluster()
     end
 
     {:noreply, state}
   end
 
-  def handle_info({:nodedown, node, _info}, state) when is_atom(node) do
-    if Topology.routing_node?(Node.self()) and Topology.routing_node?(node) do
-      _ = reassign_sessions_from(node)
+  def handle_info({:nodeup, node}, state) when is_atom(node) do
+    if node in Topology.nodes() do
+      :ok = maybe_join_cluster()
     end
 
     {:noreply, state}
@@ -221,15 +336,19 @@ defmodule Starcite.Routing.Store do
   end
 
   defp maybe_join_cluster do
-    if Topology.routing_node?(Node.self()) do
-      case bootstrap_node() do
-        nil ->
-          :ok
+    cond do
+      cluster_bootstrap_node?() ->
+        :ok
 
-        node ->
-          if node == Node.self() do
+      cluster_joined?() ->
+        :ok
+
+      true ->
+        case bootstrap_node() do
+          nil ->
             :ok
-          else
+
+          node ->
             case :khepri_cluster.join({store_id(), node}, @join_timeout_ms) do
               :ok ->
                 :ok
@@ -250,10 +369,7 @@ defmodule Starcite.Routing.Store do
                 Logger.debug("Routing.Store join skipped: #{inspect(reason)}")
                 :ok
             end
-          end
-      end
-    else
-      :ok
+        end
     end
   end
 
@@ -265,8 +381,35 @@ defmodule Starcite.Routing.Store do
   end
 
   defp bootstrap_node do
-    Topology.nodes()
-    |> Enum.find(fn node -> node == Node.self() or node in Node.list(:connected) end)
+    Topology.nodes() |> List.first()
+  end
+
+  defp cluster_bootstrap_node? do
+    bootstrap_node() == Node.self()
+  end
+
+  defp cluster_joined? do
+    case bootstrap_node() do
+      nil ->
+        true
+
+      bootstrap ->
+        if bootstrap == Node.self() do
+          true
+        else
+          case :khepri_cluster.nodes(store_id(), %{favor: :low_latency}) do
+            {:ok, nodes} when is_list(nodes) ->
+              Node.self() in nodes and bootstrap in nodes and length(nodes) > 1
+
+            _other ->
+              false
+          end
+        end
+    end
+  end
+
+  defp schedule_cluster_reconcile do
+    Process.send_after(self(), :cluster_reconcile, @cluster_reconcile_interval_ms)
   end
 
   defp do_get_assignment(session_id, favor)
@@ -290,14 +433,50 @@ defmodule Starcite.Routing.Store do
     :khepri.get(store_id(), session_path(session_id), %{favor: favor})
   end
 
-  defp do_create_assignment(session_id, assignment)
-       when is_binary(session_id) and session_id != "" and is_map(assignment) do
-    route_command(:create_assignment, [session_id, assignment])
-  end
+  def do_claim_assignment_local(session_id, claimed_at_ms)
+      when is_binary(session_id) and session_id != "" and is_integer(claimed_at_ms) and
+             claimed_at_ms >= 0 do
+    case do_get_assignment_local(session_id, :consistency) do
+      {:ok, assignment} when is_map(assignment) ->
+        {:ok, normalize_assignment(assignment)}
 
-  def do_create_assignment_local(session_id, assignment)
-      when is_binary(session_id) and session_id != "" and is_map(assignment) do
-    :khepri.create(store_id(), session_path(session_id), assignment, command_options())
+      {:error, reason} ->
+        if missing_node_error?(reason) do
+          with {:ok, assignments} <- normalize_assignments(do_all_assignments_local(:consistency)),
+               {:ok, node_records} <-
+                 normalize_node_records(do_all_node_records_local(:consistency)),
+               {:ok, [owner | _rest] = replicas} <-
+                 choose_claim_nodes(assignments, node_records, claimed_at_ms) do
+            assignment =
+              normalize_assignment(%{
+                owner: owner,
+                epoch: 1,
+                replicas: replicas,
+                status: :active,
+                updated_at_ms: claimed_at_ms
+              })
+
+            case :khepri.create(
+                   store_id(),
+                   session_path(session_id),
+                   assignment,
+                   command_options()
+                 ) do
+              :ok ->
+                {:ok, assignment}
+
+              {:error, reason} ->
+                if mismatching_node_error?(reason) do
+                  normalize_get_assignment(do_get_assignment_local(session_id, :consistency))
+                else
+                  {:error, reason}
+                end
+            end
+          end
+        else
+          {:error, reason}
+        end
+    end
   end
 
   defp compare_and_swap_assignment(session_id, current, next)
@@ -307,27 +486,53 @@ defmodule Starcite.Routing.Store do
 
   def do_compare_and_swap_assignment_local(session_id, current, next)
       when is_binary(session_id) and is_map(current) and is_map(next) do
-    path = session_path(session_id)
-
-    case :khepri.transaction(
+    case :khepri.compare_and_swap(
            store_id(),
-           fn ->
-             case :khepri_tx.get(path) do
-               {:ok, value} when value == current ->
-                 :ok = :khepri_tx.put(path, next)
-                 :ok
-
-               {:ok, _other} ->
-                 :khepri_tx.abort(:mismatching_node)
-
-               {:error, reason} ->
-                 :khepri_tx.abort(reason)
-             end
-           end,
+           session_path(session_id),
+           exact_match_pattern(current),
+           next,
            command_options()
          ) do
-      {:ok, :ok} -> :ok
+      :ok -> :ok
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def do_commit_transfer_local(session_id, transfer_id, committed_at_ms)
+      when is_binary(session_id) and session_id != "" and is_binary(transfer_id) and
+             transfer_id != "" and is_integer(committed_at_ms) and committed_at_ms >= 0 do
+    with {:ok, current} <-
+           normalize_get_assignment(do_get_assignment_local(session_id, :consistency)),
+         :ok <- ensure_matching_transfer(current, transfer_id),
+         {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
+      ready_nodes =
+        node_records
+        |> eligible_ready_nodes(committed_at_ms)
+        |> Enum.map(fn {node, _record} -> node end)
+
+      next =
+        current
+        |> Map.put(:owner, current.target_owner)
+        |> Map.put(:epoch, current.epoch + 1)
+        |> Map.put(:status, :active)
+        |> Map.put(:updated_at_ms, committed_at_ms)
+        |> Map.put(
+          :replicas,
+          rebalance_replicas(current.replicas, current.target_owner, ready_nodes)
+        )
+        |> Map.delete(:target_owner)
+        |> Map.delete(:transfer_id)
+
+      case :khepri.compare_and_swap(
+             store_id(),
+             session_path(session_id),
+             exact_match_pattern(current),
+             next,
+             command_options()
+           ) do
+        :ok -> {:ok, next}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -340,6 +545,17 @@ defmodule Starcite.Routing.Store do
 
   def do_all_assignments_local(favor) when favor in [:low_latency, :consistency] do
     :khepri.get_many(store_id(), "/:sessions/*", %{favor: favor})
+  end
+
+  defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
+    with {:ok, result} <- route_query(:all_node_records, [favor]),
+         {:ok, node_records} <- normalize_node_records(result) do
+      {:ok, node_records}
+    end
+  end
+
+  def do_all_node_records_local(favor) when favor in [:low_latency, :consistency] do
+    :khepri.get_many(store_id(), "/:nodes/*", %{favor: favor})
   end
 
   defp normalize_assignments({:ok, payloads}) when is_map(payloads) do
@@ -356,27 +572,64 @@ defmodule Starcite.Routing.Store do
     {:ok, assignments}
   end
 
-  defp normalize_assignments({:error, reason}), do: {:error, reason}
-  defp normalize_assignments(other), do: {:error, {:invalid_assignments, other}}
-
-  defp put_node_state(node, status) when is_atom(node) and status in [:ready, :draining] do
-    route_command(:put_node_state, [node, status])
+  defp normalize_assignments({:error, reason}) do
+    if missing_node_error?(reason), do: {:ok, %{}}, else: {:error, reason}
   end
 
-  def do_put_node_state_local(node, status)
-      when is_atom(node) and status in [:ready, :draining] do
-    :khepri.put(
-      store_id(),
-      node_path(node),
-      %{status: status, updated_at_ms: now_ms()},
-      command_options()
-    )
+  defp normalize_assignments(other), do: {:error, {:invalid_assignments, other}}
+
+  defp normalize_node_records({:ok, payloads}) when is_map(payloads) do
+    node_records =
+      Enum.reduce(payloads, %{}, fn
+        {[:nodes, raw_node], record}, acc when is_binary(raw_node) and is_map(record) ->
+          case decode_node_name(raw_node) do
+            {:ok, node} -> Map.put(acc, node, normalize_node_record(record))
+            :error -> acc
+          end
+
+        _other, acc ->
+          acc
+      end)
+
+    {:ok, node_records}
+  end
+
+  defp normalize_node_records({:error, reason}) do
+    if missing_node_error?(reason), do: {:ok, %{}}, else: {:error, reason}
+  end
+
+  defp normalize_node_records(other), do: {:error, {:invalid_node_records, other}}
+
+  defp put_node_state(node, status)
+       when is_atom(node) and status in [:ready, :draining, :drained] do
+    route_command(:put_node_state, [node, status, now_ms()])
+  end
+
+  def do_put_node_state_local(node, status, updated_at_ms)
+      when is_atom(node) and status in [:ready, :draining, :drained] and
+             is_integer(updated_at_ms) and updated_at_ms >= 0 do
+    mutate_node_record(node, updated_at_ms, fn current -> %{current | status: status} end)
+  end
+
+  def do_bootstrap_local_node_local(updated_at_ms, ttl_ms)
+      when is_integer(updated_at_ms) and updated_at_ms >= 0 and is_integer(ttl_ms) and ttl_ms > 0 do
+    do_renew_node_lease_local(Node.self(), updated_at_ms, ttl_ms)
+  end
+
+  def do_renew_node_lease_local(node, updated_at_ms, ttl_ms)
+      when is_atom(node) and is_integer(updated_at_ms) and updated_at_ms >= 0 and
+             is_integer(ttl_ms) and ttl_ms > 0 do
+    lease_until_ms = updated_at_ms + ttl_ms
+
+    mutate_node_record(node, updated_at_ms, fn current ->
+      %{current | lease_until_ms: lease_until_ms}
+    end)
   end
 
   def do_clear_local do
     with :ok <- :khepri.delete_many(store_id(), "/:sessions/*", command_options()),
          :ok <- :khepri.delete_many(store_id(), "/:nodes/*", command_options()),
-         :ok <- do_put_node_state_local(Node.self(), :ready) do
+         :ok <- do_bootstrap_local_node_local(now_ms(), lease_ttl_ms()) do
       :ok
     end
   end
@@ -384,7 +637,7 @@ defmodule Starcite.Routing.Store do
   defp do_get_node_state(node, favor)
        when is_atom(node) and favor in [:low_latency, :consistency] do
     case route_query(:get_node_state, [node, favor]) do
-      {:ok, {:ok, state}} -> {:ok, state}
+      {:ok, {:ok, state}} when is_map(state) -> {:ok, normalize_node_record(state)}
       {:ok, {:error, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
     end
@@ -395,25 +648,46 @@ defmodule Starcite.Routing.Store do
     :khepri.get(store_id(), node_path(node), %{favor: favor})
   end
 
-  defp route_query(fun, args) when is_atom(fun) and is_list(args) do
-    if Topology.routing_node?(Node.self()) do
-      local_call(fun, args)
-    else
-      rpc_call(fun, args)
+  def do_failover_assignment_local(session_id, current, target_node, failed_at_ms)
+      when is_binary(session_id) and session_id != "" and is_map(current) and is_atom(target_node) and
+             is_integer(failed_at_ms) and failed_at_ms >= 0 do
+    with {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
+      ready_nodes =
+        node_records
+        |> eligible_ready_nodes(failed_at_ms)
+        |> Enum.map(fn {node, _record} -> node end)
+
+      next =
+        current
+        |> Map.put(:owner, target_node)
+        |> Map.put(:epoch, current.epoch + 1)
+        |> Map.put(:status, :active)
+        |> Map.put(:updated_at_ms, failed_at_ms)
+        |> Map.put(:replicas, rebalance_replicas(current.replicas, target_node, ready_nodes))
+        |> Map.delete(:target_owner)
+        |> Map.delete(:transfer_id)
+
+      case :khepri.compare_and_swap(
+             store_id(),
+             session_path(session_id),
+             exact_match_pattern(current),
+             next,
+             command_options()
+           ) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
+  defp route_query(fun, args) when is_atom(fun) and is_list(args) do
+    local_call(fun, args)
+  end
+
   defp route_command(fun, args) when is_atom(fun) and is_list(args) do
-    if Topology.routing_node?(Node.self()) do
-      case local_call(fun, args) do
-        {:ok, result} -> result
-        {:error, reason} -> {:error, reason}
-      end
-    else
-      case rpc_call(fun, args) do
-        {:ok, result} -> result
-        {:error, reason} -> {:error, reason}
-      end
+    case local_call(fun, args) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -431,55 +705,84 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp rpc_call(fun, args) when is_atom(fun) and is_list(args) do
-    Topology.nodes()
-    |> Enum.reject(&(&1 == Node.self()))
-    |> Enum.reduce_while({:error, :routing_store_unavailable}, fn node, _acc ->
-      case :rpc.call(node, __MODULE__, fun, args, @join_timeout_ms) do
-        {:badrpc, _reason} ->
-          {:cont, {:error, :routing_store_unavailable}}
+  defp choose_claim_nodes(assignments, node_records, now_ms)
+       when is_map(assignments) and is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
+    desired = Topology.replication_factor()
+    counts = effective_session_counts(assignments)
 
-        result ->
-          {:halt, {:ok, result}}
-      end
-    end)
-  end
+    candidates =
+      node_records
+      |> eligible_ready_nodes(now_ms)
+      |> Enum.sort_by(fn {node, _record} ->
+        {Map.get(counts, node, 0), Atom.to_string(node)}
+      end)
+      |> Enum.map(fn {node, _record} -> node end)
 
-  defp ensure_routable_node(node) when is_atom(node) do
-    if node in Topology.nodes() do
-      :ok
-    else
-      {:error, :invalid_routing_node}
+    case candidates do
+      [] ->
+        {:error, :no_ready_routing_nodes}
+
+      nodes when length(nodes) < desired ->
+        {:error, :no_ready_routing_nodes}
+
+      nodes ->
+        {:ok, Enum.take(nodes, desired)}
     end
   end
 
-  defp initial_assignment(session_id) when is_binary(session_id) and session_id != "" do
-    replicas = Topology.replicas_for_session(session_id, ready_candidate_nodes())
+  defp effective_session_counts(assignments) when is_map(assignments) do
+    Enum.reduce(assignments, %{}, fn
+      {_session_id, %{owner: owner, status: :moving, target_owner: target_owner}}, acc
+      when is_atom(owner) and is_atom(target_owner) ->
+        acc
+        |> Map.update(owner, 1, &(&1 + 1))
+        |> Map.update(target_owner, 1, &(&1 + 1))
 
-    %{
-      owner: hd(replicas),
-      epoch: 1,
-      replicas: replicas,
-      status: :active,
-      updated_at_ms: now_ms()
-    }
+      {_session_id, %{owner: owner}}, acc when is_atom(owner) ->
+        Map.update(acc, owner, 1, &(&1 + 1))
+
+      _other, acc ->
+        acc
+    end)
   end
 
-  defp next_owner(%{replicas: replicas}, owner_node)
-       when is_list(replicas) and is_atom(owner_node) do
-    ready = ready_candidate_nodes()
+  defp next_owner(%{replicas: replicas}, owner_node, node_records, now_ms)
+       when is_list(replicas) and is_atom(owner_node) and is_map(node_records) and
+              is_integer(now_ms) and now_ms >= 0 do
+    ready = ready_node_set(node_records, now_ms)
 
     replicas
     |> Enum.reject(&(&1 == owner_node))
-    |> Enum.find(&(&1 in ready))
+    |> Enum.find(&MapSet.member?(ready, &1))
   end
 
-  defp rebalance_replicas(session_id, current_replicas, target_owner)
-       when is_binary(session_id) and is_list(current_replicas) and is_atom(target_owner) do
-    ready = ready_candidate_nodes()
+  defp failover_target(
+         %{status: :moving, target_owner: target_owner},
+         owner_node,
+         node_records,
+         now_ms
+       )
+       when is_atom(owner_node) and is_atom(target_owner) and is_map(node_records) and
+              is_integer(now_ms) and now_ms >= 0 do
+    ready = ready_node_set(node_records, now_ms)
 
+    if target_owner != owner_node and MapSet.member?(ready, target_owner) do
+      target_owner
+    else
+      nil
+    end
+  end
+
+  defp failover_target(assignment, owner_node, node_records, now_ms)
+       when is_map(assignment) and is_atom(owner_node) and is_map(node_records) and
+              is_integer(now_ms) and now_ms >= 0 do
+    next_owner(assignment, owner_node, node_records, now_ms)
+  end
+
+  defp rebalance_replicas(current_replicas, target_owner, ready_nodes)
+       when is_list(current_replicas) and is_atom(target_owner) and is_list(ready_nodes) do
     replicas =
-      [target_owner | Enum.filter(current_replicas, &(&1 != target_owner and &1 in ready))]
+      [target_owner | Enum.filter(current_replicas, &(&1 != target_owner and &1 in ready_nodes))]
       |> Enum.uniq()
 
     desired = Topology.replication_factor()
@@ -487,11 +790,7 @@ defmodule Starcite.Routing.Store do
     if length(replicas) >= desired do
       Enum.take(replicas, desired)
     else
-      additional =
-        ready
-        |> Enum.reject(&(&1 in replicas))
-        |> then(&Topology.replicas_for_session(session_id, &1))
-        |> Enum.reject(&(&1 in replicas))
+      additional = ready_nodes |> Enum.reject(&(&1 in replicas))
 
       (replicas ++ additional)
       |> Enum.uniq()
@@ -499,9 +798,93 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp ready_candidate_nodes do
-    nodes = ready_nodes()
-    if nodes == [], do: Topology.nodes(), else: nodes
+  defp mutate_node_record(node, updated_at_ms, updater, attempt \\ 0)
+       when is_atom(node) and is_integer(updated_at_ms) and updated_at_ms >= 0 and
+              is_function(updater, 1) and is_integer(attempt) and attempt >= 0 do
+    if attempt >= @cas_retry_limit do
+      {:error, :routing_store_unavailable}
+    else
+      case do_get_node_state_local(node, :consistency) do
+        {:ok, raw_current} when is_map(raw_current) ->
+          current = normalize_node_record(raw_current)
+
+          next =
+            updater.(current) |> normalize_node_record() |> Map.put(:updated_at_ms, updated_at_ms)
+
+          case :khepri.compare_and_swap(
+                 store_id(),
+                 node_path(node),
+                 exact_match_pattern(raw_current),
+                 next,
+                 command_options()
+               ) do
+            :ok ->
+              :ok
+
+            {:error, reason} ->
+              if mismatching_node_error?(reason) do
+                mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+              else
+                {:error, reason}
+              end
+          end
+
+        {:error, reason} ->
+          if missing_node_error?(reason) do
+            next =
+              updater.(default_node_record())
+              |> normalize_node_record()
+              |> Map.put(:updated_at_ms, updated_at_ms)
+
+            case :khepri.create(store_id(), node_path(node), next, command_options()) do
+              :ok ->
+                :ok
+
+              {:error, reason} ->
+                if mismatching_node_error?(reason) do
+                  mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+                else
+                  {:error, reason}
+                end
+            end
+          else
+            {:error, reason}
+          end
+      end
+    end
+  end
+
+  defp ensure_matching_transfer(
+         %{status: :moving, target_owner: target_owner, transfer_id: transfer_id},
+         expected_transfer_id
+       )
+       when is_atom(target_owner) and is_binary(transfer_id) do
+    if transfer_id == expected_transfer_id do
+      :ok
+    else
+      {:error, :mismatching_node}
+    end
+  end
+
+  defp ensure_matching_transfer(_current, _transfer_id), do: {:error, :mismatching_node}
+
+  defp eligible_ready_nodes(node_records, now_ms)
+       when is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
+    Enum.filter(node_records, fn {_node, record} ->
+      record.status == :ready and not lease_expired?(record, now_ms)
+    end)
+  end
+
+  defp ready_node_set(node_records, now_ms)
+       when is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
+    node_records
+    |> eligible_ready_nodes(now_ms)
+    |> Enum.map(fn {node, _record} -> node end)
+    |> MapSet.new()
+  end
+
+  defp new_transfer_id do
+    "xfer-#{System.unique_integer([:positive, :monotonic])}"
   end
 
   defp session_path(session_id), do: [:sessions, session_id]
@@ -510,13 +893,66 @@ defmodule Starcite.Routing.Store do
   defp normalize_assignment(%{owner: owner, epoch: epoch, replicas: replicas} = assignment)
        when is_atom(owner) and is_integer(epoch) and epoch >= 0 and is_list(replicas) do
     assignment
+    |> Map.put_new(:status, :active)
+    |> Map.put_new(:updated_at_ms, 0)
   end
 
   defp normalize_assignment(assignment), do: assignment
 
+  defp normalize_node_record(record) when is_map(record) do
+    %{
+      status:
+        case Map.get(record, :status) do
+          status when status in [:ready, :draining, :drained] -> status
+          _ -> :ready
+        end,
+      lease_until_ms:
+        case Map.get(record, :lease_until_ms) do
+          value when is_integer(value) and value >= 0 -> value
+          _ -> 0
+        end,
+      updated_at_ms:
+        case Map.get(record, :updated_at_ms) do
+          value when is_integer(value) and value >= 0 -> value
+          _ -> 0
+        end
+    }
+  end
+
+  defp default_node_record do
+    %{status: :ready, lease_until_ms: 0, updated_at_ms: 0}
+  end
+
+  @spec exact_match_pattern(term()) :: :ets.match_pattern()
+  defp exact_match_pattern(value), do: value
+
+  defp lease_expired?(record, now_ms)
+       when is_map(record) and is_integer(now_ms) and now_ms >= 0 do
+    record.lease_until_ms <= now_ms
+  end
+
+  defp decode_node_name(raw_node) when is_binary(raw_node) do
+    case Enum.find(Topology.nodes(), fn node -> Atom.to_string(node) == raw_node end) do
+      nil -> :error
+      node -> {:ok, node}
+    end
+  end
+
   defp missing_node_error?({:khepri, :node_not_found, _info}), do: true
   defp missing_node_error?({:node_not_found, _info}), do: true
   defp missing_node_error?(_reason), do: false
+
+  defp mismatching_node_error?({:khepri, :mismatching_node, _info}), do: true
+  defp mismatching_node_error?({:mismatching_node, _info}), do: true
+  defp mismatching_node_error?(:mismatching_node), do: true
+  defp mismatching_node_error?(_reason), do: false
+
+  defp lease_ttl_ms do
+    case Application.get_env(:starcite, :routing_lease_ttl_ms, 5_000) do
+      value when is_integer(value) and value > 0 -> value
+      value -> raise ArgumentError, "invalid value for :routing_lease_ttl_ms: #{inspect(value)}"
+    end
+  end
 
   defp command_options do
     %{

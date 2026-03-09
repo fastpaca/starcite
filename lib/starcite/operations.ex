@@ -10,7 +10,7 @@ defmodule Starcite.Operations do
   def status do
     %{
       node: Node.self(),
-      local_routing_node: Topology.routing_node?(Node.self()),
+      local_routing_node: true,
       local_mode: local_mode(),
       local_ready: local_ready(),
       local_drained: local_drained(),
@@ -28,10 +28,8 @@ defmodule Starcite.Operations do
   @spec ready_nodes() :: [node()]
   def ready_nodes, do: Store.ready_nodes()
 
-  @spec local_mode() :: :routing_node | :ingress_node
-  def local_mode do
-    if Topology.routing_node?(Node.self()), do: :routing_node, else: :ingress_node
-  end
+  @spec local_mode() :: :routing_node
+  def local_mode, do: :routing_node
 
   @spec local_ready(keyword()) :: boolean()
   def local_ready(opts \\ []) when is_list(opts), do: Readiness.local_ready(opts)
