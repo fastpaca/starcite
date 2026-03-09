@@ -15,6 +15,7 @@ defmodule Starcite.DataPlane.CursorUpdate do
   @type t :: %{
           required(:version) => 1,
           required(:session_id) => String.t(),
+          required(:epoch) => non_neg_integer(),
           required(:seq) => pos_integer(),
           required(:last_seq) => pos_integer(),
           required(:type) => String.t(),
@@ -43,10 +44,17 @@ defmodule Starcite.DataPlane.CursorUpdate do
         last_seq
       )
       when is_binary(session_id) and session_id != "" and is_integer(last_seq) and last_seq >= 0 do
+    epoch =
+      case Map.get(event, :epoch) do
+        value when is_integer(value) and value >= 0 -> value
+        _ -> 0
+      end
+
     {:cursor_update,
      %{
        version: 1,
        session_id: session_id,
+       epoch: epoch,
        seq: seq,
        last_seq: last_seq,
        type: type,

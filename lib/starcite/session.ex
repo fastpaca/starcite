@@ -17,6 +17,7 @@ defmodule Starcite.Session do
   @enforce_keys [
     :id,
     :tenant_id,
+    :epoch,
     :last_seq,
     :archived_seq,
     :inserted_at,
@@ -29,6 +30,7 @@ defmodule Starcite.Session do
     :title,
     :creator_principal,
     :metadata,
+    :epoch,
     :last_seq,
     :archived_seq,
     :inserted_at,
@@ -42,6 +44,7 @@ defmodule Starcite.Session do
           title: String.t() | nil,
           creator_principal: Principal.t() | nil,
           metadata: map(),
+          epoch: non_neg_integer(),
           last_seq: non_neg_integer(),
           archived_seq: non_neg_integer(),
           inserted_at: NaiveDateTime.t(),
@@ -51,7 +54,6 @@ defmodule Starcite.Session do
 
   @default_tail_keep 1_000
   @default_producer_max_entries 10_000
-  @retention_defaults_cache_key {__MODULE__, :retention_defaults}
 
   @doc """
   Create a new session.
@@ -65,36 +67,33 @@ defmodule Starcite.Session do
 
     tenant_id = resolve_tenant_id!(Keyword.get(opts, :tenant_id), creator_principal)
 
-    build_session(
-      id,
-      Keyword.get(opts, :title),
-      creator_principal,
-      tenant_id,
-      Keyword.get(opts, :metadata, %{}),
-      now,
-      %{
-        tail_keep: Keyword.get(opts, :tail_keep, default_tail_keep()),
-        producer_max_entries:
-          Keyword.get(opts, :producer_max_entries, default_producer_max_entries())
-      }
-    )
-  end
+    tail_keep =
+      Keyword.get(
+        opts,
+        :tail_keep,
+        Application.get_env(:starcite, :tail_keep, @default_tail_keep)
+      )
 
-  @doc false
-  @spec new_raft(String.t(), String.t() | nil, Principal.t() | nil, String.t(), map()) :: t()
-  def new_raft(id, title, creator_principal, tenant_id, metadata)
-      when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
-             is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
-    build_session(
-      id,
-      title,
-      creator_principal,
-      tenant_id,
-      metadata,
-      NaiveDateTime.utc_now(),
-      retention_defaults()
-    )
+    producer_max_entries =
+      Keyword.get(
+        opts,
+        :producer_max_entries,
+        Application.get_env(:starcite, :producer_max_entries, @default_producer_max_entries)
+      )
+
+    %Session{
+      id: id,
+      tenant_id: tenant_id,
+      title: Keyword.get(opts, :title),
+      creator_principal: creator_principal,
+      metadata: Keyword.get(opts, :metadata, %{}),
+      epoch: 0,
+      last_seq: 0,
+      archived_seq: 0,
+      inserted_at: now,
+      retention: %{tail_keep: tail_keep, producer_max_entries: producer_max_entries},
+      producer_cursors: %{}
+    }
   end
 
   @doc """
@@ -125,7 +124,7 @@ defmodule Starcite.Session do
           idempotency_key: idempotency_key,
           producer_id: producer_id,
           producer_seq: producer_seq
-        }
+        } = input
       )
       when is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and actor != "" and
              (is_binary(source) or is_nil(source)) and is_map(metadata) and is_map(refs) and
@@ -133,6 +132,7 @@ defmodule Starcite.Session do
              producer_id != "" and is_integer(producer_seq) and producer_seq > 0 do
     do_append_event(
       session,
+      input,
       producer_id,
       producer_seq,
       type,
@@ -153,6 +153,7 @@ defmodule Starcite.Session do
              producer_seq > 0 do
     do_append_event(
       session,
+      input,
       producer_id,
       producer_seq,
       input.type,
@@ -169,6 +170,7 @@ defmodule Starcite.Session do
 
   defp do_append_event(
          %Session{} = session,
+         _input,
          producer_id,
          producer_seq,
          type,
@@ -202,14 +204,18 @@ defmodule Starcite.Session do
            next_seq,
            session.retention.producer_max_entries
          ) do
-      {:deduped, seq, _updated_index} ->
-        {:deduped, session, seq}
+      {:deduped, seq, updated_index} ->
+        updated =
+          maybe_update_cursors(session, updated_index)
+
+        {:deduped, updated, seq}
 
       {:append, updated_index} ->
         now = NaiveDateTime.utc_now()
 
         event = %{
           seq: next_seq,
+          epoch: session.epoch,
           type: type,
           payload: payload,
           actor: actor,
@@ -275,6 +281,15 @@ defmodule Starcite.Session do
     }
   end
 
+  defp maybe_update_cursors(%Session{} = session, updated_index)
+       when updated_index == session.producer_cursors do
+    session
+  end
+
+  defp maybe_update_cursors(%Session{} = session, updated_index) when is_map(updated_index) do
+    %Session{session | producer_cursors: updated_index}
+  end
+
   defp retained_floor(archived_seq, last_seq, tail_keep)
        when is_integer(archived_seq) and archived_seq >= 0 and is_integer(last_seq) and
               last_seq >= 0 and
@@ -323,47 +338,6 @@ defmodule Starcite.Session do
     |> DateTime.to_iso8601()
   end
 
-  defp build_session(id, title, creator_principal, tenant_id, metadata, inserted_at, retention)
-       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-              (is_struct(creator_principal, Principal) or is_nil(creator_principal)) and
-              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) and
-              is_struct(inserted_at, NaiveDateTime) and is_map(retention) do
-    %Session{
-      id: id,
-      tenant_id: tenant_id,
-      title: title,
-      creator_principal: creator_principal,
-      metadata: metadata,
-      last_seq: 0,
-      archived_seq: 0,
-      inserted_at: inserted_at,
-      retention: retention,
-      producer_cursors: %{}
-    }
-  end
-
-  defp default_tail_keep do
-    Application.get_env(:starcite, :tail_keep, @default_tail_keep)
-  end
-
-  defp default_producer_max_entries do
-    Application.get_env(:starcite, :producer_max_entries, @default_producer_max_entries)
-  end
-
-  defp retention_defaults do
-    raw = {default_tail_keep(), default_producer_max_entries()}
-
-    case :persistent_term.get(@retention_defaults_cache_key, :undefined) do
-      {^raw, defaults} ->
-        defaults
-
-      _ ->
-        defaults = %{tail_keep: elem(raw, 0), producer_max_entries: elem(raw, 1)}
-        :persistent_term.put(@retention_defaults_cache_key, {raw, defaults})
-        defaults
-    end
-  end
-
   defp optional_principal!(nil, _field), do: nil
   defp optional_principal!(%Principal{} = principal, _field), do: principal
 
@@ -374,24 +348,6 @@ defmodule Starcite.Session do
        when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
               is_binary(type) and type != "" do
     type = principal_type!(type, field)
-
-    case Principal.new(tenant_id, id, type) do
-      {:ok, principal} -> principal
-      {:error, :invalid_principal} -> raise ArgumentError, "invalid session #{field}"
-    end
-  end
-
-  defp optional_principal!(
-         %{tenant_id: tenant_id, id: id, type: type},
-         field
-       )
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
-              ((is_binary(type) and type != "") or type in [:user, :agent, :service]) do
-    type =
-      case type do
-        atom when atom in [:user, :agent, :service] -> atom
-        string when is_binary(string) -> principal_type!(string, field)
-      end
 
     case Principal.new(tenant_id, id, type) do
       {:ok, principal} -> principal

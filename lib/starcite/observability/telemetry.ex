@@ -766,6 +766,72 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one in-memory session replication attempt.
+
+  Measurements:
+    - `:count` – fixed at 1 per attempt
+    - `:duration_ms` – elapsed replication time
+    - `:standby_count` – number of standby nodes considered
+    - `:required_remote_acks` – quorum-derived remote ack requirement
+    - `:successful_remote_acks` – remote acks obtained
+    - `:failure_count` – failed remote attempts
+
+  Metadata:
+    - `:session_id`
+    - `:tenant_id`
+    - `:outcome` (`:ok` or `:quorum_not_met`)
+    - `:failure_reason` (`:none`, `:badrpc`, `:timeout`, `:error`, etc.)
+  """
+  @spec session_replication(
+          String.t(),
+          String.t(),
+          :ok | :quorum_not_met,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          atom()
+        ) :: :ok
+  def session_replication(
+        session_id,
+        tenant_id,
+        outcome,
+        duration_ms,
+        standby_count,
+        required_remote_acks,
+        successful_remote_acks,
+        failure_count,
+        failure_reason
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             outcome in [:ok, :quorum_not_met] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_integer(standby_count) and standby_count >= 0 and
+             is_integer(required_remote_acks) and required_remote_acks >= 0 and
+             is_integer(successful_remote_acks) and successful_remote_acks >= 0 and
+             is_integer(failure_count) and failure_count >= 0 and is_atom(failure_reason) do
+    execute_if_enabled(
+      [:starcite, :replication, :session],
+      %{
+        count: 1,
+        duration_ms: duration_ms,
+        standby_count: standby_count,
+        required_remote_acks: required_remote_acks,
+        successful_remote_acks: successful_remote_acks,
+        failure_count: failure_count
+      },
+      %{
+        session_id: session_id,
+        tenant_id: tenant_id,
+        outcome: outcome,
+        failure_reason: failure_reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit an event describing a single archive flush tick.
 
   Measurements:

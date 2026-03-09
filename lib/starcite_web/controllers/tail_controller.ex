@@ -10,6 +10,7 @@ defmodule StarciteWeb.TailController do
 
   use StarciteWeb, :controller
 
+  alias Starcite.Cursor
   alias Starcite.ReadPath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
@@ -26,7 +27,7 @@ defmodule StarciteWeb.TailController do
          {:ok, cursor} <- parse_cursor_param(params),
          {:ok, frame_batch_size} <- parse_frame_batch_size_param(params),
          :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- ReadPath.get_session(id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
          :ok <- Policy.allowed_to_read_session(auth, session) do
       conn
       |> WebSockAdapter.upgrade(
@@ -50,24 +51,15 @@ defmodule StarciteWeb.TailController do
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
   defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
-  defp parse_cursor_param(%{}), do: {:ok, 0}
+  defp parse_cursor_param(%{}), do: {:ok, Cursor.new(nil, 0)}
 
   defp parse_frame_batch_size_param(%{"batch_size" => batch_size}),
     do: parse_frame_batch_size(batch_size)
 
   defp parse_frame_batch_size_param(%{}), do: {:ok, @default_tail_frame_batch_size}
 
-  defp parse_cursor(nil), do: {:ok, 0}
-  defp parse_cursor(cursor) when is_integer(cursor) and cursor >= 0, do: {:ok, cursor}
-
-  defp parse_cursor(cursor) when is_binary(cursor) do
-    case Integer.parse(cursor) do
-      {parsed, ""} when parsed >= 0 -> {:ok, parsed}
-      _ -> {:error, :invalid_cursor}
-    end
-  end
-
-  defp parse_cursor(_), do: {:error, :invalid_cursor}
+  defp parse_cursor(nil), do: {:ok, Cursor.new(nil, 0)}
+  defp parse_cursor(cursor), do: Cursor.normalize(cursor)
 
   defp parse_frame_batch_size(batch_size)
        when is_integer(batch_size) and batch_size >= @default_tail_frame_batch_size and

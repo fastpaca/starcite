@@ -25,7 +25,7 @@ defmodule Starcite.Application do
         dns_cluster_spec(),
         # Control-plane liveness and routing intent
         Starcite.ControlPlane.Supervisor,
-        # Data-plane runtime (Raft bootstrap, archive, event store)
+        # Data-plane runtime (owners, archive, event store)
         Starcite.DataPlane.Supervisor
       ]
       |> Enum.concat(ops_children(ops_port))

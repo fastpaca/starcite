@@ -9,14 +9,15 @@ defmodule Starcite.DataPlane.Supervisor do
   def init(_arg) do
     children =
       [
+        # Session owner registry (one owner process per session)
+        {Registry, keys: :unique, name: Starcite.DataPlane.SessionOwnerRegistry},
+        # Dynamic supervisor for session owner processes
+        {DynamicSupervisor,
+         strategy: :one_for_one, name: Starcite.DataPlane.SessionOwnerSupervisor},
         # Stable owner for Cachex-backed session store (control-plane/lifecycle use)
         {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table
         {Starcite.DataPlane.EventStore, []},
-        # Task.Supervisor for async Raft group startup
-        {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
-        # Raft bootstrap/lifecycle coordinator
-        Starcite.DataPlane.RaftBootstrap,
         {Starcite.Archive,
          [
            name: archive_name(),

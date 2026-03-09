@@ -7,7 +7,13 @@ defmodule Starcite.ControlPlane.Supervisor do
 
   @impl true
   def init(_arg) do
-    children = [Starcite.ControlPlane.Observer]
+    children = [
+      # Task supervisor used by control-plane Raft bootstrap/recovery work.
+      {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
+      # Control-plane Raft bootstrap/lifecycle coordinator.
+      Starcite.DataPlane.RaftBootstrap,
+      Starcite.ControlPlane.Observer
+    ]
 
     Supervisor.init(children, strategy: :one_for_one)
   end
