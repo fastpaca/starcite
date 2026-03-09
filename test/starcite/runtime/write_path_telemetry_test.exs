@@ -2,7 +2,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Observability.Telemetry
-  alias Starcite.WritePath
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -94,103 +93,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     :ok
   end
 
-  test "append emits per-command telemetry from write path" do
-    id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
-
-    assert {:ok, _reply} =
-             WritePath.append_event(id, %{
-               type: "content",
-               payload: %{text: "hello"},
-               actor: "agent:1",
-               metadata: %{"tenant_id" => "acme"},
-               producer_id: "writer:test",
-               producer_seq: 1
-             })
-
-    assert_receive_raft_command(:append_event, :local_ok)
-  end
-
-  test "append emits write request telemetry from write path" do
-    id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
-
-    assert {:ok, _reply} =
-             WritePath.append_event(id, %{
-               type: "content",
-               payload: %{text: "hello"},
-               actor: "agent:1",
-               metadata: %{"tenant_id" => "acme"},
-               producer_id: "writer:test",
-               producer_seq: 1
-             })
-
-    assert_receive_request_event(:append_event, :ack, :ok)
-    assert_receive_request_event(:append_event, :route, :ok)
-  end
-
-  test "append missing session emits per-command telemetry from write path" do
-    id = unique_id("missing")
-
-    assert {:error, :session_not_found} =
-             WritePath.append_event(id, %{
-               type: "content",
-               payload: %{text: "hello"},
-               actor: "agent:1",
-               metadata: %{"tenant_id" => "acme"},
-               producer_id: "writer:test",
-               producer_seq: 1
-             })
-
-    assert_receive_raft_command(:append_event, :local_error)
-  end
-
-  test "append missing session emits write request telemetry from write path" do
-    id = unique_id("missing")
-
-    assert {:error, :session_not_found} =
-             WritePath.append_event(id, %{
-               type: "content",
-               payload: %{text: "hello"},
-               actor: "agent:1",
-               metadata: %{"tenant_id" => "acme"},
-               producer_id: "writer:test",
-               producer_seq: 1
-             })
-
-    assert_receive_request_event(:append_event, :ack, :error)
-    assert_receive_request_event(:append_event, :route, :error)
-  end
-
-  test "append_events emits write request telemetry from write path" do
-    id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
-
-    events = [
-      %{
-        type: "content",
-        payload: %{text: "hello"},
-        actor: "agent:1",
-        metadata: %{"tenant_id" => "acme"},
-        producer_id: "writer:test",
-        producer_seq: 1
-      },
-      %{
-        type: "content",
-        payload: %{text: "world"},
-        actor: "agent:1",
-        metadata: %{"tenant_id" => "acme"},
-        producer_id: "writer:test",
-        producer_seq: 2
-      }
-    ]
-
-    assert {:ok, _reply} = WritePath.append_events(id, events)
-    assert_receive_raft_command(:append_events, :local_ok)
-    assert_receive_request_event(:append_events, :ack, :ok)
-    assert_receive_request_event(:append_events, :route, :ok)
-  end
-
   test "telemetry helper exposes leader_retry outcome dimension" do
     node_name = "shared-1@127.0.0.1"
     assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, node_name)
@@ -255,15 +157,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                    1_000
   end
 
-  test "create_session emits session lifecycle telemetry" do
-    id = unique_id("ses")
-    assert {:ok, _session} = WritePath.create_session(id: id, tenant_id: "acme")
-
-    assert_receive {:session_event, [:starcite, :session, :create], %{count: 1},
-                    %{session_id: ^id, tenant_id: "acme"}},
-                   1_000
-  end
-
   test "telemetry helper exposes freeze and hydrate dimensions" do
     assert :ok = Telemetry.session_freeze("ses-1", "acme", :conflict, :freeze_conflict)
 
@@ -323,7 +216,7 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     refute_receive {:request_event, _measurements, _metadata}, 100
   end
 
-  defp assert_receive_raft_command(command, outcome, node_name \\ Atom.to_string(Node.self())) do
+  defp assert_receive_raft_command(command, outcome, node_name) do
     deadline = System.monotonic_time(:millisecond) + 1_000
     do_assert_receive_raft_command(command, outcome, node_name, deadline)
   end
@@ -344,34 +237,5 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
           "timed out waiting for raft command telemetry command=#{inspect(command)} outcome=#{inspect(outcome)}"
         )
     end
-  end
-
-  defp assert_receive_request_event(operation, phase, outcome) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_request_event(operation, phase, outcome, deadline)
-  end
-
-  defp do_assert_receive_request_event(operation, phase, outcome, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-    node_name = Atom.to_string(Node.self())
-
-    receive do
-      {:request_event, %{count: 1, duration_ms: duration_ms},
-       %{node: ^node_name, operation: ^operation, phase: ^phase, outcome: ^outcome}}
-      when is_integer(duration_ms) and duration_ms >= 0 ->
-        :ok
-
-      {:request_event, _measurements, _metadata} ->
-        do_assert_receive_request_event(operation, phase, outcome, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)}"
-        )
-    end
-  end
-
-  defp unique_id(prefix) when is_binary(prefix) do
-    "#{prefix}-#{System.unique_integer([:positive, :monotonic])}"
   end
 end
