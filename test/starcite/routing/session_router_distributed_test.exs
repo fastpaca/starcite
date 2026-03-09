@@ -88,7 +88,13 @@ defmodule Starcite.Routing.SessionRouterDistributedTest do
 
     stale_assignment = %{owner: peer_a, epoch: 1, status: :active}
 
-    put_assignment(session_id, peer_b, [peer_a, peer_b, Node.self()], 2)
+    put_assignment_record(session_id, %{
+      owner: peer_b,
+      epoch: 2,
+      replicas: [peer_a, peer_b, Node.self()],
+      status: :active,
+      updated_at_ms: System.system_time(:millisecond)
+    })
 
     assert :ok =
              :rpc.call(
@@ -109,6 +115,82 @@ defmodule Starcite.Routing.SessionRouterDistributedTest do
              )
 
     assert {:ok, {:routed, ^peer_b}} =
+             SessionRouter.call(
+               session_id,
+               DistributedRoutingTarget,
+               :dispatch,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: stale_assignment
+             )
+  end
+
+  test "returns ownership_transfer_in_progress when the authoritative assignment is moving",
+       %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "router-dist-moving-#{System.unique_integer([:positive, :monotonic])}"
+    transfer_id = "xfer-#{System.unique_integer([:positive, :monotonic])}"
+
+    stale_assignment = %{owner: peer_a, epoch: 1, status: :active}
+
+    put_assignment_record(session_id, %{
+      owner: peer_a,
+      epoch: 2,
+      replicas: [peer_a, peer_b, Node.self()],
+      status: :moving,
+      target_owner: peer_b,
+      transfer_id: transfer_id,
+      updated_at_ms: System.system_time(:millisecond)
+    })
+
+    assert :ok =
+             :rpc.call(
+               peer_a,
+               Application,
+               :put_env,
+               [:starcite, @response_key, {:redirect, peer_b}],
+               5_000
+             )
+
+    assert {:error, :ownership_transfer_in_progress} =
+             SessionRouter.call(
+               session_id,
+               DistributedRoutingTarget,
+               :dispatch,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: stale_assignment
+             )
+  end
+
+  test "rejects redirect hints when the authoritative assignment is unchanged", %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "router-dist-stale-#{System.unique_integer([:positive, :monotonic])}"
+
+    stale_assignment = %{owner: peer_a, epoch: 1, status: :active}
+
+    put_assignment_record(session_id, %{
+      owner: peer_a,
+      epoch: 1,
+      replicas: [peer_a, peer_b, Node.self()],
+      status: :active,
+      updated_at_ms: System.system_time(:millisecond)
+    })
+
+    assert :ok =
+             :rpc.call(
+               peer_a,
+               Application,
+               :put_env,
+               [:starcite, @response_key, {:redirect, peer_b}],
+               5_000
+             )
+
+    assert {:error, {:routing_rpc_failed, ^peer_a, :stale_assignment}} =
              SessionRouter.call(
                session_id,
                DistributedRoutingTarget,
@@ -246,20 +328,13 @@ defmodule Starcite.Routing.SessionRouterDistributedTest do
     :ok
   end
 
-  defp put_assignment(session_id, owner, replicas, epoch)
-       when is_binary(session_id) and is_atom(owner) and is_list(replicas) and is_integer(epoch) and
-              epoch > 0 do
+  defp put_assignment_record(session_id, assignment)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) do
     assert :ok =
              :khepri.put(
                Store.store_id(),
                [:sessions, session_id],
-               %{
-                 owner: owner,
-                 epoch: epoch,
-                 replicas: replicas,
-                 status: :active,
-                 updated_at_ms: System.system_time(:millisecond)
-               },
+               assignment,
                %{async: false, reply_from: :local, timeout: 5_000}
              )
 
