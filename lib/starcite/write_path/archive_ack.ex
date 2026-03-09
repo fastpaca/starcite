@@ -9,7 +9,6 @@ defmodule Starcite.WritePath.ArchiveAck do
 
   alias Starcite.WritePath
   alias Starcite.WritePath.CommandRouter
-  alias Starcite.DataPlane.RaftAccess
 
   @type ack_archived_entry :: {String.t(), non_neg_integer()}
   @type ack_archived_applied :: %{
@@ -66,7 +65,7 @@ defmodule Starcite.WritePath.ArchiveAck do
   @doc false
   def run_local(entries) when is_list(entries) and entries != [] do
     with [{session_id, _upto_seq} | _rest] <- entries,
-         {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(session_id) do
+         {:ok, server_id, _group} <- CommandRouter.locate_and_ensure_started(session_id) do
       CommandRouter.dispatch_server(server_id, {:ack_archived, entries})
     else
       _ -> {:error, :invalid_archive_ack}
@@ -96,7 +95,7 @@ defmodule Starcite.WritePath.ArchiveAck do
          Enum.reduce(deduped, %{}, fn {session_id, upto_seq}, acc ->
            Map.update(
              acc,
-             RaftAccess.group_for_session(session_id),
+             CommandRouter.group_for_session(session_id),
              [{session_id, upto_seq}],
              &[{session_id, upto_seq} | &1]
            )

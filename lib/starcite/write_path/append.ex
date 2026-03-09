@@ -7,7 +7,7 @@ defmodule Starcite.WritePath.Append do
   the leader's in-memory state.
   """
 
-  alias Starcite.DataPlane.{RaftAccess, SessionStore}
+  alias Starcite.DataPlane.SessionStore
   alias Starcite.Observability.Telemetry
   alias Starcite.WritePath
   alias Starcite.WritePath.CommandRouter
@@ -112,7 +112,7 @@ defmodule Starcite.WritePath.Append do
   end
 
   defp append_local(id, command) when is_binary(id) and id != "" do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(id) do
+    with {:ok, server_id, _group} <- CommandRouter.locate_and_ensure_started(id) do
       append_with_rehydrate(server_id, id, command)
     end
   end
@@ -127,7 +127,7 @@ defmodule Starcite.WritePath.Append do
 
   defp hydrate_and_retry(server_id, session_id, command)
        when is_atom(server_id) and is_binary(session_id) and session_id != "" do
-    case SessionStore.get_archived_session(session_id) do
+    case SessionStore.get_session(session_id) do
       {:ok, hydrated_session} ->
         hydrate_retry(server_id, session_id, hydrated_session, command)
 
