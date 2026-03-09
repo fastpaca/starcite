@@ -7,8 +7,7 @@ defmodule Starcite.Operations.Maintenance do
   def drain_node(node) when is_atom(node) do
     with :ok <- ensure_cluster_node(node),
          :ok <- Store.mark_node_draining(node) do
-      _ = maybe_kick_local_watcher(node)
-      _ = maybe_progress_local_transfers(node)
+      _ = advance_local_drain(node)
       :ok
     end
   end
@@ -22,23 +21,12 @@ defmodule Starcite.Operations.Maintenance do
   end
 
   defp ensure_cluster_node(node) when is_atom(node) do
-    if node in Topology.nodes() do
-      :ok
-    else
-      {:error, :invalid_cluster_node}
-    end
+    if(node in Topology.nodes(), do: :ok, else: {:error, :invalid_cluster_node})
   end
 
-  defp maybe_kick_local_watcher(node) do
+  defp advance_local_drain(node) when is_atom(node) do
     if node == Node.self() do
-      Watcher.run_once()
-    else
-      :ok
-    end
-  end
-
-  defp maybe_progress_local_transfers(node) do
-    if node == Node.self() do
+      _ = Watcher.run_once()
       Watcher.progress_local_transfers()
     else
       :ok

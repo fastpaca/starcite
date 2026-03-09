@@ -15,39 +15,19 @@ defmodule Starcite.Routing.Watcher do
 
   @spec suspect?(node()) :: boolean()
   def suspect?(node) when is_atom(node) do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        try do
-          GenServer.call(__MODULE__, {:suspect?, node}, 250)
-        catch
-          :exit, _reason -> false
-        end
-
-      nil ->
-        false
-    end
+    call_if_running({:suspect?, node}, 250, false)
   end
 
   @spec run_once() :: :ok | {:error, :not_running}
   def run_once do
-    case Process.whereis(__MODULE__) do
-      pid when is_pid(pid) ->
-        try do
-          GenServer.call(__MODULE__, :run_once, 5_000)
-        catch
-          :exit, _reason -> {:error, :not_running}
-        end
-
-      nil ->
-        {:error, :not_running}
-    end
+    call_if_running(:run_once, 5_000, {:error, :not_running})
   end
 
   @spec progress_local_transfers() :: :ok
   def progress_local_transfers do
     case Store.all_assignments(:consistency) do
       {:ok, assignments} ->
-        Enum.each(assignments, &process_assignment/1)
+        progress_transfers(assignments)
         :ok
 
       {:error, _reason} ->
@@ -98,18 +78,18 @@ defmodule Starcite.Routing.Watcher do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp run_tick do
-    :ok = maybe_renew_local_lease()
-    maybe_begin_drain_transfers()
-    maybe_failover_expired_leases()
-    process_assignments()
-    maybe_mark_local_drained()
+    :ok = renew_local_lease()
+    start_drain_transfers()
+    fail_over_expired_leases()
+    reconcile_assignments()
+    mark_local_drained()
     :ok
   end
 
-  defp process_assignments do
+  defp reconcile_assignments do
     case Store.all_assignments(:consistency) do
       {:ok, assignments} ->
-        :ok = progress_local_transfers()
+        :ok = progress_transfers(assignments)
         prune_stale_logs(assignments)
 
       {:error, _reason} ->
@@ -138,7 +118,11 @@ defmodule Starcite.Routing.Watcher do
 
   defp process_assignment(_assignment), do: :ok
 
-  defp maybe_begin_drain_transfers do
+  defp progress_transfers(assignments) when is_map(assignments) do
+    Enum.each(assignments, &process_assignment/1)
+  end
+
+  defp start_drain_transfers do
     if Store.node_status(Node.self()) == :draining do
       _ = Store.start_drain_transfers(Node.self())
     end
@@ -146,14 +130,14 @@ defmodule Starcite.Routing.Watcher do
     :ok
   end
 
-  defp maybe_renew_local_lease do
+  defp renew_local_lease do
     case Store.renew_local_lease() do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
   end
 
-  defp maybe_failover_expired_leases do
+  defp fail_over_expired_leases do
     now_ms = System.system_time(:millisecond)
 
     Store.expired_nodes(now_ms)
@@ -165,7 +149,7 @@ defmodule Starcite.Routing.Watcher do
     :ok
   end
 
-  defp maybe_mark_local_drained do
+  defp mark_local_drained do
     with :draining <- Store.node_status(Node.self()),
          {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} <- Store.drain_status(Node.self()) do
       _ = Store.mark_node_drained(Node.self())
@@ -243,5 +227,20 @@ defmodule Starcite.Routing.Watcher do
   defp schedule_tick(state) when is_map(state) do
     Process.send_after(self(), :tick, @poll_interval_ms)
     state
+  end
+
+  defp call_if_running(message, timeout, fallback)
+       when is_integer(timeout) and timeout > 0 do
+    case Process.whereis(__MODULE__) do
+      pid when is_pid(pid) ->
+        try do
+          GenServer.call(__MODULE__, message, timeout)
+        catch
+          :exit, _reason -> fallback
+        end
+
+      nil ->
+        fallback
+    end
   end
 end

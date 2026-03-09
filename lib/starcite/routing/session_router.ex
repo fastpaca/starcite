@@ -59,7 +59,7 @@ defmodule Starcite.Routing.SessionRouter do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     self_node = Keyword.get(opts, :self, Node.self())
 
-    case assignment_for_owner_check(session_id, opts) do
+    case consistent_assignment(session_id, opts) do
       {:ok, %{owner: ^self_node} = assignment}
       when not is_map_key(assignment, :status) or assignment.status == :active ->
         :ok
@@ -82,7 +82,7 @@ defmodule Starcite.Routing.SessionRouter do
   def local_owner_epoch(session_id, fallback_epoch \\ 0, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_integer(fallback_epoch) and
              fallback_epoch >= 0 and is_list(opts) do
-    case assignment_for_epoch(session_id, opts) do
+    case consistent_assignment(session_id, opts) do
       {:ok, %{epoch: epoch}} when is_integer(epoch) and epoch >= 0 ->
         max(epoch, fallback_epoch)
 
@@ -102,36 +102,20 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
-  defp assignment_for_owner_check(session_id, opts)
-       when is_binary(session_id) and session_id != "" and is_list(opts) do
-    case Keyword.fetch(opts, :assignment) do
-      {:ok, assignment} when is_map(assignment) ->
-        {:ok, assignment}
-
-      _other ->
-        Store.get_assignment(session_id, favor: :consistency)
-    end
-  end
-
-  defp assignment_for_epoch(session_id, opts)
-       when is_binary(session_id) and session_id != "" and is_list(opts) do
-    case Keyword.fetch(opts, :assignment) do
-      {:ok, assignment} when is_map(assignment) ->
-        {:ok, assignment}
-
-      _other ->
-        Store.get_assignment(session_id, favor: :consistency)
-    end
-  end
-
   defp assignment_for_call(session_id, route_opts)
        when is_binary(session_id) and session_id != "" and is_list(route_opts) do
-    case Keyword.fetch(route_opts, :assignment) do
-      {:ok, assignment} when is_map(assignment) ->
-        {:ok, assignment}
+    assignment_or(route_opts, fn -> Store.ensure_assignment(session_id) end)
+  end
 
-      _other ->
-        Store.ensure_assignment(session_id)
+  defp consistent_assignment(session_id, opts)
+       when is_binary(session_id) and session_id != "" and is_list(opts) do
+    assignment_or(opts, fn -> Store.get_assignment(session_id, favor: :consistency) end)
+  end
+
+  defp assignment_or(opts, fallback) when is_list(opts) and is_function(fallback, 0) do
+    case Keyword.fetch(opts, :assignment) do
+      {:ok, assignment} when is_map(assignment) -> {:ok, assignment}
+      _other -> fallback.()
     end
   end
 
@@ -154,12 +138,14 @@ defmodule Starcite.Routing.SessionRouter do
               is_integer(refreshes_remaining) and refreshes_remaining >= 0 do
     self_node = Keyword.get(route_opts, :self, Node.self())
 
-    if owner == self_node do
-      apply(local_module, local_fun, local_args)
-    else
-      if Watcher.suspect?(owner) do
+    cond do
+      owner == self_node ->
+        apply(local_module, local_fun, local_args)
+
+      Watcher.suspect?(owner) ->
         {:error, {:routing_rpc_failed, owner, :suspect}}
-      else
+
+      true ->
         case rpc_call(owner, remote_module, remote_fun, remote_args, route_opts) do
           {:error, {:not_leader, {:session_owner, redirect_owner}}}
           when is_atom(redirect_owner) and redirect_owner != owner and refreshes_remaining > 0 ->
@@ -185,7 +171,6 @@ defmodule Starcite.Routing.SessionRouter do
           other ->
             other
         end
-      end
     end
   end
 
