@@ -92,13 +92,7 @@ defmodule Starcite.Routing.Watcher do
        when is_binary(session_id) and session_id != "" and is_atom(owner) and
               is_atom(target_owner) and is_binary(transfer_id) and transfer_id != "" do
     if owner == Node.self() and target_owner != Node.self() do
-      case handoff_session(session_id, target_owner, transfer_id) do
-        :ok ->
-          :ok
-
-        {:error, _reason} ->
-          :ok
-      end
+      _ = handoff_session(session_id, target_owner, transfer_id)
     end
 
     :ok
@@ -119,10 +113,8 @@ defmodule Starcite.Routing.Watcher do
   end
 
   defp renew_local_lease do
-    case Store.renew_local_lease() do
-      :ok -> :ok
-      {:error, _reason} -> :ok
-    end
+    _ = Store.renew_local_lease()
+    :ok
   end
 
   defp fail_over_expired_leases do
