@@ -25,7 +25,7 @@ defmodule Starcite.Runtime.TestHelper do
       # Cleanup ETS event mirror store (when present)
       clear_event_store()
       clear_session_store()
-      clear_session_owners()
+      clear_session_quorum()
       clear_archive_read_cache()
       reset_repo_sandbox_mode()
 
@@ -121,9 +121,9 @@ defmodule Starcite.Runtime.TestHelper do
     end
   end
 
-  defp clear_session_owners do
-    if Code.ensure_loaded?(Starcite.DataPlane.SessionOwners) do
-      Starcite.DataPlane.SessionOwners.clear()
+  defp clear_session_quorum do
+    if Code.ensure_loaded?(Starcite.DataPlane.SessionQuorum) do
+      Starcite.DataPlane.SessionQuorum.clear()
     end
   end
 

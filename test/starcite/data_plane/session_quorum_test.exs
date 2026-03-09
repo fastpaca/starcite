@@ -1,7 +1,7 @@
-defmodule Starcite.DataPlane.SessionReplicatorTest do
+defmodule Starcite.DataPlane.SessionQuorumTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.SessionReplicator
+  alias Starcite.DataPlane.SessionQuorum
   alias Starcite.Session
 
   setup do
@@ -35,7 +35,7 @@ defmodule Starcite.DataPlane.SessionReplicatorTest do
 
     session = Session.new("ses-repl-local")
 
-    assert :ok = SessionReplicator.replicate_state(session, [])
+    assert :ok = SessionQuorum.replicate_state(session, [])
 
     assert_receive {:session_replication_event, measurements, metadata}, 1_000
     assert measurements.count == 1
@@ -61,7 +61,7 @@ defmodule Starcite.DataPlane.SessionReplicatorTest do
     session = Session.new("ses-repl-missing")
 
     assert {:error, {:replication_quorum_not_met, details}} =
-             SessionReplicator.replicate_state(session, [])
+             SessionQuorum.replicate_state(session, [])
 
     assert details.required_remote_acks == 1
     assert details.successful_remote_acks == 0
@@ -83,11 +83,10 @@ defmodule Starcite.DataPlane.SessionReplicatorTest do
   end
 end
 
-defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
+defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.SessionReplicator
-  alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Session
   alias Starcite.TestSupport.DistributedPeerDataPlane
 
@@ -138,11 +137,11 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
     input = append_input("replicated-producer", 1)
     seed_session = Session.new(session_id)
 
-    assert :ok = SessionReplicator.replicate_state(seed_session, [])
+    assert :ok = SessionQuorum.replicate_state(seed_session, [])
     assert {:appended, updated_session, event} = Session.append_event(seed_session, input)
 
     replicated_session = %Session{updated_session | epoch: 7}
-    assert :ok = SessionReplicator.replicate_state(replicated_session, [event])
+    assert :ok = SessionQuorum.replicate_state(replicated_session, [event])
 
     eventually(fn ->
       assert_peer_session(peer_a, replicated_session)
@@ -152,7 +151,7 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
     end)
   end
 
-  test "owner bootstrap prefers fresher peer state over stale local cache", %{peers: peers} do
+  test "log bootstrap prefers fresher peer state over stale local cache", %{peers: peers} do
     [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-repl-bootstrap-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(session_id)
@@ -166,7 +165,7 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
 
     assert :ok = apply_local_and_replicate(session_one, [event_one])
 
-    assert :ok = :rpc.call(peer_b, SessionOwners, :stop_session, [session_id], 5_000)
+    assert :ok = :rpc.call(peer_b, SessionQuorum, :stop_session, [session_id], 5_000)
     Application.put_env(:starcite, :routing_node_ids, [Node.self(), peer_a])
     Application.put_env(:starcite, :routing_replication_factor, 2)
 
@@ -189,7 +188,7 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
 
     eventually(fn ->
       assert {:ok, ^session_three} =
-               :rpc.call(peer_b, SessionOwners, :get_session, [session_id], 5_000)
+               :rpc.call(peer_b, SessionQuorum, :get_session, [session_id], 5_000)
 
       assert_stored_session(peer_b, session_three)
       assert_peer_events(peer_b, session_id, session_three.epoch, [1, 2, 3])
@@ -256,7 +255,7 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
   end
 
   defp clear_local_data_plane do
-    :ok = SessionOwners.clear()
+    :ok = SessionQuorum.clear()
     :ok = SessionStore.clear()
     :ok = EventStore.clear()
     :ok
@@ -264,7 +263,7 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
 
   defp assert_peer_session(peer_node, %Session{id: session_id} = expected_session)
        when is_atom(peer_node) and is_binary(session_id) do
-    case :rpc.call(peer_node, SessionOwners, :get_session, [session_id], 5_000) do
+    case :rpc.call(peer_node, SessionQuorum, :get_session, [session_id], 5_000) do
       {:ok, %Session{} = actual_session} ->
         assert actual_session == expected_session
 
@@ -298,8 +297,8 @@ defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
   end
 
   defp apply_local_and_replicate(%Session{} = session, events) when is_list(events) do
-    with :ok <- SessionOwners.replicate_state(session, events),
-         :ok <- SessionReplicator.replicate_state(session, events) do
+    with :ok <- SessionQuorum.apply_replica(session, events),
+         :ok <- SessionQuorum.replicate_state(session, events) do
       :ok
     end
   end

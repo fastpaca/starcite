@@ -26,11 +26,11 @@ replay completes.
 The data plane owns session sequencing, replay semantics, hot event retention, and
 async archival.
 
-### Session owners
+### Session logs
 
-One GenServer owner process exists per active session on a node.
+One GenServer log process exists per active session replica on a node.
 
-Owner responsibilities:
+Log responsibilities:
 - Assign monotonic `seq` per session.
 - Enforce producer dedupe and optimistic concurrency (`expected_seq`).
 - Write committed events to hot event store.
@@ -45,7 +45,7 @@ The append hot path is owner-based and does not call Raft.
 sequenceDiagram
     participant C as Client
     participant A as API
-    participant O as SessionOwner
+    participant O as SessionLog
     participant E as EventStore
     participant P as PubSub
 
@@ -91,7 +91,7 @@ graph LR
 ```
 
 A background worker periodically flushes committed hot events to archive storage.
-After a successful flush, it calls archive ack on the session owner, which advances
+After a successful flush, it calls archive ack on the local session log, which advances
 `archived_seq` and evicts archived hot entries.
 
 Archive writes are idempotent. Archiver failures do not block append/tail hot paths.
@@ -114,7 +114,7 @@ not the append state machine and it is not on the per-event hot path.
 
 ## Failure modes
 
-**Session owner crash:** Owner process restarts and rehydrates from session cache.
+**Session log crash:** The local log process restarts and rehydrates from session cache.
 Short blips may return temporary timeout; retries succeed after restart.
 
 **Node failure:** Sessions owned on that node become unavailable until clients

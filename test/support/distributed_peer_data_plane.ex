@@ -1,10 +1,10 @@
 defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   @moduledoc false
 
-  alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
 
-  @registry Starcite.DataPlane.SessionOwnerRegistry
-  @supervisor Starcite.DataPlane.SessionOwnerSupervisor
+  @registry Starcite.DataPlane.SessionLogRegistry
+  @supervisor Starcite.DataPlane.SessionLogSupervisor
 
   def start do
     case Process.whereis(__MODULE__) do
@@ -47,7 +47,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   end
 
   def clear do
-    :ok = SessionOwners.clear()
+    :ok = SessionQuorum.clear()
     :ok = SessionStore.clear()
     :ok = EventStore.clear()
     :ok

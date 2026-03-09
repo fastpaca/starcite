@@ -3,9 +3,9 @@ defmodule Starcite.Archive do
   Pull-based archiver.
 
   - periodically scans local `EventStore` session cursors
-  - archives local in-memory session-owner buffers
+  - archives local in-memory session-log buffers
   - persists batches through `Starcite.Archive.Store`
-  - acknowledges archived progress via session owner (`WritePath.ack_archived_local/2`)
+  - acknowledges archived progress via the local session log (`WritePath.ack_archived_local/2`)
 
   Archive persistence failures are treated as fatal for this worker: the process
   crashes and relies on supervisor restart rather than masking write failures.
@@ -17,7 +17,7 @@ defmodule Starcite.Archive do
   alias Starcite.Routing.SessionRouter
   alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
-  alias Starcite.DataPlane.{EventStore, SessionOwners}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -267,7 +267,7 @@ defmodule Starcite.Archive do
         {:ok, archived_seq, archived_seq_cache}
 
       _ ->
-        with {:ok, archived_seq} <- SessionOwners.fetch_archived_seq(session_id) do
+        with {:ok, archived_seq} <- SessionQuorum.fetch_archived_seq(session_id) do
           {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
         else
           _ -> {:error, :session_lookup_failed}

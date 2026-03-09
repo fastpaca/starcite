@@ -1,32 +1,48 @@
-defmodule Starcite.DataPlane.SessionOwners do
+defmodule Starcite.DataPlane.SessionQuorum do
   @moduledoc """
-  Session-owner process registry and call boundary.
+  Replica-set runtime for one session log.
 
-  This module routes append/ack/query operations to one in-memory owner
-  process per session.
+  `SessionQuorum` is the boundary around per-session `SessionLog` processes.
+  It is responsible for:
+
+  - routing client commands to the local owner log
+  - bootstrapping or restarting local logs when routing epochs change
+  - replicating committed session state to standby logs and waiting for quorum
   """
 
+  alias Starcite.DataPlane.{EventStore, SessionLog, SessionStore}
+  alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
-  alias Starcite.DataPlane.{EventStore, SessionOwner, SessionStore}
   alias Starcite.Session
 
-  @registry Starcite.DataPlane.SessionOwnerRegistry
-  @supervisor Starcite.DataPlane.SessionOwnerSupervisor
-  @call_timeout Application.compile_env(:starcite, :session_owner_call_timeout_ms, 2_000)
+  @registry Starcite.DataPlane.SessionLogRegistry
+  @supervisor Starcite.DataPlane.SessionLogSupervisor
+  @call_timeout Application.compile_env(:starcite, :session_log_call_timeout_ms, 2_000)
   @peer_bootstrap_rpc_timeout_ms Application.compile_env(
                                    :starcite,
-                                   :session_owner_peer_bootstrap_rpc_timeout_ms,
+                                   :session_log_peer_bootstrap_rpc_timeout_ms,
                                    1_000
                                  )
+  @rpc_timeout_ms Application.compile_env(:starcite, :session_quorum_rpc_timeout_ms, 1_000)
+  @max_concurrency Application.compile_env(:starcite, :session_quorum_max_concurrency, 16)
+
+  @type replication_failure :: {node(), term()}
+  @type replication_error ::
+          {:replication_quorum_not_met,
+           %{
+             required_remote_acks: non_neg_integer(),
+             successful_remote_acks: non_neg_integer(),
+             failures: [replication_failure()]
+           }}
 
   @spec start_session(Session.t()) :: :ok | {:error, :session_exists | term()}
   def start_session(%Session{} = session) do
-    case lookup_owner(session.id) do
+    case lookup_log(session.id) do
       {:ok, _pid} ->
         {:error, :session_exists}
 
       :error ->
-        case start_owner(session) do
+        case start_log(session) do
           {:ok, _pid} -> :ok
           {:error, :session_exists} -> {:error, :session_exists}
           {:error, reason} -> {:error, reason}
@@ -38,44 +54,28 @@ defmodule Starcite.DataPlane.SessionOwners do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_event(session_id, input, expected_seq)
       when is_binary(session_id) and session_id != "" and is_map(input) do
-    owner_lookup = lookup_owner(session_id)
+    log_lookup = lookup_log(session_id)
 
     with :ok <- ensure_local_owner(session_id),
-         {:ok, pid} <- ensure_owner_loaded_from_lookup(session_id, owner_lookup),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, {:append_event, input, expected_seq})
+         {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, {:append_event, input, expected_seq})
     end
   end
 
   def append_event(_session_id, _input, _expected_seq), do: {:error, :invalid_event}
-
-  @doc false
-  @spec replicate_state(Session.t(), [map()]) :: :ok | {:error, term()} | {:timeout, term()}
-  def replicate_state(%Session{id: session_id} = session, events)
-      when is_binary(session_id) and session_id != "" and is_list(events) do
-    with {:ok, pid} <- ensure_owner_started(session) do
-      case safe_call(pid, {:replicate_state, session, events}) do
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
-        {:timeout, reason} -> {:timeout, reason}
-        other -> {:error, {:invalid_replication_response, other}}
-      end
-    end
-  end
-
-  def replicate_state(_session, _events), do: {:error, :invalid_event}
 
   @spec append_events(String.t(), [map()], keyword()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_events(session_id, inputs, opts)
       when is_binary(session_id) and session_id != "" and is_list(inputs) and is_list(opts) do
     expected_seq = opts[:expected_seq]
-    owner_lookup = lookup_owner(session_id)
+    log_lookup = lookup_log(session_id)
 
     with :ok <- ensure_local_owner(session_id),
-         {:ok, pid} <- ensure_owner_loaded_from_lookup(session_id, owner_lookup),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, {:append_events, inputs, expected_seq})
+         {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, {:append_events, inputs, expected_seq})
     end
   end
 
@@ -85,12 +85,12 @@ defmodule Starcite.DataPlane.SessionOwners do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(session_id, upto_seq)
       when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and upto_seq >= 0 do
-    owner_lookup = lookup_owner(session_id)
+    log_lookup = lookup_log(session_id)
 
     with :ok <- ensure_local_owner(session_id),
-         {:ok, pid} <- ensure_owner_loaded_from_lookup(session_id, owner_lookup),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, {:ack_archived, upto_seq})
+         {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, {:ack_archived, upto_seq})
     end
   end
 
@@ -99,9 +99,9 @@ defmodule Starcite.DataPlane.SessionOwners do
   @spec get_session(String.t()) ::
           {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
   def get_session(session_id) when is_binary(session_id) and session_id != "" do
-    with {:ok, pid} <- ensure_owner_loaded(session_id),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, :get_session)
+    with {:ok, pid} <- ensure_log_loaded(session_id),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, :get_session)
     end
   end
 
@@ -130,12 +130,12 @@ defmodule Starcite.DataPlane.SessionOwners do
           | {:error, term()}
           | {:timeout, term()}
   def fetch_cursor_snapshot(session_id) when is_binary(session_id) and session_id != "" do
-    owner_lookup = lookup_owner(session_id)
+    log_lookup = lookup_log(session_id)
 
     with :ok <- ensure_local_owner(session_id),
-         {:ok, pid} <- ensure_owner_loaded_from_lookup(session_id, owner_lookup),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, :fetch_cursor_snapshot)
+         {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, :fetch_cursor_snapshot)
     end
   end
 
@@ -144,19 +144,81 @@ defmodule Starcite.DataPlane.SessionOwners do
   @spec fetch_archived_seq(String.t()) ::
           {:ok, non_neg_integer()} | {:error, term()} | {:timeout, term()}
   def fetch_archived_seq(session_id) when is_binary(session_id) and session_id != "" do
-    with {:ok, pid} <- ensure_owner_loaded(session_id),
-         {:ok, current_pid} <- ensure_owner_epoch_current(session_id, pid) do
-      safe_owner_call(session_id, current_pid, :fetch_archived_seq)
+    with {:ok, pid} <- ensure_log_loaded(session_id),
+         {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid) do
+      safe_log_call(session_id, current_pid, :fetch_archived_seq)
     end
   end
 
   def fetch_archived_seq(_session_id), do: {:error, :invalid_session_id}
 
+  @doc false
+  @spec apply_replica(Session.t(), [map()]) :: :ok | {:error, term()} | {:timeout, term()}
+  def apply_replica(%Session{id: session_id} = session, events)
+      when is_binary(session_id) and session_id != "" and is_list(events) do
+    with {:ok, pid} <- ensure_log_started(session) do
+      case safe_call(pid, {:apply_replica, session, events}) do
+        :ok -> :ok
+        {:error, reason} -> {:error, reason}
+        {:timeout, reason} -> {:timeout, reason}
+        other -> {:error, {:invalid_replication_response, other}}
+      end
+    end
+  end
+
+  def apply_replica(_session, _events), do: {:error, :invalid_event}
+
+  @spec replicate_state(Session.t(), [map()]) :: :ok | {:error, replication_error()}
+  def replicate_state(%Session{id: session_id, tenant_id: tenant_id} = session, events)
+      when is_binary(session_id) and session_id != "" and is_list(events) do
+    started_ms = System.monotonic_time(:millisecond)
+    replicas = SessionRouter.replica_nodes(session_id)
+    local_node = Node.self()
+    quorum_size = quorum_size(length(replicas))
+    local_acks = if local_node in replicas, do: 1, else: 0
+    required_remote_acks = max(quorum_size - local_acks, 0)
+    standby_nodes = Enum.reject(replicas, &(&1 == local_node))
+    standby_count = length(standby_nodes)
+
+    {result, successful_remote_acks, failures} =
+      case required_remote_acks do
+        0 ->
+          {:ok, 0, []}
+
+        _other ->
+          {successful_remote_acks, failures} =
+            collect_remote_results_parallel(standby_nodes, session, events)
+
+          finalize_quorum_result(required_remote_acks, successful_remote_acks, failures)
+      end
+
+    duration_ms = max(System.monotonic_time(:millisecond) - started_ms, 0)
+    outcome = if result == :ok, do: :ok, else: :quorum_not_met
+    failure_reason = primary_failure_reason(failures)
+
+    :ok =
+      Telemetry.session_replication(
+        session_id,
+        tenant_id,
+        outcome,
+        duration_ms,
+        standby_count,
+        required_remote_acks,
+        successful_remote_acks,
+        length(failures),
+        failure_reason
+      )
+
+    result
+  end
+
   @spec local_owner?(String.t()) :: boolean()
   def local_owner?(session_id) when is_binary(session_id) and session_id != "" do
-    case lookup_owner(session_id) do
-      {:ok, _pid} -> true
-      :error -> false
+    with {:ok, pid} <- lookup_log(session_id),
+         :owner <- safe_call(pid, :get_role) do
+      true
+    else
+      _other -> false
     end
   end
 
@@ -188,7 +250,7 @@ defmodule Starcite.DataPlane.SessionOwners do
   @doc false
   @spec stop_session(String.t()) :: :ok
   def stop_session(session_id) when is_binary(session_id) and session_id != "" do
-    case lookup_owner(session_id) do
+    case lookup_log(session_id) do
       {:ok, pid} ->
         _ = DynamicSupervisor.terminate_child(@supervisor, pid)
         :ok
@@ -200,24 +262,24 @@ defmodule Starcite.DataPlane.SessionOwners do
 
   def stop_session(_session_id), do: :ok
 
-  defp ensure_owner_loaded(session_id) when is_binary(session_id) and session_id != "" do
-    ensure_owner_loaded_from_lookup(session_id, lookup_owner(session_id))
+  defp ensure_log_loaded(session_id) when is_binary(session_id) and session_id != "" do
+    ensure_log_loaded_from_lookup(session_id, lookup_log(session_id))
   end
 
-  defp ensure_owner_loaded_from_lookup(session_id, {:ok, pid})
+  defp ensure_log_loaded_from_lookup(session_id, {:ok, pid})
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
     {:ok, pid}
   end
 
-  defp ensure_owner_loaded_from_lookup(session_id, :error)
+  defp ensure_log_loaded_from_lookup(session_id, :error)
        when is_binary(session_id) and session_id != "" do
     case load_bootstrap_source(session_id) do
       {:ok, {:local, %Session{} = session}} ->
-        start_owner_from_bootstrap(session_id, session)
+        start_log_from_bootstrap(session_id, session)
 
       {:ok, {:peer, %Session{} = session, events}} ->
         with :ok <- prime_local_bootstrap(session, events) do
-          start_owner_from_bootstrap(session_id, session)
+          start_log_from_bootstrap(session_id, session)
         end
 
       {:error, reason} ->
@@ -225,30 +287,30 @@ defmodule Starcite.DataPlane.SessionOwners do
     end
   end
 
-  defp ensure_owner_started(%Session{id: session_id} = session)
+  defp ensure_log_started(%Session{id: session_id} = session)
        when is_binary(session_id) and session_id != "" do
-    case lookup_owner(session_id) do
+    case lookup_log(session_id) do
       {:ok, pid} ->
         {:ok, pid}
 
       :error ->
-        case start_owner(session) do
+        case start_log(session) do
           {:ok, pid} -> {:ok, pid}
-          {:error, :session_exists} -> lookup_owner(session_id)
+          {:error, :session_exists} -> lookup_log(session_id)
           {:error, reason} -> {:error, reason}
         end
     end
   end
 
-  defp lookup_owner(session_id) when is_binary(session_id) and session_id != "" do
+  defp lookup_log(session_id) when is_binary(session_id) and session_id != "" do
     case Registry.lookup(@registry, session_id) do
       [{pid, _value} | _rest] when is_pid(pid) -> {:ok, pid}
       _ -> :error
     end
   end
 
-  defp start_owner(%Session{} = session) do
-    case DynamicSupervisor.start_child(@supervisor, {SessionOwner, session: session}) do
+  defp start_log(%Session{} = session) do
+    case DynamicSupervisor.start_child(@supervisor, {SessionLog, session: session}) do
       {:ok, pid} when is_pid(pid) ->
         {:ok, pid}
 
@@ -266,27 +328,27 @@ defmodule Starcite.DataPlane.SessionOwners do
     end
   end
 
-  defp start_owner_from_bootstrap(session_id, %Session{} = session)
+  defp start_log_from_bootstrap(session_id, %Session{} = session)
        when is_binary(session_id) and session_id != "" do
-    with {:ok, _pid} <- start_owner(session) do
-      lookup_owner(session_id)
+    with {:ok, _pid} <- start_log(session) do
+      lookup_log(session_id)
     else
-      {:error, :session_exists} -> lookup_owner(session_id)
+      {:error, :session_exists} -> lookup_log(session_id)
       {:error, reason} -> {:error, reason}
     end
   end
 
   defp safe_call(pid, message) when is_pid(pid) do
-    GenServer.call(pid, message, @call_timeout)
+    :gen_statem.call(pid, message, @call_timeout)
   catch
-    :exit, _reason -> {:timeout, :session_owner_unavailable}
+    :exit, _reason -> {:timeout, :session_log_unavailable}
   end
 
-  defp safe_owner_call(session_id, pid, message)
+  defp safe_log_call(session_id, pid, message)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
     case safe_call(pid, message) do
-      {:timeout, :session_owner_unavailable} ->
-        with {:ok, replacement_pid} <- ensure_owner_loaded(session_id) do
+      {:timeout, :session_log_unavailable} ->
+        with {:ok, replacement_pid} <- ensure_log_loaded(session_id) do
           safe_call(replacement_pid, message)
         end
 
@@ -295,24 +357,33 @@ defmodule Starcite.DataPlane.SessionOwners do
     end
   end
 
-  defp ensure_owner_epoch_current(session_id, pid)
+  defp ensure_log_epoch_current(session_id, pid)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    case safe_call(pid, :get_session) do
-      {:ok, %Session{} = session} ->
+    case {safe_call(pid, :get_role), safe_call(pid, :get_session)} do
+      {role, {:ok, %Session{} = session}} when role in [:owner, :follower] ->
         current_epoch =
           SessionRouter.local_owner_epoch(session_id, normalize_epoch(session.epoch))
 
-        if current_epoch > normalize_epoch(session.epoch) do
-          restart_owner_for_epoch(session_id, session, current_epoch)
+        desired_role =
+          case SessionRouter.ensure_local_owner(session_id) do
+            :ok -> :owner
+            _other -> :follower
+          end
+
+        if current_epoch > normalize_epoch(session.epoch) or desired_role != role do
+          restart_log_for_epoch(session_id, session, current_epoch)
         else
           {:ok, pid}
         end
 
-      {:timeout, :session_owner_unavailable} ->
-        ensure_owner_loaded(session_id)
+      {{:timeout, :session_log_unavailable}, _other} ->
+        ensure_log_loaded(session_id)
+
+      {_other, {:timeout, :session_log_unavailable}} ->
+        ensure_log_loaded(session_id)
 
       other ->
-        {:error, {:invalid_session_owner_state, other}}
+        {:error, {:invalid_session_log_state, other}}
     end
   end
 
@@ -437,8 +508,7 @@ defmodule Starcite.DataPlane.SessionOwners do
 
     length(events) == expected_count and
       Enum.reduce_while(events, archived_seq, fn
-        %{seq: seq} = event, previous_seq
-        when is_integer(seq) and seq == previous_seq + 1 ->
+        %{seq: seq} = event, previous_seq when is_integer(seq) and seq == previous_seq + 1 ->
           case Map.get(event, :epoch) do
             nil ->
               {:cont, seq}
@@ -464,7 +534,7 @@ defmodule Starcite.DataPlane.SessionOwners do
     if fresher_session?(incoming, current), do: snapshot, else: current_snapshot
   end
 
-  defp restart_owner_for_epoch(session_id, %Session{} = session, target_epoch)
+  defp restart_log_for_epoch(session_id, %Session{} = session, target_epoch)
        when is_binary(session_id) and session_id != "" and is_integer(target_epoch) and
               target_epoch >= 0 do
     case freshest_peer_bootstrap(session_id) do
@@ -474,13 +544,13 @@ defmodule Starcite.DataPlane.SessionOwners do
 
           :ok = stop_session(session_id)
           :ok = prime_local_bootstrap(refreshed_session, events)
-          start_owner_from_bootstrap(session_id, refreshed_session)
+          start_log_from_bootstrap(session_id, refreshed_session)
         else
-          restart_owner_from_local_session(session_id, session, target_epoch)
+          restart_log_from_local_session(session_id, session, target_epoch)
         end
 
       _other ->
-        restart_owner_from_local_session(session_id, session, target_epoch)
+        restart_log_from_local_session(session_id, session, target_epoch)
     end
   end
 
@@ -495,14 +565,14 @@ defmodule Starcite.DataPlane.SessionOwners do
     %Session{session | epoch: max(normalize_epoch(session.epoch), epoch)}
   end
 
-  defp restart_owner_from_local_session(session_id, %Session{} = session, target_epoch)
+  defp restart_log_from_local_session(session_id, %Session{} = session, target_epoch)
        when is_binary(session_id) and session_id != "" and is_integer(target_epoch) and
               target_epoch >= 0 do
     refreshed_session = session_with_epoch(session, target_epoch)
 
     :ok = stop_session(session_id)
     :ok = SessionStore.put_session(refreshed_session)
-    start_owner_from_bootstrap(session_id, refreshed_session)
+    start_log_from_bootstrap(session_id, refreshed_session)
   end
 
   defp replace_local_pending_events(%Session{id: session_id, tenant_id: tenant_id}, events)
@@ -526,6 +596,125 @@ defmodule Starcite.DataPlane.SessionOwners do
         :ok
     end
   end
+
+  defp collect_remote_results_parallel(standby_nodes, session, events)
+       when is_list(standby_nodes) and is_struct(session, Session) and is_list(events) do
+    standby_nodes
+    |> Task.async_stream(
+      fn standby_node ->
+        {standby_node, replicate_to_standby(standby_node, session, events)}
+      end,
+      ordered: false,
+      timeout: @rpc_timeout_ms,
+      on_timeout: :kill_task,
+      max_concurrency: max_concurrency(length(standby_nodes))
+    )
+    |> Enum.reduce({0, []}, fn result, {acks, failures} ->
+      case result_to_ack_result(result) do
+        {:ack, _node} ->
+          {acks + 1, failures}
+
+        {:fail, failure} ->
+          {acks, [failure | failures]}
+      end
+    end)
+  end
+
+  defp replicate_to_standby(standby_node, session, events)
+       when is_atom(standby_node) and is_struct(session, Session) and is_list(events) do
+    case :rpc.call(
+           standby_node,
+           __MODULE__,
+           :apply_replica,
+           [session, events],
+           @rpc_timeout_ms
+         ) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
+
+      {:timeout, reason} ->
+        {:error, {:timeout, reason}}
+
+      {:badrpc, reason} ->
+        {:error, {:badrpc, reason}}
+
+      other ->
+        {:error, {:unexpected_response, other}}
+    end
+  end
+
+  defp result_to_ack_result({:ok, {standby_node, :ok}}) when is_atom(standby_node) do
+    {:ack, standby_node}
+  end
+
+  defp result_to_ack_result({:ok, {standby_node, {:error, reason}}})
+       when is_atom(standby_node) do
+    {:fail, {standby_node, {:error, reason}}}
+  end
+
+  defp result_to_ack_result({:exit, reason}) do
+    {:fail, {:unknown, {:error, {:task_exit, reason}}}}
+  end
+
+  defp result_to_ack_result(other) do
+    {:fail, {:unknown, {:error, {:task_error, other}}}}
+  end
+
+  defp quorum_size(replica_count) when is_integer(replica_count) and replica_count > 0 do
+    div(replica_count, 2) + 1
+  end
+
+  defp quorum_size(_replica_count), do: 1
+
+  defp finalize_quorum_result(required_remote_acks, successful_remote_acks, failures)
+       when is_integer(required_remote_acks) and required_remote_acks >= 0 and
+              is_integer(successful_remote_acks) and successful_remote_acks >= 0 and
+              is_list(failures) do
+    if successful_remote_acks >= required_remote_acks do
+      {:ok, successful_remote_acks, failures}
+    else
+      error =
+        {:error,
+         {:replication_quorum_not_met,
+          %{
+            required_remote_acks: required_remote_acks,
+            successful_remote_acks: successful_remote_acks,
+            failures: Enum.reverse(failures)
+          }}}
+
+      {error, successful_remote_acks, failures}
+    end
+  end
+
+  defp max_concurrency(standby_count)
+       when is_integer(standby_count) and standby_count >= 0 do
+    configured =
+      case @max_concurrency do
+        value when is_integer(value) and value > 0 -> value
+        _ -> 1
+      end
+
+    max(1, min(configured, max(standby_count, 1)))
+  end
+
+  defp primary_failure_reason([]), do: :none
+
+  defp primary_failure_reason([{_node, {:error, {:badrpc, _reason}}} | _]), do: :badrpc
+  defp primary_failure_reason([{_node, {:error, {:timeout, _reason}}} | _]), do: :timeout
+
+  defp primary_failure_reason([{_node, {:error, {:unexpected_response, _response}}} | _]),
+    do: :unexpected_response
+
+  defp primary_failure_reason([{_node, {:error, {:task_exit, _reason}}} | _]), do: :task_exit
+  defp primary_failure_reason([{_node, {:error, {:task_error, _reason}}} | _]), do: :task_error
+  defp primary_failure_reason([{_node, {:error, reason}} | _]) when is_atom(reason), do: reason
+  defp primary_failure_reason([{_node, {:error, _reason}} | _]), do: :error
+  defp primary_failure_reason([{_node, {:badrpc, _reason}} | _]), do: :badrpc
+  defp primary_failure_reason([{_node, reason} | _]) when is_atom(reason), do: reason
+  defp primary_failure_reason([_ | _]), do: :error
 
   defp fresher_session?(%Session{} = incoming, %Session{} = current) do
     incoming_epoch = normalize_epoch(incoming.epoch)

@@ -6,7 +6,7 @@ defmodule Starcite.RuntimeTest do
   alias Starcite.Auth.Principal
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Archive.Store
-  alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Session
   alias Starcite.Repo
 
@@ -98,7 +98,7 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses")
       assert {:error, _reason} = WritePath.create_session(id: id, tenant_id: "acme")
 
-      refute SessionOwners.local_owner?(id)
+      refute SessionQuorum.local_owner?(id)
       assert :error == SessionStore.get_session_cached(id)
       assert {:error, :session_not_found} = ReadPath.get_session(id)
     end
@@ -396,7 +396,7 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
-  describe "session owner recovery" do
+  describe "session log recovery" do
     test "recovers state after owner crash and restart" do
       id = unique_id("ses-failover")
 
@@ -412,7 +412,7 @@ defmodule Starcite.RuntimeTest do
 
         assert first.seq == 1
 
-        [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionOwnerRegistry, id)
+        [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
 
         ref = Process.monitor(pid)
         Process.exit(pid, :kill)
@@ -420,14 +420,14 @@ defmodule Starcite.RuntimeTest do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
-          2_000 -> flunk("session owner did not die")
+          2_000 -> flunk("session log did not die")
         end
 
         eventually(
           fn ->
             assert match?(
                      [{owner_pid, _}] when is_pid(owner_pid),
-                     Registry.lookup(Starcite.DataPlane.SessionOwnerRegistry, id)
+                     Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
                    )
           end,
           timeout: 3_000

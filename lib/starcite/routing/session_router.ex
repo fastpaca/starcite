@@ -8,10 +8,10 @@ defmodule Starcite.Routing.SessionRouter do
   alias Starcite.Routing.ReplicaRouter
   alias Starcite.Routing.LeaseManager
 
-  @owner_probe_timeout_ms Application.compile_env(:starcite, :session_owner_probe_timeout_ms, 50)
+  @owner_probe_timeout_ms Application.compile_env(:starcite, :session_log_probe_timeout_ms, 50)
   @owner_epoch_probe_timeout_ms Application.compile_env(
                                   :starcite,
-                                  :session_owner_epoch_probe_timeout_ms,
+                                  :session_log_epoch_probe_timeout_ms,
                                   50
                                 )
 
