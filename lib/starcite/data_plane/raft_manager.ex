@@ -15,6 +15,7 @@ defmodule Starcite.DataPlane.RaftManager do
   alias Starcite.DataPlane.RaftFSM
   @server_ids_cache_key {__MODULE__, :server_ids}
   @cluster_names_cache_key {__MODULE__, :cluster_names}
+  @replicas_cache_key {__MODULE__, :replicas}
   @ra_runtime_start_wait_attempts 20
   @ra_runtime_start_wait_sleep_ms 50
   @group_election_timeout_ms 500
@@ -107,17 +108,12 @@ defmodule Starcite.DataPlane.RaftManager do
   @doc "Determine the static write replicas for a group."
   @spec replicas_for_group(non_neg_integer()) :: [node()]
   def replicas_for_group(group_id) when is_integer(group_id) and group_id >= 0 do
-    nodes = write_nodes()
-    factor = replication_factor()
-
-    nodes
-    |> Enum.map(fn node ->
-      score = :erlang.phash2({group_id, node})
-      {score, node}
-    end)
-    |> Enum.sort()
-    |> Enum.take(factor)
-    |> Enum.map(fn {_score, node} -> node end)
+    if group_id < num_groups() do
+      replica_sets()
+      |> elem(group_id)
+    else
+      raise ArgumentError, "invalid group_id: #{inspect(group_id)}"
+    end
   end
 
   @doc "Check if this node should host the given group."
@@ -332,6 +328,36 @@ defmodule Starcite.DataPlane.RaftManager do
 
   defp cluster_names do
     build_cached_group_atoms(@cluster_names_cache_key, "raft_cluster_")
+  end
+
+  defp replica_sets do
+    total_groups = num_groups()
+    nodes = write_nodes()
+    factor = replication_factor()
+    cache_key = {total_groups, nodes, factor}
+
+    case :persistent_term.get(@replicas_cache_key, :undefined) do
+      {^cache_key, cached} when is_tuple(cached) ->
+        cached
+
+      _ ->
+        computed =
+          0..(total_groups - 1)
+          |> Enum.map(fn group_id ->
+            nodes
+            |> Enum.map(fn node ->
+              score = :erlang.phash2({group_id, node})
+              {score, node}
+            end)
+            |> Enum.sort()
+            |> Enum.take(factor)
+            |> Enum.map(fn {_score, node} -> node end)
+          end)
+          |> List.to_tuple()
+
+        :persistent_term.put(@replicas_cache_key, {cache_key, computed})
+        computed
+    end
   end
 
   defp build_cached_group_atoms(cache_key, prefix)

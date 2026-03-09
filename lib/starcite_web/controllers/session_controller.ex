@@ -52,32 +52,43 @@ defmodule StarciteWeb.SessionController do
   def append(conn, %{"id" => id} = params) do
     measure_append_request(fn ->
       with {:ok, auth} <- fetch_auth(conn) do
-        with :ok <- Policy.allowed_to_access_session(auth, id),
-             :ok <- authorize_append(auth, id),
-             {:ok, event, expected_seq} <- validate_append(params, auth),
-             {:ok, reply} <- append_event(id, event, expected_seq) do
-          :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
-
+        with {:ok, reply} <- append_api(auth, id, params) do
           conn
           |> put_status(:created)
           |> json(reply)
-        else
-          error ->
-            :ok =
-              Telemetry.ingest_edge(
-                :append_event,
-                auth.principal.tenant_id,
-                :error,
-                ingest_edge_error_reason(error)
-              )
-
-            error
         end
       end
     end)
   end
 
   def append(_conn, _params), do: {:error, :invalid_event}
+
+  @doc false
+  @spec append_api(Context.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
+  def append_api(%Context{} = auth, id, params)
+      when is_binary(id) and id != "" and is_map(params) do
+    with :ok <- Policy.allowed_to_access_session(auth, id),
+         :ok <- authorize_append(auth, id),
+         {:ok, event, expected_seq} <- validate_append(params, auth),
+         {:ok, reply} <- append_event(id, event, expected_seq) do
+      :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
+      {:ok, reply}
+    else
+      error ->
+        :ok =
+          Telemetry.ingest_edge(
+            :append_event,
+            auth.principal.tenant_id,
+            :error,
+            ingest_edge_error_reason(error)
+          )
+
+        error
+    end
+  end
+
+  def append_api(_auth, _id, _params), do: {:error, :invalid_event}
 
   defp append_event(id, event, nil), do: WritePath.append_event(id, event)
 
@@ -101,6 +112,9 @@ defmodule StarciteWeb.SessionController do
   defp ingest_edge_error_reason({:timeout, _leader}), do: :timeout
   defp ingest_edge_error_reason({:error, {:timeout, _leader}}), do: :timeout
   defp ingest_edge_error_reason({:error, {:no_available_replicas, _failures}}), do: :unavailable
+
+  defp ingest_edge_error_reason({:error, {:replication_quorum_not_met, _details}}),
+    do: :unavailable
 
   defp ingest_edge_error_reason({:error, reason})
        when reason in [:archive_read_unavailable, :event_gap_detected, :event_store_backpressure],
@@ -134,8 +148,11 @@ defmodule StarciteWeb.SessionController do
 
   defp ingest_edge_error_reason({:error, reason}) when is_atom(reason), do: reason
 
+  # Keep the no-auth path free of per-append read/route overhead.
+  defp authorize_append(%Context{kind: :none}, _id), do: :ok
+
   defp authorize_append(%Context{} = auth, id) when is_binary(id) and id != "" do
-    with {:ok, session} <- ReadPath.get_session(id),
+    with {:ok, session} <- ReadPath.get_session_routed(id, true),
          :ok <- Policy.allowed_to_append_session(auth, session) do
       :ok
     end

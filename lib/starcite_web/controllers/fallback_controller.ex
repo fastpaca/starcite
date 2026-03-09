@@ -44,15 +44,42 @@ defmodule StarciteWeb.FallbackController do
   end
 
   def call(conn, {:timeout, _leader}) do
-    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
+    error(
+      conn,
+      :service_unavailable,
+      "routing_timeout",
+      "Control-plane routing request timed out"
+    )
   end
 
   def call(conn, {:error, {:timeout, _leader}}) do
-    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
+    error(
+      conn,
+      :service_unavailable,
+      "routing_timeout",
+      "Control-plane routing request timed out"
+    )
   end
 
   def call(conn, {:error, {:no_available_replicas, _failures}}) do
-    error(conn, :service_unavailable, "raft_unavailable", "No available replicas")
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
+  def call(conn, {:error, {:replication_quorum_not_met, _details}}) do
+    error(
+      conn,
+      :service_unavailable,
+      "replication_unavailable",
+      "In-memory replication quorum was not met"
+    )
+  end
+
+  def call(conn, {:error, :not_leader}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No active owner for session group")
+  end
+
+  def call(conn, {:error, {:not_leader, _leader}}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No active owner for session group")
   end
 
   def call(conn, {:error, :archive_read_unavailable}) do
