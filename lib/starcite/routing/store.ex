@@ -16,7 +16,7 @@ defmodule Starcite.Routing.Store do
 
   require Logger
 
-  alias Starcite.Routing.Topology
+  alias Starcite.Routing.{Policy, Topology}
 
   @dialyzer {:nowarn_function,
              [
@@ -107,6 +107,8 @@ defmodule Starcite.Routing.Store do
 
     with {:ok, assignments} <- all_assignments(:consistency),
          {:ok, node_records} <- all_node_records(:consistency) do
+      ready_nodes = ready_node_list(node_records, started_at_ms)
+
       {started, _counts} =
         assignments
         |> Enum.filter(fn {_session_id, assignment} ->
@@ -114,7 +116,7 @@ defmodule Starcite.Routing.Store do
         end)
         |> Enum.reduce({0, effective_session_counts(assignments)}, fn {session_id, assignment},
                                                                       {acc, counts} ->
-          case next_owner(assignment, owner_node, node_records, counts, started_at_ms) do
+          case Policy.next_owner(assignment, owner_node, ready_nodes, counts) do
             nil ->
               {acc, counts}
 
@@ -177,12 +179,14 @@ defmodule Starcite.Routing.Store do
 
     with {:ok, assignments} <- all_assignments(:consistency),
          {:ok, node_records} <- all_node_records(:consistency) do
+      ready_nodes = ready_node_list(node_records, failed_at_ms)
+
       {moved, _counts} =
         assignments
         |> Enum.filter(fn {_session_id, assignment} -> assignment.owner == owner_node end)
         |> Enum.reduce({0, effective_session_counts(assignments)}, fn {session_id, assignment},
                                                                       {acc, counts} ->
-          case failover_target(assignment, owner_node, node_records, counts, failed_at_ms) do
+          case Policy.failover_target(assignment, owner_node, ready_nodes, counts) do
             nil ->
               {acc, counts}
 
@@ -507,10 +511,7 @@ defmodule Starcite.Routing.Store do
            normalize_get_assignment(do_get_assignment_local(session_id, :consistency)),
          :ok <- ensure_matching_transfer(current, transfer_id),
          {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
-      ready_nodes =
-        node_records
-        |> eligible_ready_nodes(committed_at_ms)
-        |> Enum.map(fn {node, _record} -> node end)
+      ready_nodes = ready_node_list(node_records, committed_at_ms)
 
       next =
         current
@@ -520,7 +521,12 @@ defmodule Starcite.Routing.Store do
         |> Map.put(:updated_at_ms, committed_at_ms)
         |> Map.put(
           :replicas,
-          rebalance_replicas(current.replicas, current.target_owner, ready_nodes)
+          Policy.rebalance_replicas(
+            current.replicas,
+            current.target_owner,
+            ready_nodes,
+            Topology.replication_factor()
+          )
         )
         |> Map.delete(:target_owner)
         |> Map.delete(:transfer_id)
@@ -654,10 +660,7 @@ defmodule Starcite.Routing.Store do
       when is_binary(session_id) and session_id != "" and is_map(current) and is_atom(target_node) and
              is_integer(failed_at_ms) and failed_at_ms >= 0 do
     with {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
-      ready_nodes =
-        node_records
-        |> eligible_ready_nodes(failed_at_ms)
-        |> Enum.map(fn {node, _record} -> node end)
+      ready_nodes = ready_node_list(node_records, failed_at_ms)
 
       next =
         current
@@ -665,7 +668,15 @@ defmodule Starcite.Routing.Store do
         |> Map.put(:epoch, current.epoch + 1)
         |> Map.put(:status, :active)
         |> Map.put(:updated_at_ms, failed_at_ms)
-        |> Map.put(:replicas, rebalance_replicas(current.replicas, target_node, ready_nodes))
+        |> Map.put(
+          :replicas,
+          Policy.rebalance_replicas(
+            current.replicas,
+            target_node,
+            ready_nodes,
+            Topology.replication_factor()
+          )
+        )
         |> Map.delete(:target_owner)
         |> Map.delete(:transfer_id)
 
@@ -709,117 +720,19 @@ defmodule Starcite.Routing.Store do
 
   defp choose_claim_nodes(assignments, node_records, now_ms)
        when is_map(assignments) and is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
-    desired = Topology.replication_factor()
-    counts = effective_session_counts(assignments)
-
-    candidates =
-      node_records
-      |> eligible_ready_nodes(now_ms)
-      |> Enum.sort_by(fn {node, _record} ->
-        {Map.get(counts, node, 0), Atom.to_string(node)}
-      end)
-      |> Enum.map(fn {node, _record} -> node end)
-
-    case candidates do
-      [] ->
-        {:error, :no_ready_cluster_nodes}
-
-      nodes when length(nodes) < desired ->
-        {:error, :no_ready_cluster_nodes}
-
-      nodes ->
-        {:ok, Enum.take(nodes, desired)}
-    end
+    Policy.choose_claim_nodes(
+      assignments,
+      ready_node_list(node_records, now_ms),
+      Topology.replication_factor()
+    )
   end
 
   defp effective_session_counts(assignments) when is_map(assignments) do
-    Enum.reduce(assignments, %{}, fn
-      {_session_id, %{owner: owner, status: :moving, target_owner: target_owner}}, acc
-      when is_atom(owner) and is_atom(target_owner) ->
-        acc
-        |> Map.update(owner, 1, &(&1 + 1))
-        |> Map.update(target_owner, 1, &(&1 + 1))
-
-      {_session_id, %{owner: owner}}, acc when is_atom(owner) ->
-        Map.update(acc, owner, 1, &(&1 + 1))
-
-      _other, acc ->
-        acc
-    end)
+    Policy.session_counts(assignments)
   end
 
   defp increment_session_count(counts, node) when is_map(counts) and is_atom(node) do
     Map.update(counts, node, 1, &(&1 + 1))
-  end
-
-  defp next_owner(%{replicas: replicas}, owner_node, node_records, counts, now_ms)
-       when is_list(replicas) and is_atom(owner_node) and is_map(node_records) and
-              is_map(counts) and is_integer(now_ms) and now_ms >= 0 do
-    ready = ready_node_set(node_records, now_ms)
-
-    case choose_least_loaded_node(
-           Enum.filter(replicas, &(&1 != owner_node and MapSet.member?(ready, &1))),
-           counts
-         ) do
-      nil ->
-        node_records
-        |> eligible_ready_nodes(now_ms)
-        |> Enum.map(fn {node, _record} -> node end)
-        |> Enum.reject(&(&1 == owner_node))
-        |> choose_least_loaded_node(counts)
-
-      target_node ->
-        target_node
-    end
-  end
-
-  defp failover_target(
-         %{status: :moving, target_owner: target_owner},
-         owner_node,
-         node_records,
-         counts,
-         now_ms
-       )
-       when is_atom(owner_node) and is_atom(target_owner) and is_map(node_records) and
-              is_map(counts) and is_integer(now_ms) and now_ms >= 0 do
-    ready = ready_node_set(node_records, now_ms)
-
-    if target_owner != owner_node and MapSet.member?(ready, target_owner) do
-      target_owner
-    else
-      next_owner(%{replicas: Map.keys(node_records)}, owner_node, node_records, counts, now_ms)
-    end
-  end
-
-  defp failover_target(assignment, owner_node, node_records, counts, now_ms)
-       when is_map(assignment) and is_atom(owner_node) and is_map(node_records) and
-              is_map(counts) and is_integer(now_ms) and now_ms >= 0 do
-    next_owner(assignment, owner_node, node_records, counts, now_ms)
-  end
-
-  defp rebalance_replicas(current_replicas, target_owner, ready_nodes)
-       when is_list(current_replicas) and is_atom(target_owner) and is_list(ready_nodes) do
-    replicas =
-      [target_owner | Enum.filter(current_replicas, &(&1 != target_owner and &1 in ready_nodes))]
-      |> Enum.uniq()
-
-    desired = Topology.replication_factor()
-
-    if length(replicas) >= desired do
-      Enum.take(replicas, desired)
-    else
-      additional = ready_nodes |> Enum.reject(&(&1 in replicas))
-
-      (replicas ++ additional)
-      |> Enum.uniq()
-      |> Enum.take(desired)
-    end
-  end
-
-  defp choose_least_loaded_node(nodes, counts) when is_list(nodes) and is_map(counts) do
-    nodes
-    |> Enum.sort_by(fn node -> {Map.get(counts, node, 0), Atom.to_string(node)} end)
-    |> List.first()
   end
 
   defp mutate_node_record(node, updated_at_ms, updater, attempt \\ 0)
@@ -899,12 +812,11 @@ defmodule Starcite.Routing.Store do
     end)
   end
 
-  defp ready_node_set(node_records, now_ms)
+  defp ready_node_list(node_records, now_ms)
        when is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
     node_records
     |> eligible_ready_nodes(now_ms)
     |> Enum.map(fn {node, _record} -> node end)
-    |> MapSet.new()
   end
 
   defp new_transfer_id do

@@ -32,20 +32,23 @@ defmodule Starcite.Routing.SessionRouter do
         local_module,
         local_fun,
         local_args,
-        _route_opts \\ []
+        route_opts \\ []
       )
       when is_binary(session_id) and session_id != "" and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
-             is_atom(local_fun) and is_list(local_args) do
-    with {:ok, assignment} <- Store.ensure_assignment(session_id) do
+             is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
+    with {:ok, assignment} <- assignment_for_call(session_id, route_opts) do
       dispatch_to_owner(
+        session_id,
         assignment.owner,
         remote_module,
         remote_fun,
         remote_args,
         local_module,
         local_fun,
-        local_args
+        local_args,
+        route_opts,
+        1
       )
     end
   end
@@ -121,28 +124,60 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
+  defp assignment_for_call(session_id, route_opts)
+       when is_binary(session_id) and session_id != "" and is_list(route_opts) do
+    case Keyword.fetch(route_opts, :assignment) do
+      {:ok, assignment} when is_map(assignment) ->
+        {:ok, assignment}
+
+      _other ->
+        Store.ensure_assignment(session_id)
+    end
+  end
+
   defp dispatch_to_owner(
+         session_id,
          owner,
          remote_module,
          remote_fun,
          remote_args,
          local_module,
          local_fun,
-         local_args
+         local_args,
+         route_opts,
+         refreshes_remaining
        )
-       when is_atom(owner) and is_atom(remote_module) and is_atom(remote_fun) and
-              is_list(remote_args) and is_atom(local_module) and is_atom(local_fun) and
-              is_list(local_args) do
-    if owner == Node.self() do
+       when is_binary(session_id) and session_id != "" and is_atom(owner) and
+              is_atom(remote_module) and
+              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
+              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) and
+              is_integer(refreshes_remaining) and refreshes_remaining >= 0 do
+    self_node = Keyword.get(route_opts, :self, Node.self())
+
+    if owner == self_node do
       apply(local_module, local_fun, local_args)
     else
       if Watcher.suspect?(owner) do
         {:error, {:routing_rpc_failed, owner, :suspect}}
       else
-        case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
+        case rpc_call(owner, remote_module, remote_fun, remote_args, route_opts) do
           {:error, {:not_leader, {:session_owner, redirect_owner}}}
-          when is_atom(redirect_owner) and redirect_owner != owner ->
-            reroute_to_redirect(redirect_owner, remote_module, remote_fun, remote_args)
+          when is_atom(redirect_owner) and redirect_owner != owner and refreshes_remaining > 0 ->
+            reroute_to_assignment(
+              session_id,
+              owner,
+              remote_module,
+              remote_fun,
+              remote_args,
+              local_module,
+              local_fun,
+              local_args,
+              route_opts,
+              refreshes_remaining - 1
+            )
+
+          {:error, {:not_leader, {:session_owner, _redirect_owner}}} ->
+            {:error, {:routing_rpc_failed, owner, :stale_assignment}}
 
           {:badrpc, reason} ->
             {:error, {:routing_rpc_failed, owner, reason}}
@@ -154,12 +189,69 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
-  defp reroute_to_redirect(owner, remote_module, remote_fun, remote_args)
+  defp reroute_to_assignment(
+         session_id,
+         previous_owner,
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args,
+         route_opts,
+         refreshes_remaining
+       )
+       when is_binary(session_id) and session_id != "" and is_atom(previous_owner) and
+              is_atom(remote_module) and is_atom(remote_fun) and is_list(remote_args) and
+              is_atom(local_module) and is_atom(local_fun) and is_list(local_args) and
+              is_list(route_opts) and is_integer(refreshes_remaining) and
+              refreshes_remaining >= 0 do
+    case refresh_assignment(session_id, route_opts) do
+      {:ok, %{status: :moving}} ->
+        {:error, :ownership_transfer_in_progress}
+
+      {:ok, %{owner: owner}} when is_atom(owner) and owner != previous_owner ->
+        dispatch_to_owner(
+          session_id,
+          owner,
+          remote_module,
+          remote_fun,
+          remote_args,
+          local_module,
+          local_fun,
+          local_args,
+          route_opts,
+          refreshes_remaining
+        )
+
+      {:ok, %{owner: ^previous_owner}} ->
+        {:error, {:routing_rpc_failed, previous_owner, :stale_assignment}}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp refresh_assignment(session_id, route_opts)
+       when is_binary(session_id) and session_id != "" and is_list(route_opts) do
+    case Keyword.fetch(route_opts, :assignment_fetcher) do
+      {:ok, assignment_fetcher} when is_function(assignment_fetcher, 1) ->
+        assignment_fetcher.(session_id)
+
+      _other ->
+        Store.get_assignment(session_id, favor: :consistency)
+    end
+  end
+
+  defp rpc_call(owner, remote_module, remote_fun, remote_args, route_opts)
        when is_atom(owner) and is_atom(remote_module) and is_atom(remote_fun) and
-              is_list(remote_args) do
-    case :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms) do
-      {:badrpc, reason} -> {:error, {:routing_rpc_failed, owner, reason}}
-      other -> other
+              is_list(remote_args) and is_list(route_opts) do
+    case Keyword.fetch(route_opts, :rpc_fun) do
+      {:ok, rpc_fun} when is_function(rpc_fun, 4) ->
+        rpc_fun.(owner, remote_module, remote_fun, remote_args)
+
+      _other ->
+        :rpc.call(owner, remote_module, remote_fun, remote_args, @rpc_timeout_ms)
     end
   end
 end
