@@ -371,6 +371,7 @@ defmodule StarciteWeb.TailSocket do
     |> DateTime.to_iso8601()
   end
 
+  defp iso8601_utc(datetime) when is_binary(datetime), do: datetime
   defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
 
   defp measure_read(operation, fun)
