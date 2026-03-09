@@ -412,18 +412,11 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_assignment(session_id, favor)
        when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
-    with {:ok, result} <- local_call(:get_assignment, [session_id, favor]) do
-      normalize_get_assignment(result)
+    case local_call(:get_assignment, [session_id, favor]) do
+      {:ok, result} -> assignment_from_khepri(result)
+      {:error, reason} -> {:error, reason}
     end
   end
-
-  defp normalize_get_assignment({:ok, assignment}) when is_map(assignment), do: {:ok, assignment}
-
-  defp normalize_get_assignment({:error, reason}) do
-    if missing_node_error?(reason), do: {:error, :not_found}, else: {:error, reason}
-  end
-
-  defp normalize_get_assignment(other), do: {:error, {:invalid_assignment_lookup, other}}
 
   def do_get_assignment_local(session_id, favor)
       when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
@@ -439,9 +432,10 @@ defmodule Starcite.Routing.Store do
 
       {:error, reason} ->
         if missing_node_error?(reason) do
-          with {:ok, assignments} <- normalize_assignments(do_all_assignments_local(:consistency)),
+          with {:ok, assignments} <-
+                 assignments_from_khepri(do_all_assignments_local(:consistency)),
                {:ok, node_records} <-
-                 normalize_node_records(do_all_node_records_local(:consistency)),
+                 node_records_from_khepri(do_all_node_records_local(:consistency)),
                {:ok, [owner | _rest] = replicas} <-
                  Policy.choose_claim_nodes(
                    assignments,
@@ -468,7 +462,7 @@ defmodule Starcite.Routing.Store do
 
               {:error, reason} ->
                 if mismatching_node_error?(reason) do
-                  normalize_get_assignment(do_get_assignment_local(session_id, :consistency))
+                  assignment_from_khepri(do_get_assignment_local(session_id, :consistency))
                 else
                   {:error, reason}
                 end
@@ -503,9 +497,9 @@ defmodule Starcite.Routing.Store do
       when is_binary(session_id) and session_id != "" and is_binary(transfer_id) and
              transfer_id != "" and is_integer(committed_at_ms) and committed_at_ms >= 0 do
     with {:ok, current} <-
-           normalize_get_assignment(do_get_assignment_local(session_id, :consistency)),
+           assignment_from_khepri(do_get_assignment_local(session_id, :consistency)),
          :ok <- ensure_matching_transfer(current, transfer_id),
-         {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
+         {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
       ready_nodes = ready_node_list(node_records, committed_at_ms)
 
       next =
@@ -541,7 +535,7 @@ defmodule Starcite.Routing.Store do
 
   defp do_all_assignments(favor) when favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:all_assignments, [favor]),
-         {:ok, assignments} <- normalize_assignments(result) do
+         {:ok, assignments} <- assignments_from_khepri(result) do
       {:ok, assignments}
     end
   end
@@ -552,7 +546,7 @@ defmodule Starcite.Routing.Store do
 
   defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:all_node_records, [favor]),
-         {:ok, node_records} <- normalize_node_records(result) do
+         {:ok, node_records} <- node_records_from_khepri(result) do
       {:ok, node_records}
     end
   end
@@ -561,7 +555,7 @@ defmodule Starcite.Routing.Store do
     :khepri.get_many(store_id(), "/:nodes/*", %{favor: favor})
   end
 
-  defp normalize_assignments({:ok, payloads}) when is_map(payloads) do
+  defp assignments_from_khepri({:ok, payloads}) when is_map(payloads) do
     assignments =
       Enum.reduce(payloads, %{}, fn
         {[:sessions, session_id], assignment}, acc
@@ -575,13 +569,13 @@ defmodule Starcite.Routing.Store do
     {:ok, assignments}
   end
 
-  defp normalize_assignments({:error, reason}) do
+  defp assignments_from_khepri({:error, reason}) do
     if missing_node_error?(reason), do: {:ok, %{}}, else: {:error, reason}
   end
 
-  defp normalize_assignments(other), do: {:error, {:invalid_assignments, other}}
+  defp assignments_from_khepri(other), do: {:error, {:invalid_assignments, other}}
 
-  defp normalize_node_records({:ok, payloads}) when is_map(payloads) do
+  defp node_records_from_khepri({:ok, payloads}) when is_map(payloads) do
     node_records =
       Enum.reduce(payloads, %{}, fn
         {[:nodes, raw_node], record}, acc when is_binary(raw_node) and is_map(record) ->
@@ -597,11 +591,11 @@ defmodule Starcite.Routing.Store do
     {:ok, node_records}
   end
 
-  defp normalize_node_records({:error, reason}) do
+  defp node_records_from_khepri({:error, reason}) do
     if missing_node_error?(reason), do: {:ok, %{}}, else: {:error, reason}
   end
 
-  defp normalize_node_records(other), do: {:error, {:invalid_node_records, other}}
+  defp node_records_from_khepri(other), do: {:error, {:invalid_node_records, other}}
 
   defp put_node_state(node, status)
        when is_atom(node) and status in [:ready, :draining, :drained] do
@@ -654,7 +648,7 @@ defmodule Starcite.Routing.Store do
   def do_failover_assignment_local(session_id, current, target_node, failed_at_ms)
       when is_binary(session_id) and session_id != "" and is_map(current) and is_atom(target_node) and
              is_integer(failed_at_ms) and failed_at_ms >= 0 do
-    with {:ok, node_records} <- normalize_node_records(do_all_node_records_local(:consistency)) do
+    with {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
       ready_nodes = ready_node_list(node_records, failed_at_ms)
 
       next =
@@ -769,6 +763,14 @@ defmodule Starcite.Routing.Store do
        do: :ok
 
   defp ensure_matching_transfer(_current, _transfer_id), do: {:error, :mismatching_node}
+
+  defp assignment_from_khepri({:ok, assignment}) when is_map(assignment), do: {:ok, assignment}
+
+  defp assignment_from_khepri({:error, reason}) do
+    if missing_node_error?(reason), do: {:error, :not_found}, else: {:error, reason}
+  end
+
+  defp assignment_from_khepri(other), do: {:error, {:invalid_assignment_lookup, other}}
 
   defp eligible_ready_nodes(node_records, now_ms)
        when is_map(node_records) and is_integer(now_ms) and now_ms >= 0 do
