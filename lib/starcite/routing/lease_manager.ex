@@ -1,11 +1,11 @@
-defmodule Starcite.ControlPlane.RaftManager do
+defmodule Starcite.Routing.LeaseManager do
   @moduledoc """
   Utility module for static Raft shard-group placement and lifecycle.
 
   Responsibilities:
 
-  - Map sessions to write groups.
-  - Compute static replica sets from configured write nodes.
+  - Map sessions to routing groups.
+  - Compute static replica sets from configured routing nodes.
   - Bootstrap or join control-plane Raft groups hosted by this node.
 
   These groups do not hold session payload state. They exist only to elect and
@@ -14,7 +14,7 @@ defmodule Starcite.ControlPlane.RaftManager do
 
   require Logger
 
-  alias Starcite.ControlPlane.{ShardLeaseMachine, WriteNodes}
+  alias Starcite.Routing.{ShardLeaseMachine, Topology}
   @server_ids_cache_key {__MODULE__, :server_ids}
   @cluster_names_cache_key {__MODULE__, :cluster_names}
   @replicas_cache_key {__MODULE__, :replicas}
@@ -25,31 +25,31 @@ defmodule Starcite.ControlPlane.RaftManager do
   @doc false
   @spec validate_config!() :: :ok
   def validate_config! do
-    WriteNodes.validate!()
+    Topology.validate!()
   end
 
   @doc false
   @spec num_groups() :: pos_integer()
   def num_groups do
-    WriteNodes.num_groups()
+    Topology.num_groups()
   end
 
   @doc false
   @spec replication_factor() :: pos_integer()
   def replication_factor do
-    WriteNodes.replication_factor()
+    Topology.replication_factor()
   end
 
   @doc false
-  @spec write_nodes() :: [node()]
-  def write_nodes do
-    WriteNodes.nodes()
+  @spec routing_nodes() :: [node()]
+  def routing_nodes do
+    Topology.nodes()
   end
 
   @doc false
-  @spec write_node?(node()) :: boolean()
-  def write_node?(node) when is_atom(node) do
-    WriteNodes.write_node?(node)
+  @spec routing_node?(node()) :: boolean()
+  def routing_node?(node) when is_atom(node) do
+    Topology.routing_node?(node)
   end
 
   @doc false
@@ -159,13 +159,13 @@ defmodule Starcite.ControlPlane.RaftManager do
           {:error, reason} ->
             if runtime_boot_error?(reason) do
               Logger.warning(
-                "RaftManager: Group #{group_id} unavailable due to RA runtime state: #{inspect(reason)}"
+                "LeaseManager: Group #{group_id} unavailable due to RA runtime state: #{inspect(reason)}"
               )
 
               _ = ensure_runtime_started()
               {:error, :ra_runtime_unavailable}
             else
-              Logger.error("RaftManager: Failed to start group #{group_id}: #{inspect(reason)}")
+              Logger.error("LeaseManager: Failed to start group #{group_id}: #{inspect(reason)}")
               {:error, reason}
             end
         end
@@ -178,7 +178,7 @@ defmodule Starcite.ControlPlane.RaftManager do
 
     case :ra.restart_server(:default, local_server_id) do
       :ok ->
-        Logger.debug("RaftManager: Restarted group #{group_id} from persisted state")
+        Logger.debug("LeaseManager: Restarted group #{group_id} from persisted state")
         :ok
 
       {:error, reason} when reason in [:name_not_registered, :not_found] ->
@@ -220,7 +220,7 @@ defmodule Starcite.ControlPlane.RaftManager do
 
         case :ra.start_server(:default, server_conf) do
           :ok ->
-            Logger.debug("RaftManager: Started fresh server for group #{group_id}")
+            Logger.debug("LeaseManager: Started fresh server for group #{group_id}")
             :ok
 
           {:error, :not_new} ->
@@ -232,7 +232,7 @@ defmodule Starcite.ControlPlane.RaftManager do
             :ok
 
           {:error, {:shutdown, {:failed_to_start_child, _, {:already_started, _}}}} ->
-            Logger.debug("RaftManager: Group #{group_id} already running locally")
+            Logger.debug("LeaseManager: Group #{group_id} already running locally")
             :ok
 
           {:error, reason} ->
@@ -241,7 +241,7 @@ defmodule Starcite.ControlPlane.RaftManager do
 
       {:error, reason} ->
         Logger.error(
-          "RaftManager: Failed to create raft data dir for group #{group_id}: #{inspect(reason)}"
+          "LeaseManager: Failed to create raft data dir for group #{group_id}: #{inspect(reason)}"
         )
 
         {:error, reason}
@@ -297,7 +297,7 @@ defmodule Starcite.ControlPlane.RaftManager do
         :ok
 
       {:error, reason} = error ->
-        Logger.warning("RaftManager: failed to start :ra runtime: #{inspect(reason)}")
+        Logger.warning("LeaseManager: failed to start :ra runtime: #{inspect(reason)}")
         error
     end
   end
@@ -334,7 +334,7 @@ defmodule Starcite.ControlPlane.RaftManager do
 
   defp replica_sets do
     total_groups = num_groups()
-    nodes = write_nodes()
+    nodes = routing_nodes()
     factor = replication_factor()
     cache_key = {total_groups, nodes, factor}
 

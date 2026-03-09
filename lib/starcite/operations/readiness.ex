@@ -1,9 +1,7 @@
-defmodule Starcite.ControlPlane.Ops.Readiness do
+defmodule Starcite.Operations.Readiness do
   @moduledoc false
 
-  alias Starcite.ControlPlane.Observer
-  alias Starcite.ControlPlane.Ops.Topology
-  alias Starcite.ControlPlane.RaftBootstrap
+  alias Starcite.Routing.{LeaseBootstrap, Observer, Topology}
 
   @default_wait_interval_ms 200
   @status_call_timeout_ms 1_000
@@ -15,7 +13,7 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
 
   @spec local_readiness(keyword()) :: map()
   def local_readiness(opts \\ []) when is_list(opts) do
-    mode = Topology.local_mode()
+    mode = local_mode()
     refresh? = Keyword.get(opts, :refresh?, false)
     checks = readiness_checks(mode, refresh?)
 
@@ -24,7 +22,7 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
 
   @spec local_drained() :: boolean()
   def local_drained do
-    Topology.local_mode() == :write_node and
+    local_mode() == :routing_node and
       local_node_status() == :draining and
       Node.self() not in Observer.ready_nodes()
   end
@@ -54,14 +52,14 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
   end
 
   defp readiness_checks(mode, refresh?)
-       when mode in [:write_node, :router_node] and is_boolean(refresh?) do
+       when mode in [:routing_node, :ingress_node] and is_boolean(refresh?) do
     %{
       in_service: in_service_gate(mode),
-      write_path: RaftBootstrap.readiness_status(refresh?: refresh?)
+      routing: LeaseBootstrap.readiness_status(refresh?: refresh?)
     }
   end
 
-  defp in_service_gate(:router_node) do
+  defp in_service_gate(:ingress_node) do
     %{
       ready?: true,
       reason: :ok,
@@ -69,7 +67,7 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
     }
   end
 
-  defp in_service_gate(:write_node) do
+  defp in_service_gate(:routing_node) do
     cond do
       local_drained() ->
         %{
@@ -94,22 +92,22 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
     end
   end
 
-  defp compose_readiness(:router_node, %{write_path: write_path} = checks) when is_map(checks) do
-    if write_path.ready? do
+  defp compose_readiness(:ingress_node, %{routing: routing} = checks) when is_map(checks) do
+    if routing.ready? do
       ready_result(checks)
     else
-      not_ready_result(write_path.reason, write_path.detail, checks)
+      not_ready_result(routing.reason, routing.detail, checks)
     end
   end
 
-  defp compose_readiness(:write_node, %{in_service: in_service, write_path: write_path} = checks)
+  defp compose_readiness(:routing_node, %{in_service: in_service, routing: routing} = checks)
        when is_map(checks) do
     cond do
       in_service.reason == :draining ->
         not_ready_result(:draining, %{}, checks)
 
-      not write_path.ready? ->
-        not_ready_result(write_path.reason, write_path.detail, checks)
+      not routing.ready? ->
+        not_ready_result(routing.reason, routing.detail, checks)
 
       not in_service.ready? ->
         not_ready_result(:observer_sync, %{}, checks)
@@ -141,7 +139,7 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
   defp local_drain_complete do
     local = Node.self()
 
-    Topology.local_mode() == :write_node and
+    local_mode() == :routing_node and
       local_drained() and
       drained_on_visible_nodes?(local)
   end
@@ -189,6 +187,14 @@ defmodule Starcite.ControlPlane.Ops.Readiness do
         Process.sleep(@default_wait_interval_ms)
         do_wait_until(predicate, deadline_ms)
       end
+    end
+  end
+
+  defp local_mode do
+    if Topology.routing_node?(Node.self()) do
+      :routing_node
+    else
+      :ingress_node
     end
   end
 end

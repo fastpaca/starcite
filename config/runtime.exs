@@ -22,7 +22,7 @@ end
 
 # Suppress Ra (Raft library) verbose logs
 # Call :logger.set_application_level(:ra, :error) at runtime to filter Ra logs
-# This is set in RaftBootstrap.init/1
+# This is set in LeaseBootstrap.init/1
 
 # Cluster configuration (works in all environments, not just prod)
 cluster_nodes = System.get_env("CLUSTER_NODES")
@@ -180,20 +180,22 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
-if write_node_ids = System.get_env("STARCITE_WRITE_NODE_IDS") do
-  config :starcite, :write_node_ids, parse_node_ids!.("STARCITE_WRITE_NODE_IDS", write_node_ids)
+if routing_node_ids = System.get_env("STARCITE_ROUTING_NODE_IDS") do
+  config :starcite,
+         :routing_node_ids,
+         parse_node_ids!.("STARCITE_ROUTING_NODE_IDS", routing_node_ids)
 end
 
 if num_groups = System.get_env("STARCITE_NUM_GROUPS") do
   config :starcite, :num_groups, parse_positive_integer!.("STARCITE_NUM_GROUPS", num_groups)
 end
 
-if write_replication_factor = System.get_env("STARCITE_WRITE_REPLICATION_FACTOR") do
+if routing_replication_factor = System.get_env("STARCITE_ROUTING_REPLICATION_FACTOR") do
   config :starcite,
-         :write_replication_factor,
+         :routing_replication_factor,
          parse_positive_integer!.(
-           "STARCITE_WRITE_REPLICATION_FACTOR",
-           write_replication_factor
+           "STARCITE_ROUTING_REPLICATION_FACTOR",
+           routing_replication_factor
          )
 end
 

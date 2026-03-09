@@ -1,17 +1,17 @@
-defmodule Starcite.ControlPlane.WriteNodes do
+defmodule Starcite.Routing.Topology do
   @moduledoc """
-  Static write-node configuration and validation for the control plane.
+  Static routing-node configuration and validation for the control plane.
 
   This module is the single source of truth for:
 
-  - write node ids
-  - write replication factor
-  - number of write groups
+  - routing node ids
+  - routing replication factor
+  - number of routing groups
   """
 
   @default_num_groups 256
   @default_replication_factor 3
-  @default_write_nodes [:nonode@nohost]
+  @default_routing_nodes [:nonode@nohost]
   @config_cache_key {__MODULE__, :config}
 
   @type config :: %{
@@ -39,9 +39,9 @@ defmodule Starcite.ControlPlane.WriteNodes do
     raw_num_groups = Application.get_env(:starcite, :num_groups, @default_num_groups)
 
     raw_replication_factor =
-      Application.get_env(:starcite, :write_replication_factor, @default_replication_factor)
+      Application.get_env(:starcite, :routing_replication_factor, @default_replication_factor)
 
-    raw_nodes = Application.get_env(:starcite, :write_node_ids, @default_write_nodes)
+    raw_nodes = Application.get_env(:starcite, :routing_node_ids, @default_routing_nodes)
     node_self = Node.self()
     cache_key = {raw_num_groups, raw_replication_factor, raw_nodes, node_self}
 
@@ -81,8 +81,8 @@ defmodule Starcite.ControlPlane.WriteNodes do
     nodes
   end
 
-  @spec write_node?(node()) :: boolean()
-  def write_node?(node) when is_atom(node) do
+  @spec routing_node?(node()) :: boolean()
+  def routing_node?(node) when is_atom(node) do
     node in nodes()
   end
 
@@ -93,12 +93,12 @@ defmodule Starcite.ControlPlane.WriteNodes do
 
     if replication_factor > length(nodes) do
       raise ArgumentError,
-            "invalid write-node config: write_replication_factor=#{replication_factor} exceeds write_node_ids=#{length(nodes)}"
+            "invalid routing-node config: routing_replication_factor=#{replication_factor} exceeds routing_node_ids=#{length(nodes)}"
     end
 
-    if node_self != :nonode@nohost and nodes == @default_write_nodes do
+    if node_self != :nonode@nohost and nodes == @default_routing_nodes do
       raise ArgumentError,
-            "invalid write-node config: STARCITE_WRITE_NODE_IDS must be configured for distributed nodes"
+            "invalid routing-node config: STARCITE_ROUTING_NODE_IDS must be configured for distributed nodes"
     end
 
     %{
@@ -119,7 +119,7 @@ defmodule Starcite.ControlPlane.WriteNodes do
 
   defp validate_replication_factor!(value) do
     raise ArgumentError,
-          "invalid value for :write_replication_factor: #{inspect(value)} (expected positive integer)"
+          "invalid value for :routing_replication_factor: #{inspect(value)} (expected positive integer)"
   end
 
   defp validate_nodes!(nodes) when is_list(nodes) and nodes != [] do
@@ -127,12 +127,12 @@ defmodule Starcite.ControlPlane.WriteNodes do
       Enum.uniq(nodes)
     else
       raise ArgumentError,
-            "invalid value for :write_node_ids: #{inspect(nodes)} (expected list of node atoms)"
+            "invalid value for :routing_node_ids: #{inspect(nodes)} (expected list of node atoms)"
     end
   end
 
   defp validate_nodes!(value) do
     raise ArgumentError,
-          "invalid value for :write_node_ids: #{inspect(value)} (expected non-empty list of node atoms)"
+          "invalid value for :routing_node_ids: #{inspect(value)} (expected non-empty list of node atoms)"
   end
 end

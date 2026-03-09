@@ -1,4 +1,4 @@
-defmodule Starcite.ControlPlane.RaftHealth do
+defmodule Starcite.Routing.LeaseHealth do
   @moduledoc """
   Intrinsic Raft readiness checks used by health and routing gates.
 
@@ -6,8 +6,8 @@ defmodule Starcite.ControlPlane.RaftHealth do
   refresh path used by `/health/ready`.
   """
 
-  alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.Topology
+  alias Starcite.Routing.LeaseManager
 
   @consensus_probe_ttl_ms 3_000
 
@@ -56,7 +56,7 @@ defmodule Starcite.ControlPlane.RaftHealth do
           {:startup_sync, probe_detail}
 
         true ->
-          {:raft_sync, probe_detail}
+          {:lease_sync, probe_detail}
       end
 
     %{
@@ -115,8 +115,8 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
   @spec note_peer_down(map(), node()) :: map()
   def note_peer_down(state, down_node) when is_map(state) and is_atom(down_node) do
-    if state.startup_complete? and WriteNodes.write_node?(Node.self()) and
-         down_node in WriteNodes.nodes() and not local_quorum_available?() do
+    if state.startup_complete? and Topology.routing_node?(Node.self()) and
+         down_node in Topology.nodes() and not local_quorum_available?() do
       now_ms = System.monotonic_time(:millisecond)
 
       state
@@ -135,8 +135,8 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
   @spec note_peer_up(map(), node()) :: map()
   def note_peer_up(state, up_node) when is_map(state) and is_atom(up_node) do
-    if state.startup_complete? and WriteNodes.write_node?(Node.self()) and
-         up_node in WriteNodes.nodes() do
+    if state.startup_complete? and Topology.routing_node?(Node.self()) and
+         up_node in Topology.nodes() do
       Map.put(state, :consensus_last_probe_at_ms, nil)
     else
       state
@@ -225,7 +225,7 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
   defp group_consensus_ready?(group_id, connected_nodes)
        when is_integer(group_id) and group_id >= 0 and is_struct(connected_nodes, MapSet) do
-    server_id = RaftManager.server_id(group_id)
+    server_id = LeaseManager.server_id(group_id)
 
     if group_running?(group_id) do
       with :ok <- validate_group_quorum(group_id, connected_nodes),
@@ -245,7 +245,7 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
   defp validate_group_quorum(group_id, connected_nodes)
        when is_integer(group_id) and group_id >= 0 and is_struct(connected_nodes, MapSet) do
-    replicas = RaftManager.replicas_for_group(group_id)
+    replicas = LeaseManager.replicas_for_group(group_id)
     required_quorum = quorum_size(length(replicas))
 
     reachable_replicas =
@@ -291,7 +291,7 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
   defp validate_group_leader(group_id, server_id)
        when is_integer(group_id) and group_id >= 0 and is_atom(server_id) do
-    cluster_name = RaftManager.cluster_name(group_id)
+    cluster_name = LeaseManager.cluster_name(group_id)
 
     case :ra_leaderboard.lookup_leader(cluster_name) do
       {^server_id, leader_node} when is_atom(leader_node) and not is_nil(leader_node) ->
@@ -331,7 +331,7 @@ defmodule Starcite.ControlPlane.RaftHealth do
 
     compute_my_groups()
     |> Enum.all?(fn group_id ->
-      replicas = RaftManager.replicas_for_group(group_id)
+      replicas = LeaseManager.replicas_for_group(group_id)
       required_quorum = quorum_size(length(replicas))
       reachable_replicas = Enum.count(replicas, &MapSet.member?(connected_nodes, &1))
       reachable_replicas >= required_quorum
@@ -344,13 +344,13 @@ defmodule Starcite.ControlPlane.RaftHealth do
   end
 
   defp compute_my_groups do
-    for group_id <- 0..(WriteNodes.num_groups() - 1),
-        RaftManager.should_participate?(group_id),
+    for group_id <- 0..(Topology.num_groups() - 1),
+        LeaseManager.should_participate?(group_id),
         do: group_id
   end
 
   defp group_running?(group_id) do
-    Process.whereis(RaftManager.server_id(group_id)) != nil
+    Process.whereis(LeaseManager.server_id(group_id)) != nil
   end
 
   defp quorum_size(replica_count) when is_integer(replica_count) and replica_count >= 0 do

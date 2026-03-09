@@ -4,8 +4,8 @@ defmodule Starcite.WritePath do
   """
 
   alias Starcite.Auth.Principal
-  alias Starcite.ControlPlane.{SessionReplicator, SessionRouter}
-  alias Starcite.DataPlane.{SessionOwners, SessionStore}
+  alias Starcite.DataPlane.{SessionOwners, SessionReplicator, SessionStore}
+  alias Starcite.Routing.SessionRouter
   alias Starcite.Session
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}

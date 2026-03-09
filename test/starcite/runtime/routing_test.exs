@@ -1,7 +1,7 @@
 defmodule Starcite.Runtime.RoutingTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.ReplicaRouter
+  alias Starcite.Routing.ReplicaRouter
 
   defmodule RoutingProbe do
     def local_ok, do: {:ok, :local}
@@ -174,7 +174,7 @@ defmodule Starcite.Runtime.RoutingTest do
   defp unique_group_id do
     rem(
       System.unique_integer([:positive, :monotonic]),
-      Starcite.ControlPlane.RaftManager.num_groups()
+      Starcite.Routing.LeaseManager.num_groups()
     )
   end
 

@@ -3,7 +3,7 @@ defmodule Starcite.ReadPath do
   Read path for session and event tail operations.
   """
 
-  alias Starcite.ControlPlane.SessionRouter
+  alias Starcite.Routing.SessionRouter
   alias Starcite.Cursor
   alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
   alias Starcite.Session

@@ -1,7 +1,8 @@
-defmodule Starcite.ControlPlane.ObserverDistributedTest do
+defmodule Starcite.Routing.ObserverDistributedTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.{Observer, Ops}
+  alias Starcite.Operations, as: Ops
+  alias Starcite.Routing.Observer
 
   @moduletag :distributed
 
@@ -10,21 +11,21 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
   end
 
   setup do
-    previous_write_node_ids = Application.get_env(:starcite, :write_node_ids)
-    previous_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+    previous_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    previous_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
     peers = start_peers(2)
     peer_nodes = Enum.map(peers, fn {_pid, node} -> node end)
-    write_nodes = [Node.self() | peer_nodes]
+    routing_nodes = [Node.self() | peer_nodes]
 
-    Application.put_env(:starcite, :write_node_ids, write_nodes)
-    Application.put_env(:starcite, :write_replication_factor, 1)
+    Application.put_env(:starcite, :routing_node_ids, routing_nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 1)
 
     Enum.each(peers, fn {_peer_pid, peer_node} ->
       true = Node.connect(peer_node)
 
       :ok = add_code_paths(peer_node)
-      :ok = configure_peer(peer_node, write_nodes)
+      :ok = configure_peer(peer_node, routing_nodes)
       :ok = start_peer_observer(peer_node)
     end)
 
@@ -36,11 +37,11 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
         _ = stop_peer(peer_pid)
       end)
 
-      restore_env(:write_node_ids, previous_write_node_ids)
-      restore_env(:write_replication_factor, previous_replication_factor)
+      restore_env(:routing_node_ids, previous_routing_node_ids)
+      restore_env(:routing_replication_factor, previous_replication_factor)
     end)
 
-    {:ok, peers: peers, write_nodes: write_nodes}
+    {:ok, peers: peers, routing_nodes: routing_nodes}
   end
 
   test "drain propagates cluster-wide and survives observer restart", %{peers: peers} do
@@ -73,7 +74,7 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
 
   test "drain intent recovers after full peer node restart", %{
     peers: peers,
-    write_nodes: write_nodes
+    routing_nodes: routing_nodes
   } do
     [target_peer, witness_peer] = peers
     {target_pid, target_node} = target_peer
@@ -106,7 +107,7 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
 
     true = Node.connect(restarted_node)
     :ok = add_code_paths(restarted_node)
-    :ok = configure_peer(restarted_node, write_nodes)
+    :ok = configure_peer(restarted_node, routing_nodes)
     :ok = start_peer_observer(restarted_node)
 
     eventually(fn ->
@@ -160,10 +161,12 @@ defmodule Starcite.ControlPlane.ObserverDistributedTest do
     end
   end
 
-  defp configure_peer(peer_node, write_nodes)
-       when is_atom(peer_node) and is_list(write_nodes) do
-    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :write_node_ids, write_nodes])
-    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :write_replication_factor, 1])
+  defp configure_peer(peer_node, routing_nodes)
+       when is_atom(peer_node) and is_list(routing_nodes) do
+    :ok =
+      :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_node_ids, routing_nodes])
+
+    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_replication_factor, 1])
     :ok
   end
 

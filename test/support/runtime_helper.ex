@@ -4,7 +4,7 @@ defmodule Starcite.Runtime.TestHelper do
   require ExUnit.CaptureLog
   require Logger
 
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.LeaseManager
 
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->
@@ -38,8 +38,8 @@ defmodule Starcite.Runtime.TestHelper do
 
   defp stop_all_raft_groups do
     # Delete all 256 Raft groups completely
-    for group_id <- 0..(RaftManager.num_groups() - 1) do
-      server_id = RaftManager.server_id(group_id)
+    for group_id <- 0..(LeaseManager.num_groups() - 1) do
+      server_id = LeaseManager.server_id(group_id)
       server_ref = {server_id, Node.self()}
 
       # First try to delete the cluster (stops and removes from Ra)
@@ -94,8 +94,8 @@ defmodule Starcite.Runtime.TestHelper do
   end
 
   defp configure_ra_system_storage do
-    ra_system_dir = RaftManager.ra_system_data_dir()
-    wal_data_dir = RaftManager.ra_wal_data_dir()
+    ra_system_dir = LeaseManager.ra_system_data_dir()
+    wal_data_dir = LeaseManager.ra_wal_data_dir()
 
     with :ok <- File.mkdir_p(ra_system_dir),
          :ok <- File.mkdir_p(wal_data_dir) do

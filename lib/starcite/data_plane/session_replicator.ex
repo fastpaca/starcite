@@ -1,13 +1,12 @@
-defmodule Starcite.ControlPlane.SessionReplicator do
+defmodule Starcite.DataPlane.SessionReplicator do
   @moduledoc """
   In-memory cross-node replication for session-owner state.
 
-  This module lives in the control plane and is used by the data plane to
-  synchronously replicate session snapshots to standby nodes before acking
-  writes to callers.
+  The data plane uses this module to synchronously replicate session snapshots
+  to standby owners before acking writes to callers.
   """
 
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.LeaseManager
   alias Starcite.DataPlane.SessionOwners
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
@@ -28,7 +27,7 @@ defmodule Starcite.ControlPlane.SessionReplicator do
   def replicate_state(%Session{id: session_id, tenant_id: tenant_id} = session, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
     started_ms = System.monotonic_time(:millisecond)
-    replicas = RaftManager.replicas_for_group(RaftManager.group_for_session(session_id))
+    replicas = LeaseManager.replicas_for_group(LeaseManager.group_for_session(session_id))
     local_node = Node.self()
     quorum_size = quorum_size(length(replicas))
     local_acks = if local_node in replicas, do: 1, else: 0

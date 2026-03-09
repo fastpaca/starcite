@@ -1,21 +1,21 @@
-defmodule Starcite.ControlPlane.RaftBootstrapTest do
+defmodule Starcite.Routing.RaftBootstrapTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.RaftBootstrap
+  alias Starcite.Routing.LeaseBootstrap
 
   test "startup_complete is idempotent once startup has finished" do
-    original_state = :sys.get_state(RaftBootstrap)
+    original_state = :sys.get_state(LeaseBootstrap)
 
     on_exit(fn ->
-      :sys.replace_state(RaftBootstrap, fn _state -> original_state end)
+      :sys.replace_state(LeaseBootstrap, fn _state -> original_state end)
     end)
 
     now_ms = System.monotonic_time(:millisecond)
 
-    :sys.replace_state(RaftBootstrap, fn state ->
+    :sys.replace_state(LeaseBootstrap, fn state ->
       state
       |> Map.put(:startup_complete?, true)
-      |> Map.put(:startup_mode, :write)
+      |> Map.put(:startup_mode, :routing)
       |> Map.put(:consensus_ready?, true)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
       |> Map.put(:consensus_probe_detail, %{
@@ -25,16 +25,16 @@ defmodule Starcite.ControlPlane.RaftBootstrapTest do
       })
     end)
 
-    send(RaftBootstrap, {:startup_complete, :router})
+    send(LeaseBootstrap, {:startup_complete, :ingress})
 
     eventually(fn ->
       assert %{
                startup_complete?: true,
-               startup_mode: :router,
+               startup_mode: :ingress,
                consensus_ready?: true,
                consensus_last_probe_at_ms: ^now_ms,
                consensus_probe_detail: %{probe_result: "ok"}
-             } = :sys.get_state(RaftBootstrap)
+             } = :sys.get_state(LeaseBootstrap)
     end)
   end
 

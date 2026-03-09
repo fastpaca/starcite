@@ -1,15 +1,15 @@
-defmodule Starcite.ControlPlane.ReplicaRouter do
+defmodule Starcite.Routing.ReplicaRouter do
   @moduledoc """
   Replica-aware request routing for write/read path operations.
 
-  Uses write-node liveness snapshots and short-lived leader hints to choose
+  Uses routing-node liveness snapshots and short-lived leader hints to choose
   execution targets. This module does not mutate Raft membership.
   """
 
   require Logger
 
-  alias Starcite.ControlPlane.Observer
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.Observer
+  alias Starcite.Routing.LeaseManager
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache
@@ -78,7 +78,7 @@ defmodule Starcite.ControlPlane.ReplicaRouter do
     ensure_leader_cache_table()
 
     self_node = Keyword.get(opts, :self, Node.self())
-    replicas = Keyword.get(opts, :replicas, RaftManager.replicas_for_group(group_id))
+    replicas = Keyword.get(opts, :replicas, LeaseManager.replicas_for_group(group_id))
     local_running = Keyword.get(opts, :local_running, group_running?(group_id))
     allow_local = Keyword.get(opts, :allow_local, true)
     prefer_leader = Keyword.get(opts, :prefer_leader, false)
@@ -403,7 +403,7 @@ defmodule Starcite.ControlPlane.ReplicaRouter do
   defp maybe_enqueue_leader(_leader, rest, _visited, _allowed_nodes), do: rest
 
   defp group_running?(group_id) do
-    Process.whereis(RaftManager.server_id(group_id)) != nil
+    Process.whereis(LeaseManager.server_id(group_id)) != nil
   end
 
   defp remote_candidates_with_leader_first(
@@ -477,7 +477,7 @@ defmodule Starcite.ControlPlane.ReplicaRouter do
   end
 
   defp probe_leader(group_id, self_node) when is_integer(group_id) and is_atom(self_node) do
-    server_id = RaftManager.server_id(group_id)
+    server_id = LeaseManager.server_id(group_id)
 
     case :ra.members({server_id, self_node}, @leader_probe_timeout_ms) do
       {:ok, _members, {^server_id, leader_node}} when is_atom(leader_node) ->

@@ -1,4 +1,4 @@
-defmodule Starcite.ControlPlane.Supervisor do
+defmodule Starcite.Routing.Supervisor do
   use Supervisor
 
   def start_link(arg) do
@@ -11,8 +11,8 @@ defmodule Starcite.ControlPlane.Supervisor do
       # Task supervisor used by control-plane Raft bootstrap/recovery work.
       {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
       # Control-plane Raft bootstrap/lifecycle coordinator.
-      Starcite.ControlPlane.RaftBootstrap,
-      Starcite.ControlPlane.Observer
+      Starcite.Routing.LeaseBootstrap,
+      Starcite.Routing.Observer
     ]
 
     Supervisor.init(children, strategy: :one_for_one)

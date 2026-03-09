@@ -84,16 +84,16 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "create_session rolls back local owner/session cache when replication quorum fails" do
-      original_write_node_ids = Application.get_env(:starcite, :write_node_ids)
-      original_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+      original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
       on_exit(fn ->
-        Application.put_env(:starcite, :write_node_ids, original_write_node_ids)
-        Application.put_env(:starcite, :write_replication_factor, original_replication_factor)
+        Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
-      Application.put_env(:starcite, :write_node_ids, [Node.self(), :"missing@127.0.0.1"])
-      Application.put_env(:starcite, :write_replication_factor, 2)
+      Application.put_env(:starcite, :routing_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
 
       id = unique_id("ses")
       assert {:error, _reason} = WritePath.create_session(id: id, tenant_id: "acme")

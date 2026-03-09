@@ -1,12 +1,12 @@
-defmodule Starcite.ControlPlane.SessionRouter do
+defmodule Starcite.Routing.SessionRouter do
   @moduledoc """
   Control-plane routing helper for session-scoped operations.
 
   Hot-path modules should call this boundary instead of direct Raft/router APIs.
   """
 
-  alias Starcite.ControlPlane.ReplicaRouter
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.ReplicaRouter
+  alias Starcite.Routing.LeaseManager
 
   @owner_probe_timeout_ms Application.compile_env(:starcite, :session_owner_probe_timeout_ms, 50)
   @owner_epoch_probe_timeout_ms Application.compile_env(
@@ -38,7 +38,7 @@ defmodule Starcite.ControlPlane.SessionRouter do
       when is_binary(session_id) and session_id != "" and is_atom(remote_module) and
              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
-    group_id = RaftManager.group_for_session(session_id)
+    group_id = LeaseManager.group_for_session(session_id)
 
     ReplicaRouter.call_on_replica(
       group_id,
@@ -56,8 +56,8 @@ defmodule Starcite.ControlPlane.SessionRouter do
           :ok | {:error, :not_leader | {:not_leader, {atom(), node()}}}
   def ensure_local_owner(session_id, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_list(opts) do
-    group_id = RaftManager.group_for_session(session_id)
-    server_id = RaftManager.server_id(group_id)
+    group_id = LeaseManager.group_for_session(session_id)
+    server_id = LeaseManager.server_id(group_id)
     self_node = Keyword.get(opts, :self, Node.self())
 
     if singleton_replica_group_owner?(group_id, self_node) do
@@ -84,8 +84,8 @@ defmodule Starcite.ControlPlane.SessionRouter do
   def local_owner_epoch(session_id, fallback_epoch \\ 0, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_integer(fallback_epoch) and
              fallback_epoch >= 0 and is_list(opts) do
-    group_id = RaftManager.group_for_session(session_id)
-    server_id = RaftManager.server_id(group_id)
+    group_id = LeaseManager.group_for_session(session_id)
+    server_id = LeaseManager.server_id(group_id)
     self_node = Keyword.get(opts, :self, Node.self())
 
     case Keyword.fetch(opts, :metrics) do
@@ -105,8 +105,8 @@ defmodule Starcite.ControlPlane.SessionRouter do
   @spec replica_nodes(String.t()) :: [node()]
   def replica_nodes(session_id) when is_binary(session_id) and session_id != "" do
     session_id
-    |> RaftManager.group_for_session()
-    |> RaftManager.replicas_for_group()
+    |> LeaseManager.group_for_session()
+    |> LeaseManager.replicas_for_group()
   end
 
   defp resolve_leader_hint(group_id, server_id, self_node, opts)
@@ -124,7 +124,7 @@ defmodule Starcite.ControlPlane.SessionRouter do
   defp lookup_or_probe_leader(group_id, server_id, self_node, opts)
        when is_integer(group_id) and group_id >= 0 and is_atom(server_id) and
               is_atom(self_node) and is_list(opts) do
-    cluster_name = RaftManager.cluster_name(group_id)
+    cluster_name = LeaseManager.cluster_name(group_id)
 
     case :ra_leaderboard.lookup_leader(cluster_name) do
       {^server_id, leader_node} = leader_hint
@@ -174,7 +174,7 @@ defmodule Starcite.ControlPlane.SessionRouter do
 
   defp singleton_replica_group_owner?(group_id, self_node)
        when is_integer(group_id) and group_id >= 0 and is_atom(self_node) do
-    case RaftManager.replicas_for_group(group_id) do
+    case LeaseManager.replicas_for_group(group_id) do
       [^self_node] -> true
       _other -> false
     end
