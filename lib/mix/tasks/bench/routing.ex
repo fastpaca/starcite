@@ -1,9 +1,9 @@
 defmodule Mix.Tasks.Bench.Routing do
   require Logger
 
-  alias Starcite.WritePath
+  @dialyzer {:nowarn_function, [run: 0]}
 
-  @rpc_timeout 5_000
+  alias Starcite.WritePath
 
   def run do
     ensure_apps_stopped()
@@ -44,40 +44,9 @@ defmodule Mix.Tasks.Bench.Routing do
       end
     end
 
-    append_local = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
-
-      case WritePath.append_event_local(session_id, event_with_producer, []) do
-        {:ok, _reply} -> :ok
-        {:error, reason} -> raise "append_local failed: #{inspect(reason)}"
-        {:timeout, leader} -> raise "append_local timeout: #{inspect(leader)}"
-      end
-    end
-
-    append_rpc_self_local = fn ->
-      {session_id, producer_seq} = next_session.()
-      event_with_producer = with_bench_producer(event, session_id, producer_seq)
-
-      case :rpc.call(
-             Node.self(),
-             WritePath,
-             :append_event_local,
-             [session_id, event_with_producer, []],
-             @rpc_timeout
-           ) do
-        {:ok, _reply} -> :ok
-        {:error, reason} -> raise "append_rpc_self_local failed: #{inspect(reason)}"
-        {:timeout, leader} -> raise "append_rpc_self_local timeout: #{inspect(leader)}"
-        {:badrpc, reason} -> raise "append_rpc_self_local badrpc: #{inspect(reason)}"
-      end
-    end
-
     run_benchee(
       %{
-        "append_public" => append_public,
-        "append_local" => append_local,
-        "append_rpc_self_local" => append_rpc_self_local
+        "append_public" => append_public
       },
       parallel: config.parallel,
       warmup: config.warmup_seconds,

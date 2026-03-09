@@ -36,6 +36,8 @@ defmodule Starcite.Routing.Store do
                                    :routing_store_reconcile_interval_ms,
                                    1_000
                                  )
+  @assignment_cache_table :starcite_routing_assignment_cache
+  @node_record_cache_table :starcite_routing_node_record_cache
 
   @type assignment :: %{
           required(:owner) => node(),
@@ -84,20 +86,35 @@ defmodule Starcite.Routing.Store do
   @spec get_assignment(String.t(), keyword()) :: {:ok, assignment()} | {:error, term()}
   def get_assignment(session_id, opts \\ [])
       when is_binary(session_id) and session_id != "" and is_list(opts) do
-    do_get_assignment(session_id, Keyword.get(opts, :favor, :low_latency))
+    case Keyword.get(opts, :favor, :low_latency) do
+      :low_latency ->
+        case cached_assignment(session_id) do
+          {:ok, assignment} -> {:ok, assignment}
+          :error -> do_get_assignment(session_id, :low_latency)
+        end
+
+      :consistency ->
+        do_get_assignment(session_id, :consistency)
+    end
   end
 
   @spec ensure_assignment(String.t()) :: {:ok, assignment()} | {:error, term()}
   def ensure_assignment(session_id) when is_binary(session_id) and session_id != "" do
-    case do_get_assignment(session_id, :consistency) do
+    case cached_assignment(session_id) do
       {:ok, assignment} ->
         {:ok, assignment}
 
-      {:error, :not_found} ->
-        route_command(:claim_assignment, [session_id, now_ms()])
+      :error ->
+        case do_get_assignment(session_id, :consistency) do
+          {:ok, assignment} ->
+            {:ok, assignment}
 
-      {:error, reason} ->
-        {:error, reason}
+          {:error, :not_found} ->
+            route_command(:claim_assignment, [session_id, now_ms()])
+
+          {:error, reason} ->
+            {:error, reason}
+        end
     end
   end
 
@@ -234,15 +251,43 @@ defmodule Starcite.Routing.Store do
 
   @spec node_status(node()) :: :ready | :draining | :drained | :unknown
   def node_status(node) when is_atom(node) do
-    case do_get_node_state(node, :low_latency) do
-      {:ok, %{status: status}} when status in [:ready, :draining, :drained] -> status
-      _other -> :unknown
+    case cached_node_record(node) do
+      {:ok, %{status: status}} when status in [:ready, :draining, :drained] ->
+        status
+
+      :error ->
+        case do_get_node_state(node, :low_latency) do
+          {:ok, %{status: status}} when status in [:ready, :draining, :drained] -> status
+          _other -> :unknown
+        end
     end
   end
 
   @spec node_record(node(), keyword()) :: {:ok, node_record()} | {:error, term()}
   def node_record(node, opts \\ []) when is_atom(node) and is_list(opts) do
     do_get_node_state(node, Keyword.get(opts, :favor, :low_latency))
+  end
+
+  @spec cached_assignment(String.t()) :: {:ok, assignment()} | :error
+  def cached_assignment(session_id) when is_binary(session_id) and session_id != "" do
+    case :ets.lookup(@assignment_cache_table, session_id) do
+      [{^session_id, assignment}] when is_map(assignment) -> {:ok, assignment}
+      _other -> :error
+    end
+  rescue
+    ArgumentError ->
+      :error
+  end
+
+  @spec cached_node_record(node()) :: {:ok, node_record()} | :error
+  def cached_node_record(node) when is_atom(node) do
+    case :ets.lookup(@node_record_cache_table, node) do
+      [{^node, record}] when is_map(record) -> {:ok, record}
+      _other -> :error
+    end
+  rescue
+    ArgumentError ->
+      :error
   end
 
   @spec renew_local_lease() :: :ok | {:error, term()}
@@ -283,6 +328,7 @@ defmodule Starcite.Routing.Store do
   def init(_arg) do
     Process.flag(:trap_exit, true)
     :ok = :net_kernel.monitor_nodes(true, node_type: :visible)
+    :ok = ensure_cache_tables()
     :ok = start_store()
     :ok = join_cluster()
     :ok = :khepri_cluster.wait_for_leader(store_id(), @join_timeout_ms)
@@ -414,7 +460,10 @@ defmodule Starcite.Routing.Store do
   defp do_get_assignment(session_id, favor)
        when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:get_assignment, [session_id, favor]) do
-      assignment_from_khepri(result)
+      with {:ok, assignment} <- assignment_from_khepri(result) do
+        :ok = cache_assignment(session_id, assignment)
+        {:ok, assignment}
+      end
     end
   end
 
@@ -453,8 +502,12 @@ defmodule Starcite.Routing.Store do
            next,
            command_options()
          ) do
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
+      :ok ->
+        :ok = cache_assignment(session_id, next)
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -480,8 +533,12 @@ defmodule Starcite.Routing.Store do
              next,
              command_options()
            ) do
-        :ok -> {:ok, next}
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          :ok = cache_assignment(session_id, next)
+          {:ok, next}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -489,6 +546,7 @@ defmodule Starcite.Routing.Store do
   defp do_all_assignments(favor) when favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:all_assignments, [favor]),
          {:ok, assignments} <- assignments_from_khepri(result) do
+      :ok = cache_assignments(assignments)
       {:ok, assignments}
     end
   end
@@ -500,6 +558,7 @@ defmodule Starcite.Routing.Store do
   defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:all_node_records, [favor]),
          {:ok, node_records} <- node_records_from_khepri(result) do
+      :ok = cache_node_records(node_records)
       {:ok, node_records}
     end
   end
@@ -553,6 +612,7 @@ defmodule Starcite.Routing.Store do
        when is_binary(session_id) and session_id != "" and is_map(assignment) do
     case :khepri.create(store_id(), session_path(session_id), assignment, command_options()) do
       :ok ->
+        :ok = cache_assignment(session_id, assignment)
         {:ok, assignment}
 
       {:error, reason} ->
@@ -616,6 +676,7 @@ defmodule Starcite.Routing.Store do
     with :ok <- :khepri.delete_many(store_id(), "/:sessions/*", command_options()),
          :ok <- :khepri.delete_many(store_id(), "/:nodes/*", command_options()),
          :ok <- do_bootstrap_local_node_local(now_ms(), lease_ttl_ms()) do
+      :ok = clear_caches()
       :ok
     end
   end
@@ -624,8 +685,12 @@ defmodule Starcite.Routing.Store do
        when is_atom(node) and favor in [:low_latency, :consistency] do
     with {:ok, result} <- local_call(:get_node_state, [node, favor]) do
       case result do
-        {:ok, state} when is_map(state) -> {:ok, state}
-        {:error, reason} -> {:error, reason}
+        {:ok, state} when is_map(state) ->
+          :ok = cache_node_record(node, state)
+          {:ok, state}
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -654,8 +719,12 @@ defmodule Starcite.Routing.Store do
              next,
              command_options()
            ) do
-        :ok -> :ok
-        {:error, reason} -> {:error, reason}
+        :ok ->
+          :ok = cache_assignment(session_id, next)
+          :ok
+
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -699,6 +768,7 @@ defmodule Starcite.Routing.Store do
                  command_options()
                ) do
             :ok ->
+              :ok = cache_node_record(node, next)
               :ok
 
             {:error, reason} ->
@@ -715,6 +785,7 @@ defmodule Starcite.Routing.Store do
 
             case :khepri.create(store_id(), node_path(node), next, command_options()) do
               :ok ->
+                :ok = cache_node_record(node, next)
                 :ok
 
               {:error, reason} ->
@@ -840,4 +911,69 @@ defmodule Starcite.Routing.Store do
   end
 
   defp now_ms, do: System.system_time(:millisecond)
+
+  defp ensure_cache_tables do
+    _ =
+      :ets.new(@assignment_cache_table, [
+        :named_table,
+        :public,
+        :set,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
+
+    _ =
+      :ets.new(@node_record_cache_table, [
+        :named_table,
+        :public,
+        :set,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
+
+    :ok
+  rescue
+    ArgumentError ->
+      :ok
+  end
+
+  defp cache_assignment(session_id, assignment)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) do
+    true = :ets.insert(@assignment_cache_table, {session_id, assignment})
+    :ok
+  end
+
+  defp cache_assignments(assignments) when is_map(assignments) do
+    true =
+      :ets.insert(
+        @assignment_cache_table,
+        Enum.map(assignments, fn {session_id, assignment} -> {session_id, assignment} end)
+      )
+
+    :ok
+  end
+
+  defp cache_node_record(node, record) when is_atom(node) and is_map(record) do
+    true = :ets.insert(@node_record_cache_table, {node, record})
+    :ok
+  end
+
+  defp cache_node_records(node_records) when is_map(node_records) do
+    true =
+      :ets.insert(
+        @node_record_cache_table,
+        Enum.map(node_records, fn {node, record} -> {node, record} end)
+      )
+
+    :ok
+  end
+
+  defp clear_caches do
+    true = :ets.delete_all_objects(@assignment_cache_table)
+    true = :ets.delete_all_objects(@node_record_cache_table)
+    :ok
+  rescue
+    ArgumentError ->
+      :ok
+  end
 end

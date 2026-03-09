@@ -12,10 +12,14 @@ defmodule Starcite.Routing.Watcher do
                             :routing_handoff_rpc_timeout_ms,
                             2_000
                           )
+  @suspect_table :starcite_routing_suspects
 
   @spec suspect?(node()) :: boolean()
   def suspect?(node) when is_atom(node) do
-    call_if_running({:suspect?, node}, 250, false)
+    :ets.member(@suspect_table, node)
+  rescue
+    ArgumentError ->
+      false
   end
 
   @spec run_once() :: :ok | {:error, :not_running}
@@ -30,7 +34,8 @@ defmodule Starcite.Routing.Watcher do
   @impl true
   def init(_arg) do
     :net_kernel.monitor_nodes(true, node_type: :visible)
-    {:ok, %{suspects: MapSet.new()}, {:continue, :schedule_tick}}
+    :ok = ensure_suspect_table()
+    {:ok, %{}, {:continue, :schedule_tick}}
   end
 
   @impl true
@@ -39,10 +44,6 @@ defmodule Starcite.Routing.Watcher do
   end
 
   @impl true
-  def handle_call({:suspect?, node}, _from, %{suspects: suspects} = state) when is_atom(node) do
-    {:reply, MapSet.member?(suspects, node), state}
-  end
-
   def handle_call(:run_once, _from, state) do
     :ok = run_tick()
     {:reply, :ok, state}
@@ -55,12 +56,14 @@ defmodule Starcite.Routing.Watcher do
     {:noreply, schedule_tick(state)}
   end
 
-  def handle_info({:nodeup, node, _info}, %{suspects: suspects} = state) when is_atom(node) do
-    {:noreply, %{state | suspects: MapSet.delete(suspects, node)}}
+  def handle_info({:nodeup, node, _info}, state) when is_atom(node) do
+    true = :ets.delete(@suspect_table, node)
+    {:noreply, state}
   end
 
-  def handle_info({:nodedown, node, _info}, %{suspects: suspects} = state) when is_atom(node) do
-    {:noreply, %{state | suspects: MapSet.put(suspects, node)}}
+  def handle_info({:nodedown, node, _info}, state) when is_atom(node) do
+    true = :ets.insert(@suspect_table, {node, true})
+    {:noreply, state}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -222,5 +225,23 @@ defmodule Starcite.Routing.Watcher do
       nil ->
         fallback
     end
+  end
+
+  defp ensure_suspect_table do
+    _ =
+      :ets.new(@suspect_table, [
+        :named_table,
+        :public,
+        :set,
+        {:read_concurrency, true},
+        {:write_concurrency, true}
+      ])
+
+    true = :ets.delete_all_objects(@suspect_table)
+    :ok
+  rescue
+    ArgumentError ->
+      true = :ets.delete_all_objects(@suspect_table)
+      :ok
   end
 end

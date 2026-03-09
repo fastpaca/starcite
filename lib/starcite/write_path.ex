@@ -33,6 +33,8 @@ defmodule Starcite.WritePath do
   end
 
   @doc false
+  @spec create_session_local(String.t(), String.t() | nil, Principal.t(), String.t(), map()) ::
+          {:ok, map()} | {:error, term()}
   def create_session_local(id, title, creator_principal, tenant_id, metadata)
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
@@ -182,12 +184,16 @@ defmodule Starcite.WritePath do
   def append_event(_id, _event, _opts), do: {:error, :invalid_event}
 
   @doc false
+  @spec append_event_local(String.t(), map()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
     SessionQuorum.append_event(id, event, nil)
   end
 
   @doc false
+  @spec append_event_local(String.t(), map(), keyword()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_event_local(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
     expected_seq = expected_seq_from_opts(opts)
     SessionQuorum.append_event(id, event, expected_seq)
@@ -217,6 +223,8 @@ defmodule Starcite.WritePath do
   def append_events(_id, _events, _opts), do: {:error, :invalid_event}
 
   @doc false
+  @spec append_events_local(String.t(), [map()], keyword()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
     SessionQuorum.append_events(id, events, opts)
@@ -235,6 +243,8 @@ defmodule Starcite.WritePath do
   end
 
   @doc false
+  @spec ack_archived_local(String.t(), non_neg_integer()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived_local(id, upto_seq)
       when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do
     SessionQuorum.ack_archived(id, upto_seq)
