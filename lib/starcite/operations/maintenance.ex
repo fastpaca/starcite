@@ -26,8 +26,7 @@ defmodule Starcite.Operations.Maintenance do
 
   defp advance_local_drain(node) when is_atom(node) do
     if node == Node.self() do
-      _ = Watcher.run_once()
-      Watcher.progress_local_transfers()
+      Watcher.run_once()
     else
       :ok
     end

@@ -87,7 +87,6 @@ defmodule Starcite.Operations.Readiness do
   defp progress_local_drain(node) when is_atom(node) do
     if node == Node.self() do
       _ = Watcher.run_once()
-      _ = Watcher.progress_local_transfers()
     end
 
     :ok

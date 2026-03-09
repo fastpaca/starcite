@@ -23,8 +23,7 @@ defmodule Starcite.Routing.Store do
                do_compare_and_swap_assignment_local: 3,
                do_commit_transfer_local: 3,
                do_failover_assignment_local: 4,
-               mutate_node_record: 4,
-               exact_match_pattern: 1
+               mutate_node_record: 4
              ]}
 
   @join_timeout_ms 15_000
@@ -418,8 +417,7 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp normalize_get_assignment({:ok, assignment}) when is_map(assignment),
-    do: {:ok, normalize_assignment(assignment)}
+  defp normalize_get_assignment({:ok, assignment}) when is_map(assignment), do: {:ok, assignment}
 
   defp normalize_get_assignment({:error, reason}) do
     if missing_node_error?(reason), do: {:error, :not_found}, else: {:error, reason}
@@ -437,7 +435,7 @@ defmodule Starcite.Routing.Store do
              claimed_at_ms >= 0 do
     case do_get_assignment_local(session_id, :consistency) do
       {:ok, assignment} when is_map(assignment) ->
-        {:ok, normalize_assignment(assignment)}
+        {:ok, assignment}
 
       {:error, reason} ->
         if missing_node_error?(reason) do
@@ -451,13 +449,13 @@ defmodule Starcite.Routing.Store do
                    Topology.replication_factor()
                  ) do
             assignment =
-              normalize_assignment(%{
+              %{
                 owner: owner,
                 epoch: 1,
                 replicas: replicas,
                 status: :active,
                 updated_at_ms: claimed_at_ms
-              })
+              }
 
             case :khepri.create(
                    store_id(),
@@ -492,7 +490,7 @@ defmodule Starcite.Routing.Store do
     case :khepri.compare_and_swap(
            store_id(),
            session_path(session_id),
-           exact_match_pattern(current),
+           current,
            next,
            command_options()
          ) do
@@ -531,7 +529,7 @@ defmodule Starcite.Routing.Store do
       case :khepri.compare_and_swap(
              store_id(),
              session_path(session_id),
-             exact_match_pattern(current),
+             current,
              next,
              command_options()
            ) do
@@ -568,7 +566,7 @@ defmodule Starcite.Routing.Store do
       Enum.reduce(payloads, %{}, fn
         {[:sessions, session_id], assignment}, acc
         when is_binary(session_id) and is_map(assignment) ->
-          Map.put(acc, session_id, normalize_assignment(assignment))
+          Map.put(acc, session_id, assignment)
 
         _other, acc ->
           acc
@@ -588,7 +586,7 @@ defmodule Starcite.Routing.Store do
       Enum.reduce(payloads, %{}, fn
         {[:nodes, raw_node], record}, acc when is_binary(raw_node) and is_map(record) ->
           case decode_node_name(raw_node) do
-            {:ok, node} -> Map.put(acc, node, normalize_node_record(record))
+            {:ok, node} -> Map.put(acc, node, record)
             :error -> acc
           end
 
@@ -642,7 +640,7 @@ defmodule Starcite.Routing.Store do
   defp do_get_node_state(node, favor)
        when is_atom(node) and favor in [:low_latency, :consistency] do
     case local_call(:get_node_state, [node, favor]) do
-      {:ok, {:ok, state}} when is_map(state) -> {:ok, normalize_node_record(state)}
+      {:ok, {:ok, state}} when is_map(state) -> {:ok, state}
       {:ok, {:error, reason}} -> {:error, reason}
       {:error, reason} -> {:error, reason}
     end
@@ -680,7 +678,7 @@ defmodule Starcite.Routing.Store do
       case :khepri.compare_and_swap(
              store_id(),
              session_path(session_id),
-             exact_match_pattern(current),
+             current,
              next,
              command_options()
            ) do
@@ -719,15 +717,14 @@ defmodule Starcite.Routing.Store do
     else
       case do_get_node_state_local(node, :consistency) do
         {:ok, raw_current} when is_map(raw_current) ->
-          current = normalize_node_record(raw_current)
+          current = raw_current
 
-          next =
-            updater.(current) |> normalize_node_record() |> Map.put(:updated_at_ms, updated_at_ms)
+          next = updater.(current) |> Map.put(:updated_at_ms, updated_at_ms)
 
           case :khepri.compare_and_swap(
                  store_id(),
                  node_path(node),
-                 exact_match_pattern(raw_current),
+                 raw_current,
                  next,
                  command_options()
                ) do
@@ -744,10 +741,7 @@ defmodule Starcite.Routing.Store do
 
         {:error, reason} ->
           if missing_node_error?(reason) do
-            next =
-              updater.(default_node_record())
-              |> normalize_node_record()
-              |> Map.put(:updated_at_ms, updated_at_ms)
+            next = updater.(default_node_record()) |> Map.put(:updated_at_ms, updated_at_ms)
 
             case :khepri.create(store_id(), node_path(node), next, command_options()) do
               :ok ->
@@ -769,15 +763,10 @@ defmodule Starcite.Routing.Store do
 
   defp ensure_matching_transfer(
          %{status: :moving, target_owner: target_owner, transfer_id: transfer_id},
-         expected_transfer_id
+         transfer_id
        )
-       when is_atom(target_owner) and is_binary(transfer_id) do
-    if transfer_id == expected_transfer_id do
-      :ok
-    else
-      {:error, :mismatching_node}
-    end
-  end
+       when is_atom(target_owner) and is_binary(transfer_id),
+       do: :ok
 
   defp ensure_matching_transfer(_current, _transfer_id), do: {:error, :mismatching_node}
 
@@ -802,41 +791,9 @@ defmodule Starcite.Routing.Store do
   defp session_path(session_id), do: [:sessions, session_id]
   defp node_path(node), do: [:nodes, Atom.to_string(node)]
 
-  defp normalize_assignment(%{owner: owner, epoch: epoch, replicas: replicas} = assignment)
-       when is_atom(owner) and is_integer(epoch) and epoch >= 0 and is_list(replicas) do
-    assignment
-    |> Map.put_new(:status, :active)
-    |> Map.put_new(:updated_at_ms, 0)
-  end
-
-  defp normalize_assignment(assignment), do: assignment
-
-  defp normalize_node_record(record) when is_map(record) do
-    %{
-      status:
-        case Map.get(record, :status) do
-          status when status in [:ready, :draining, :drained] -> status
-          _ -> :ready
-        end,
-      lease_until_ms:
-        case Map.get(record, :lease_until_ms) do
-          value when is_integer(value) and value >= 0 -> value
-          _ -> 0
-        end,
-      updated_at_ms:
-        case Map.get(record, :updated_at_ms) do
-          value when is_integer(value) and value >= 0 -> value
-          _ -> 0
-        end
-    }
-  end
-
   defp default_node_record do
     %{status: :ready, lease_until_ms: 0, updated_at_ms: 0}
   end
-
-  @spec exact_match_pattern(term()) :: :ets.match_pattern()
-  defp exact_match_pattern(value), do: value
 
   defp lease_expired?(record, now_ms)
        when is_map(record) and is_integer(now_ms) and now_ms >= 0 do
