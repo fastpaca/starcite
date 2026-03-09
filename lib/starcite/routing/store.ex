@@ -23,7 +23,8 @@ defmodule Starcite.Routing.Store do
                do_compare_and_swap_assignment_local: 3,
                do_commit_transfer_local: 3,
                do_failover_assignment_local: 4,
-               mutate_node_record: 4
+               mutate_node_record: 4,
+               exact_match_pattern: 1
              ]}
 
   @join_timeout_ms 15_000
@@ -310,11 +311,11 @@ defmodule Starcite.Routing.Store do
   end
 
   def handle_info({:nodeup, node, _info}, state) when is_atom(node) do
-    {:noreply, maybe_join_node(node, state)}
+    {:noreply, join_known_node(node, state)}
   end
 
   def handle_info({:nodeup, node}, state) when is_atom(node) do
-    {:noreply, maybe_join_node(node, state)}
+    {:noreply, join_known_node(node, state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -402,7 +403,7 @@ defmodule Starcite.Routing.Store do
     Process.send_after(self(), :cluster_reconcile, @cluster_reconcile_interval_ms)
   end
 
-  defp maybe_join_node(node, state) when is_atom(node) and is_map(state) do
+  defp join_known_node(node, state) when is_atom(node) and is_map(state) do
     if node in Topology.nodes() do
       :ok = join_cluster()
     end
@@ -412,9 +413,8 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_assignment(session_id, favor)
        when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
-    case local_call(:get_assignment, [session_id, favor]) do
-      {:ok, result} -> assignment_from_khepri(result)
-      {:error, reason} -> {:error, reason}
+    with {:ok, result} <- local_call(:get_assignment, [session_id, favor]) do
+      assignment_from_khepri(result)
     end
   end
 
@@ -484,7 +484,7 @@ defmodule Starcite.Routing.Store do
     case :khepri.compare_and_swap(
            store_id(),
            session_path(session_id),
-           current,
+           exact_match_pattern(current),
            next,
            command_options()
          ) do
@@ -523,7 +523,7 @@ defmodule Starcite.Routing.Store do
       case :khepri.compare_and_swap(
              store_id(),
              session_path(session_id),
-             current,
+             exact_match_pattern(current),
              next,
              command_options()
            ) do
@@ -557,14 +557,11 @@ defmodule Starcite.Routing.Store do
 
   defp assignments_from_khepri({:ok, payloads}) when is_map(payloads) do
     assignments =
-      Enum.reduce(payloads, %{}, fn
-        {[:sessions, session_id], assignment}, acc
-        when is_binary(session_id) and is_map(assignment) ->
-          Map.put(acc, session_id, assignment)
-
-        _other, acc ->
-          acc
-      end)
+      for {[:sessions, session_id], assignment} <- payloads,
+          is_binary(session_id) and is_map(assignment),
+          into: %{} do
+        {session_id, assignment}
+      end
 
     {:ok, assignments}
   end
@@ -633,10 +630,11 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_node_state(node, favor)
        when is_atom(node) and favor in [:low_latency, :consistency] do
-    case local_call(:get_node_state, [node, favor]) do
-      {:ok, {:ok, state}} when is_map(state) -> {:ok, state}
-      {:ok, {:error, reason}} -> {:error, reason}
-      {:error, reason} -> {:error, reason}
+    with {:ok, result} <- local_call(:get_node_state, [node, favor]) do
+      case result do
+        {:ok, state} when is_map(state) -> {:ok, state}
+        {:error, reason} -> {:error, reason}
+      end
     end
   end
 
@@ -672,7 +670,7 @@ defmodule Starcite.Routing.Store do
       case :khepri.compare_and_swap(
              store_id(),
              session_path(session_id),
-             current,
+             exact_match_pattern(current),
              next,
              command_options()
            ) do
@@ -710,15 +708,13 @@ defmodule Starcite.Routing.Store do
       {:error, :routing_store_unavailable}
     else
       case do_get_node_state_local(node, :consistency) do
-        {:ok, raw_current} when is_map(raw_current) ->
-          current = raw_current
-
+        {:ok, current} when is_map(current) ->
           next = updater.(current) |> Map.put(:updated_at_ms, updated_at_ms)
 
           case :khepri.compare_and_swap(
                  store_id(),
                  node_path(node),
-                 raw_current,
+                 exact_match_pattern(current),
                  next,
                  command_options()
                ) do
@@ -796,6 +792,9 @@ defmodule Starcite.Routing.Store do
   defp default_node_record do
     %{status: :ready, lease_until_ms: 0, updated_at_ms: 0}
   end
+
+  @spec exact_match_pattern(term()) :: :ets.match_pattern()
+  defp exact_match_pattern(value), do: value
 
   defp lease_expired?(record, now_ms)
        when is_map(record) and is_integer(now_ms) and now_ms >= 0 do
