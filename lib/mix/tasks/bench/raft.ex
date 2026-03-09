@@ -245,6 +245,7 @@ defmodule Mix.Tasks.Bench.Raft do
         %Starcite.Session{
           id: session_id,
           title: "Hydrated",
+          epoch: 0,
           creator_principal: context.principal,
           tenant_id: @tenant_id,
           metadata: %{bench: true, scenario: "raft_hydrate_session"},

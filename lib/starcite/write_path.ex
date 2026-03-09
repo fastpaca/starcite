@@ -274,6 +274,7 @@ defmodule Starcite.WritePath do
       creator_principal: creator_principal,
       tenant_id: tenant_id,
       metadata: metadata,
+      archived_seq: 0,
       created_at: parse_utc_datetime!(created_at)
     }
 

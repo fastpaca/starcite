@@ -448,6 +448,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     %Starcite.Session{
       id: session_id,
       title: title,
+      epoch: 0,
       creator_principal: %Starcite.Auth.Principal{
         tenant_id: "acme",
         id: "user-1",
