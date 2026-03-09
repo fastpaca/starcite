@@ -1,7 +1,7 @@
 defmodule Starcite.Runtime.RoutingTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.ReplicaRouter
+  alias Starcite.ControlPlane.ReplicaRouter
 
   defmodule RoutingProbe do
     def local_ok, do: {:ok, :local}
@@ -78,6 +78,37 @@ defmodule Starcite.Runtime.RoutingTest do
                  replicas: [self_node, ready_remote],
                  ready_nodes: [ready_remote],
                  prefer_leader: true,
+                 local_running: true
+               )
+    end
+
+    test "prefer_leader uses retry-capable remote routing when leader hint is missing" do
+      group_id = unique_group_id()
+      self_node = :"node1@127.0.0.1"
+      ready_remote = :"node2@127.0.0.1"
+
+      assert {:remote, [^self_node, ^ready_remote]} =
+               ReplicaRouter.route_target(group_id,
+                 self: self_node,
+                 replicas: [self_node, ready_remote],
+                 ready_nodes: [self_node, ready_remote],
+                 prefer_leader: true,
+                 local_running: true
+               )
+    end
+
+    test "prefer_leader can defer unconfirmed local reads behind ready remotes" do
+      group_id = unique_group_id()
+      self_node = :"node1@127.0.0.1"
+      ready_remote = :"node2@127.0.0.1"
+
+      assert {:remote, [^ready_remote, ^self_node]} =
+               ReplicaRouter.route_target(group_id,
+                 self: self_node,
+                 replicas: [self_node, ready_remote],
+                 ready_nodes: [self_node, ready_remote],
+                 prefer_leader: true,
+                 defer_local_when_unconfirmed: true,
                  local_running: true
                )
     end

@@ -79,19 +79,27 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     session_id = unique_session_id()
     state = seeded_state(session_id)
 
-    {next_state, {:reply, {:ok, %{seq: 1, deduped: false}}}, _effects} =
+    {next_state, {:reply, {:ok, %{seq: 1, deduped: false, epoch: epoch_one} = reply_one}},
+     _effects} =
       RaftFSM.apply(
         nil,
         {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         state
       )
 
-    {_, {:reply, {:ok, %{seq: 1, deduped: true}}}} =
+    assert is_integer(epoch_one) and epoch_one >= 0
+    assert reply_one.cursor == %{epoch: epoch_one, seq: 1}
+    assert reply_one.committed_cursor == %{epoch: epoch_one, seq: 0}
+
+    {_, {:reply, {:ok, %{seq: 1, deduped: true, epoch: ^epoch_one} = deduped_reply}}} =
       RaftFSM.apply(
         nil,
         {:append_event, session_id, event_payload("one", producer_seq: 1), nil},
         next_state
       )
+
+    assert deduped_reply.cursor == %{epoch: epoch_one, seq: 1}
+    assert deduped_reply.committed_cursor == %{epoch: epoch_one, seq: 0}
 
     assert EventStore.session_size(session_id) == 1
     assert {:ok, event} = EventStore.get_event(session_id, 1)
@@ -137,8 +145,12 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
         state
       )
 
-    assert first == %{seq: 1, last_seq: 1, deduped: false}
-    assert second == %{seq: 2, last_seq: 2, deduped: false}
+    assert %{seq: 1, last_seq: 1, deduped: false, epoch: first_epoch} = first
+    assert first.cursor == %{epoch: first_epoch, seq: 1}
+    assert first.committed_cursor == %{epoch: first_epoch, seq: 0}
+    assert %{seq: 2, last_seq: 2, deduped: false, epoch: second_epoch} = second
+    assert second.cursor == %{epoch: second_epoch, seq: 2}
+    assert second.committed_cursor == %{epoch: second_epoch, seq: 0}
     assert length(effects) == 2
 
     assert {:ok, one} = EventStore.get_event(session_id, 1)
