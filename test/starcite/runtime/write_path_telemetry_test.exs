@@ -6,7 +6,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
 
-    handler_id = "raft-command-#{System.unique_integer([:positive, :monotonic])}"
     role_count_handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
     group_role_handler_id = "raft-group-role-#{System.unique_integer([:positive, :monotonic])}"
 
@@ -16,16 +15,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     request_handler_id = "write-request-#{System.unique_integer([:positive, :monotonic])}"
     session_handler_id = "session-lifecycle-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:starcite, :raft, :command],
-        fn _event, measurements, metadata, pid ->
-          send(pid, {:raft_command_event, measurements, metadata})
-        end,
-        test_pid
-      )
 
     :ok =
       :telemetry.attach(
@@ -82,7 +71,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
       )
 
     on_exit(fn ->
-      :telemetry.detach(handler_id)
       :telemetry.detach(role_count_handler_id)
       :telemetry.detach(group_role_handler_id)
       :telemetry.detach(leadership_transfer_handler_id)
@@ -91,33 +79,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     end)
 
     :ok
-  end
-
-  test "telemetry helper exposes leader_retry outcome dimension" do
-    node_name = "shared-1@127.0.0.1"
-    assert :ok = Telemetry.raft_command_result(:append_event, :leader_retry_timeout, node_name)
-
-    assert_receive_raft_command(:append_event, :leader_retry_timeout, node_name)
-  end
-
-  test "telemetry helper emits command attempt telemetry for append acknowledgements" do
-    node_name = "shared-1@127.0.0.1"
-
-    assert :ok =
-             Telemetry.raft_command_attempt(
-               :append_event,
-               :leader_retry_ok,
-               node_name,
-               :append_event,
-               {:ok, %{seq: 1}},
-               9
-             )
-
-    assert_receive_raft_command(:append_event, :leader_retry_ok, node_name)
-
-    assert_receive {:request_event, %{count: 1, duration_ms: 9},
-                    %{node: ^node_name, operation: :append_event, phase: :ack, outcome: :ok}},
-                   1_000
   end
 
   test "telemetry helper exposes raft group role count dimensions" do
@@ -185,24 +146,6 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
                    1_000
   end
 
-  test "global telemetry flag disables raft command events" do
-    original = Application.get_env(:starcite, :telemetry_enabled, false)
-    Application.put_env(:starcite, :telemetry_enabled, false)
-
-    on_exit(fn ->
-      Application.put_env(:starcite, :telemetry_enabled, original)
-    end)
-
-    assert :ok =
-             Telemetry.raft_command_result(
-               :append_event,
-               :leader_retry_timeout,
-               "shared-1@127.0.0.1"
-             )
-
-    refute_receive {:raft_command_event, _measurements, _metadata}, 100
-  end
-
   test "global telemetry flag disables write request helper events" do
     original = Application.get_env(:starcite, :telemetry_enabled, false)
     Application.put_env(:starcite, :telemetry_enabled, false)
@@ -214,28 +157,5 @@ defmodule Starcite.Runtime.WritePathTelemetryTest do
     assert :ok = Telemetry.request(:append_event, :ack, :ok, 5)
 
     refute_receive {:request_event, _measurements, _metadata}, 100
-  end
-
-  defp assert_receive_raft_command(command, outcome, node_name) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_raft_command(command, outcome, node_name, deadline)
-  end
-
-  defp do_assert_receive_raft_command(command, outcome, node_name, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {:raft_command_event, %{count: 1},
-       %{node: ^node_name, command: ^command, outcome: ^outcome}} ->
-        :ok
-
-      {:raft_command_event, _measurements, _metadata} ->
-        do_assert_receive_raft_command(command, outcome, node_name, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for raft command telemetry command=#{inspect(command)} outcome=#{inspect(outcome)}"
-        )
-    end
   end
 end

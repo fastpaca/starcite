@@ -18,6 +18,7 @@ Control plane:
 - Routing metadata publication.
 - Node lifecycle coordination (drain, add, remove).
 - Consensus-backed durable frontier publication (`committed_cursor` / current `archived_seq` shape).
+- One Raft-backed shard lease group per routing shard; these groups elect leaders but do not store session payload state.
 
 Data plane:
 - Owner-assigned `(epoch, seq)` event ordering.

@@ -1,9 +1,10 @@
-defmodule Starcite.ControlPlane.RaftMachine do
+defmodule Starcite.ControlPlane.ShardLeaseMachine do
   @moduledoc """
-  Minimal raft machine for control-plane coordination groups.
+  Minimal Raft machine for control-plane shard lease groups.
 
-  This machine does not hold application session state. Raft is used here only
-  for leader discovery and lightweight in-memory membership coordination.
+  This machine deliberately does not hold session payload state. Its only job is
+  to let the control plane run one Raft group per routing shard so the cluster
+  can elect a current owner and derive a fencing epoch for routed writes.
   """
 
   @behaviour :ra_machine
