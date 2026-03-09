@@ -7,7 +7,6 @@ defmodule Starcite.WritePath.CommandRouter do
   """
 
   alias Starcite.DataPlane.{
-    RaftAccess,
     RaftBootstrap,
     RaftManager,
     RaftPipelineClient,
@@ -28,7 +27,7 @@ defmodule Starcite.WritePath.CommandRouter do
       when is_binary(session_id) and session_id != "" and is_function(local_dispatch, 1) and
              is_atom(remote_mod) and is_atom(remote_fun) and is_list(remote_args) do
     dispatch_group(
-      RaftAccess.group_for_session(session_id),
+      group_for_session(session_id),
       local_dispatch,
       remote_mod,
       remote_fun,
@@ -42,7 +41,7 @@ defmodule Starcite.WritePath.CommandRouter do
   @spec dispatch_local_session(String.t(), term()) :: result()
   def dispatch_local_session(session_id, command)
       when is_binary(session_id) and session_id != "" do
-    with {:ok, server_id, _group} <- RaftAccess.locate_and_ensure_started(session_id) do
+    with {:ok, server_id, _group} <- locate_and_ensure_started(session_id) do
       dispatch_server(server_id, command)
     end
   end
@@ -62,7 +61,7 @@ defmodule Starcite.WritePath.CommandRouter do
         System.monotonic_time()
       end
 
-    case RaftAccess.local_server_for_group(group_id) do
+    case local_server_for_group(group_id) do
       {:ok, server_id} ->
         if routing_operation do
           replica_count = length(RaftManager.replicas_for_group(group_id))
@@ -111,6 +110,33 @@ defmodule Starcite.WritePath.CommandRouter do
 
         result
     end
+  end
+
+  @spec locate_and_ensure_started(String.t()) ::
+          {:ok, atom(), non_neg_integer()} | {:error, term()}
+  def locate_and_ensure_started(session_id) when is_binary(session_id) and session_id != "" do
+    group_id = group_for_session(session_id)
+    server_id = RaftManager.server_id(group_id)
+
+    with :ok <- ensure_group_started(server_id, group_id) do
+      {:ok, server_id, group_id}
+    end
+  end
+
+  @spec local_server_for_group(non_neg_integer()) :: {:ok, atom()} | :error
+  def local_server_for_group(group_id) when is_integer(group_id) and group_id >= 0 do
+    server_id = RaftManager.server_id(group_id)
+
+    if Process.whereis(server_id) != nil do
+      {:ok, server_id}
+    else
+      :error
+    end
+  end
+
+  @spec group_for_session(String.t()) :: non_neg_integer()
+  def group_for_session(session_id) when is_binary(session_id) and session_id != "" do
+    RaftManager.group_for_session(session_id)
   end
 
   @doc """
@@ -193,6 +219,24 @@ defmodule Starcite.WritePath.CommandRouter do
       {:ok, _reply} = ok -> ok
       {:error, _reason} = error -> error
       {:timeout, _leader} -> dispatch_on_node_fallback(server_id, node, command)
+    end
+  end
+
+  defp ensure_group_started(server_id, group_id)
+       when is_atom(server_id) and is_integer(group_id) and group_id >= 0 do
+    if Process.whereis(server_id) != nil do
+      :ok
+    else
+      ensure_group_started_slow(group_id)
+    end
+  end
+
+  defp ensure_group_started_slow(group_id) when is_integer(group_id) and group_id >= 0 do
+    case RaftManager.start_group(group_id) do
+      :ok -> :ok
+      {:error, {:already_started, _pid}} -> :ok
+      {:error, {:shutdown, {:failed_to_start_child, _child, {:already_started, _pid}}}} -> :ok
+      {:error, reason} -> {:error, reason}
     end
   end
 
