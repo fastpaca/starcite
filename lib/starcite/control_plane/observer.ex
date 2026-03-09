@@ -9,7 +9,7 @@ defmodule Starcite.ControlPlane.Observer do
 
   alias Starcite.ControlPlane.ObserverState
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.ControlPlane.RaftBootstrap
 
   @status_call_timeout_ms 1_000
   @suspect_to_lost_ms 120_000

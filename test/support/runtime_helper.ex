@@ -4,7 +4,7 @@ defmodule Starcite.Runtime.TestHelper do
   require ExUnit.CaptureLog
   require Logger
 
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->

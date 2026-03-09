@@ -1,7 +1,7 @@
-defmodule Starcite.DataPlane.RaftBootstrapTest do
+defmodule Starcite.ControlPlane.RaftBootstrapTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.RaftBootstrap
+  alias Starcite.ControlPlane.RaftBootstrap
 
   test "startup_complete is idempotent once startup has finished" do
     original_state = :sys.get_state(RaftBootstrap)

@@ -1,4 +1,4 @@
-defmodule Starcite.DataPlane.RaftBootstrap do
+defmodule Starcite.ControlPlane.RaftBootstrap do
   @moduledoc """
   Topology bootstrap for static write-node Raft groups.
 
@@ -16,7 +16,7 @@ defmodule Starcite.DataPlane.RaftBootstrap do
 
   alias Starcite.ControlPlane.Ops.Leadership
   alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.DataPlane.{RaftHealth, RaftManager}
+  alias Starcite.ControlPlane.{RaftHealth, RaftManager}
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32

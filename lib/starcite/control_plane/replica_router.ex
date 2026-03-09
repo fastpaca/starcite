@@ -9,7 +9,7 @@ defmodule Starcite.ControlPlane.ReplicaRouter do
   require Logger
 
   alias Starcite.ControlPlane.Observer
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   @rpc_timeout Application.compile_env(:starcite, :rpc_timeout_ms, 5_000)
   @leader_cache_table :starcite_replica_router_leader_cache

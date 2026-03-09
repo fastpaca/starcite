@@ -6,7 +6,7 @@ defmodule Starcite.ControlPlane.SessionRouter do
   """
 
   alias Starcite.ControlPlane.ReplicaRouter
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   @owner_probe_timeout_ms Application.compile_env(:starcite, :session_owner_probe_timeout_ms, 50)
   @owner_epoch_probe_timeout_ms Application.compile_env(

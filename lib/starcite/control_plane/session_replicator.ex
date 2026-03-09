@@ -7,7 +7,8 @@ defmodule Starcite.ControlPlane.SessionReplicator do
   writes to callers.
   """
 
-  alias Starcite.DataPlane.{RaftManager, SessionOwners}
+  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.DataPlane.SessionOwners
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
 

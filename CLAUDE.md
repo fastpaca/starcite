@@ -40,10 +40,12 @@ Contract reminders:
 
 ## Architecture Cheat Sheet
 
-- **Storage:** 256 Raft groups (Ra library) with 3 replicas each. Quorum writes (2 of 3) and automatic leader election.
-- **No per-session processes:** Request handling is stateless; Raft state machines are the long-lived state holders.
-- **Session state in Raft:** Session metadata and ordered event logs are cached in Raft state.
-- **Postgres as write-behind:** Background archiver flushes committed events to Postgres. Failures do not block append acks.
+- **Storage:** Session state and sequencing are owned by per-session in-memory
+  owners (GenServers), backed by deterministic routing and replication.
+- **Control plane:** 256 Raft groups (Ra library) coordinate ownership, topology
+  changes, and readiness with automatic leader election.
+- **Postgres as write-behind:** Background archiver flushes committed events to
+  Postgres. Failures do not block append acks.
 - **Cluster membership:** Erlang distribution + coordinator reconcile topology and deterministic replica assignment.
 
 ## Working Standards
@@ -83,12 +85,12 @@ Contract reminders:
 
 **Critical path:**
 1. Client calls `POST /v1/sessions/:id/append`
-2. Runtime routes append to the session's Raft group
-3. Quorum commit assigns next `seq`
-4. API responds with committed `seq`; tail subscribers receive the committed event
+2. Control-plane-aware runtime routes append to the session's owner
+3. Owner assigns next `seq` and replicates to in-memory replicas
+4. API responds with committed `cursor`; tail subscribers receive the committed event
 
 **What's NOT on the critical path:**
 - Database writes (background flusher, 5s interval)
 - Snapshots (triggered at 100k appends, async)
 
-**Key insight:** Session metadata and ordered event state live in Raft memory/log state, avoiding synchronous database lookups on append.
+**Key insight:** Session sequencing and ordered event state are owned by session owners and replicated in-memory, avoiding synchronous database lookups on append.

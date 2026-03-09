@@ -11,7 +11,7 @@ defmodule Starcite.ControlPlane.Supervisor do
       # Task supervisor used by control-plane Raft bootstrap/recovery work.
       {Task.Supervisor, name: Starcite.RaftTaskSupervisor},
       # Control-plane Raft bootstrap/lifecycle coordinator.
-      Starcite.DataPlane.RaftBootstrap,
+      Starcite.ControlPlane.RaftBootstrap,
       Starcite.ControlPlane.Observer
     ]
 

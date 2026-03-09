@@ -2,7 +2,7 @@ defmodule Starcite.ControlPlane.Ops.Topology do
   @moduledoc false
 
   alias Starcite.ControlPlane.{Observer, WriteNodes}
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   @spec ready_nodes() :: [node()]
   def ready_nodes do

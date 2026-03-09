@@ -8,7 +8,7 @@ defmodule Starcite.ControlPlane.Ops do
 
   alias Starcite.ControlPlane.{Observer, WriteNodes}
   alias Starcite.ControlPlane.Ops.{Leadership, Maintenance, Readiness, Topology}
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.ControlPlane.RaftManager
 
   @spec status() :: map()
   def status do
