@@ -1,18 +1,20 @@
 defmodule Starcite.ControlPlane.RaftManager do
   @moduledoc """
-  Utility module for static Raft write-group placement and lifecycle.
+  Utility module for static Raft shard-group placement and lifecycle.
 
   Responsibilities:
 
   - Map sessions to write groups.
   - Compute static replica sets from configured write nodes.
-  - Bootstrap or join Raft groups hosted by this node.
+  - Bootstrap or join control-plane Raft groups hosted by this node.
+
+  These groups do not hold session payload state. They exist only to elect and
+  fence the active shard owner used by routing and failover.
   """
 
   require Logger
 
-  alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.ControlPlane.RaftMachine
+  alias Starcite.ControlPlane.{ShardLeaseMachine, WriteNodes}
   @server_ids_cache_key {__MODULE__, :server_ids}
   @cluster_names_cache_key {__MODULE__, :cluster_names}
   @replicas_cache_key {__MODULE__, :replicas}
@@ -190,7 +192,7 @@ defmodule Starcite.ControlPlane.RaftManager do
   defp start_local_server(group_id) do
     server_name = server_id(group_id)
     cluster_name = cluster_name(group_id)
-    machine = {:module, RaftMachine, %{group_id: group_id}}
+    machine = machine(group_id)
     my_node = Node.self()
     node_name = safe_node_name(my_node)
 
@@ -264,6 +266,12 @@ defmodule Starcite.ControlPlane.RaftManager do
 
   defp single_replica_group?(group_id) when is_integer(group_id) and group_id >= 0 do
     length(replicas_for_group(group_id)) == 1
+  end
+
+  @doc false
+  @spec machine(non_neg_integer()) :: {:module, module(), map()}
+  def machine(group_id) when is_integer(group_id) and group_id >= 0 do
+    {:module, ShardLeaseMachine, %{group_id: group_id}}
   end
 
   @doc false

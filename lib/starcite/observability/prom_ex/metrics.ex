@@ -165,12 +165,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_raft_metrics,
       [
-        counter("starcite_raft_command_total",
-          event_name: [:starcite, :raft, :command],
-          measurement: :count,
-          description: "Raft command execution outcomes by node, command, and outcome",
-          tags: [:node, :command, :outcome]
-        ),
         last_value("starcite_raft_groups",
           event_name: [:starcite, :raft, :role_count],
           measurement: :groups,

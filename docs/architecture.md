@@ -98,17 +98,19 @@ Archive writes are idempotent. Archiver failures do not block append/tail hot pa
 
 ## Control plane
 
-The control plane manages cluster lifecycle/readiness and operator workflows.
-It does not participate in append sequencing.
+The control plane manages shard ownership, routing readiness, and operator
+workflows. It does not sequence or store per-event payloads.
 
 Current responsibilities:
 - Static write-node topology configuration.
+- One Raft group per write shard to elect the active shard owner.
+- Ownership fencing via Raft term (`epoch`) for routed writes and failover.
 - Node liveness and drain/undrain intent.
-- Raft runtime/bootstrap/readiness management for control-plane operations.
+- Raft runtime/bootstrap/readiness management for shard lease groups.
 - Cluster status and operational tooling.
 
-Raft remains in the system as control-plane/lifecycle infrastructure, but it is not
-on the append/read hot path.
+Raft remains in the system as shard-lease control-plane infrastructure, but it is
+not the append state machine and it is not on the per-event hot path.
 
 ## Failure modes
 
