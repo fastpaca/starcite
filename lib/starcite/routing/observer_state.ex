@@ -1,4 +1,4 @@
-defmodule Starcite.ControlPlane.ObserverState do
+defmodule Starcite.Routing.ObserverState do
   @moduledoc false
 
   @type status :: :ready | :suspect | :lost | :draining

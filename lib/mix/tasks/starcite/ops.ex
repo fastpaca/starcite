@@ -1,6 +1,6 @@
 defmodule Mix.Tasks.Starcite.Ops do
   @moduledoc """
-  Operator commands for static write-node control-plane state.
+  Operator commands for routing and lease state.
 
   This task affects routing readiness only and never mutates Raft membership.
 
@@ -9,9 +9,9 @@ defmodule Mix.Tasks.Starcite.Ops do
       mix starcite.ops status
       mix starcite.ops ready-nodes
       mix starcite.ops drain
-      mix starcite.ops drain write-1@starcite.internal
+      mix starcite.ops drain routing-1@starcite.internal
       mix starcite.ops undrain
-      mix starcite.ops undrain write-1@starcite.internal
+      mix starcite.ops undrain routing-1@starcite.internal
       mix starcite.ops group-replicas 42
       mix starcite.ops wait-ready
       mix starcite.ops wait-ready 60000
@@ -21,10 +21,10 @@ defmodule Mix.Tasks.Starcite.Ops do
 
   use Mix.Task
 
-  alias Starcite.ControlPlane.Ops
+  alias Starcite.Operations, as: Ops
 
   @default_wait_timeout_ms 30_000
-  @shortdoc "Control-plane ops for static write-node routing state"
+  @shortdoc "Routing and lease operations"
 
   @impl Mix.Task
   def run(args) do
@@ -145,7 +145,7 @@ defmodule Mix.Tasks.Starcite.Ops do
       {:ok, node} ->
         {:ok, node}
 
-      {:error, :invalid_write_node} ->
+      {:error, :invalid_routing_node} ->
         node_name = String.trim(raw_node)
 
         known =

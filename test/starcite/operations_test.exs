@@ -1,9 +1,9 @@
-defmodule Starcite.ControlPlane.OpsTest do
+defmodule Starcite.OperationsTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.{Observer, Ops, WriteNodes}
-  alias Starcite.ControlPlane.Ops.Leadership
-  alias Starcite.ControlPlane.{RaftBootstrap, RaftManager}
+  alias Starcite.Operations, as: Ops
+  alias Starcite.Operations.Leadership
+  alias Starcite.Routing.{LeaseBootstrap, LeaseManager, Observer, Topology}
 
   setup do
     Ops.undrain_node(Node.self())
@@ -15,27 +15,27 @@ defmodule Starcite.ControlPlane.OpsTest do
     :ok
   end
 
-  test "status exposes write-node and observer snapshot" do
+  test "status exposes routing-node and observer snapshot" do
     status = Ops.status()
 
     assert status.node == Node.self()
-    assert is_boolean(status.local_write_node)
-    assert status.local_mode in [:write_node, :router_node]
+    assert is_boolean(status.local_routing_node)
+    assert status.local_mode in [:routing_node, :ingress_node]
     assert is_boolean(status.local_ready)
     assert is_boolean(status.local_drained)
-    assert is_list(status.write_nodes)
-    assert is_integer(status.write_replication_factor)
-    assert status.write_replication_factor > 0
+    assert is_list(status.routing_nodes)
+    assert is_integer(status.routing_replication_factor)
+    assert status.routing_replication_factor > 0
     assert is_integer(status.num_groups)
     assert status.num_groups > 0
-    assert is_list(status.local_groups)
+    assert is_list(status.local_routing_groups)
     assert is_list(status.local_leader_groups)
-    assert is_map(status.raft_role_counts)
-    assert status.raft_role_counts.leader >= 0
-    assert is_map(status.raft_storage)
-    assert is_binary(status.raft_storage.starcite_data_dir)
-    assert is_binary(status.raft_storage.ra_data_dir)
-    assert is_binary(status.raft_storage.ra_wal_data_dir)
+    assert is_map(status.lease_role_counts)
+    assert status.lease_role_counts.leader >= 0
+    assert is_map(status.lease_storage)
+    assert is_binary(status.lease_storage.starcite_data_dir)
+    assert is_binary(status.lease_storage.ra_data_dir)
+    assert is_binary(status.lease_storage.ra_wal_data_dir)
     assert is_map(status.observer)
   end
 
@@ -83,24 +83,24 @@ defmodule Starcite.ControlPlane.OpsTest do
     refute Ops.local_drained()
   end
 
-  test "wait_local_ready succeeds once write-node convergence is restored" do
+  test "wait_local_ready succeeds once routing-node convergence is restored" do
     local = Node.self()
     :ok = Ops.undrain_node(local)
 
     original_observer_state = :sys.get_state(Observer)
-    original_bootstrap_state = :sys.get_state(RaftBootstrap)
+    original_bootstrap_state = :sys.get_state(LeaseBootstrap)
 
     on_exit(fn ->
       :sys.replace_state(Observer, fn _state -> original_observer_state end)
-      :sys.replace_state(RaftBootstrap, fn _state -> original_bootstrap_state end)
+      :sys.replace_state(LeaseBootstrap, fn _state -> original_bootstrap_state end)
     end)
 
-    :sys.replace_state(RaftBootstrap, fn state ->
+    :sys.replace_state(LeaseBootstrap, fn state ->
       now_ms = System.monotonic_time(:millisecond)
 
       state
       |> Map.put(:startup_complete?, true)
-      |> Map.put(:startup_mode, :write)
+      |> Map.put(:startup_mode, :routing)
       |> Map.put(:consensus_ready?, false)
       |> Map.put(:consensus_last_probe_at_ms, now_ms)
       |> Map.put(:consensus_probe_success_streak, 0)
@@ -118,7 +118,7 @@ defmodule Starcite.ControlPlane.OpsTest do
 
     assert Ops.wait_local_ready(100) in [:ok, {:error, :timeout}]
 
-    :sys.replace_state(RaftBootstrap, fn state ->
+    :sys.replace_state(LeaseBootstrap, fn state ->
       now_ms = System.monotonic_time(:millisecond)
 
       state
@@ -145,12 +145,12 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert {:ok, node} = Ops.parse_known_node(node_name)
     assert node == Node.self()
 
-    assert {:error, :invalid_write_node} =
+    assert {:error, :invalid_routing_node} =
              Ops.parse_known_node("missing@starcite.internal")
   end
 
   test "parse_group_id enforces configured group bounds" do
-    max_group_id = WriteNodes.num_groups() - 1
+    max_group_id = Topology.num_groups() - 1
 
     assert {:ok, 0} = Ops.parse_group_id("0")
     assert {:ok, ^max_group_id} = Ops.parse_group_id(Integer.to_string(max_group_id))
@@ -162,38 +162,38 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert {:error, :invalid_group_id} = Ops.parse_group_id("not-a-number")
   end
 
-  test "drain rejects nodes outside static write-node set" do
-    non_write_node = :"router-1@starcite.internal"
+  test "drain rejects nodes outside static routing-node set" do
+    non_routing_node = :"router-1@starcite.internal"
 
-    refute non_write_node in WriteNodes.nodes()
-    assert {:error, :invalid_write_node} = Ops.drain_node(non_write_node)
-    assert {:error, :invalid_write_node} = Ops.undrain_node(non_write_node)
+    refute non_routing_node in Topology.nodes()
+    assert {:error, :invalid_routing_node} = Ops.drain_node(non_routing_node)
+    assert {:error, :invalid_routing_node} = Ops.undrain_node(non_routing_node)
   end
 
   test "leadership helpers expose local single-node state" do
-    Enum.each(Ops.local_write_groups(), fn group_id ->
-      assert :ok = RaftManager.start_group(group_id)
+    Enum.each(Ops.local_routing_groups(), fn group_id ->
+      assert :ok = LeaseManager.start_group(group_id)
     end)
 
     eventually(
       fn ->
-        assert Ops.raft_role_counts().leader == WriteNodes.num_groups()
+        assert Ops.lease_role_counts().leader == Topology.num_groups()
       end,
       timeout: 5_000
     )
 
-    states = Ops.local_raft_group_states()
+    states = Ops.local_lease_group_states()
 
     assert Leadership.group_roles() == [:leader, :follower, :candidate, :other, :down]
-    assert length(states) == WriteNodes.num_groups()
-    assert Ops.local_leader_groups() == Ops.local_write_groups()
+    assert length(states) == Topology.num_groups()
+    assert Ops.local_leader_groups() == Ops.local_routing_groups()
     assert Ops.group_leader(0) == Node.self()
     assert Leadership.local_group_probe(0) == %{role: :leader, running?: true}
     assert :ok = Ops.wait_group_leader(0, Node.self(), 1_000)
     assert :already_leader = Ops.transfer_group_leadership(0, Node.self())
 
-    assert Ops.raft_role_counts() == %{
-             leader: WriteNodes.num_groups(),
+    assert Ops.lease_role_counts() == %{
+             leader: Topology.num_groups(),
              follower: 0,
              candidate: 0,
              other: 0,
@@ -263,8 +263,8 @@ defmodule Starcite.ControlPlane.OpsTest do
         assert state.leader_node == nil
         refute 0 in Ops.local_leader_groups()
 
-        assert Ops.raft_role_counts() == %{
-                 leader: WriteNodes.num_groups() - 1,
+        assert Ops.lease_role_counts() == %{
+                 leader: Topology.num_groups() - 1,
                  follower: 0,
                  candidate: 0,
                  other: 0,
@@ -278,16 +278,16 @@ defmodule Starcite.ControlPlane.OpsTest do
     assert Leadership.local_group_probe(0) == %{role: :down, running?: false}
     assert {:error, :timeout} = Ops.wait_group_leader(0, Node.self(), 200)
 
-    assert :ok = Leadership.emit_local_raft_role_telemetry()
+    assert :ok = Leadership.emit_local_lease_role_telemetry()
     assert_receive_raft_role_count(:down, 1, Node.self())
 
-    assert :ok = Leadership.emit_local_raft_role_telemetry()
-    assert_receive_raft_role_count(:leader, WriteNodes.num_groups() - 1, Node.self())
+    assert :ok = Leadership.emit_local_lease_role_telemetry()
+    assert_receive_raft_role_count(:leader, Topology.num_groups() - 1, Node.self())
 
-    assert :ok = Leadership.emit_local_raft_role_telemetry()
+    assert :ok = Leadership.emit_local_lease_role_telemetry()
     assert_receive_raft_group_role(0, :down, 1, Node.self())
 
-    assert :ok = Leadership.emit_local_raft_role_telemetry()
+    assert :ok = Leadership.emit_local_lease_role_telemetry()
     assert_receive_raft_group_role(0, :leader, 0, Node.self())
   end
 
@@ -342,7 +342,7 @@ defmodule Starcite.ControlPlane.OpsTest do
       Atom.to_string(Node.self())
     )
 
-    invalid_group_id = WriteNodes.num_groups()
+    invalid_group_id = Topology.num_groups()
 
     assert {:error, :invalid_group_id} =
              Ops.transfer_group_leadership(invalid_group_id, Node.self())
@@ -357,7 +357,7 @@ defmodule Starcite.ControlPlane.OpsTest do
   end
 
   test "leadership helpers reject invalid public arguments" do
-    invalid_group_id = WriteNodes.num_groups()
+    invalid_group_id = Topology.num_groups()
 
     assert_raise ArgumentError, ~r/invalid group_id/, fn ->
       Ops.group_leader(invalid_group_id)
@@ -389,20 +389,20 @@ defmodule Starcite.ControlPlane.OpsTest do
   end
 
   defp ensure_all_local_groups_started do
-    Enum.each(Ops.local_write_groups(), fn group_id ->
-      assert :ok = RaftManager.start_group(group_id)
+    Enum.each(Ops.local_routing_groups(), fn group_id ->
+      assert :ok = LeaseManager.start_group(group_id)
     end)
 
     eventually(
       fn ->
-        assert Ops.raft_role_counts().leader == WriteNodes.num_groups()
+        assert Ops.lease_role_counts().leader == Topology.num_groups()
       end,
       timeout: 5_000
     )
   end
 
   defp delete_local_group(group_id) when is_integer(group_id) and group_id >= 0 do
-    server_ref = {RaftManager.server_id(group_id), Node.self()}
+    server_ref = {LeaseManager.server_id(group_id), Node.self()}
 
     case :ra.delete_cluster([server_ref], 5_000) do
       {:ok, _members} ->
@@ -420,7 +420,7 @@ defmodule Starcite.ControlPlane.OpsTest do
   end
 
   defp restore_local_group(group_id) when is_integer(group_id) and group_id >= 0 do
-    assert :ok = RaftManager.start_group(group_id)
+    assert :ok = LeaseManager.start_group(group_id)
 
     eventually(
       fn ->
@@ -431,7 +431,7 @@ defmodule Starcite.ControlPlane.OpsTest do
   end
 
   defp find_local_group_state!(group_id) when is_integer(group_id) and group_id >= 0 do
-    Ops.local_raft_group_states()
+    Ops.local_lease_group_states()
     |> Enum.find(&match?(%{group_id: ^group_id}, &1))
     |> case do
       nil -> flunk("missing local group state for #{group_id}")

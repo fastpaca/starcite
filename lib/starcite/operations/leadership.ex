@@ -1,10 +1,9 @@
-defmodule Starcite.ControlPlane.Ops.Leadership do
+defmodule Starcite.Operations.Leadership do
   @moduledoc false
 
-  alias Starcite.ControlPlane.Observer
-  alias Starcite.ControlPlane.Ops.Topology
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.Observer
   alias Starcite.Observability.Telemetry
+  alias Starcite.Routing.{LeaseManager, Topology}
 
   @default_wait_interval_ms 200
   @target_probe_timeout_ms 1_000
@@ -15,7 +14,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   @spec group_roles() :: [group_role()]
   def group_roles, do: @group_roles
 
-  @spec local_raft_group_states() :: [
+  @spec local_lease_group_states() :: [
           %{
             group_id: non_neg_integer(),
             leader_node: node() | nil,
@@ -23,26 +22,26 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
             role: group_role()
           }
         ]
-  def local_raft_group_states do
-    Enum.map(Topology.local_write_groups(), &local_group_state/1)
+  def local_lease_group_states do
+    Enum.map(local_routing_groups(), &local_group_state/1)
   end
 
-  @spec raft_role_counts() :: %{
+  @spec lease_role_counts() :: %{
           leader: non_neg_integer(),
           follower: non_neg_integer(),
           candidate: non_neg_integer(),
           other: non_neg_integer(),
           down: non_neg_integer()
         }
-  def raft_role_counts do
-    Enum.reduce(local_raft_group_states(), empty_role_counts(), fn %{role: role}, acc ->
+  def lease_role_counts do
+    Enum.reduce(local_lease_group_states(), empty_role_counts(), fn %{role: role}, acc ->
       Map.update!(acc, role, &(&1 + 1))
     end)
   end
 
   @spec local_leader_groups() :: [non_neg_integer()]
   def local_leader_groups do
-    local_raft_group_states()
+    local_lease_group_states()
     |> Enum.reduce([], fn
       %{group_id: group_id, role: :leader}, acc -> [group_id | acc]
       _state, acc -> acc
@@ -52,7 +51,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
 
   @spec group_leader(non_neg_integer()) :: node() | nil
   def group_leader(group_id) when is_integer(group_id) and group_id >= 0 do
-    case Topology.parse_group_id(group_id) do
+    case parse_group_id(group_id) do
       {:ok, valid_group_id} ->
         lookup_group_leader(valid_group_id)
 
@@ -73,7 +72,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
       group_id: group_id,
       role: local_group_role(group_id),
       leader_node: lookup_group_leader(group_id),
-      replicas: RaftManager.replicas_for_group(group_id)
+      replicas: LeaseManager.replicas_for_group(group_id)
     }
   end
 
@@ -87,10 +86,10 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   end
 
   @doc false
-  @spec emit_local_raft_role_telemetry() :: :ok
-  def emit_local_raft_role_telemetry do
+  @spec emit_local_lease_role_telemetry() :: :ok
+  def emit_local_lease_role_telemetry do
     node_name = Atom.to_string(Node.self())
-    states = local_raft_group_states()
+    states = local_lease_group_states()
     counts = count_states(states)
 
     Enum.each(counts, fn {role, groups} ->
@@ -114,7 +113,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
     source_node = lookup_group_leader_safe(group_id)
 
     result =
-      with {:ok, valid_group_id} <- Topology.parse_group_id(group_id),
+      with {:ok, valid_group_id} <- parse_group_id(group_id),
            :ok <- validate_target_replica(valid_group_id, target_node),
            {:ok, current_leader} <- current_leader(valid_group_id),
            :ok <- validate_target_leader_change(current_leader, target_node),
@@ -132,7 +131,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   def wait_group_leader(group_id, target_node, timeout_ms)
       when is_integer(group_id) and group_id >= 0 and is_atom(target_node) and
              is_integer(timeout_ms) and timeout_ms > 0 do
-    with {:ok, valid_group_id} <- Topology.parse_group_id(group_id),
+    with {:ok, valid_group_id} <- parse_group_id(group_id),
          :ok <- validate_target_replica(valid_group_id, target_node) do
       deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
       do_wait_group_leader(valid_group_id, target_node, deadline_ms)
@@ -155,7 +154,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
 
   defp validate_target_replica(group_id, target_node)
        when is_integer(group_id) and is_atom(target_node) do
-    if target_node in RaftManager.replicas_for_group(group_id) do
+    if target_node in LeaseManager.replicas_for_group(group_id) do
       :ok
     else
       {:error, :target_not_replica}
@@ -236,7 +235,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
 
   defp do_transfer(group_id, current_leader, target_node)
        when is_integer(group_id) and is_atom(current_leader) and is_atom(target_node) do
-    server_id = RaftManager.server_id(group_id)
+    server_id = LeaseManager.server_id(group_id)
 
     try do
       :ra.transfer_leadership({server_id, current_leader}, {server_id, target_node})
@@ -302,8 +301,8 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   defp normalize_transfer_result({:error, _other}), do: {:error, :error}
 
   defp lookup_group_leader(group_id) when is_integer(group_id) and group_id >= 0 do
-    server_id = RaftManager.server_id(group_id)
-    cluster_name = RaftManager.cluster_name(group_id)
+    server_id = LeaseManager.server_id(group_id)
+    cluster_name = LeaseManager.cluster_name(group_id)
 
     case :ra_leaderboard.lookup_leader(cluster_name) do
       {^server_id, leader_node} when is_atom(leader_node) and not is_nil(leader_node) ->
@@ -315,7 +314,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   end
 
   defp lookup_group_leader_safe(group_id) when is_integer(group_id) and group_id >= 0 do
-    case Topology.parse_group_id(group_id) do
+    case parse_group_id(group_id) do
       {:ok, valid_group_id} -> lookup_group_leader(valid_group_id)
       {:error, :invalid_group_id} -> nil
     end
@@ -323,7 +322,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
 
   defp local_group_role(group_id) when is_integer(group_id) and group_id >= 0 do
     if group_running?(group_id) do
-      server_ref = {RaftManager.server_id(group_id), Node.self()}
+      server_ref = {LeaseManager.server_id(group_id), Node.self()}
 
       try do
         case :ra.key_metrics(server_ref) do
@@ -342,7 +341,7 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   end
 
   defp group_running?(group_id) when is_integer(group_id) and group_id >= 0 do
-    Process.whereis(RaftManager.server_id(group_id)) != nil
+    Process.whereis(LeaseManager.server_id(group_id)) != nil
   end
 
   defp count_states(states) when is_list(states) do
@@ -354,6 +353,22 @@ defmodule Starcite.ControlPlane.Ops.Leadership do
   defp empty_role_counts do
     %{leader: 0, follower: 0, candidate: 0, other: 0, down: 0}
   end
+
+  defp local_routing_groups do
+    for group_id <- 0..(Topology.num_groups() - 1),
+        LeaseManager.should_participate?(group_id),
+        do: group_id
+  end
+
+  defp parse_group_id(group_id) when is_integer(group_id) and group_id >= 0 do
+    if group_id < Topology.num_groups() do
+      {:ok, group_id}
+    else
+      {:error, :invalid_group_id}
+    end
+  end
+
+  defp parse_group_id(_group_id), do: {:error, :invalid_group_id}
 
   defp normalize_node_name(node) when is_atom(node) and not is_nil(node), do: Atom.to_string(node)
   defp normalize_node_name(nil), do: "unknown"

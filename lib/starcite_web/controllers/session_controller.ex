@@ -138,7 +138,7 @@ defmodule StarciteWeb.SessionController do
               :invalid_tail_batch_size,
               :invalid_limit,
               :invalid_list_query,
-              :invalid_write_node,
+              :invalid_routing_node,
               :invalid_group_id,
               :invalid_websocket_upgrade,
               :invalid_session,

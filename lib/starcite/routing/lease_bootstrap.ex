@@ -1,12 +1,12 @@
-defmodule Starcite.ControlPlane.RaftBootstrap do
+defmodule Starcite.Routing.LeaseBootstrap do
   @moduledoc """
-  Topology bootstrap for static write-node Raft groups.
+  Topology bootstrap for static routing-node lease groups.
 
   Responsibilities:
 
-  - Bootstrap groups from static write-node config.
+  - Bootstrap groups from static routing-node config.
   - Start/join local assigned groups.
-  - Maintain intrinsic Raft readiness state used by health/routing gates.
+  - Maintain intrinsic lease readiness state used by health/routing gates.
 
   This module does not perform dynamic membership add/remove operations.
   """
@@ -14,9 +14,9 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   use GenServer
   require Logger
 
-  alias Starcite.ControlPlane.Ops.Leadership
-  alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.ControlPlane.{RaftHealth, RaftManager}
+  alias Starcite.Operations.Leadership
+  alias Starcite.Routing.Topology
+  alias Starcite.Routing.{LeaseHealth, LeaseManager}
 
   @ready_call_timeout_ms 1_000
   @group_task_max_concurrency 32
@@ -39,7 +39,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   @doc "Returns local intrinsic readiness status used by health/routing gates."
   @spec readiness_status(keyword()) :: map()
   def readiness_status(opts \\ []) when is_list(opts) do
-    fallback = RaftHealth.readiness_status_fallback()
+    fallback = LeaseHealth.readiness_status_fallback()
     refresh? = Keyword.get(opts, :refresh?, false)
     timeout_ms = readiness_status_timeout_ms(refresh?)
     message = {:readiness_status, refresh?}
@@ -90,7 +90,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
     :ok = :net_kernel.monitor_nodes(true, [:nodedown_reason])
 
     Logger.info(
-      "RaftBootstrap: starting on #{Node.self()} (write_node=#{WriteNodes.write_node?(Node.self())})"
+      "LeaseBootstrap: starting on #{Node.self()} (routing_node=#{Topology.routing_node?(Node.self())})"
     )
 
     send(self(), :bootstrap)
@@ -114,21 +114,21 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
 
   @impl true
   def handle_call(:ready?, _from, state) do
-    next_state = RaftHealth.maybe_refresh(state, true)
-    status = RaftHealth.readiness_status(next_state)
+    next_state = LeaseHealth.maybe_refresh(state, true)
+    status = LeaseHealth.readiness_status(next_state)
     {:reply, status.ready?, next_state}
   end
 
   @impl true
   def handle_call({:readiness_status, refresh?}, _from, state) when is_boolean(refresh?) do
-    next_state = RaftHealth.maybe_refresh(state, refresh?)
-    {:reply, RaftHealth.readiness_status(next_state), next_state}
+    next_state = LeaseHealth.maybe_refresh(state, refresh?)
+    {:reply, LeaseHealth.readiness_status(next_state), next_state}
   end
 
   @impl true
   def handle_call(:readiness_status, _from, state) do
-    next_state = RaftHealth.maybe_refresh(state, false)
-    {:reply, RaftHealth.readiness_status(next_state), next_state}
+    next_state = LeaseHealth.maybe_refresh(state, false)
+    {:reply, LeaseHealth.readiness_status(next_state), next_state}
   end
 
   @impl true
@@ -141,7 +141,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
              :leader_retry_error,
              :leader_retry_timeout
            ] do
-    {:noreply, RaftHealth.record_write_outcome(state, outcome)}
+    {:noreply, LeaseHealth.record_write_outcome(state, outcome)}
   end
 
   @impl true
@@ -151,48 +151,48 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
 
   @impl true
   def handle_info({:startup_complete, mode}, state)
-      when mode in [:write, :router] do
+      when mode in [:routing, :ingress] do
     if state.startup_complete? do
       {:noreply, Map.put(state, :startup_mode, mode)}
     else
-      Logger.info("RaftBootstrap: startup complete (mode=#{mode})")
+      Logger.info("LeaseBootstrap: startup complete (mode=#{mode})")
 
-      if mode == :write do
-        :ok = emit_local_raft_role_counts()
+      if mode == :routing do
+        :ok = emit_local_lease_role_counts()
       end
 
       {:noreply,
        state
        |> Map.put(:startup_complete?, true)
        |> Map.put(:startup_mode, mode)
-       |> RaftHealth.clear()}
+       |> LeaseHealth.clear()}
     end
   end
 
   @impl true
   def handle_info({:nodedown, down_node, _reason}, state) when is_atom(down_node) do
-    {:noreply, RaftHealth.note_peer_down(state, down_node)}
+    {:noreply, LeaseHealth.note_peer_down(state, down_node)}
   end
 
   @impl true
   def handle_info({:nodedown, down_node}, state) when is_atom(down_node) do
-    {:noreply, RaftHealth.note_peer_down(state, down_node)}
+    {:noreply, LeaseHealth.note_peer_down(state, down_node)}
   end
 
   @impl true
   def handle_info({:nodeup, up_node, _info}, state) when is_atom(up_node) do
     {:noreply,
      state
-     |> RaftHealth.note_peer_up(up_node)
-     |> maybe_start_sync_on_write_node_change(up_node)}
+     |> LeaseHealth.note_peer_up(up_node)
+     |> maybe_start_sync_on_routing_node_change(up_node)}
   end
 
   @impl true
   def handle_info({:nodeup, up_node}, state) when is_atom(up_node) do
     {:noreply,
      state
-     |> RaftHealth.note_peer_up(up_node)
-     |> maybe_start_sync_on_write_node_change(up_node)}
+     |> LeaseHealth.note_peer_up(up_node)
+     |> maybe_start_sync_on_routing_node_change(up_node)}
   end
 
   @impl true
@@ -203,7 +203,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
 
   @impl true
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{sync_ref: ref} = state) do
-    Logger.warning("RaftBootstrap: bootstrap task failed: #{inspect(reason)}")
+    Logger.warning("LeaseBootstrap: bootstrap task failed: #{inspect(reason)}")
     {:noreply, maybe_start_pending_sync(%{state | sync_ref: nil})}
   end
 
@@ -217,7 +217,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
       when is_reference(sync_ref) do
     schedule_runtime_reconcile()
 
-    :ok = emit_local_raft_role_counts()
+    :ok = emit_local_lease_role_counts()
     {:noreply, state}
   end
 
@@ -225,7 +225,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   def handle_info(:runtime_reconcile, state) do
     schedule_runtime_reconcile()
     next_state = maybe_reconcile_local_groups(state)
-    :ok = emit_local_raft_role_counts()
+    :ok = emit_local_lease_role_counts()
     {:noreply, next_state}
   end
 
@@ -257,29 +257,29 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
 
   defp run_sync(trigger, owner)
        when trigger in [:bootstrap, :nodeup] do
-    case WriteNodes.validate() do
+    case Topology.validate() do
       {:ok, _config} ->
         run_sync_for_valid_config(trigger, owner)
 
       {:error, reason} ->
         raise ArgumentError,
-              "RaftBootstrap bootstrap aborted due to invalid write-node config: #{reason}"
+              "LeaseBootstrap bootstrap aborted due to invalid routing-node config: #{reason}"
     end
   end
 
   defp run_sync_for_valid_config(trigger, owner) do
-    if WriteNodes.write_node?(Node.self()) do
+    if Topology.routing_node?(Node.self()) do
       my_groups = compute_my_groups()
 
       Logger.info(
-        "RaftBootstrap: reconciling #{length(my_groups)} local write groups (trigger=#{trigger})"
+        "LeaseBootstrap: reconciling #{length(my_groups)} local routing groups (trigger=#{trigger})"
       )
 
       run_groups_parallel(my_groups, "ensure-local", &ensure_local_group_running/1)
 
-      send(owner, {:startup_complete, :write})
+      send(owner, {:startup_complete, :routing})
     else
-      send(owner, {:startup_complete, :router})
+      send(owner, {:startup_complete, :ingress})
     end
 
     :ok
@@ -302,8 +302,8 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   defp readiness_status_timeout_ms(false), do: @ready_call_timeout_ms
 
   defp ensure_local_group_running(group_id) do
-    if RaftManager.should_participate?(group_id) and not group_running?(group_id) do
-      RaftManager.start_group(group_id)
+    if LeaseManager.should_participate?(group_id) and not group_running?(group_id) do
+      LeaseManager.start_group(group_id)
     else
       :ok
     end
@@ -342,7 +342,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
       duration_ms = System.monotonic_time(:millisecond) - started_at_ms
 
       Logger.info(
-        "RaftBootstrap: #{label} processed #{total} groups in #{duration_ms}ms (max_concurrency=#{max_concurrency})"
+        "LeaseBootstrap: #{label} processed #{total} groups in #{duration_ms}ms (max_concurrency=#{max_concurrency})"
       )
     end
   end
@@ -350,17 +350,17 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   defp handle_group_result({:ok, {_group_id, :ok}}, _label), do: :ok
 
   defp handle_group_result({:ok, {group_id, {:error, reason}}}, label) do
-    Logger.debug("RaftBootstrap: #{label} group #{group_id} failed: #{inspect(reason)}")
+    Logger.debug("LeaseBootstrap: #{label} group #{group_id} failed: #{inspect(reason)}")
   end
 
   defp handle_group_result({:ok, {_group_id, _result}}, _label), do: :ok
 
   defp handle_group_result({:exit, reason}, label) do
-    Logger.warning("RaftBootstrap: #{label} worker crashed: #{inspect(reason)}")
+    Logger.warning("LeaseBootstrap: #{label} worker crashed: #{inspect(reason)}")
   end
 
-  defp maybe_start_sync_on_write_node_change(state, up_node) when is_atom(up_node) do
-    if WriteNodes.write_node?(Node.self()) and up_node in WriteNodes.nodes() do
+  defp maybe_start_sync_on_routing_node_change(state, up_node) when is_atom(up_node) do
+    if Topology.routing_node?(Node.self()) and up_node in Topology.nodes() do
       maybe_start_sync(state, :nodeup)
     else
       state
@@ -368,18 +368,18 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   end
 
   defp compute_my_groups do
-    for group_id <- 0..(WriteNodes.num_groups() - 1),
-        RaftManager.should_participate?(group_id),
+    for group_id <- 0..(Topology.num_groups() - 1),
+        LeaseManager.should_participate?(group_id),
         do: group_id
   end
 
   defp group_running?(group_id) do
-    Process.whereis(RaftManager.server_id(group_id)) != nil
+    Process.whereis(LeaseManager.server_id(group_id)) != nil
   end
 
   defp configure_ra_system_storage do
-    ra_system_dir = RaftManager.ra_system_data_dir()
-    wal_data_dir = RaftManager.ra_wal_data_dir()
+    ra_system_dir = LeaseManager.ra_system_data_dir()
+    wal_data_dir = LeaseManager.ra_wal_data_dir()
 
     with :ok <- File.mkdir_p(ra_system_dir),
          :ok <- File.mkdir_p(wal_data_dir) do
@@ -394,7 +394,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
   end
 
   defp maybe_reconcile_local_groups(%{startup_complete?: true} = state) do
-    if WriteNodes.write_node?(Node.self()) do
+    if Topology.routing_node?(Node.self()) do
       local_groups = compute_my_groups()
       down_groups = Enum.reject(local_groups, &group_running?/1)
 
@@ -402,7 +402,7 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
         state
       else
         Logger.warning(
-          "RaftBootstrap: detected #{length(down_groups)} local groups down, attempting recovery"
+          "LeaseBootstrap: detected #{length(down_groups)} local groups down, attempting recovery"
         )
 
         run_groups_parallel(down_groups, "runtime-reconcile", &ensure_local_group_running/1)
@@ -419,9 +419,9 @@ defmodule Starcite.ControlPlane.RaftBootstrap do
     Process.send_after(self(), :runtime_reconcile, @runtime_reconcile_interval_ms)
   end
 
-  defp emit_local_raft_role_counts do
-    if WriteNodes.write_node?(Node.self()) do
-      :ok = Leadership.emit_local_raft_role_telemetry()
+  defp emit_local_lease_role_counts do
+    if Topology.routing_node?(Node.self()) do
+      :ok = Leadership.emit_local_lease_role_telemetry()
     end
 
     :ok

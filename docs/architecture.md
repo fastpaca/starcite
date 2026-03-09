@@ -102,7 +102,7 @@ The control plane manages shard ownership, routing readiness, and operator
 workflows. It does not sequence or store per-event payloads.
 
 Current responsibilities:
-- Static write-node topology configuration.
+- Static routing-node topology configuration.
 - One Raft group per write shard to elect the active shard owner.
 - Ownership fencing via Raft term (`epoch`) for routed writes and failover.
 - Node liveness and drain/undrain intent.

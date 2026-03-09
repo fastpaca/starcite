@@ -1,4 +1,4 @@
-defmodule Starcite.ControlPlane.ShardLeaseMachine do
+defmodule Starcite.Routing.ShardLeaseMachine do
   @moduledoc """
   Minimal Raft machine for control-plane shard lease groups.
 

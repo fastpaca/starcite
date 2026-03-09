@@ -1,12 +1,12 @@
-defmodule Starcite.ControlPlane.SessionReplicatorTest do
+defmodule Starcite.DataPlane.SessionReplicatorTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.SessionReplicator
+  alias Starcite.DataPlane.SessionReplicator
   alias Starcite.Session
 
   setup do
-    original_write_node_ids = Application.get_env(:starcite, :write_node_ids)
-    original_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
     handler_id = "session-replication-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
 
@@ -21,8 +21,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorTest do
       )
 
     on_exit(fn ->
-      Application.put_env(:starcite, :write_node_ids, original_write_node_ids)
-      Application.put_env(:starcite, :write_replication_factor, original_replication_factor)
+      Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+      Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       :telemetry.detach(handler_id)
     end)
 
@@ -30,8 +30,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorTest do
   end
 
   test "succeeds locally when no remote acknowledgements are required" do
-    Application.put_env(:starcite, :write_node_ids, [Node.self()])
-    Application.put_env(:starcite, :write_replication_factor, 1)
+    Application.put_env(:starcite, :routing_node_ids, [Node.self()])
+    Application.put_env(:starcite, :routing_replication_factor, 1)
 
     session = Session.new("ses-repl-local")
 
@@ -55,8 +55,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorTest do
   test "returns quorum error when required remote acknowledgement cannot be obtained" do
     missing = :"missing-replica@127.0.0.1"
 
-    Application.put_env(:starcite, :write_node_ids, [Node.self(), missing])
-    Application.put_env(:starcite, :write_replication_factor, 2)
+    Application.put_env(:starcite, :routing_node_ids, [Node.self(), missing])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
 
     session = Session.new("ses-repl-missing")
 
@@ -83,10 +83,10 @@ defmodule Starcite.ControlPlane.SessionReplicatorTest do
   end
 end
 
-defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
+defmodule Starcite.DataPlane.SessionReplicatorDistributedTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.ControlPlane.SessionReplicator
+  alias Starcite.DataPlane.SessionReplicator
   alias Starcite.DataPlane.{EventStore, SessionOwners, SessionStore}
   alias Starcite.Session
   alias Starcite.TestSupport.DistributedPeerDataPlane
@@ -98,22 +98,22 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
   end
 
   setup do
-    original_write_node_ids = Application.get_env(:starcite, :write_node_ids)
-    original_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
     clear_local_data_plane()
 
     peers = start_peers(2)
     peer_nodes = Enum.map(peers, fn {_pid, node} -> node end)
-    write_nodes = [Node.self() | peer_nodes]
+    routing_nodes = [Node.self() | peer_nodes]
 
-    Application.put_env(:starcite, :write_node_ids, write_nodes)
-    Application.put_env(:starcite, :write_replication_factor, 3)
+    Application.put_env(:starcite, :routing_node_ids, routing_nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 3)
 
     Enum.each(peers, fn {_peer_pid, peer_node} ->
       true = Node.connect(peer_node)
       :ok = add_code_paths(peer_node)
-      :ok = configure_peer(peer_node, write_nodes)
+      :ok = configure_peer(peer_node, routing_nodes)
       :ok = start_peer_data_plane(peer_node)
     end)
 
@@ -125,8 +125,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
         _ = stop_peer(peer_pid)
       end)
 
-      restore_env(:write_node_ids, original_write_node_ids)
-      restore_env(:write_replication_factor, original_replication_factor)
+      restore_env(:routing_node_ids, original_routing_node_ids)
+      restore_env(:routing_replication_factor, original_replication_factor)
     end)
 
     {:ok, peers: peers}
@@ -156,8 +156,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
     [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-repl-bootstrap-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(session_id)
-    original_write_node_ids = Application.get_env(:starcite, :write_node_ids)
-    original_replication_factor = Application.get_env(:starcite, :write_replication_factor)
+    original_routing_node_ids = Application.get_env(:starcite, :routing_node_ids)
+    original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
     assert :ok = apply_local_and_replicate(seed_session, [])
 
@@ -167,8 +167,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
     assert :ok = apply_local_and_replicate(session_one, [event_one])
 
     assert :ok = :rpc.call(peer_b, SessionOwners, :stop_session, [session_id], 5_000)
-    Application.put_env(:starcite, :write_node_ids, [Node.self(), peer_a])
-    Application.put_env(:starcite, :write_replication_factor, 2)
+    Application.put_env(:starcite, :routing_node_ids, [Node.self(), peer_a])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
 
     {:ok, session_two, [event_two]} =
       append_session(session_one, append_input("bootstrap-writer", 2))
@@ -179,8 +179,8 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
       append_session(session_two, append_input("bootstrap-writer", 3))
 
     assert :ok = apply_local_and_replicate(session_three, [event_three])
-    Application.put_env(:starcite, :write_node_ids, original_write_node_ids)
-    Application.put_env(:starcite, :write_replication_factor, original_replication_factor)
+    Application.put_env(:starcite, :routing_node_ids, original_routing_node_ids)
+    Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
 
     eventually(fn ->
       assert_stored_session(peer_b, session_one)
@@ -216,10 +216,12 @@ defmodule Starcite.ControlPlane.SessionReplicatorDistributedTest do
     end
   end
 
-  defp configure_peer(peer_node, write_nodes)
-       when is_atom(peer_node) and is_list(write_nodes) do
-    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :write_node_ids, write_nodes])
-    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :write_replication_factor, 3])
+  defp configure_peer(peer_node, routing_nodes)
+       when is_atom(peer_node) and is_list(routing_nodes) do
+    :ok =
+      :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_node_ids, routing_nodes])
+
+    :ok = :rpc.call(peer_node, Application, :put_env, [:starcite, :routing_replication_factor, 3])
 
     :ok =
       :rpc.call(

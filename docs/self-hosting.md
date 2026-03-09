@@ -6,7 +6,7 @@
 
 ## How it works
 
-Starcite runs as a cluster of write nodes (typically 3 or 5). When a client appends
+Starcite runs as a cluster of routing nodes (typically 3 or 5). When a client appends
 an event, the event is replicated to an in-memory group before the client gets an
 acknowledgment. That improves failover safety, but only durability comes from your
 configured archive backend.
@@ -67,8 +67,8 @@ lag separately from Starcite's own replication.
 | `RELEASE_NODE` | Erlang node identity (`name@host`). Must survive restarts. |
 | `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
 | `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. |
-| `STARCITE_WRITE_NODE_IDS` | Comma-separated static write-node identities. Same value on every node. |
-| `STARCITE_WRITE_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
+| `STARCITE_ROUTING_NODE_IDS` | Comma-separated static routing-node identities. Same value on every node. |
+| `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
 | `STARCITE_RA_WAL_DATA_DIR` | Optional separate Ra WAL path. Put this on the lowest-latency persistent volume you have. |
@@ -109,20 +109,20 @@ unsupported.
 
 First-time cluster setup:
 
-1. Provision three write nodes with persistent volumes.
+1. Provision three routing nodes with persistent volumes.
 2. Set a stable `RELEASE_NODE` on each — this identity must survive restarts.
-3. Set identical `CLUSTER_NODES` and `STARCITE_WRITE_NODE_IDS` on all nodes.
-4. Start all write nodes.
+3. Set identical `CLUSTER_NODES` and `STARCITE_ROUTING_NODE_IDS` on all nodes.
+4. Start all routing nodes.
 5. Verify:
 
 ```bash
 curl -sS http://<node>:4001/health/ready
-bin/starcite rpc "Starcite.ControlPlane.Ops.status()"
-bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
+bin/starcite rpc "Starcite.Operations.status()"
+bin/starcite rpc "Starcite.Operations.ready_nodes()"
 ```
 
-You should see each node report ready, and the ready write-node set should match your
-configured `STARCITE_WRITE_NODE_IDS`. If a node isn't ready, check its logs — the
+You should see each node report ready, and the ready routing-node set should match your
+configured `STARCITE_ROUTING_NODE_IDS`. If a node isn't ready, check its logs — the
 most common issue is misconfigured `CLUSTER_NODES` or unreachable peers.
 
 Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
@@ -131,41 +131,41 @@ served there instead of the public API port.
 
 ## Rolling restarts
 
-The key constraint: never restart more than one write node at a time. Starcite uses
+The key constraint: never restart more than one routing node at a time. Starcite uses
 in-memory replication with quorum writes — taking two nodes down simultaneously means
 some groups lose quorum and can't accept writes.
 
-For each write node, one at a time:
+For each routing node, one at a time:
 
 1. **Drain** — tells the cluster to stop routing new requests to this node:
    ```bash
-   bin/starcite rpc "Starcite.ControlPlane.Ops.drain_node()"
+   bin/starcite rpc "Starcite.Operations.drain_node()"
    ```
 
 2. **Wait for drain convergence** — the cluster needs a moment to re-route in-flight
    traffic. This command blocks until all nodes agree the target is drained:
    ```bash
-   bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_drained(30000)"
+   bin/starcite rpc "Starcite.Operations.wait_local_drained(30000)"
    ```
 
 3. **Restart/redeploy** the node.
 
 4. **Undrain** — tells the cluster this node is available again:
    ```bash
-   bin/starcite rpc "Starcite.ControlPlane.Ops.undrain_node()"
+   bin/starcite rpc "Starcite.Operations.undrain_node()"
    ```
 
 5. **Wait for readiness** — the node needs to sync its Raft state before it can serve
    traffic. This blocks until sync is complete:
    ```bash
-   bin/starcite rpc "Starcite.ControlPlane.Ops.wait_local_ready(60000)"
+   bin/starcite rpc "Starcite.Operations.wait_local_ready(60000)"
    curl -sS http://<node>:4001/health/ready
    ```
 
 6. **Verify** the cluster looks healthy before moving on:
    ```bash
-   bin/starcite rpc "Starcite.ControlPlane.Ops.ready_nodes()"
-   bin/starcite rpc "Starcite.ControlPlane.Ops.status()"
+   bin/starcite rpc "Starcite.Operations.ready_nodes()"
+   bin/starcite rpc "Starcite.Operations.status()"
    ```
 
 7. Move to the next node.
@@ -179,7 +179,7 @@ The simplest approach: keep the same logical identity.
 3. Bring up the replacement with the same `RELEASE_NODE` and the same persistent data
    directory (or a restored backup).
 4. Undrain, wait for readiness.
-5. Verify with `bin/starcite rpc "Starcite.ControlPlane.Ops.status()"`.
+5. Verify with `bin/starcite rpc "Starcite.Operations.status()"`.
 
 If you need to change a node's identity (different hostname, different rack), that's a
 topology migration — a more involved procedure. Don't mix it with routine rollouts.
@@ -202,7 +202,7 @@ topology back to health. Membership changes during a partition can make things w
 
 Run these periodically — they're cheap and catch problems before your users do:
 
-1. **Restart drill** — restart a single write node under load. Verify no churn in
+1. **Restart drill** — restart a single routing node under load. Verify no churn in
    session distribution and that clients reconnect cleanly.
 2. **Drain/undrain drill** — verify the ready-node set transitions correctly and that
    traffic stops/resumes as expected.

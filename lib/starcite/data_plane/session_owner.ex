@@ -8,8 +8,8 @@ defmodule Starcite.DataPlane.SessionOwner do
 
   use GenServer
 
-  alias Starcite.ControlPlane.{SessionReplicator, SessionRouter}
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionReplicator, SessionStore}
+  alias Starcite.Routing.SessionRouter
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
 

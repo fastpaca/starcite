@@ -21,10 +21,10 @@ config :phoenix, :plug_init_mode, :runtime
 
 # Raft test configuration
 config :starcite,
-  raft_data_dir: "tmp/test_raft",
+  raft_data_dir: "tmp/test_routing_raft",
   raft_flush_interval_ms: 100,
-  write_replication_factor: 1,
-  write_node_ids: [:nonode@nohost],
+  routing_replication_factor: 1,
+  routing_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
   archive_name: Starcite.Runtime.Archive,
   archive_adapter: Starcite.Archive.Adapter.Postgres,

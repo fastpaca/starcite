@@ -1,4 +1,4 @@
-defmodule Starcite.ControlPlane.Observer do
+defmodule Starcite.Routing.Observer do
   @moduledoc """
   Liveness observer used by request-path routing.
 
@@ -7,9 +7,9 @@ defmodule Starcite.ControlPlane.Observer do
 
   use GenServer
 
-  alias Starcite.ControlPlane.ObserverState
-  alias Starcite.ControlPlane.WriteNodes
-  alias Starcite.ControlPlane.RaftBootstrap
+  alias Starcite.Routing.ObserverState
+  alias Starcite.Routing.Topology
+  alias Starcite.Routing.LeaseBootstrap
 
   @status_call_timeout_ms 1_000
   @suspect_to_lost_ms 120_000
@@ -24,7 +24,7 @@ defmodule Starcite.ControlPlane.Observer do
     [Node.self() | Node.list()] |> Enum.uniq() |> Enum.sort()
   end
 
-  @doc "Returns write nodes currently eligible for routing."
+  @doc "Returns routing nodes currently eligible for routing."
   def ready_nodes do
     fallback = fallback_ready_nodes()
 
@@ -258,13 +258,13 @@ defmodule Starcite.ControlPlane.Observer do
       |> Enum.filter(&MapSet.member?(raft_ready_nodes, &1))
       |> Enum.sort()
 
-    write_nodes = WriteNodes.nodes()
-    Enum.filter(ready, &(&1 in write_nodes))
+    routing_nodes = Topology.nodes()
+    Enum.filter(ready, &(&1 in routing_nodes))
   end
 
   defp route_candidates_from_observer(%ObserverState{} = observer, raft_ready_nodes, replicas)
        when is_map(raft_ready_nodes) and is_list(replicas) do
-    write_replicas = Enum.filter(replicas, &WriteNodes.write_node?/1)
+    write_replicas = Enum.filter(replicas, &Topology.routing_node?/1)
 
     ready =
       write_replicas
@@ -293,7 +293,7 @@ defmodule Starcite.ControlPlane.Observer do
   defp refresh_raft_ready_nodes(visible_nodes) when is_list(visible_nodes) do
     visible = MapSet.new(visible_nodes)
 
-    WriteNodes.nodes()
+    Topology.nodes()
     |> Enum.filter(&MapSet.member?(visible, &1))
     |> Enum.reduce(MapSet.new(), fn node, acc ->
       if raft_node_ready?(node) do
@@ -309,10 +309,10 @@ defmodule Starcite.ControlPlane.Observer do
       if Node.self() == :nonode@nohost do
         true
       else
-        RaftBootstrap.ready?()
+        LeaseBootstrap.ready?()
       end
     else
-      :rpc.call(node, RaftBootstrap, :ready?, [], @status_call_timeout_ms) == true
+      :rpc.call(node, LeaseBootstrap, :ready?, [], @status_call_timeout_ms) == true
     end
   end
 

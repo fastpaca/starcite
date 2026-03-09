@@ -1,13 +1,13 @@
-defmodule Starcite.ControlPlane.SessionRouterTest do
+defmodule Starcite.Routing.SessionRouterTest do
   use ExUnit.Case, async: true
 
-  alias Starcite.ControlPlane.SessionRouter
-  alias Starcite.ControlPlane.RaftManager
+  alias Starcite.Routing.SessionRouter
+  alias Starcite.Routing.LeaseManager
 
   test "ensure_local_owner/2 accepts the active leader node" do
     session_id = "session-router-local-owner"
-    group_id = RaftManager.group_for_session(session_id)
-    server_id = RaftManager.server_id(group_id)
+    group_id = LeaseManager.group_for_session(session_id)
+    server_id = LeaseManager.server_id(group_id)
     leader_node = :"leader@127.0.0.1"
 
     assert :ok =
@@ -19,8 +19,8 @@ defmodule Starcite.ControlPlane.SessionRouterTest do
 
   test "ensure_local_owner/2 returns not_leader with redirect hint when node is follower" do
     session_id = "session-router-follower"
-    group_id = RaftManager.group_for_session(session_id)
-    server_id = RaftManager.server_id(group_id)
+    group_id = LeaseManager.group_for_session(session_id)
+    server_id = LeaseManager.server_id(group_id)
     leader_node = :"leader@127.0.0.1"
 
     assert {:error, {:not_leader, {^server_id, ^leader_node}}} =

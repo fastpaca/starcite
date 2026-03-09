@@ -14,7 +14,7 @@ defmodule Starcite.Archive do
   use GenServer
 
   alias Starcite.Archive.Store
-  alias Starcite.ControlPlane.SessionRouter
+  alias Starcite.Routing.SessionRouter
   alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
   alias Starcite.DataPlane.{EventStore, SessionOwners}

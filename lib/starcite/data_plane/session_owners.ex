@@ -6,7 +6,7 @@ defmodule Starcite.DataPlane.SessionOwners do
   process per session.
   """
 
-  alias Starcite.ControlPlane.SessionRouter
+  alias Starcite.Routing.SessionRouter
   alias Starcite.DataPlane.{EventStore, SessionOwner, SessionStore}
   alias Starcite.Session
 

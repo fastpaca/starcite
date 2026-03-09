@@ -8,7 +8,7 @@ defmodule Starcite.Application do
   def start(_type, _args) do
     ops_port = ops_port()
     :ok = maybe_prepare_ops_server(ops_port)
-    :ok = Starcite.ControlPlane.WriteNodes.validate!()
+    :ok = Starcite.Routing.Topology.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
     children =
@@ -24,7 +24,7 @@ defmodule Starcite.Application do
         # DNS / clustering
         dns_cluster_spec(),
         # Control-plane liveness and routing intent
-        Starcite.ControlPlane.Supervisor,
+        Starcite.Routing.Supervisor,
         # Data-plane runtime (owners, archive, event store)
         Starcite.DataPlane.Supervisor
       ]

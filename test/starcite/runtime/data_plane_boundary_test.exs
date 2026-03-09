@@ -14,8 +14,8 @@ defmodule Starcite.Runtime.DataPlaneBoundaryTest do
 
   @forbidden_references [
     ":ra.",
-    "RaftManager",
-    "RaftBootstrap"
+    "LeaseManager",
+    "LeaseBootstrap"
   ]
 
   test "hot path modules are decoupled from raft control-plane internals" do
