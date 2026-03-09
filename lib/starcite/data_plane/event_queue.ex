@@ -1,4 +1,4 @@
-defmodule Starcite.DataPlane.EventStore.EventQueue do
+defmodule Starcite.DataPlane.EventQueue do
   @moduledoc """
   In-memory write queue for `Starcite.DataPlane.EventStore`.
 

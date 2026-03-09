@@ -4,7 +4,7 @@ defmodule Starcite.DataPlane.EventStore do
 
   `EventStore` composes two focused submodules:
 
-  - `EventQueue` for unarchived in-memory events
+  - `Starcite.DataPlane.EventQueue` for unarchived in-memory events
   - `Starcite.Archive.Store` for archived reads and archived-read cache
 
   Memory pressure is enforced across both tiers. When local memory exceeds
@@ -16,7 +16,7 @@ defmodule Starcite.DataPlane.EventStore do
 
   alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
-  alias Starcite.DataPlane.EventStore.EventQueue
+  alias Starcite.DataPlane.EventQueue
   alias Starcite.Session.Event
 
   @default_max_memory_bytes 2_147_483_648
