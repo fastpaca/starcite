@@ -66,8 +66,7 @@ lag separately from Starcite's own replication.
 | --- | --- |
 | `RELEASE_NODE` | Erlang node identity (`name@host`). Must survive restarts. |
 | `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
-| `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. Also used as the cluster membership list when `STARCITE_CLUSTER_NODE_IDS` is unset. |
-| `STARCITE_CLUSTER_NODE_IDS` | Optional explicit cluster membership list. Same value on every node. Defaults to `CLUSTER_NODES` when unset. |
+| `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. This is the cluster membership list. |
 | `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
@@ -111,7 +110,7 @@ First-time cluster setup:
 
 1. Provision three cluster nodes with persistent volumes.
 2. Set a stable `RELEASE_NODE` on each — this identity must survive restarts.
-3. Set identical `CLUSTER_NODES` on all nodes. Set `STARCITE_CLUSTER_NODE_IDS` too if you need the membership list to differ from the peer discovery list.
+3. Set identical `CLUSTER_NODES` on all nodes.
 4. Start all cluster nodes.
 5. Verify:
 
@@ -122,8 +121,8 @@ bin/starcite rpc "Starcite.Operations.ready_nodes()"
 ```
 
 You should see each node report ready, and the ready node set should match your
-configured `STARCITE_CLUSTER_NODE_IDS`. If a node isn't ready, check its logs — the
-most common issue is misconfigured `CLUSTER_NODES` or unreachable peers.
+configured `CLUSTER_NODES`. If a node isn't ready, check its logs — the most common
+issue is misconfigured `CLUSTER_NODES` or unreachable peers.
 
 Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
 or admin network. `/health/live`, `/health/ready`, `/metrics`, and `pprof` are
