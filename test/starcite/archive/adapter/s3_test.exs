@@ -12,7 +12,9 @@ defmodule Starcite.Archive.Adapter.S3Test do
     def store_name, do: @store
 
     def get_object(%{bucket: bucket}, key) do
-      case Agent.get(@store, fn state -> state |> Map.get(bucket, %{}) |> Map.get(key) end) do
+      Agent.update(@store, &increment_call(&1, :get, key))
+
+      case Agent.get(@store, fn state -> state |> bucket_objects(bucket) |> Map.get(key) end) do
         nil -> {:ok, :not_found}
         %{body: body, etag: etag} -> {:ok, {body, etag}}
       end
@@ -20,16 +22,21 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     def put_object(%{bucket: bucket}, key, body, opts \\ []) do
       Agent.get_and_update(@store, fn state ->
-        existing = state |> Map.get(bucket, %{}) |> Map.get(key)
+        state = increment_call(state, :put, key)
+        existing = state |> bucket_objects(bucket) |> Map.get(key)
 
         if precondition_failed?(existing, opts) do
           {{:error, :precondition_failed}, state}
         else
-          bucket_state = Map.get(state, bucket, %{})
+          bucket_state = bucket_objects(state, bucket)
           etag = etag_for(body)
 
           next_state =
-            Map.put(state, bucket, Map.put(bucket_state, key, %{body: body, etag: etag}))
+            put_in(
+              state,
+              [:objects, bucket],
+              Map.put(bucket_state, key, %{body: body, etag: etag})
+            )
 
           {:ok, next_state}
         end
@@ -40,13 +47,21 @@ defmodule Starcite.Archive.Adapter.S3Test do
       keys =
         Agent.get(@store, fn state ->
           state
-          |> Map.get(bucket, %{})
+          |> bucket_objects(bucket)
           |> Map.keys()
           |> Enum.filter(&String.starts_with?(&1, prefix))
           |> Enum.sort()
         end)
 
       {:ok, keys}
+    end
+
+    def call_count(op, key) when op in [:get, :put] and is_binary(key) do
+      Agent.get(@store, fn state ->
+        state
+        |> Map.get(:calls, %{})
+        |> Map.get({op, key}, 0)
+      end)
     end
 
     defp precondition_failed?(existing, opts) do
@@ -68,12 +83,26 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
       ~s("#{digest}")
     end
+
+    defp bucket_objects(state, bucket) when is_binary(bucket) do
+      state
+      |> Map.get(:objects, %{})
+      |> Map.get(bucket, %{})
+    end
+
+    defp increment_call(state, op, key) do
+      update_in(state, [:calls], fn calls ->
+        Map.update(calls || %{}, {op, key}, 1, &(&1 + 1))
+      end)
+    end
   end
 
   setup do
     start_supervised!(%{
       id: FakeClient.store_name(),
-      start: {Agent, :start_link, [fn -> %{} end, [name: FakeClient.store_name()]]}
+      start:
+        {Agent, :start_link,
+         [fn -> %{objects: %{}, calls: %{}} end, [name: FakeClient.store_name()]]}
     })
 
     session_prefix = "s3-test-#{System.unique_integer([:positive, :monotonic])}"
@@ -138,6 +167,42 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     refute "#{prefix}/sessions/v1/#{session}.json" in keys
     refute "#{prefix}/events/v1/#{session}/1.ndjson" in keys
+  end
+
+  test "reuses cached session tenant index across repeated chunk writes", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    session_id = "ses-s3-cache-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    session_segment = Base.url_encode64(session_id, padding: false)
+    tenant_index_key = "#{prefix}/session-tenants/v1/#{session_segment}.json"
+
+    assert {:ok, 1} = S3.write_events(event_rows(session_id, inserted_at, 1..1))
+    assert {:ok, 1} = S3.write_events(event_rows(session_id, inserted_at, 2..2))
+
+    assert FakeClient.call_count(:put, tenant_index_key) == 1
+    assert FakeClient.call_count(:get, tenant_index_key) == 0
+
+    assert {:ok, keys} = FakeClient.list_keys(%{bucket: bucket}, "#{prefix}/session-tenants/")
+    assert tenant_index_key in keys
+  end
+
+  test "fails loudly on cached tenant mismatch", %{prefix: prefix} do
+    session_id = "ses-s3-conflict-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+    session_segment = Base.url_encode64(session_id, padding: false)
+    tenant_index_key = "#{prefix}/session-tenants/v1/#{session_segment}.json"
+
+    assert {:ok, 1} = S3.write_events(event_rows(session_id, inserted_at, 1..1))
+
+    conflicting_row =
+      event_rows(session_id, inserted_at, 2..2)
+      |> hd()
+      |> Map.put(:tenant_id, "beta")
+
+    assert {:error, :archive_write_unavailable} = S3.write_events([conflicting_row])
+    assert FakeClient.call_count(:put, tenant_index_key) == 1
   end
 
   test "write_events rejects mixed-tenant rows for one session chunk" do
