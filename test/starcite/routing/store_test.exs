@@ -179,6 +179,31 @@ defmodule Starcite.Routing.StoreTest do
     assert standby in assignment.replicas
   end
 
+  test "recovers local node readiness and claims after a local Khepri reset" do
+    session_id = "routing-store-reset-recovery-#{System.unique_integer([:positive, :monotonic])}"
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self()])
+    Application.put_env(:starcite, :routing_replication_factor, 1)
+    TestHelper.reset()
+
+    assert :ok = Store.renew_local_lease()
+    assert Node.self() in Store.ready_nodes()
+
+    assert :ok = :khepri_cluster.reset(Store.store_id(), 15_000)
+
+    assert :ok = Store.renew_local_lease()
+    assert Node.self() in Store.ready_nodes()
+
+    assert {:ok, record} = Store.node_record(Node.self(), favor: :consistency)
+    assert record.status == :ready
+    assert record.lease_until_ms > now_ms
+
+    assert {:ok, assignment} = Store.ensure_assignment(session_id)
+    assert assignment.owner == Node.self()
+    assert assignment.replicas == [Node.self()]
+  end
+
   defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
     :khepri.put(Store.store_id(), [:sessions, session_id], assignment, khepri_opts())
   end

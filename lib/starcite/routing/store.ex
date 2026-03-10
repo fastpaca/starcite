@@ -22,13 +22,16 @@ defmodule Starcite.Routing.Store do
              [
                do_compare_and_swap_assignment_local: 3,
                do_commit_transfer_local: 3,
+               do_commit_transfer_local: 4,
                do_failover_assignment_local: 4,
+               do_failover_assignment_local: 5,
                mutate_node_record: 4,
                exact_match_pattern: 1
              ]}
 
   @join_timeout_ms 15_000
   @cas_retry_limit 8
+  @store_reset_retry_limit 1
   @default_store_id :starcite_routing
   @default_store_dir "priv/khepri"
   @cluster_reconcile_interval_ms Application.compile_env(
@@ -329,10 +332,7 @@ defmodule Starcite.Routing.Store do
     Process.flag(:trap_exit, true)
     :ok = :net_kernel.monitor_nodes(true, node_type: :visible)
     :ok = ensure_cache_tables()
-    :ok = start_store()
-    :ok = join_cluster()
-    :ok = :khepri_cluster.wait_for_leader(store_id(), @join_timeout_ms)
-    :ok = do_bootstrap_local_node_local(now_ms(), lease_ttl_ms())
+    :ok = initialize_local_store()
     send(self(), :cluster_bootstrap)
     schedule_cluster_reconcile()
     {:ok, %{}}
@@ -341,7 +341,16 @@ defmodule Starcite.Routing.Store do
   @impl true
   def handle_call({:run_local, fun, args}, _from, state)
       when is_atom(fun) and is_list(args) do
-    {:reply, apply(__MODULE__, :"do_#{fun}_local", args), state}
+    reply =
+      try do
+        apply(__MODULE__, :"do_#{fun}_local", args)
+      catch
+        :exit, reason ->
+          Logger.warning("Routing.Store local call #{inspect(fun)} exited: #{inspect(reason)}")
+          {:error, reason}
+      end
+
+    {:reply, reply, state}
   end
 
   @impl true
@@ -367,7 +376,7 @@ defmodule Starcite.Routing.Store do
   def handle_info(_message, state), do: {:noreply, state}
 
   defp start_store do
-    case :khepri.start(local_store_dir(), store_id()) do
+    case khepri_call(fn -> :khepri.start(local_store_dir(), store_id()) end) do
       {:ok, _store_id} ->
         :ok
 
@@ -375,7 +384,7 @@ defmodule Starcite.Routing.Store do
         :ok
 
       {:error, reason} ->
-        raise "failed to start routing store: #{inspect(reason)}"
+        {:error, reason}
     end
   end
 
@@ -393,7 +402,7 @@ defmodule Starcite.Routing.Store do
             :ok
 
           node ->
-            case :khepri_cluster.join({store_id(), node}, @join_timeout_ms) do
+            case khepri_call(fn -> :khepri_cluster.join({store_id(), node}, @join_timeout_ms) end) do
               :ok ->
                 :ok
 
@@ -459,17 +468,12 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_assignment(session_id, favor)
        when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
-    with {:ok, result} <- local_call(:get_assignment, [session_id, favor]) do
-      with {:ok, assignment} <- assignment_from_khepri(result) do
-        :ok = cache_assignment(session_id, assignment)
-        {:ok, assignment}
-      end
-    end
+    do_get_assignment(session_id, favor, 0)
   end
 
   def do_get_assignment_local(session_id, favor)
       when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] do
-    :khepri.get(store_id(), session_path(session_id), %{favor: favor})
+    khepri_call(fn -> :khepri.get(store_id(), session_path(session_id), %{favor: favor}) end)
   end
 
   def do_claim_assignment_local(session_id, claimed_at_ms)
@@ -495,13 +499,15 @@ defmodule Starcite.Routing.Store do
 
   def do_compare_and_swap_assignment_local(session_id, current, next)
       when is_binary(session_id) and is_map(current) and is_map(next) do
-    case :khepri.compare_and_swap(
-           store_id(),
-           session_path(session_id),
-           exact_match_pattern(current),
-           next,
-           command_options()
-         ) do
+    case khepri_call(fn ->
+           :khepri.compare_and_swap(
+             store_id(),
+             session_path(session_id),
+             exact_match_pattern(current),
+             next,
+             command_options()
+           )
+         end) do
       :ok ->
         :ok = cache_assignment(session_id, next)
         :ok
@@ -514,57 +520,15 @@ defmodule Starcite.Routing.Store do
   def do_commit_transfer_local(session_id, transfer_id, committed_at_ms)
       when is_binary(session_id) and session_id != "" and is_binary(transfer_id) and
              transfer_id != "" and is_integer(committed_at_ms) and committed_at_ms >= 0 do
-    with {:ok, current} <-
-           assignment_from_khepri(do_get_assignment_local(session_id, :consistency)),
-         :ok <- ensure_matching_transfer(current, transfer_id),
-         {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      next =
-        activate_assignment(
-          current,
-          current.target_owner,
-          ready_node_list(node_records, committed_at_ms),
-          committed_at_ms
-        )
-
-      case :khepri.compare_and_swap(
-             store_id(),
-             session_path(session_id),
-             exact_match_pattern(current),
-             next,
-             command_options()
-           ) do
-        :ok ->
-          :ok = cache_assignment(session_id, next)
-          {:ok, next}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
-  end
-
-  defp do_all_assignments(favor) when favor in [:low_latency, :consistency] do
-    with {:ok, result} <- local_call(:all_assignments, [favor]),
-         {:ok, assignments} <- assignments_from_khepri(result) do
-      :ok = cache_assignments(assignments)
-      {:ok, assignments}
-    end
+    do_commit_transfer_local(session_id, transfer_id, committed_at_ms, 0)
   end
 
   def do_all_assignments_local(favor) when favor in [:low_latency, :consistency] do
-    :khepri.get_many(store_id(), "/:sessions/*", %{favor: favor})
-  end
-
-  defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
-    with {:ok, result} <- local_call(:all_node_records, [favor]),
-         {:ok, node_records} <- node_records_from_khepri(result) do
-      :ok = cache_node_records(node_records)
-      {:ok, node_records}
-    end
+    khepri_call(fn -> :khepri.get_many(store_id(), "/:sessions/*", %{favor: favor}) end)
   end
 
   def do_all_node_records_local(favor) when favor in [:low_latency, :consistency] do
-    :khepri.get_many(store_id(), "/:nodes/*", %{favor: favor})
+    khepri_call(fn -> :khepri.get_many(store_id(), "/:nodes/*", %{favor: favor}) end)
   end
 
   defp assignments_from_khepri({:ok, payloads}) when is_map(payloads) do
@@ -610,17 +574,17 @@ defmodule Starcite.Routing.Store do
 
   defp create_assignment(session_id, assignment)
        when is_binary(session_id) and session_id != "" and is_map(assignment) do
-    case :khepri.create(store_id(), session_path(session_id), assignment, command_options()) do
+    case khepri_call(fn ->
+           :khepri.create(store_id(), session_path(session_id), assignment, command_options())
+         end) do
       :ok ->
         :ok = cache_assignment(session_id, assignment)
         {:ok, assignment}
 
       {:error, reason} ->
-        if mismatching_node_error?(reason) do
+        retry_after_local_store_reset(reason, 0, fn ->
           assignment_from_khepri(do_get_assignment_local(session_id, :consistency))
-        else
-          {:error, reason}
-        end
+        end)
     end
   end
 
@@ -673,8 +637,12 @@ defmodule Starcite.Routing.Store do
   end
 
   def do_clear_local do
-    with :ok <- :khepri.delete_many(store_id(), "/:sessions/*", command_options()),
-         :ok <- :khepri.delete_many(store_id(), "/:nodes/*", command_options()),
+    with :ok <-
+           khepri_call(fn ->
+             :khepri.delete_many(store_id(), "/:sessions/*", command_options())
+           end),
+         :ok <-
+           khepri_call(fn -> :khepri.delete_many(store_id(), "/:nodes/*", command_options()) end),
          :ok <- do_bootstrap_local_node_local(now_ms(), lease_ttl_ms()) do
       :ok = clear_caches()
       :ok
@@ -683,50 +651,18 @@ defmodule Starcite.Routing.Store do
 
   defp do_get_node_state(node, favor)
        when is_atom(node) and favor in [:low_latency, :consistency] do
-    with {:ok, result} <- local_call(:get_node_state, [node, favor]) do
-      case result do
-        {:ok, state} when is_map(state) ->
-          :ok = cache_node_record(node, state)
-          {:ok, state}
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
+    do_get_node_state(node, favor, 0)
   end
 
   def do_get_node_state_local(node, favor)
       when is_atom(node) and favor in [:low_latency, :consistency] do
-    :khepri.get(store_id(), node_path(node), %{favor: favor})
+    khepri_call(fn -> :khepri.get(store_id(), node_path(node), %{favor: favor}) end)
   end
 
   def do_failover_assignment_local(session_id, current, target_node, failed_at_ms)
       when is_binary(session_id) and session_id != "" and is_map(current) and is_atom(target_node) and
              is_integer(failed_at_ms) and failed_at_ms >= 0 do
-    with {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      next =
-        activate_assignment(
-          current,
-          target_node,
-          ready_node_list(node_records, failed_at_ms),
-          failed_at_ms
-        )
-
-      case :khepri.compare_and_swap(
-             store_id(),
-             session_path(session_id),
-             exact_match_pattern(current),
-             next,
-             command_options()
-           ) do
-        :ok ->
-          :ok = cache_assignment(session_id, next)
-          :ok
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    end
+    do_failover_assignment_local(session_id, current, target_node, failed_at_ms, 0)
   end
 
   defp route_command(fun, args) when is_atom(fun) and is_list(args) do
@@ -760,43 +696,47 @@ defmodule Starcite.Routing.Store do
         {:ok, current} when is_map(current) ->
           next = updater.(current) |> Map.put(:updated_at_ms, updated_at_ms)
 
-          case :khepri.compare_and_swap(
-                 store_id(),
-                 node_path(node),
-                 exact_match_pattern(current),
-                 next,
-                 command_options()
-               ) do
+          case khepri_call(fn ->
+                 :khepri.compare_and_swap(
+                   store_id(),
+                   node_path(node),
+                   exact_match_pattern(current),
+                   next,
+                   command_options()
+                 )
+               end) do
             :ok ->
               :ok = cache_node_record(node, next)
               :ok
 
             {:error, reason} ->
-              if mismatching_node_error?(reason) do
+              retry_after_local_store_reset(reason, attempt, fn ->
                 mutate_node_record(node, updated_at_ms, updater, attempt + 1)
-              else
-                {:error, reason}
-              end
+              end)
           end
 
         {:error, reason} ->
-          if missing_node_error?(reason) do
-            next = updater.(default_node_record()) |> Map.put(:updated_at_ms, updated_at_ms)
+          cond do
+            missing_node_error?(reason) ->
+              next = updater.(default_node_record()) |> Map.put(:updated_at_ms, updated_at_ms)
 
-            case :khepri.create(store_id(), node_path(node), next, command_options()) do
-              :ok ->
-                :ok = cache_node_record(node, next)
-                :ok
+              case khepri_call(fn ->
+                     :khepri.create(store_id(), node_path(node), next, command_options())
+                   end) do
+                :ok ->
+                  :ok = cache_node_record(node, next)
+                  :ok
 
-              {:error, reason} ->
-                if mismatching_node_error?(reason) do
-                  mutate_node_record(node, updated_at_ms, updater, attempt + 1)
-                else
-                  {:error, reason}
-                end
-            end
-          else
-            {:error, reason}
+                {:error, reason} ->
+                  retry_after_local_store_reset(reason, attempt, fn ->
+                    mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+                  end)
+              end
+
+            true ->
+              retry_after_local_store_reset(reason, attempt, fn ->
+                mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+              end)
           end
       end
     end
@@ -911,6 +851,247 @@ defmodule Starcite.Routing.Store do
   end
 
   defp now_ms, do: System.system_time(:millisecond)
+
+  defp initialize_local_store(attempt \\ 0) when is_integer(attempt) and attempt >= 0 do
+    with :ok <- start_store(),
+         :ok <- join_cluster(),
+         :ok <- wait_for_leader(),
+         :ok <- do_bootstrap_local_node_local(now_ms(), lease_ttl_ms()) do
+      :ok
+    else
+      {:error, reason} ->
+        case retry_after_local_store_reset(reason, attempt, fn ->
+               initialize_local_store(attempt + 1)
+             end) do
+          :ok ->
+            :ok
+
+          {:error, recovered_reason} ->
+            raise "failed to initialize routing store: #{inspect(recovered_reason)}"
+        end
+    end
+  end
+
+  defp wait_for_leader do
+    khepri_call(fn -> :khepri_cluster.wait_for_leader(store_id(), @join_timeout_ms) end)
+  end
+
+  defp retry_after_local_store_reset(reason, attempt, fun)
+       when is_integer(attempt) and attempt >= 0 and is_function(fun, 0) do
+    cond do
+      attempt >= @store_reset_retry_limit ->
+        {:error, reason}
+
+      not recoverable_store_error?(reason) ->
+        {:error, reason}
+
+      true ->
+        with :ok <- recover_local_store(reason) do
+          fun.()
+        end
+    end
+  end
+
+  defp recover_local_store(reason) do
+    Logger.warning("Routing.Store resetting local Khepri state after #{inspect(reason)}")
+
+    with :ok <- clear_caches(),
+         :ok <- reset_local_store(),
+         :ok <- start_store(),
+         :ok <- join_cluster(),
+         :ok <- wait_for_leader() do
+      :ok
+    end
+  end
+
+  defp reset_local_store do
+    case khepri_call(fn -> :khepri_cluster.reset(store_id(), @join_timeout_ms) end) do
+      :ok -> :ok
+      {:error, {:noproc, _pid}} -> :ok
+      {:error, :noproc} -> :ok
+      {:error, {:khepri, :not_a_khepri_store, _info}} -> :ok
+      {:error, {:not_a_khepri_store, _info}} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp do_get_assignment(session_id, favor, attempt)
+       when is_binary(session_id) and session_id != "" and favor in [:low_latency, :consistency] and
+              is_integer(attempt) and attempt >= 0 do
+    with {:ok, result} <- local_call(:get_assignment, [session_id, favor]),
+         {:ok, assignment} <- assignment_from_khepri(result) do
+      :ok = cache_assignment(session_id, assignment)
+      {:ok, assignment}
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_get_assignment(session_id, favor, attempt + 1)
+        end)
+    end
+  end
+
+  defp do_all_assignments(favor, attempt)
+       when favor in [:low_latency, :consistency] and is_integer(attempt) and attempt >= 0 do
+    with {:ok, result} <- local_call(:all_assignments, [favor]),
+         {:ok, assignments} <- assignments_from_khepri(result) do
+      :ok = cache_assignments(assignments)
+      {:ok, assignments}
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_all_assignments(favor, attempt + 1)
+        end)
+    end
+  end
+
+  defp do_all_assignments(favor) when favor in [:low_latency, :consistency] do
+    do_all_assignments(favor, 0)
+  end
+
+  defp do_all_node_records(favor, attempt)
+       when favor in [:low_latency, :consistency] and is_integer(attempt) and attempt >= 0 do
+    with {:ok, result} <- local_call(:all_node_records, [favor]),
+         {:ok, node_records} <- node_records_from_khepri(result) do
+      :ok = cache_node_records(node_records)
+      {:ok, node_records}
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_all_node_records(favor, attempt + 1)
+        end)
+    end
+  end
+
+  defp do_all_node_records(favor) when favor in [:low_latency, :consistency] do
+    do_all_node_records(favor, 0)
+  end
+
+  defp do_get_node_state(node, favor, attempt)
+       when is_atom(node) and favor in [:low_latency, :consistency] and is_integer(attempt) and
+              attempt >= 0 do
+    with {:ok, result} <- local_call(:get_node_state, [node, favor]),
+         {:ok, state} when is_map(state) <- result do
+      :ok = cache_node_record(node, state)
+      {:ok, state}
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_get_node_state(node, favor, attempt + 1)
+        end)
+    end
+  end
+
+  defp do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt)
+       when is_binary(session_id) and session_id != "" and is_binary(transfer_id) and
+              transfer_id != "" and is_integer(committed_at_ms) and committed_at_ms >= 0 and
+              is_integer(attempt) and attempt >= 0 do
+    with {:ok, current} <-
+           assignment_from_khepri(do_get_assignment_local(session_id, :consistency)),
+         :ok <- ensure_matching_transfer(current, transfer_id),
+         {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
+      next =
+        activate_assignment(
+          current,
+          current.target_owner,
+          ready_node_list(node_records, committed_at_ms),
+          committed_at_ms
+        )
+
+      case khepri_call(fn ->
+             :khepri.compare_and_swap(
+               store_id(),
+               session_path(session_id),
+               exact_match_pattern(current),
+               next,
+               command_options()
+             )
+           end) do
+        :ok ->
+          :ok = cache_assignment(session_id, next)
+          {:ok, next}
+
+        {:error, reason} ->
+          retry_after_local_store_reset(reason, attempt, fn ->
+            do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
+          end)
+      end
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
+        end)
+    end
+  end
+
+  defp do_failover_assignment_local(session_id, current, target_node, failed_at_ms, attempt)
+       when is_binary(session_id) and session_id != "" and is_map(current) and
+              is_atom(target_node) and
+              is_integer(failed_at_ms) and failed_at_ms >= 0 and is_integer(attempt) and
+              attempt >= 0 do
+    with {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
+      next =
+        activate_assignment(
+          current,
+          target_node,
+          ready_node_list(node_records, failed_at_ms),
+          failed_at_ms
+        )
+
+      case khepri_call(fn ->
+             :khepri.compare_and_swap(
+               store_id(),
+               session_path(session_id),
+               exact_match_pattern(current),
+               next,
+               command_options()
+             )
+           end) do
+        :ok ->
+          :ok = cache_assignment(session_id, next)
+          :ok
+
+        {:error, reason} ->
+          retry_after_local_store_reset(reason, attempt, fn ->
+            do_failover_assignment_local(
+              session_id,
+              current,
+              target_node,
+              failed_at_ms,
+              attempt + 1
+            )
+          end)
+      end
+    else
+      {:error, reason} ->
+        retry_after_local_store_reset(reason, attempt, fn ->
+          do_failover_assignment_local(
+            session_id,
+            current,
+            target_node,
+            failed_at_ms,
+            attempt + 1
+          )
+        end)
+    end
+  end
+
+  defp recoverable_store_error?(reason) do
+    mismatching_node_error?(reason) or local_store_missing_error?(reason)
+  end
+
+  defp khepri_call(fun) when is_function(fun, 0) do
+    try do
+      fun.()
+    catch
+      :exit, reason -> {:error, reason}
+    end
+  end
+
+  defp local_store_missing_error?({:noproc, _pid}), do: true
+  defp local_store_missing_error?(:noproc), do: true
+  defp local_store_missing_error?({:khepri, :not_a_khepri_store, _info}), do: true
+  defp local_store_missing_error?({:not_a_khepri_store, _info}), do: true
+  defp local_store_missing_error?(_reason), do: false
 
   defp ensure_cache_tables do
     _ =
