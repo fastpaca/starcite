@@ -453,13 +453,20 @@ defmodule StarciteWeb.SessionController do
     started_at = System.monotonic_time()
     result = fun.()
     duration_ms = elapsed_ms_since(started_at)
-    :ok = Telemetry.request(:append_event, :total, request_outcome(result), duration_ms)
+
+    :ok =
+      Telemetry.request_result(
+        :append_event,
+        :total,
+        request_telemetry_result(result),
+        duration_ms
+      )
+
     result
   end
 
-  defp request_outcome(%Plug.Conn{}), do: :ok
-  defp request_outcome({:timeout, _reason}), do: :timeout
-  defp request_outcome(_result), do: :error
+  defp request_telemetry_result(%Plug.Conn{}), do: {:ok, :response}
+  defp request_telemetry_result(result), do: result
 
   defp elapsed_ms_since(started_at) when is_integer(started_at) do
     System.monotonic_time()

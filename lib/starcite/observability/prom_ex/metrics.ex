@@ -11,6 +11,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
       ingestion_metrics(),
       routing_metrics(),
       request_slo_metrics(),
+      replication_metrics(),
       archive_metrics(),
       session_metrics(),
       event_store_metrics()
@@ -129,14 +130,16 @@ defmodule Starcite.Observability.PromEx.Metrics do
         counter("starcite_request_total",
           event_name: [:starcite, :request],
           measurement: :count,
-          description: "Write request outcomes by node, operation, phase, and outcome",
-          tags: [:node, :operation, :phase, :outcome]
+          description:
+            "Write request outcomes by node, operation, phase, outcome, and error reason",
+          tags: [:node, :operation, :phase, :outcome, :error_reason]
         ),
         distribution("starcite_request_duration_ms",
           event_name: [:starcite, :request],
           measurement: :duration_ms,
-          description: "Write request duration in milliseconds by node, operation, and phase",
-          tags: [:node, :operation, :phase],
+          description:
+            "Write request duration in milliseconds by node, operation, phase, and outcome",
+          tags: [:node, :operation, :phase, :outcome],
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
@@ -164,39 +167,47 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_routing_metrics,
       [
-        counter("starcite_routing_decision_total",
-          event_name: [:starcite, :routing, :decision],
-          measurement: :count,
-          description:
-            "Routing decisions by node, target, leader preference, and leader hint status",
-          tags: [:node, :target, :prefer_leader, :leader_hint]
-        ),
         counter("starcite_routing_result_total",
           event_name: [:starcite, :routing, :result],
           measurement: :count,
-          description: "Routing execution outcomes by node, path, and outcome",
-          tags: [:node, :path, :outcome]
+          description: "Routing execution outcomes by node, target, outcome, and error reason",
+          tags: [:node, :target, :outcome, :error_reason]
         ),
-        distribution("starcite_routing_attempts",
+        distribution("starcite_routing_refreshes",
           event_name: [:starcite, :routing, :result],
-          measurement: :attempts,
-          description: "Replica attempts per routed write request",
-          tags: [:node, :path],
+          measurement: :refreshes,
+          description: "Authoritative assignment refreshes per routed request",
+          tags: [:node, :target, :outcome],
           reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        )
+      ]
+    )
+  end
+
+  defp replication_metrics do
+    Event.build(
+      :starcite_replication_metrics,
+      [
+        counter("starcite_replication_session_total",
+          event_name: [:starcite, :replication, :session],
+          measurement: :count,
+          description: "In-memory session replication attempts by outcome and failure reason",
+          tags: [:tenant_id, :outcome, :failure_reason]
         ),
-        distribution("starcite_routing_retries",
-          event_name: [:starcite, :routing, :result],
-          measurement: :retries,
-          description: "Routing retries per routed write request",
-          tags: [:node, :path],
-          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        distribution("starcite_replication_session_duration_ms",
+          event_name: [:starcite, :replication, :session],
+          measurement: :duration_ms,
+          description: "In-memory session replication duration in milliseconds",
+          tags: [:outcome, :failure_reason],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
         ),
-        distribution("starcite_routing_leader_redirects",
-          event_name: [:starcite, :routing, :result],
-          measurement: :leader_redirects,
-          description: "Leader redirect hints observed per routed write request",
-          tags: [:node, :path],
-          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        counter("starcite_replication_session_failures_total",
+          event_name: [:starcite, :replication, :session],
+          measurement: :failure_count,
+          description: "Total failed remote replication attempts",
+          tags: [:tenant_id, :failure_reason]
         )
       ]
     )
