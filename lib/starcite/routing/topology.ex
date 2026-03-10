@@ -68,7 +68,7 @@ defmodule Starcite.Routing.Topology do
 
     if node_self != :nonode@nohost and nodes == @default_cluster_nodes do
       raise ArgumentError,
-            "invalid cluster-node config: STARCITE_CLUSTER_NODE_IDS must be configured for distributed nodes"
+            "invalid cluster-node config: CLUSTER_NODES must be configured for distributed nodes"
     end
 
     if node_self not in nodes do

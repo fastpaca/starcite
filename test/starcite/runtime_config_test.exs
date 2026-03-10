@@ -3,13 +3,11 @@ defmodule Starcite.RuntimeConfigTest do
 
   @routing_store_dir_env "STARCITE_ROUTING_STORE_DIR"
   @cluster_nodes_env "CLUSTER_NODES"
-  @cluster_node_ids_env "STARCITE_CLUSTER_NODE_IDS"
   @routing_replication_factor_env "STARCITE_ROUTING_REPLICATION_FACTOR"
   @enable_telemetry_env "STARCITE_ENABLE_TELEMETRY"
   @runtime_envs [
     @routing_store_dir_env,
     @cluster_nodes_env,
-    @cluster_node_ids_env,
     @routing_replication_factor_env,
     @enable_telemetry_env
   ]
@@ -36,8 +34,8 @@ defmodule Starcite.RuntimeConfigTest do
     assert Keyword.fetch!(starcite_config, :routing_store_dir) == routing_store_dir
   end
 
-  test "runtime config applies cluster node ids and replication factor overrides" do
-    System.put_env(@cluster_node_ids_env, "node-a@host,node-b@host,node-c@host")
+  test "runtime config applies CLUSTER_NODES and replication factor overrides" do
+    System.put_env(@cluster_nodes_env, "node-a@host,node-b@host,node-c@host")
     System.put_env(@routing_replication_factor_env, "2")
 
     config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
@@ -52,9 +50,18 @@ defmodule Starcite.RuntimeConfigTest do
     assert Keyword.fetch!(starcite_config, :routing_replication_factor) == 2
   end
 
-  test "runtime config falls back to CLUSTER_NODES for cluster node ids" do
+  test "runtime config ignores blank CLUSTER_NODES" do
+    System.put_env(@cluster_nodes_env, "   ")
+    System.put_env(@routing_replication_factor_env, "3")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    refute Keyword.has_key?(starcite_config, :cluster_node_ids)
+  end
+
+  test "runtime config loads cluster node ids from CLUSTER_NODES" do
     System.put_env(@cluster_nodes_env, "node-a@host,node-b@host,node-c@host")
-    System.delete_env(@cluster_node_ids_env)
     System.put_env(@routing_replication_factor_env, "3")
 
     config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
