@@ -255,7 +255,7 @@ defmodule Starcite.DataPlane.SessionLog do
       when op_id == pending_id do
     next_session = pending.next_session
     :ok = maybe_put_appended_events(next_session.id, next_session.tenant_id, pending.events)
-    :ok = publish_events(next_session.id, pending.events)
+    :ok = publish_events(next_session, pending.events)
 
     reply =
       case pending.kind do
@@ -479,21 +479,28 @@ defmodule Starcite.DataPlane.SessionLog do
     EventStore.put_events(session_id, tenant_id, events)
   end
 
-  defp maybe_publish_event(session_id, %{seq: seq} = event)
-       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
+  defp maybe_publish_event(session_id, tenant_id, last_seq, %{seq: seq} = event)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and
+              is_integer(last_seq) and last_seq >= seq and is_integer(seq) and seq > 0 do
+    message = CursorUpdate.message(session_id, tenant_id, event, last_seq)
+
     Phoenix.PubSub.broadcast(
       Starcite.PubSub,
       CursorUpdate.topic(session_id),
-      CursorUpdate.message(session_id, event, seq)
+      message
     )
+
+    Telemetry.cursor_update_emitted(session_id, tenant_id, seq, last_seq)
   end
 
-  defp publish_events(_session_id, []), do: :ok
+  defp publish_events(_session, []), do: :ok
 
-  defp publish_events(session_id, events)
-       when is_binary(session_id) and session_id != "" and is_list(events) do
+  defp publish_events(%Session{id: session_id, tenant_id: tenant_id, last_seq: last_seq}, events)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and is_integer(last_seq) and last_seq >= 0 and is_list(events) do
     Enum.each(events, fn %{seq: seq} = event ->
-      :ok = maybe_publish_event(session_id, event)
+      :ok = maybe_publish_event(session_id, tenant_id, last_seq, event)
       seq
     end)
 

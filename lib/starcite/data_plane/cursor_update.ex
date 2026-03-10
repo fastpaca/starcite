@@ -15,9 +15,11 @@ defmodule Starcite.DataPlane.CursorUpdate do
   @type t :: %{
           required(:version) => 1,
           required(:session_id) => String.t(),
+          required(:tenant_id) => String.t(),
           required(:epoch) => non_neg_integer(),
           required(:seq) => pos_integer(),
           required(:last_seq) => pos_integer(),
+          required(:published_at_ms) => non_neg_integer(),
           required(:type) => String.t(),
           required(:actor) => String.t(),
           optional(:source) => String.t() | nil,
@@ -32,9 +34,10 @@ defmodule Starcite.DataPlane.CursorUpdate do
     @topic_prefix <> session_id
   end
 
-  @spec message(String.t(), Event.t(), pos_integer()) :: message()
+  @spec message(String.t(), String.t(), Event.t(), pos_integer()) :: message()
   def message(
         session_id,
+        tenant_id,
         %{
           seq: seq,
           type: type,
@@ -43,7 +46,8 @@ defmodule Starcite.DataPlane.CursorUpdate do
         } = event,
         last_seq
       )
-      when is_binary(session_id) and session_id != "" and is_integer(last_seq) and last_seq >= 0 do
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_integer(last_seq) and last_seq >= 0 do
     epoch =
       case Map.get(event, :epoch) do
         value when is_integer(value) and value >= 0 -> value
@@ -54,9 +58,11 @@ defmodule Starcite.DataPlane.CursorUpdate do
      %{
        version: 1,
        session_id: session_id,
+       tenant_id: tenant_id,
        epoch: epoch,
        seq: seq,
        last_seq: last_seq,
+       published_at_ms: System.system_time(:millisecond),
        type: type,
        actor: actor,
        source: Map.get(event, :source),

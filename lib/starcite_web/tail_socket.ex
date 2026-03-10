@@ -77,6 +77,7 @@ defmodule StarciteWeb.TailSocket do
   def handle_info(:auth_expired, state), do: close_for_auth_error(:token_expired, state)
 
   def handle_info({:cursor_update, update}, state) when is_map(update) do
+    observe_cursor_update(update, state)
     handle_cursor_update(update, state)
   end
 
@@ -244,12 +245,16 @@ defmodule StarciteWeb.TailSocket do
   defp resolve_cursor_update_event(session_id, principal, %{seq: seq} = update)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
+    tenant_id = tail_tenant_id(update)
+
     case event_from_cursor_update(update, seq) do
       {:ok, event} ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :embedded, :hit)
         {:ok, event}
 
       :error ->
-        read_event_for_tail(session_id, principal, seq, Map.get(update, :epoch))
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :embedded, :miss)
+        read_event_for_tail(session_id, principal, tenant_id, seq, Map.get(update, :epoch))
     end
   end
 
@@ -266,29 +271,74 @@ defmodule StarciteWeb.TailSocket do
 
   defp event_from_cursor_update(_update, _seq), do: :error
 
-  defp read_event_for_tail(session_id, principal, seq, epoch)
+  defp read_event_for_tail(session_id, principal, tenant_id, seq, epoch)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :event_store, :hit)
         {:ok, put_event_epoch(event, epoch)}
 
       :error ->
-        read_event_from_storage(session_id, principal, seq, epoch)
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :event_store, :miss)
+        read_event_from_storage(session_id, principal, tenant_id, seq, epoch)
     end
   end
 
-  defp read_event_from_storage(session_id, principal, seq, epoch)
+  defp read_event_from_storage(session_id, principal, tenant_id, seq, epoch)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
     case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :hit)
         {:ok, put_event_epoch(event, epoch)}
 
       _ ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :miss)
         :error
     end
   end
+
+  defp observe_cursor_update(
+         %{
+           session_id: session_id,
+           tenant_id: tenant_id,
+           seq: seq,
+           published_at_ms: published_at_ms
+         },
+         state
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and
+              is_integer(seq) and seq > 0 and is_integer(published_at_ms) and published_at_ms >= 0 do
+    Telemetry.tail_visibility(
+      session_id,
+      tenant_id,
+      seq,
+      cursor_update_mode(seq, state),
+      max(System.system_time(:millisecond) - published_at_ms, 0),
+      :queue.len(state.replay_queue),
+      map_size(state.live_buffer)
+    )
+  end
+
+  defp observe_cursor_update(_update, _state), do: :ok
+
+  defp cursor_update_mode(seq, state) when is_integer(seq) and seq > 0 do
+    queue_empty? = :queue.is_empty(state.replay_queue)
+    buffer_empty? = map_size(state.live_buffer) == 0
+
+    cond do
+      seq <= state.cursor -> :stale
+      state.replay_done and queue_empty? and buffer_empty? -> :live_fast_path
+      true -> :buffered
+    end
+  end
+
+  defp tail_tenant_id(%{tenant_id: tenant_id}) when is_binary(tenant_id) and tenant_id != "",
+    do: tenant_id
+
+  defp tail_tenant_id(_update), do: "unknown"
 
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)

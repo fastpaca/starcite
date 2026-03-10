@@ -337,24 +337,82 @@ defmodule Starcite.Observability.Telemetry do
     - `:session_id`
     - `:tenant_id`
     - `:seq`
-    - `:source` (`:ets` or `:storage`)
+    - `:source` (`:embedded`, `:event_store`, or `:storage`)
     - `:result` (`:hit` or `:miss`)
   """
   @spec tail_cursor_lookup(
           String.t(),
           String.t(),
           pos_integer(),
-          :ets | :storage,
+          :embedded | :event_store | :storage,
           :hit | :miss
         ) :: :ok
   def tail_cursor_lookup(session_id, tenant_id, seq, source, result)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(seq) and seq > 0 and source in [:ets, :storage] and
+             tenant_id != "" and is_integer(seq) and seq > 0 and
+             source in [:embedded, :event_store, :storage] and
              result in [:hit, :miss] do
     execute_if_enabled(
       [:starcite, :tail, :cursor_lookup],
       %{count: 1},
       %{session_id: session_id, tenant_id: tenant_id, seq: seq, source: source, result: result}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry when a tail socket receives a committed cursor update.
+
+  Measurements:
+    - `:count` – fixed at 1 per received update
+    - `:publish_to_receive_ms` – wall-clock lag from commit publish to socket receipt
+    - `:replay_queue_size` – queued replay events before processing this update
+    - `:live_buffer_size` – buffered live updates before processing this update
+
+  Metadata:
+    - `:session_id`
+    - `:tenant_id`
+    - `:seq`
+    - `:mode` (`:stale`, `:live_fast_path`, or `:buffered`)
+  """
+  @spec tail_visibility(
+          String.t(),
+          String.t(),
+          pos_integer(),
+          :stale | :live_fast_path | :buffered,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer()
+        ) :: :ok
+  def tail_visibility(
+        session_id,
+        tenant_id,
+        seq,
+        mode,
+        publish_to_receive_ms,
+        replay_queue_size,
+        live_buffer_size
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_integer(seq) and seq > 0 and mode in [:stale, :live_fast_path, :buffered] and
+             is_integer(publish_to_receive_ms) and publish_to_receive_ms >= 0 and
+             is_integer(replay_queue_size) and replay_queue_size >= 0 and
+             is_integer(live_buffer_size) and live_buffer_size >= 0 do
+    execute_if_enabled(
+      [:starcite, :tail, :visibility],
+      %{
+        count: 1,
+        publish_to_receive_ms: publish_to_receive_ms,
+        replay_queue_size: replay_queue_size,
+        live_buffer_size: live_buffer_size
+      },
+      %{
+        session_id: session_id,
+        tenant_id: tenant_id,
+        seq: seq,
+        mode: mode
+      }
     )
 
     :ok
