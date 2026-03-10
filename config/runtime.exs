@@ -105,10 +105,13 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
-if cluster_node_ids = System.get_env("STARCITE_CLUSTER_NODE_IDS") do
+cluster_node_ids =
+  get_optional_env.("STARCITE_CLUSTER_NODE_IDS") || get_optional_env.("CLUSTER_NODES")
+
+if cluster_node_ids do
   config :starcite,
          :cluster_node_ids,
-         parse_node_ids!.("STARCITE_CLUSTER_NODE_IDS", cluster_node_ids)
+         parse_node_ids!.("STARCITE_CLUSTER_NODE_IDS or CLUSTER_NODES", cluster_node_ids)
 end
 
 if routing_replication_factor = System.get_env("STARCITE_ROUTING_REPLICATION_FACTOR") do
