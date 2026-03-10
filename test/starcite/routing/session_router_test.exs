@@ -198,4 +198,95 @@ defmodule Starcite.Routing.SessionRouterTest do
     assert_receive {:rpc_called, ^original_owner}
     refute_receive {:rpc_called, ^redirect_owner}
   end
+
+  test "call/8 emits routing telemetry for authoritative refresh success" do
+    attach_routing_handler()
+    session_id = "session-router-telemetry-refresh"
+    original_owner = :"owner-a@cluster"
+    refreshed_owner = :"owner-b@cluster"
+
+    rpc_fun = fn owner, _module, _fun, _args ->
+      if owner == original_owner do
+        {:error, {:not_leader, {:session_owner, refreshed_owner}}}
+      else
+        {:ok, {:routed, owner}}
+      end
+    end
+
+    assignment_fetcher = fn ^session_id ->
+      {:ok, %{owner: refreshed_owner, epoch: 2, status: :active}}
+    end
+
+    assert {:ok, {:routed, ^refreshed_owner}} =
+             SessionRouter.call(
+               session_id,
+               __MODULE__,
+               :remote_echo,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: %{owner: original_owner, epoch: 1, status: :active},
+               assignment_fetcher: assignment_fetcher,
+               rpc_fun: rpc_fun,
+               self: :local@cluster
+             )
+
+    assert_receive {:routing_result_event, %{count: 1, refreshes: 1},
+                    %{target: :remote, outcome: :ok, error_reason: :none}},
+                   1_000
+  end
+
+  test "call/8 emits routing telemetry for stale assignment failure" do
+    attach_routing_handler()
+    session_id = "session-router-telemetry-stale"
+    original_owner = :"owner-a@cluster"
+    redirect_owner = :"owner-b@cluster"
+
+    rpc_fun = fn _owner, _module, _fun, _args ->
+      {:error, {:not_leader, {:session_owner, redirect_owner}}}
+    end
+
+    assignment_fetcher = fn ^session_id ->
+      {:ok, %{owner: original_owner, epoch: 1, status: :active}}
+    end
+
+    assert {:error, {:routing_rpc_failed, ^original_owner, :stale_assignment}} =
+             SessionRouter.call(
+               session_id,
+               __MODULE__,
+               :remote_echo,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: %{owner: original_owner, epoch: 1, status: :active},
+               assignment_fetcher: assignment_fetcher,
+               rpc_fun: rpc_fun,
+               self: :local@cluster
+             )
+
+    assert_receive {:routing_result_event, %{count: 1, refreshes: 1},
+                    %{target: :remote, outcome: :error, error_reason: :stale_assignment}},
+                   1_000
+  end
+
+  defp attach_routing_handler do
+    handler_id = "routing-result-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :result],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_result_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
 end
