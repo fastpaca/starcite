@@ -272,6 +272,52 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Tail cursor lookups by source and result",
           tags: [:source, :result, :tenant_id]
+        ),
+        counter("starcite_tail_visibility_total",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :count,
+          description: "Tail cursor update receipts by socket mode",
+          tags: [:mode, :tenant_id]
+        ),
+        distribution("starcite_tail_visibility_lag_ms",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :publish_to_receive_ms,
+          description: "Lag from committed cursor update publish to tail socket receipt",
+          tags: [:mode],
+          reporter_options: [
+            buckets: [
+              0,
+              1,
+              2,
+              5,
+              10,
+              20,
+              50,
+              100,
+              250,
+              500,
+              1_000,
+              2_500,
+              5_000,
+              10_000,
+              30_000,
+              60_000
+            ]
+          ]
+        ),
+        distribution("starcite_tail_replay_queue_size",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :replay_queue_size,
+          description: "Replay queue size when a tail socket receives a cursor update",
+          tags: [:mode],
+          reporter_options: [buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]]
+        ),
+        distribution("starcite_tail_live_buffer_size",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :live_buffer_size,
+          description: "Buffered live cursor updates when a tail socket receives a cursor update",
+          tags: [:mode],
+          reporter_options: [buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]]
         )
       ]
     )
