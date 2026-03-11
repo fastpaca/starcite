@@ -549,6 +549,8 @@ defmodule StarciteWeb.SessionControllerTest do
         })
 
       assert conn.status == 201
+      assert_receive_request(:append_event, :route, :ok, :none)
+      assert_receive_request(:append_event, :ack, :ok, :none)
       assert_receive_request(:append_event, :total, :ok, :none)
     end
 
@@ -577,6 +579,8 @@ defmodule StarciteWeb.SessionControllerTest do
         })
 
       assert conn.status == 409
+      assert_receive_request(:append_event, :route, :ok, :none)
+      assert_receive_request(:append_event, :ack, :error, :expected_seq_conflict)
       assert_receive_request(:append_event, :total, :error, :expected_seq_conflict)
     end
   end

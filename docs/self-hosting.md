@@ -149,27 +149,26 @@ For production rollouts, operate one node at a time:
    bin/starcite rpc "Starcite.Operations.wait_local_drained(30000)"
    ```
 
-3. **Restart/redeploy** the node.
+3. **Restart/redeploy** the node — a restarted drained node rejoins as `ready`
+   automatically once the release is healthy again.
 
-4. **Undrain** — tells the cluster this node is available again:
-   ```bash
-   bin/starcite rpc "Starcite.Operations.undrain_node()"
-   ```
-
-5. **Wait for readiness** — the node needs to rejoin the Khepri routing store and
+4. **Wait for readiness** — the node needs to rejoin the Khepri routing store and
    restore its local runtime before it can accept fresh ownership:
    ```bash
    bin/starcite rpc "Starcite.Operations.wait_local_ready(60000)"
    curl -sS http://<node>:4001/health/ready
    ```
 
-6. **Verify** the cluster looks healthy before moving on:
+5. **Verify** the cluster looks healthy before moving on:
    ```bash
    bin/starcite rpc "Starcite.Operations.ready_nodes()"
    bin/starcite rpc "Starcite.Operations.status()"
    ```
 
-7. Move to the next node.
+6. Move to the next node.
+
+Use `Starcite.Operations.undrain_node()` only when you want to return a still-running
+node to service without restarting it.
 
 ## Node replacement
 

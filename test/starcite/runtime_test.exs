@@ -4,9 +4,12 @@ defmodule Starcite.RuntimeTest do
   import ExUnit.CaptureLog
 
   alias Starcite.Auth.Principal
+  alias Starcite.Operations
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Archive.Store
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Routing.Store, as: RoutingStore
+  alias Starcite.Routing.Watcher
   alias Starcite.Session
   alias Starcite.Repo
 
@@ -153,6 +156,20 @@ defmodule Starcite.RuntimeTest do
                })
 
       assert SessionQuorum.local_owner?(id)
+    end
+
+    test "watcher startup rejoins a drained node as ready" do
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+      assert :ok = Operations.wait_local_ready(5_000)
+      assert RoutingStore.node_status(Node.self()) == :ready
     end
   end
 
@@ -644,6 +661,28 @@ defmodule Starcite.RuntimeTest do
       )
 
     result.num_rows > 0
+  end
+
+  defp wait_for_process_restart(name, previous_pid, timeout_ms)
+       when is_atom(name) and is_pid(previous_pid) and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_process_restart(name, previous_pid, deadline_ms)
+  end
+
+  defp do_wait_for_process_restart(name, previous_pid, deadline_ms)
+       when is_atom(name) and is_pid(previous_pid) and is_integer(deadline_ms) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != previous_pid ->
+        pid
+
+      _other ->
+        if System.monotonic_time(:millisecond) >= deadline_ms do
+          flunk("timed out waiting for #{inspect(name)} to restart")
+        else
+          Process.sleep(50)
+          do_wait_for_process_restart(name, previous_pid, deadline_ms)
+        end
+    end
   end
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
