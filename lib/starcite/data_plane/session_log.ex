@@ -404,32 +404,36 @@ defmodule Starcite.DataPlane.SessionLog do
   defp append_to_session(%Session{}, []), do: {:error, :invalid_event}
 
   defp append_one_to_session(%Session{} = session, input) when is_map(input) do
-    case Session.append_event(session, input) do
-      {:appended, updated_session, event} ->
-        reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-        {:ok, updated_session, reply, event}
+    with :ok <- guard_event_tenant(session, input) do
+      case Session.append_event(session, input) do
+        {:appended, updated_session, event} ->
+          reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+          {:ok, updated_session, reply, event}
 
-      {:deduped, updated_session, seq} ->
-        reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-        {:ok, updated_session, reply, nil}
+        {:deduped, updated_session, seq} ->
+          reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+          {:ok, updated_session, reply, nil}
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
   defp do_append_to_session(%Session{} = session, [input | rest], replies, events) do
-    case Session.append_event(session, input) do
-      {:appended, updated_session, event} ->
-        reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-        do_append_to_session(updated_session, rest, [reply | replies], [event | events])
+    with :ok <- guard_event_tenant(session, input) do
+      case Session.append_event(session, input) do
+        {:appended, updated_session, event} ->
+          reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
+          do_append_to_session(updated_session, rest, [reply | replies], [event | events])
 
-      {:deduped, updated_session, seq} ->
-        reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-        do_append_to_session(updated_session, rest, [reply | replies], events)
+        {:deduped, updated_session, seq} ->
+          reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
+          do_append_to_session(updated_session, rest, [reply | replies], events)
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -601,4 +605,33 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp comparison_session(%Session{}, %{next_session: %Session{} = pending_session}),
     do: pending_session
+
+  defp guard_event_tenant(%Session{tenant_id: session_tenant_id}, %{metadata: metadata})
+       when is_binary(session_tenant_id) and session_tenant_id != "" and is_map(metadata) do
+    case event_principal_tenant_id(metadata) do
+      nil -> :ok
+      ^session_tenant_id -> :ok
+      _other -> {:error, :forbidden_tenant}
+    end
+  end
+
+  defp guard_event_tenant(%Session{}, _input), do: :ok
+
+  defp event_principal_tenant_id(%{"starcite_principal" => %{"tenant_id" => tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_principal_tenant_id(%{"starcite_principal" => %{tenant_id: tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_principal_tenant_id(%{starcite_principal: %{"tenant_id" => tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_principal_tenant_id(%{starcite_principal: %{tenant_id: tenant_id}})
+       when is_binary(tenant_id) and tenant_id != "",
+       do: tenant_id
+
+  defp event_principal_tenant_id(_metadata), do: nil
 end
