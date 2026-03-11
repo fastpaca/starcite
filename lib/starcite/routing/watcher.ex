@@ -81,17 +81,15 @@ defmodule Starcite.Routing.Watcher do
   defp rejoin_local_node(%{boot_rejoin_pending: false} = state), do: state
 
   defp rejoin_local_node(%{boot_rejoin_pending: true} = state) do
-    case Store.node_status(Node.self()) do
-      :ready ->
+    case Store.node_record(Node.self(), favor: :consistency) do
+      {:ok, %{status: :ready}} ->
         %{state | boot_rejoin_pending: false}
 
-      status when status in [:draining, :drained] ->
-        case Store.mark_node_ready(Node.self(), :startup) do
-          :ok -> %{state | boot_rejoin_pending: false}
-          {:error, _reason} -> state
-        end
+      {:ok, %{status: status}} when status in [:draining, :drained] ->
+        _ = Store.mark_node_ready(Node.self(), :startup)
+        state
 
-      _other ->
+      {:error, _reason} ->
         state
     end
   end

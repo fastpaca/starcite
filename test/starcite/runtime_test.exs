@@ -171,6 +171,30 @@ defmodule Starcite.RuntimeTest do
       assert :ok = Operations.wait_local_ready(5_000)
       assert RoutingStore.node_status(Node.self()) == :ready
     end
+
+    test "watcher startup ignores a stale ready cache until the consistent store is ready" do
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: System.system_time(:millisecond) + 60_000,
+            updated_at_ms: 0
+          }
+        })
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+      assert :ok = Operations.wait_local_ready(5_000)
+      assert {:ok, %{status: :ready}} = RoutingStore.node_record(Node.self(), favor: :consistency)
+    end
   end
 
   describe "append_event/3" do
