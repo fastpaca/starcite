@@ -9,7 +9,7 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.{ReadPath, WritePath}
+  alias Starcite.WritePath
   alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
@@ -158,12 +158,7 @@ defmodule StarciteWeb.SessionController do
   # Keep the no-auth path free of per-append read/route overhead.
   defp authorize_append(%Context{kind: :none}, _id), do: :ok
 
-  defp authorize_append(%Context{} = auth, id) when is_binary(id) and id != "" do
-    with {:ok, session} <- ReadPath.get_session_routed(id, true),
-         :ok <- Policy.allowed_to_append_session(auth, session) do
-      :ok
-    end
-  end
+  defp authorize_append(%Context{} = auth, _id), do: Policy.has_scope(auth, "session:append")
 
   @doc """
   List known sessions from the configured archive adapter.
