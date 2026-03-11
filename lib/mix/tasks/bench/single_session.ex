@@ -2,7 +2,9 @@ defmodule Mix.Tasks.Bench.SingleSession do
   require Logger
 
   alias Starcite.Config.Size
+  alias Starcite.ReadPath
   alias Starcite.WritePath
+  alias Starcite.Auth.Principal
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.SessionController
 
@@ -18,6 +20,7 @@ defmodule Mix.Tasks.Bench.SingleSession do
 
     auth = Context.none()
     controller_session_id = prepare_controller_session(auth)
+    jwt_auth = jwt_auth_context(controller_session_id)
 
     controller_producers =
       prepare_shared_producers(
@@ -26,6 +29,7 @@ defmodule Mix.Tasks.Bench.SingleSession do
       )
 
     write_path_session_id = prepare_write_path_session()
+    read_path_session_id = prepare_read_path_session()
 
     write_path_producers =
       prepare_shared_producers(
@@ -36,9 +40,14 @@ defmodule Mix.Tasks.Bench.SingleSession do
     controller_event_template = controller_event_template(config.payload_bytes)
     write_path_event_template = write_path_event_template(config.payload_bytes)
 
-    controller_append = fn ->
+    controller_append_none = fn ->
       input = next_shared_input_string_keys(controller_event_template, controller_producers)
       append_event_controller_api!(controller_session_id, input, auth)
+    end
+
+    controller_append_jwt = fn ->
+      input = next_shared_input_string_keys(controller_event_template, controller_producers)
+      append_event_controller_api!(controller_session_id, input, jwt_auth)
     end
 
     write_path_append = fn ->
@@ -46,10 +55,21 @@ defmodule Mix.Tasks.Bench.SingleSession do
       append_event_write_path!(write_path_session_id, input)
     end
 
+    read_path_get_session = fn ->
+      get_session_routed!(read_path_session_id)
+    end
+
+    read_path_replay = fn ->
+      replay_from_cursor!(read_path_session_id, 0, 1)
+    end
+
     run_benchee(
       %{
-        "web.controller.append_api(routed)" => controller_append,
-        "api.write_path.append(routed)" => write_path_append
+        "web.controller.append_api(routed,auth=none)" => controller_append_none,
+        "web.controller.append_api(routed,auth=jwt)" => controller_append_jwt,
+        "api.write_path.append(routed)" => write_path_append,
+        "api.read_path.get_session_routed" => read_path_get_session,
+        "api.read_path.replay_from_cursor" => read_path_replay
       },
       parallel: config.parallel,
       warmup: config.warmup_seconds,
@@ -172,6 +192,24 @@ defmodule Mix.Tasks.Bench.SingleSession do
     end
   end
 
+  defp prepare_read_path_session do
+    run_id = System.system_time(:millisecond)
+    session_id = "single-benchee-read-path-#{run_id}"
+
+    case WritePath.create_session(
+           id: session_id,
+           tenant_id: "service",
+           metadata: %{bench: true, scenario: @bench_scope}
+         ) do
+      {:ok, _session} ->
+        seed_read_path_session!(session_id)
+        session_id
+
+      {:error, reason} ->
+        raise "read_path session create failed: #{inspect(reason)}"
+    end
+  end
+
   defp prepare_shared_producers(producer_pool_size, session_id)
        when is_integer(producer_pool_size) and producer_pool_size > 0 and
               is_binary(session_id) and session_id != "" do
@@ -282,9 +320,72 @@ defmodule Mix.Tasks.Bench.SingleSession do
     end
   end
 
+  defp get_session_routed!(session_id) when is_binary(session_id) and session_id != "" do
+    case ReadPath.get_session_routed(session_id, true) do
+      {:ok, _session} ->
+        :ok
+
+      {:error, reason} ->
+        raise "read_path get_session_routed failed: #{inspect(reason)}"
+
+      {:timeout, leader} ->
+        raise "read_path get_session_routed timeout: #{inspect(leader)}"
+    end
+  end
+
+  defp replay_from_cursor!(session_id, cursor, limit)
+       when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
+              is_integer(limit) and limit > 0 do
+    case ReadPath.replay_from_cursor(session_id, cursor, limit) do
+      {:ok, _events} ->
+        :ok
+
+      {:gap, gap_signal} ->
+        raise "read_path replay_from_cursor gap: #{inspect(gap_signal)}"
+
+      {:error, reason} ->
+        raise "read_path replay_from_cursor failed: #{inspect(reason)}"
+    end
+  end
+
   defp controller_conn(path, %Context{} = auth) when is_binary(path) and path != "" do
     Plug.Test.conn("POST", path, "")
     |> Plug.Conn.assign(:auth, auth)
+  end
+
+  defp jwt_auth_context(session_id) when is_binary(session_id) and session_id != "" do
+    {:ok, principal} = Principal.new("service", "single-benchee-jwt", :service)
+
+    %Context{
+      kind: :jwt,
+      principal: principal,
+      scopes: ["session:append", "session:read"],
+      session_id: session_id,
+      expires_at: System.system_time(:second) + 3600
+    }
+  end
+
+  defp seed_read_path_session!(session_id) when is_binary(session_id) and session_id != "" do
+    case WritePath.append_event(session_id, %{
+           type: "content",
+           payload: %{text: "seed"},
+           actor: "service:service",
+           source: "benchmark",
+           metadata: %{bench: true, scenario: @bench_scope},
+           refs: %{},
+           idempotency_key: nil,
+           producer_id: "#{session_id}:seed",
+           producer_seq: 1
+         }) do
+      {:ok, _reply} ->
+        :ok
+
+      {:error, reason} ->
+        raise "read_path seed append failed: #{inspect(reason)}"
+
+      {:timeout, leader} ->
+        raise "read_path seed append timeout: #{inspect(leader)}"
+    end
   end
 
   defp worker_slot(pool_size, worker_counter) when is_integer(pool_size) and pool_size > 0 do
