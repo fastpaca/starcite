@@ -2,6 +2,7 @@ defmodule Starcite.Application do
   @moduledoc false
 
   use Application
+  require Logger
   @archive_read_cache :starcite_archive_read_cache
 
   @impl true
@@ -151,8 +152,14 @@ defmodule Starcite.Application do
 
   defp maybe_drain_before_stop do
     if length(Starcite.Routing.Topology.nodes()) > 1 do
-      _ = Starcite.Operations.drain_node(Node.self())
-      _ = Starcite.Operations.wait_local_drained(drain_timeout_ms())
+      Logger.warning("Starcite shutdown drain starting node=#{inspect(Node.self())}")
+
+      drain_result = Starcite.Operations.drain_node(Node.self(), :shutdown)
+      wait_result = Starcite.Operations.wait_local_drained(drain_timeout_ms())
+
+      Logger.warning(
+        "Starcite shutdown drain finished node=#{inspect(Node.self())} drain_result=#{inspect(drain_result)} wait_result=#{inspect(wait_result)}"
+      )
     end
 
     :ok

@@ -61,8 +61,16 @@ defmodule Starcite.Operations do
   @spec drain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def drain_node(node \\ Node.self()) when is_atom(node), do: Maintenance.drain_node(node)
 
+  @spec drain_node(node(), atom()) :: :ok | {:error, :invalid_cluster_node | term()}
+  def drain_node(node, source) when is_atom(node) and is_atom(source),
+    do: Maintenance.drain_node(node, source)
+
   @spec undrain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def undrain_node(node \\ Node.self()) when is_atom(node), do: Maintenance.undrain_node(node)
+
+  @spec undrain_node(node(), atom()) :: :ok | {:error, :invalid_cluster_node | term()}
+  def undrain_node(node, source) when is_atom(node) and is_atom(source),
+    do: Maintenance.undrain_node(node, source)
 
   @spec known_nodes() :: [node()]
   def known_nodes, do: Topology.nodes()

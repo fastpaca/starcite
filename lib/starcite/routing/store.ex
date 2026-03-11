@@ -16,6 +16,7 @@ defmodule Starcite.Routing.Store do
 
   require Logger
 
+  alias Starcite.Observability.Telemetry
   alias Starcite.Routing.{Policy, Topology}
 
   @dialyzer {:nowarn_function,
@@ -25,7 +26,7 @@ defmodule Starcite.Routing.Store do
                do_commit_transfer_local: 4,
                do_failover_assignment_local: 4,
                do_failover_assignment_local: 5,
-               mutate_node_record: 4,
+               mutate_node_record: 5,
                exact_match_pattern: 1
              ]}
 
@@ -239,17 +240,32 @@ defmodule Starcite.Routing.Store do
 
   @spec mark_node_draining(node()) :: :ok | {:error, term()}
   def mark_node_draining(node) when is_atom(node) do
-    put_node_state(node, :draining)
+    mark_node_draining(node, :maintenance)
+  end
+
+  @spec mark_node_draining(node(), atom()) :: :ok | {:error, term()}
+  def mark_node_draining(node, source) when is_atom(node) and is_atom(source) do
+    put_node_state(node, :draining, source)
   end
 
   @spec mark_node_ready(node()) :: :ok | {:error, term()}
   def mark_node_ready(node) when is_atom(node) do
-    put_node_state(node, :ready)
+    mark_node_ready(node, :maintenance)
+  end
+
+  @spec mark_node_ready(node(), atom()) :: :ok | {:error, term()}
+  def mark_node_ready(node, source) when is_atom(node) and is_atom(source) do
+    put_node_state(node, :ready, source)
   end
 
   @spec mark_node_drained(node()) :: :ok | {:error, term()}
   def mark_node_drained(node) when is_atom(node) do
-    put_node_state(node, :drained)
+    mark_node_drained(node, :watcher)
+  end
+
+  @spec mark_node_drained(node(), atom()) :: :ok | {:error, term()}
+  def mark_node_drained(node, source) when is_atom(node) and is_atom(source) do
+    put_node_state(node, :drained, source)
   end
 
   @spec node_status(node()) :: :ready | :draining | :drained | :unknown
@@ -610,15 +626,15 @@ defmodule Starcite.Routing.Store do
 
   defp node_records_from_khepri(other), do: {:error, {:invalid_node_records, other}}
 
-  defp put_node_state(node, status)
-       when is_atom(node) and status in [:ready, :draining, :drained] do
-    route_command(:put_node_state, [node, status, now_ms()])
+  defp put_node_state(node, status, source)
+       when is_atom(node) and status in [:ready, :draining, :drained] and is_atom(source) do
+    route_command(:put_node_state, [node, status, now_ms(), source])
   end
 
-  def do_put_node_state_local(node, status, updated_at_ms)
+  def do_put_node_state_local(node, status, updated_at_ms, source)
       when is_atom(node) and status in [:ready, :draining, :drained] and
-             is_integer(updated_at_ms) and updated_at_ms >= 0 do
-    mutate_node_record(node, updated_at_ms, fn current -> %{current | status: status} end)
+             is_integer(updated_at_ms) and updated_at_ms >= 0 and is_atom(source) do
+    mutate_node_record(node, updated_at_ms, source, fn current -> %{current | status: status} end)
   end
 
   def do_bootstrap_local_node_local(updated_at_ms, ttl_ms)
@@ -631,7 +647,7 @@ defmodule Starcite.Routing.Store do
              is_integer(ttl_ms) and ttl_ms > 0 do
     lease_until_ms = updated_at_ms + ttl_ms
 
-    mutate_node_record(node, updated_at_ms, fn current ->
+    mutate_node_record(node, updated_at_ms, :lease, fn current ->
       %{current | lease_until_ms: lease_until_ms}
     end)
   end
@@ -686,14 +702,15 @@ defmodule Starcite.Routing.Store do
     end
   end
 
-  defp mutate_node_record(node, updated_at_ms, updater, attempt \\ 0)
+  defp mutate_node_record(node, updated_at_ms, source, updater, attempt \\ 0)
        when is_atom(node) and is_integer(updated_at_ms) and updated_at_ms >= 0 and
-              is_function(updater, 1) and is_integer(attempt) and attempt >= 0 do
+              is_atom(source) and is_function(updater, 1) and is_integer(attempt) and attempt >= 0 do
     if attempt >= @cas_retry_limit do
       {:error, :routing_store_unavailable}
     else
       case do_get_node_state_local(node, :consistency) do
         {:ok, current} when is_map(current) ->
+          from_status = Map.get(current, :status, :unknown)
           next = updater.(current) |> Map.put(:updated_at_ms, updated_at_ms)
 
           case khepri_call(fn ->
@@ -707,17 +724,19 @@ defmodule Starcite.Routing.Store do
                end) do
             :ok ->
               :ok = cache_node_record(node, next)
+              emit_node_state_transition(node, from_status, next, source)
               :ok
 
             {:error, reason} ->
               retry_after_local_store_reset(reason, attempt, fn ->
-                mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+                mutate_node_record(node, updated_at_ms, source, updater, attempt + 1)
               end)
           end
 
         {:error, reason} ->
           cond do
             missing_node_error?(reason) ->
+              from_status = :unknown
               next = updater.(default_node_record()) |> Map.put(:updated_at_ms, updated_at_ms)
 
               case khepri_call(fn ->
@@ -725,21 +744,36 @@ defmodule Starcite.Routing.Store do
                    end) do
                 :ok ->
                   :ok = cache_node_record(node, next)
+                  emit_node_state_transition(node, from_status, next, source)
                   :ok
 
                 {:error, reason} ->
                   retry_after_local_store_reset(reason, attempt, fn ->
-                    mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+                    mutate_node_record(node, updated_at_ms, source, updater, attempt + 1)
                   end)
               end
 
             true ->
               retry_after_local_store_reset(reason, attempt, fn ->
-                mutate_node_record(node, updated_at_ms, updater, attempt + 1)
+                mutate_node_record(node, updated_at_ms, source, updater, attempt + 1)
               end)
           end
       end
     end
+  end
+
+  defp emit_node_state_transition(node, from_status, %{status: to_status}, source)
+       when from_status in [:unknown, :ready, :draining, :drained] and
+              to_status in [:ready, :draining, :drained] and is_atom(source) do
+    if from_status != to_status do
+      Logger.info(
+        "Routing.Store node state transition node=#{inspect(node)} from=#{from_status} to=#{to_status} source=#{source}"
+      )
+
+      :ok = Telemetry.routing_node_state(node, from_status, to_status, source)
+    end
+
+    :ok
   end
 
   defp ensure_matching_transfer(
