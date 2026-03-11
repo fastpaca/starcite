@@ -405,68 +405,52 @@ defmodule Starcite.Routing.Store do
   end
 
   defp join_cluster do
-    cond do
-      cluster_bootstrap_node?() ->
-        :ok
-
-      cluster_joined?() ->
-        :ok
-
-      true ->
-        case bootstrap_node() do
-          nil ->
-            :ok
-
-          node ->
-            case khepri_call(fn -> :khepri_cluster.join({store_id(), node}, @join_timeout_ms) end) do
-              :ok ->
-                :ok
-
-              {:error, {:already_member, _member}} ->
-                :ok
-
-              {:error, {:not_joinable, _reason}} ->
-                :ok
-
-              {:error, {:failed_to_contact_remote_member, _reason}} ->
-                :ok
-
-              {:error, {:no_leader, _reason}} ->
-                :ok
-
-              {:error, reason} ->
-                Logger.debug("Routing.Store join skipped: #{inspect(reason)}")
-                :ok
-            end
-        end
+    if cluster_joined?() do
+      :ok
+    else
+      join_existing_cluster()
     end
   end
 
-  defp bootstrap_node do
-    Topology.nodes() |> List.first()
-  end
+  defp join_existing_cluster do
+    Topology.nodes()
+    |> Enum.reject(&(&1 == Node.self()))
+    |> Enum.reduce_while(:ok, fn node, _acc ->
+      case khepri_call(fn -> :khepri_cluster.join({store_id(), node}, @join_timeout_ms) end) do
+        :ok ->
+          {:halt, :ok}
 
-  defp cluster_bootstrap_node? do
-    bootstrap_node() == Node.self()
+        {:error, {:already_member, _member}} ->
+          {:halt, :ok}
+
+        {:error, {:not_joinable, _reason}} ->
+          {:cont, :ok}
+
+        {:error, {:failed_to_contact_remote_member, _reason}} ->
+          {:cont, :ok}
+
+        {:error, {:no_leader, _reason}} ->
+          {:cont, :ok}
+
+        {:error, reason} ->
+          Logger.debug("Routing.Store join skipped: #{inspect(reason)}")
+          {:cont, :ok}
+      end
+    end)
   end
 
   defp cluster_joined? do
-    case bootstrap_node() do
-      nil ->
-        true
+    remote_nodes =
+      Topology.nodes()
+      |> Enum.reject(&(&1 == Node.self()))
 
-      bootstrap ->
-        if bootstrap == Node.self() do
-          true
-        else
-          case :khepri_cluster.nodes(store_id(), %{favor: :low_latency}) do
-            {:ok, nodes} when is_list(nodes) ->
-              Node.self() in nodes and bootstrap in nodes and length(nodes) > 1
+    case :khepri_cluster.nodes(store_id(), %{favor: :low_latency}) do
+      {:ok, nodes} when is_list(nodes) ->
+        Node.self() in nodes and
+          (remote_nodes == [] or Enum.any?(remote_nodes, &(&1 in nodes)))
 
-            _other ->
-              false
-          end
-        end
+      _other ->
+        false
     end
   end
 
