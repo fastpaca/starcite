@@ -549,9 +549,13 @@ defmodule StarciteWeb.SessionControllerTest do
         })
 
       assert conn.status == 201
-      assert_receive_request(:append_event, :route, :ok, :none)
-      assert_receive_request(:append_event, :ack, :ok, :none)
-      assert_receive_request(:append_event, :total, :ok, :none)
+
+      assert_receive_requests(:append_event, [
+        {:route, :ok, :none},
+        {:dispatch, :ok, :none},
+        {:ack, :ok, :none},
+        {:total, :ok, :none}
+      ])
     end
 
     test "append expected_seq conflict emits request telemetry with conflict reason" do
@@ -579,9 +583,13 @@ defmodule StarciteWeb.SessionControllerTest do
         })
 
       assert conn.status == 409
-      assert_receive_request(:append_event, :route, :ok, :none)
-      assert_receive_request(:append_event, :ack, :error, :expected_seq_conflict)
-      assert_receive_request(:append_event, :total, :error, :expected_seq_conflict)
+
+      assert_receive_requests(:append_event, [
+        {:route, :ok, :none},
+        {:dispatch, :error, :expected_seq_conflict},
+        {:ack, :error, :expected_seq_conflict},
+        {:total, :error, :expected_seq_conflict}
+      ])
     end
   end
 
@@ -669,31 +677,39 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
-  defp assert_receive_request(operation, phase, outcome, error_reason) do
+  defp assert_receive_requests(operation, expectations)
+       when operation in [:append_event, :append_events] and is_list(expectations) do
+    expected = MapSet.new(expectations)
     deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_request(operation, phase, outcome, error_reason, deadline)
+    do_assert_receive_requests(operation, expected, deadline)
   end
 
-  defp do_assert_receive_request(operation, phase, outcome, error_reason, deadline) do
+  defp do_assert_receive_requests(_operation, expected, _deadline)
+       when is_struct(expected, MapSet) and map_size(expected.map) == 0 do
+    :ok
+  end
+
+  defp do_assert_receive_requests(operation, expected, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {:request_event, %{count: 1, duration_ms: duration_ms},
-       %{
-         operation: ^operation,
-         phase: ^phase,
-         outcome: ^outcome,
-         error_reason: ^error_reason
-       }} ->
+       %{operation: ^operation, phase: phase, outcome: outcome, error_reason: error_reason}} ->
         assert is_integer(duration_ms)
         assert duration_ms >= 0
 
+        do_assert_receive_requests(
+          operation,
+          MapSet.delete(expected, {phase, outcome, error_reason}),
+          deadline
+        )
+
       {:request_event, _measurements, _metadata} ->
-        do_assert_receive_request(operation, phase, outcome, error_reason, deadline)
+        do_assert_receive_requests(operation, expected, deadline)
     after
       remaining ->
         flunk(
-          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)} reason=#{inspect(error_reason)}"
+          "timed out waiting for request telemetry operation=#{inspect(operation)} expectations=#{inspect(MapSet.to_list(expected))}"
         )
     end
   end

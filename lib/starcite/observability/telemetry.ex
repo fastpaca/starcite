@@ -119,30 +119,32 @@ defmodule Starcite.Observability.Telemetry do
   Metadata:
     - `:node` – local Erlang node name as a string
     - `:operation` (`:append_event` or `:append_events`)
-    - `:phase` (`:total`, `:route`, or `:ack`)
+    - `:phase` (`:total`, `:route`, `:dispatch`, or `:ack`)
     - `:outcome` (`:ok`, `:error`, or `:timeout`)
     - `:error_reason` – stable failure class atom (`:none` for success)
   """
   @spec request(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           :ok | :error | :timeout,
           non_neg_integer()
         ) :: :ok
   def request(operation, phase, outcome, duration_ms)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 do
     request(operation, phase, outcome, duration_ms, :none, current_node_name())
   end
 
   @spec request_result(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           {:ok, term()} | {:error, term()} | {:timeout, term()},
           non_neg_integer()
         ) :: :ok
   def request_result(operation, phase, result, duration_ms)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              is_integer(duration_ms) and duration_ms >= 0 do
     request(
       operation,
@@ -155,13 +157,14 @@ defmodule Starcite.Observability.Telemetry do
 
   @spec request(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           :ok | :error | :timeout,
           non_neg_integer(),
           atom()
         ) :: :ok
   def request(operation, phase, outcome, duration_ms, error_reason)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 and
              is_atom(error_reason) do
     request(operation, phase, outcome, duration_ms, error_reason, current_node_name())
@@ -169,14 +172,15 @@ defmodule Starcite.Observability.Telemetry do
 
   @spec request(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           :ok | :error | :timeout,
           non_neg_integer(),
           atom(),
           String.t()
         ) :: :ok
   def request(operation, phase, outcome, duration_ms, error_reason, node_name)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 and
              is_atom(error_reason) and is_binary(node_name) and node_name != "" do
     execute_if_enabled(

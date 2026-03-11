@@ -44,6 +44,7 @@ defmodule Starcite.Routing.SessionRouter do
     case assignment_for_call(session_id, route_opts) do
       {:ok, assignment} ->
         emit_request_route_phase(route_opts, {:ok, :owner_selected}, route_started_at)
+        dispatch_started_at = System.monotonic_time()
 
         {result, refreshes} =
           dispatch_to_owner(
@@ -59,6 +60,8 @@ defmodule Starcite.Routing.SessionRouter do
             1,
             0
           )
+
+        emit_request_dispatch_phase(route_opts, result, dispatch_started_at)
 
         :ok =
           Telemetry.routing_result(
@@ -289,6 +292,18 @@ defmodule Starcite.Routing.SessionRouter do
       operation when operation in [:append_event, :append_events] ->
         duration_ms = elapsed_ms_since(started_at)
         :ok = Telemetry.request_result(operation, :route, result, duration_ms)
+
+      _other ->
+        :ok
+    end
+  end
+
+  defp emit_request_dispatch_phase(route_opts, result, started_at)
+       when is_list(route_opts) and is_integer(started_at) do
+    case Keyword.get(route_opts, :request_operation) do
+      operation when operation in [:append_event, :append_events] ->
+        duration_ms = elapsed_ms_since(started_at)
+        :ok = Telemetry.request_result(operation, :dispatch, result, duration_ms)
 
       _other ->
         :ok
