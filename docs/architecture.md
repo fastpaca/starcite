@@ -128,7 +128,9 @@ until its control-plane lease expires. After lease expiry, ownership is moved an
 `epoch` is bumped.
 
 **Rolling maintenance:** Expected path is `draining -> drained -> stop`. Sessions
-move explicitly before the node is taken down.
+move explicitly before the node is taken down. A restarted drained node rejoins as
+`ready`; keeping a live node drained without restart still requires an explicit
+`undrain_node`.
 
 **Archive lag/failure:** Live delivery continues; archival watermark stops advancing
 until storage recovers.

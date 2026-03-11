@@ -91,12 +91,9 @@ Restart the drained node:
 docker compose -f docker-compose.integration.yml -p starcite-khepri-it restart node1
 ```
 
-Undrain it once the release is back:
+Wait for it to rejoin as ready:
 
 ```bash
-docker exec starcite-khepri-it-node1-1 /app/starcite/bin/starcite rpc \
-  'Starcite.Operations.undrain_node(Node.self())'
-
 docker exec starcite-khepri-it-node1-1 /app/starcite/bin/starcite rpc \
   'Starcite.Operations.wait_local_ready(30000)'
 ```
@@ -117,7 +114,7 @@ A rolling drill is healthy when all of the following hold:
 1. Each node reaches `:drained` before restart.
 2. No assignment is left in `status: :moving`.
 3. Post-drain appends to moved sessions still succeed.
-4. After `undrain`, the restarted node returns to `ready_nodes`.
+4. After restart, the node returns to `ready_nodes`.
 5. New session claims eventually land on the returned node.
 6. Khepri membership remains stable across the full cycle.
 

@@ -5,6 +5,7 @@ defmodule Starcite.WritePath do
 
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{SessionQuorum, SessionStore}
+  alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
 
@@ -188,7 +189,9 @@ defmodule Starcite.WritePath do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_event_local(id, event)
       when is_binary(id) and id != "" and is_map(event) do
-    SessionQuorum.append_event(id, event, nil)
+    measure_ack_request(:append_event, fn ->
+      SessionQuorum.append_event(id, event, nil)
+    end)
   end
 
   @doc false
@@ -196,7 +199,10 @@ defmodule Starcite.WritePath do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_event_local(id, event, opts) when is_binary(id) and id != "" and is_map(event) do
     expected_seq = expected_seq_from_opts(opts)
-    SessionQuorum.append_event(id, event, expected_seq)
+
+    measure_ack_request(:append_event, fn ->
+      SessionQuorum.append_event(id, event, expected_seq)
+    end)
   end
 
   @spec append_events(String.t(), [map()], keyword()) ::
@@ -227,7 +233,9 @@ defmodule Starcite.WritePath do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_events_local(id, events, opts \\ [])
       when is_binary(id) and id != "" and is_list(events) and events != [] and is_list(opts) do
-    SessionQuorum.append_events(id, events, opts)
+    measure_ack_request(:append_events, fn ->
+      SessionQuorum.append_events(id, events, opts)
+    end)
   end
 
   @spec ack_archived(String.t(), non_neg_integer()) ::
@@ -261,7 +269,8 @@ defmodule Starcite.WritePath do
       __MODULE__,
       local_fun,
       local_args,
-      prefer_leader: true
+      prefer_leader: true,
+      request_operation: request_operation(local_fun)
     )
   end
 
@@ -309,5 +318,25 @@ defmodule Starcite.WritePath do
 
   defp generate_session_id do
     "ses_" <> Base.url_encode64(:crypto.strong_rand_bytes(12), padding: false)
+  end
+
+  defp request_operation(:append_event_local), do: :append_event
+  defp request_operation(:append_events_local), do: :append_events
+  defp request_operation(_local_fun), do: nil
+
+  defp measure_ack_request(operation, fun)
+       when operation in [:append_event, :append_events] and is_function(fun, 0) do
+    started_at = System.monotonic_time()
+    result = fun.()
+    duration_ms = elapsed_ms_since(started_at)
+    :ok = Telemetry.request_result(operation, :ack, result, duration_ms)
+    result
+  end
+
+  defp elapsed_ms_since(started_at) when is_integer(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+    |> max(0)
   end
 end

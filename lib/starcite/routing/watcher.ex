@@ -35,25 +35,25 @@ defmodule Starcite.Routing.Watcher do
   def init(_arg) do
     :net_kernel.monitor_nodes(true, node_type: :visible)
     :ok = ensure_suspect_table()
-    {:ok, %{}, {:continue, :schedule_tick}}
+    {:ok, %{boot_rejoin_pending: true}, {:continue, :schedule_tick}}
   end
 
   @impl true
   def handle_continue(:schedule_tick, state) do
-    {:noreply, schedule_tick(state)}
+    {:noreply, state |> rejoin_local_node() |> schedule_tick()}
   end
 
   @impl true
   def handle_call(:run_once, _from, state) do
-    :ok = run_tick()
-    {:reply, :ok, state}
+    next_state = run_tick(state)
+    {:reply, :ok, next_state}
   end
 
   @impl true
   def handle_info(:tick, state) do
-    :ok = run_tick()
+    next_state = run_tick(state)
 
-    {:noreply, schedule_tick(state)}
+    {:noreply, schedule_tick(next_state)}
   end
 
   def handle_info({:nodeup, node, _info}, state) when is_atom(node) do
@@ -68,13 +68,32 @@ defmodule Starcite.Routing.Watcher do
 
   def handle_info(_message, state), do: {:noreply, state}
 
-  defp run_tick do
+  defp run_tick(state) when is_map(state) do
+    state = rejoin_local_node(state)
     :ok = renew_local_lease()
     start_drain_transfers()
     fail_over_expired_leases()
     reconcile_assignments()
     mark_local_drained()
-    :ok
+    state
+  end
+
+  defp rejoin_local_node(%{boot_rejoin_pending: false} = state), do: state
+
+  defp rejoin_local_node(%{boot_rejoin_pending: true} = state) do
+    case Store.node_status(Node.self()) do
+      :ready ->
+        %{state | boot_rejoin_pending: false}
+
+      status when status in [:draining, :drained] ->
+        case Store.mark_node_ready(Node.self()) do
+          :ok -> %{state | boot_rejoin_pending: false}
+          {:error, _reason} -> state
+        end
+
+      _other ->
+        state
+    end
   end
 
   defp reconcile_assignments do
