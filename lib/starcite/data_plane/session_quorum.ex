@@ -20,12 +20,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
                append_event: 3,
                append_events: 3,
                ack_archived: 2,
-               fetch_cursor_snapshot: 1,
-               execute_prepared_operation: 4,
-               call_prepared_operation: 3,
-               normalize_prepared_result: 1,
-               normalize_commit_result: 1,
-               abort_prepared_operation: 3
+               fetch_cursor_snapshot: 1
              ]}
 
   @registry Starcite.DataPlane.SessionLogRegistry
@@ -40,11 +35,6 @@ defmodule Starcite.DataPlane.SessionQuorum do
   @max_concurrency Application.compile_env(:starcite, :session_quorum_max_concurrency, 16)
 
   @type replication_failure :: {node(), term()}
-  @type prepared_operation :: %{
-          required(:op_id) => reference(),
-          required(:session) => Session.t(),
-          required(:events) => [map()]
-        }
   @type routing_assignment :: %{
           required(:owner) => node(),
           required(:epoch) => non_neg_integer(),
@@ -87,11 +77,10 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
          {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
-      execute_prepared_operation(
+      safe_log_call(
         session_id,
         current_pid,
-        {:prepare_append_event, input, expected_seq},
-        assignment
+        {:append_event, input, expected_seq, assignment.replicas}
       )
     end
   end
@@ -108,11 +97,10 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
          {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
-      execute_prepared_operation(
+      safe_log_call(
         session_id,
         current_pid,
-        {:prepare_append_events, inputs, expected_seq},
-        assignment
+        {:append_events, inputs, expected_seq, assignment.replicas}
       )
     end
   end
@@ -128,12 +116,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_log_loaded_from_lookup(session_id, log_lookup),
          {:ok, current_pid} <- ensure_log_epoch_current(session_id, pid, assignment) do
-      execute_prepared_operation(
-        session_id,
-        current_pid,
-        {:prepare_ack_archived, upto_seq},
-        assignment
-      )
+      safe_log_call(session_id, current_pid, {:ack_archived, upto_seq, assignment.replicas})
     end
   end
 
@@ -435,7 +418,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp safe_call(pid, message) when is_pid(pid) do
-    :gen_statem.call(pid, message, @call_timeout)
+    :gen_batch_server.call(pid, message, @call_timeout)
   catch
     :exit, _reason -> {:timeout, :session_log_unavailable}
   end
@@ -450,81 +433,6 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
       other ->
         other
-    end
-  end
-
-  defp execute_prepared_operation(session_id, pid, prepare_message, %{replicas: replicas})
-       when is_binary(session_id) and session_id != "" and is_pid(pid) and is_list(replicas) do
-    with {:ok, prepare_pid, %{op_id: op_id, session: %Session{} = session, events: events}} <-
-           call_prepared_operation(session_id, pid, prepare_message) do
-      case replicate_state(session, events, replicas) do
-        :ok ->
-          case normalize_commit_result(safe_call(prepare_pid, {:commit_prepared, op_id})) do
-            {:ok, reply} ->
-              {:ok, reply}
-
-            {:error, _reason} = error ->
-              _ = stop_session(session_id)
-              error
-
-            {:timeout, _reason} = timeout ->
-              _ = stop_session(session_id)
-              timeout
-          end
-
-        {:error, _reason} = error ->
-          _ = abort_prepared_operation(session_id, pid, op_id)
-          error
-      end
-    else
-      {:error, _reason} = error ->
-        error
-
-      {:timeout, _reason} = timeout ->
-        timeout
-    end
-  end
-
-  defp call_prepared_operation(session_id, pid, prepare_message)
-       when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    case safe_call(pid, prepare_message) do
-      {:timeout, :session_log_unavailable} ->
-        with {:ok, replacement_pid} <- ensure_log_loaded(session_id),
-             {:ok, prepared} <-
-               normalize_prepared_result(safe_call(replacement_pid, prepare_message)) do
-          {:ok, replacement_pid, prepared}
-        end
-
-      other ->
-        with {:ok, prepared} <- normalize_prepared_result(other) do
-          {:ok, pid, prepared}
-        end
-    end
-  end
-
-  defp normalize_prepared_result(
-         {:ok, %{op_id: op_id, session: %Session{} = session, events: events}}
-       )
-       when is_reference(op_id) and is_list(events) do
-    {:ok, %{op_id: op_id, session: session, events: events}}
-  end
-
-  defp normalize_prepared_result({:error, reason}), do: {:error, reason}
-  defp normalize_prepared_result({:timeout, reason}), do: {:timeout, reason}
-  defp normalize_prepared_result(other), do: {:error, {:invalid_prepare_response, other}}
-
-  defp normalize_commit_result({:ok, reply}) when is_map(reply), do: {:ok, reply}
-  defp normalize_commit_result({:error, reason}), do: {:error, reason}
-  defp normalize_commit_result({:timeout, reason}), do: {:timeout, reason}
-  defp normalize_commit_result(other), do: {:error, {:invalid_commit_response, other}}
-
-  defp abort_prepared_operation(session_id, pid, op_id)
-       when is_pid(pid) and is_reference(op_id) and is_binary(session_id) and session_id != "" do
-    case safe_call(pid, {:abort_prepared, op_id}) do
-      :ok -> :ok
-      {:error, :no_pending_operation} -> :ok
-      {:error, :invalid_pending_operation} -> :ok
-      _other -> stop_session(session_id)
     end
   end
 
