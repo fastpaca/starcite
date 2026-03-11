@@ -8,6 +8,7 @@ defmodule Starcite.Observability.PromEx.Metrics do
   @impl true
   def event_metrics(_opts) do
     [
+      edge_http_metrics(),
       ingestion_metrics(),
       routing_metrics(),
       request_slo_metrics(),
@@ -16,6 +17,46 @@ defmodule Starcite.Observability.PromEx.Metrics do
       session_metrics(),
       event_store_metrics()
     ]
+  end
+
+  defp edge_http_metrics do
+    Event.build(
+      :starcite_edge_http_metrics,
+      [
+        counter("starcite_edge_http_total",
+          event_name: [:phoenix, :endpoint, :stop],
+          measurement: fn _measurements, _metadata -> 1 end,
+          description: "HTTP requests observed at the Phoenix endpoint boundary",
+          tags: [:method, :status_class],
+          tag_values: &edge_http_tag_values/1
+        ),
+        distribution("starcite_edge_http_duration_ms",
+          event_name: [:phoenix, :endpoint, :stop],
+          measurement: :duration,
+          unit: {:native, :millisecond},
+          description: "HTTP request duration from endpoint entry until response send",
+          tags: [:method, :status_class],
+          tag_values: &edge_http_tag_values/1,
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        ),
+        counter("starcite_cowboy_request_total",
+          event_name: [:cowboy, :request, :stop],
+          measurement: fn _measurements, _metadata -> 1 end,
+          description: "HTTP requests observed at the Cowboy request boundary"
+        ),
+        distribution("starcite_cowboy_request_duration_ms",
+          event_name: [:cowboy, :request, :stop],
+          measurement: :duration,
+          unit: {:native, :millisecond},
+          description: "HTTP request duration at the Cowboy request boundary",
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
   end
 
   defp ingestion_metrics do
@@ -327,5 +368,13 @@ defmodule Starcite.Observability.PromEx.Metrics do
         )
       ]
     )
+  end
+
+  defp edge_http_tag_values(%{conn: %{method: method, status: status}})
+       when is_binary(method) and is_integer(status) do
+    %{
+      method: method,
+      status_class: "#{div(status, 100)}xx"
+    }
   end
 end
