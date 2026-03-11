@@ -86,7 +86,7 @@ defmodule Starcite.Routing.Watcher do
         %{state | boot_rejoin_pending: false}
 
       status when status in [:draining, :drained] ->
-        case Store.mark_node_ready(Node.self()) do
+        case Store.mark_node_ready(Node.self(), :startup) do
           :ok -> %{state | boot_rejoin_pending: false}
           {:error, _reason} -> state
         end
@@ -154,7 +154,7 @@ defmodule Starcite.Routing.Watcher do
   defp mark_local_drained do
     with :draining <- Store.node_status(Node.self()),
          {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} <- Store.drain_status(Node.self()) do
-      _ = Store.mark_node_drained(Node.self())
+      _ = Store.mark_node_drained(Node.self(), :watcher)
       :ok
     else
       _other -> :ok

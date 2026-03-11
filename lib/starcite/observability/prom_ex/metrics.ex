@@ -179,6 +179,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
           description: "Authoritative assignment refreshes per routed request",
           tags: [:node, :target, :outcome],
           reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        ),
+        counter("starcite_routing_node_state_total",
+          event_name: [:starcite, :routing, :node_state],
+          measurement: :count,
+          description: "Routing node lifecycle transitions by source",
+          tags: [:node, :from, :to, :source]
         )
       ]
     )

@@ -453,6 +453,34 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for a routing node lifecycle state transition.
+
+  Measurements:
+    - `:count` - fixed at 1 per transition
+
+  Metadata:
+    - `:node` - cluster node name as a string
+    - `:from` - previous node lifecycle state
+    - `:to` - next node lifecycle state
+    - `:source` - transition initiator (`:maintenance`, `:startup`, `:watcher`, or `:shutdown`)
+  """
+  @type routing_node_state :: :unknown | :ready | :draining | :drained
+
+  @spec routing_node_state(node(), routing_node_state(), :ready | :draining | :drained, atom()) ::
+          :ok
+  def routing_node_state(node, from, to, source)
+      when is_atom(node) and from in [:unknown, :ready, :draining, :drained] and
+             to in [:ready, :draining, :drained] and is_atom(source) do
+    execute_if_enabled(
+      [:starcite, :routing, :node_state],
+      %{count: 1},
+      %{node: Atom.to_string(node), from: from, to: to, source: source}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit a successful session create event.
   """
   @spec session_create(String.t(), String.t()) :: :ok

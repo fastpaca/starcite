@@ -5,8 +5,13 @@ defmodule Starcite.Operations.Maintenance do
 
   @spec drain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def drain_node(node) when is_atom(node) do
+    drain_node(node, :maintenance)
+  end
+
+  @spec drain_node(node(), atom()) :: :ok | {:error, :invalid_cluster_node | term()}
+  def drain_node(node, source) when is_atom(node) and is_atom(source) do
     with :ok <- ensure_cluster_node(node),
-         :ok <- Store.mark_node_draining(node) do
+         :ok <- Store.mark_node_draining(node, source) do
       _ = advance_local_drain(node)
       :ok
     end
@@ -14,8 +19,13 @@ defmodule Starcite.Operations.Maintenance do
 
   @spec undrain_node(node()) :: :ok | {:error, :invalid_cluster_node | term()}
   def undrain_node(node) when is_atom(node) do
+    undrain_node(node, :maintenance)
+  end
+
+  @spec undrain_node(node(), atom()) :: :ok | {:error, :invalid_cluster_node | term()}
+  def undrain_node(node, source) when is_atom(node) and is_atom(source) do
     with :ok <- ensure_cluster_node(node),
-         :ok <- Store.mark_node_ready(node) do
+         :ok <- Store.mark_node_ready(node, source) do
       :ok
     end
   end

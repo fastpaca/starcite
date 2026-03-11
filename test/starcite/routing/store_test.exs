@@ -204,6 +204,33 @@ defmodule Starcite.Routing.StoreTest do
     assert assignment.replicas == [Node.self()]
   end
 
+  test "emits node state transition telemetry with the transition source" do
+    handler_id = "routing-node-state-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :node_state],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_node_state_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    assert :ok = Store.mark_node_draining(Node.self(), :maintenance)
+
+    assert_receive {:routing_node_state_event, %{count: 1},
+                    %{node: node_name, from: :ready, to: :draining, source: :maintenance}},
+                   1_000
+
+    assert node_name == Atom.to_string(Node.self())
+  end
+
   defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
     :khepri.put(Store.store_id(), [:sessions, session_id], assignment, khepri_opts())
   end
