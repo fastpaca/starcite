@@ -571,6 +571,41 @@ defmodule Starcite.RuntimeTest do
                _ -> false
              end)
     end
+
+    test "one session can batch many concurrent appends and keep contiguous sequence order" do
+      id = unique_id("ses-hot-lane")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        1..100
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_event(id, %{
+              type: "content",
+              payload: %{text: "m#{n}"},
+              actor: "agent:1",
+              producer_id: "writer:#{n}",
+              producer_seq: 1
+            })
+          end,
+          max_concurrency: 100,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      seqs =
+        results
+        |> Enum.map(fn {:ok, reply} -> reply.seq end)
+        |> Enum.sort()
+
+      assert seqs == Enum.to_list(1..100)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 200)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
+    end
   end
 
   defp append_event(id, event, opts \\ [])

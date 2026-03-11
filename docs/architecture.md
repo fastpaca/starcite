@@ -33,6 +33,7 @@ One session-log process exists per active session replica on a node.
 Log responsibilities:
 - Assign monotonic `seq` per session.
 - Enforce producer dedupe and optimistic concurrency (`expected_seq`).
+- Batch compatible owner-side appends into one replication/commit cycle.
 - Write committed events to hot event store.
 - Broadcast cursor updates to PubSub for tail subscribers.
 - Track archive progress (`archived_seq`) and apply archive acknowledgements.
