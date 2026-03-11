@@ -235,7 +235,6 @@ defmodule Mix.Tasks.Bench.SingleSession do
     %{
       "type" => "content",
       "payload" => %{"text" => String.duplicate("x", payload_bytes)},
-      "actor" => "service:service",
       "source" => "benchmark",
       "metadata" => %{"bench" => true, "scenario" => @bench_scope},
       "producer_id" => "single-benchee-producer:bootstrap",
