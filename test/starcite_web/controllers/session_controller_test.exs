@@ -593,6 +593,26 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
+  describe "endpoint telemetry" do
+    test "append emits Phoenix endpoint stop telemetry" do
+      attach_endpoint_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+      assert_receive_endpoint_stop("POST", 201)
+    end
+  end
+
   defp token_for(private_key, kid, overrides)
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
     claims =
@@ -640,6 +660,25 @@ defmodule StarciteWeb.SessionControllerTest do
         [:starcite, :request],
         fn _event, measurements, metadata, pid ->
           send(pid, {:request_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_endpoint_handler do
+    handler_id = "endpoint-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:phoenix, :endpoint, :stop],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:endpoint_stop_event, measurements, metadata})
         end,
         test_pid
       )
@@ -710,6 +749,31 @@ defmodule StarciteWeb.SessionControllerTest do
       remaining ->
         flunk(
           "timed out waiting for request telemetry operation=#{inspect(operation)} expectations=#{inspect(MapSet.to_list(expected))}"
+        )
+    end
+  end
+
+  defp assert_receive_endpoint_stop(method, status)
+       when is_binary(method) and is_integer(status) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_endpoint_stop(method, status, deadline)
+  end
+
+  defp do_assert_receive_endpoint_stop(method, status, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:endpoint_stop_event, %{duration: duration}, %{conn: %{method: ^method, status: ^status}}} ->
+        assert is_integer(duration)
+        assert duration >= 0
+        :ok
+
+      {:endpoint_stop_event, _measurements, _metadata} ->
+        do_assert_receive_endpoint_stop(method, status, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for Phoenix endpoint stop telemetry method=#{inspect(method)} status=#{inspect(status)}"
         )
     end
   end

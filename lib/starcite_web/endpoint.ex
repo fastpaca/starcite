@@ -1,6 +1,8 @@
 defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: false
+
   plug CORSPlug,
     origin: "*",
     credentials: false,
