@@ -35,7 +35,7 @@ config :starcite,
 # Configures the endpoint
 config :starcite, StarciteWeb.Endpoint,
   url: [host: "localhost"],
-  adapter: Bandit.PhoenixAdapter,
+  adapter: Phoenix.Endpoint.Cowboy2Adapter,
   render_errors: [
     formats: [json: StarciteWeb.ErrorJSON],
     layout: false
