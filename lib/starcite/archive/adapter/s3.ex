@@ -22,6 +22,7 @@ defmodule Starcite.Archive.Adapter.S3 do
   alias __MODULE__.{Config, Layout, Schema, SchemaControl}
 
   @config_key {__MODULE__, :config}
+  @ordered_list_batch_factor 4
 
   @impl true
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -82,12 +83,16 @@ defmodule Starcite.Archive.Adapter.S3 do
     }
 
     with :ok <- put_session_tenant_index(config, id, tenant_id),
-         result <- put_session(config, tenant_id, id, session) do
-      case result do
-        :ok -> :ok
-        {:error, :precondition_failed} -> :ok
-        {:error, :unavailable} -> {:error, :archive_write_unavailable}
-      end
+         result <- put_session(config, tenant_id, id, session),
+         :ok <- normalize_session_put_result(result),
+         :ok <- put_session_order_indexes(config, id, tenant_id) do
+      :ok
+    else
+      {:error, :unavailable} ->
+        {:error, :archive_write_unavailable}
+
+      {:error, _reason} ->
+        {:error, :archive_write_unavailable}
     end
   end
 
@@ -122,8 +127,17 @@ defmodule Starcite.Archive.Adapter.S3 do
     config = config!()
     tenant_id = Map.get(query, :tenant_id)
 
-    with {:ok, keys} <- list_session_keys(config) do
-      list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config)
+    case session_order_ready?(config) do
+      {:ok, true} ->
+        list_sessions_from_ordered_index(limit, cursor, metadata, tenant_id, config)
+
+      {:ok, false} ->
+        with {:ok, keys} <- list_session_keys(config) do
+          list_sessions_for_keys_with_backfill(keys, limit, cursor, metadata, tenant_id, config)
+        end
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -134,6 +148,28 @@ defmodule Starcite.Archive.Adapter.S3 do
 
     with {:ok, keys} <- session_keys_for_ids(ids, tenant_id, config) do
       list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config)
+    end
+  end
+
+  def backfill_session_order_indexes, do: backfill_session_order_indexes(config!())
+
+  def backfill_session_order_indexes(config) when is_map(config) do
+    case session_order_ready?(config) do
+      {:ok, true} ->
+        {:ok,
+         %{
+           legacy_sessions: 0,
+           ready_already?: true,
+           sessions_total: 0,
+           tenant_sessions: 0,
+           tenants: 0
+         }}
+
+      {:ok, false} ->
+        do_backfill_session_order_indexes(config)
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -304,6 +340,106 @@ defmodule Starcite.Archive.Adapter.S3 do
     )
   end
 
+  defp put_session_order_indexes(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    [
+      Layout.session_order_tenant_key(config, tenant_id, session_id),
+      Layout.session_order_global_key(config, tenant_id, session_id)
+    ]
+    |> Enum.reduce_while(:ok, fn key, :ok ->
+      case client(config).put_object(config, key, "",
+             content_type: "application/octet-stream",
+             if_none_match: "*"
+           ) do
+        :ok -> {:cont, :ok}
+        {:error, :precondition_failed} -> {:cont, :ok}
+        {:error, :unavailable} -> {:halt, {:error, :unavailable}}
+      end
+    end)
+  end
+
+  defp do_backfill_session_order_indexes(config) do
+    with {:ok, keys} <- list_session_keys(config) do
+      {tenant_keys, legacy_keys} = session_order_backfill_targets(keys, config)
+      tenant_count = map_size(tenant_keys)
+
+      tenant_sessions =
+        Enum.reduce(tenant_keys, 0, fn {_tenant_id, grouped_keys}, acc ->
+          acc + length(grouped_keys)
+        end)
+
+      legacy_sessions = length(legacy_keys)
+
+      result =
+        Enum.reduce_while(
+          Enum.sort_by(tenant_keys, fn {tenant_id, _keys} -> tenant_id end),
+          :ok,
+          fn
+            {_tenant_id, tenant_session_keys}, :ok ->
+              case backfill_session_order_indexes_for_keys(tenant_session_keys, config) do
+                :ok -> {:cont, :ok}
+                {:error, _reason} = error -> {:halt, error}
+              end
+          end
+        )
+
+      result =
+        case {result, legacy_keys} do
+          {:ok, []} ->
+            :ok
+
+          {:ok, keys} ->
+            backfill_session_order_indexes_for_keys(keys, config)
+
+          {{:error, _reason} = error, _keys} ->
+            error
+        end
+
+      case result do
+        :ok ->
+          case mark_session_order_ready(config) do
+            :ok ->
+              {:ok,
+               %{
+                 legacy_sessions: legacy_sessions,
+                 ready_already?: false,
+                 sessions_total: tenant_sessions + legacy_sessions,
+                 tenant_sessions: tenant_sessions,
+                 tenants: tenant_count
+               }}
+
+            {:error, :unavailable} ->
+              {:error, :archive_write_unavailable}
+          end
+
+        {:error, _reason} = error ->
+          error
+      end
+    end
+  end
+
+  defp session_order_ready?(config) do
+    case client(config).get_object(config, Layout.session_order_ready_key(config)) do
+      {:ok, :not_found} -> {:ok, false}
+      {:ok, {_body, _etag}} -> {:ok, true}
+      {:error, :unavailable} -> {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp mark_session_order_ready(config) do
+    case client(config).put_object(
+           config,
+           Layout.session_order_ready_key(config),
+           ~s({"ready":true}),
+           content_type: "application/json"
+         ) do
+      :ok -> :ok
+      {:error, :precondition_failed} -> :ok
+      {:error, :unavailable} -> {:error, :unavailable}
+    end
+  end
+
   defp put_session_by_key(config, key, session)
        when is_binary(key) and key != "" and is_map(session) do
     body = Schema.encode_session(session)
@@ -460,19 +596,304 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
-  defp list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config) do
-    with {:ok, sessions} <- load_sessions(Enum.uniq(keys), config) do
-      {:ok, session_page(sessions, limit, cursor, metadata, tenant_id)}
+  defp list_sessions_from_ordered_index(limit, cursor, metadata, tenant_id, config)
+       when is_integer(limit) and limit > 0 and is_map(metadata) do
+    with {:ok, listing} <- ordered_index_listing(config, tenant_id, cursor) do
+      load_session_page_from_ordered_index(listing, limit, metadata, tenant_id, config)
     end
   end
 
-  defp load_sessions(keys, config) do
+  defp ordered_index_listing(config, tenant_id, nil)
+       when is_binary(tenant_id) and tenant_id != "" do
+    {:ok,
+     %{
+       prefix: Layout.session_order_tenant_prefix(config, tenant_id),
+       start_after: nil,
+       tenant_id: tenant_id,
+       scope: :tenant
+     }}
+  end
+
+  defp ordered_index_listing(config, tenant_id, cursor)
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(cursor) and cursor != "" do
+    {:ok,
+     %{
+       prefix: Layout.session_order_tenant_prefix(config, tenant_id),
+       start_after: Layout.session_order_tenant_key(config, tenant_id, cursor),
+       tenant_id: tenant_id,
+       scope: :tenant
+     }}
+  end
+
+  defp ordered_index_listing(config, nil, nil) do
+    {:ok,
+     %{
+       prefix: Layout.session_order_global_prefix(config),
+       start_after: nil,
+       tenant_id: nil,
+       scope: :global
+     }}
+  end
+
+  defp ordered_index_listing(config, nil, cursor) when is_binary(cursor) and cursor != "" do
+    with {:ok, tenant_id} when is_binary(tenant_id) and tenant_id != "" <-
+           resolve_session_tenant(config, cursor) do
+      {:ok,
+       %{
+         prefix: Layout.session_order_global_prefix(config),
+         start_after: Layout.session_order_global_key(config, tenant_id, cursor),
+         tenant_id: nil,
+         scope: :global
+       }}
+    else
+      {:ok, nil} -> {:error, :archive_read_unavailable}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp load_session_page_from_ordered_index(
+         listing,
+         limit,
+         metadata_filters,
+         tenant_id_filter,
+         config
+       )
+       when is_map(listing) and is_integer(limit) and limit > 0 and is_map(metadata_filters) do
+    target_size = limit + 1
+    batch_size = ordered_list_batch_size(limit)
+
+    do_load_session_page_from_ordered_index(
+      listing,
+      nil,
+      batch_size,
+      target_size,
+      metadata_filters,
+      tenant_id_filter,
+      config,
+      [],
+      0
+    )
+  end
+
+  defp do_load_session_page_from_ordered_index(
+         listing,
+         continuation_token,
+         batch_size,
+         target_size,
+         metadata_filters,
+         tenant_id_filter,
+         config,
+         sessions,
+         count
+       ) do
+    case list_ordered_session_candidates(listing, continuation_token, batch_size, config) do
+      {:ok, %{candidates: [], next_continuation_token: nil}} when count == 0 ->
+        {:ok, build_session_page(Enum.reverse(sessions), target_size - 1)}
+
+      {:ok, %{candidates: candidates, next_continuation_token: next_token}} ->
+        with {:ok, next_sessions, next_count} <-
+               load_matching_candidates(
+                 candidates,
+                 metadata_filters,
+                 tenant_id_filter,
+                 config,
+                 sessions,
+                 count,
+                 target_size
+               ) do
+          cond do
+            next_count >= target_size ->
+              {:ok, build_session_page(Enum.reverse(next_sessions), target_size - 1)}
+
+            is_binary(next_token) and next_token != "" ->
+              do_load_session_page_from_ordered_index(
+                listing,
+                next_token,
+                batch_size,
+                target_size,
+                metadata_filters,
+                tenant_id_filter,
+                config,
+                next_sessions,
+                next_count
+              )
+
+            true ->
+              {:ok, build_session_page(Enum.reverse(next_sessions), target_size - 1)}
+          end
+        end
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp list_ordered_session_candidates(listing, continuation_token, batch_size, config)
+       when is_map(listing) and is_integer(batch_size) and batch_size > 0 do
+    opts =
+      [max_keys: batch_size]
+      |> maybe_put_page_opt(:start_after, if(is_nil(continuation_token), do: listing.start_after))
+      |> maybe_put_page_opt(:continuation_token, continuation_token)
+
+    case client(config).list_keys_page(config, listing.prefix, opts) do
+      {:ok, %{keys: keys, next_continuation_token: next_token}} ->
+        {:ok,
+         %{
+           candidates:
+             keys
+             |> Enum.reduce([], fn key, acc ->
+               case ordered_session_candidate(key, listing, config) do
+                 {:ok, candidate} -> [candidate | acc]
+                 :error -> acc
+               end
+             end)
+             |> Enum.reverse(),
+           next_continuation_token: next_token
+         }}
+
+      {:error, :unavailable} ->
+        {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp ordered_session_candidate(key, %{scope: :tenant, tenant_id: tenant_id} = listing, config)
+       when is_binary(key) and is_binary(tenant_id) do
+    prefix = listing.prefix
+
+    if String.starts_with?(key, prefix) do
+      key
+      |> String.trim_leading(prefix)
+      |> ordered_tenant_candidate_from_suffix(tenant_id, config)
+    else
+      :error
+    end
+  end
+
+  defp ordered_session_candidate(key, %{scope: :global} = listing, config) when is_binary(key) do
+    prefix = listing.prefix
+
+    if String.starts_with?(key, prefix) do
+      key
+      |> String.trim_leading(prefix)
+      |> ordered_global_candidate_from_suffix(config)
+    else
+      :error
+    end
+  end
+
+  defp ordered_tenant_candidate_from_suffix("", _tenant_id, _config), do: :error
+
+  defp ordered_tenant_candidate_from_suffix(suffix, tenant_id, config)
+       when is_binary(suffix) and is_binary(tenant_id) do
+    with {:ok, session_id} <-
+           suffix
+           |> String.trim_trailing(".json")
+           |> decode_ordered_segment() do
+      {:ok,
+       %{
+         id: session_id,
+         tenant_id: tenant_id,
+         keys: session_keys_for_id(config, tenant_id, session_id)
+       }}
+    end
+  end
+
+  defp ordered_global_candidate_from_suffix(suffix, config) when is_binary(suffix) do
+    case String.split(suffix, "/", trim: true) do
+      [session_segment, tenant_segment] ->
+        with {:ok, session_id} <- decode_ordered_segment(session_segment),
+             {:ok, tenant_id} <-
+               tenant_segment
+               |> String.trim_trailing(".json")
+               |> decode_base64url() do
+          {:ok,
+           %{
+             id: session_id,
+             tenant_id: tenant_id,
+             keys: session_keys_for_id(config, tenant_id, session_id)
+           }}
+        end
+
+      _other ->
+        :error
+    end
+  end
+
+  defp list_sessions_for_keys_with_backfill(keys, limit, cursor, metadata, tenant_id, config) do
+    with {:ok, sessions} <- load_sessions(Enum.uniq(keys), config) do
+      _ = materialize_session_order_indexes(sessions, config)
+
+      {:ok,
+       sessions
+       |> session_page(limit, cursor, metadata, tenant_id)}
+    end
+  end
+
+  defp list_sessions_for_keys(keys, limit, cursor, metadata, tenant_id, config) do
+    keys
+    |> session_candidates(config)
+    |> sort_candidates_after_cursor(cursor)
+    |> load_session_page(limit, metadata, tenant_id, config)
+    |> case do
+      {:ok, page} -> {:ok, page}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp load_session_page(candidates, limit, metadata_filters, tenant_id_filter, config)
+       when is_list(candidates) and is_integer(limit) and limit > 0 and is_map(metadata_filters) do
+    target_size = limit + 1
+
+    load_matching_candidates(
+      candidates,
+      metadata_filters,
+      tenant_id_filter,
+      config,
+      [],
+      0,
+      target_size
+    )
+    |> case do
+      {:ok, sessions, _count} ->
+        {:ok, build_session_page(Enum.reverse(sessions), limit)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp load_sessions(keys, config) when is_list(keys) do
     keys
     |> Enum.reduce_while({:ok, []}, fn key, {:ok, sessions} ->
       case load_session(key, config) do
         {:ok, nil} -> {:cont, {:ok, sessions}}
         {:ok, session} -> {:cont, {:ok, [session | sessions]}}
         {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+  end
+
+  defp load_matching_candidates(
+         candidates,
+         metadata_filters,
+         tenant_id_filter,
+         config,
+         sessions,
+         count,
+         target_size
+       )
+       when is_list(candidates) and is_map(metadata_filters) and is_integer(count) and
+              is_integer(target_size) and target_size > 0 do
+    Enum.reduce_while(candidates, {:ok, sessions, count}, fn candidate,
+                                                             {:ok, acc, current_count} ->
+      if current_count >= target_size do
+        {:halt, {:ok, acc, current_count}}
+      else
+        case load_matching_session(candidate, metadata_filters, tenant_id_filter, config) do
+          {:ok, nil} -> {:cont, {:ok, acc, current_count}}
+          {:ok, session} -> {:cont, {:ok, [session | acc], current_count + 1}}
+          {:error, _reason} = error -> {:halt, error}
+        end
       end
     end)
   end
@@ -496,6 +917,67 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
+  defp load_session_for_candidate(%{keys: keys}, config) when is_list(keys) do
+    load_session_for_keys(keys, config)
+  end
+
+  defp load_session_for_candidate(%{key: key}, config) when is_binary(key) do
+    load_session(key, config)
+  end
+
+  defp load_session_for_keys([], _config), do: {:ok, nil}
+
+  defp load_session_for_keys([key | rest], config) when is_binary(key) do
+    case load_session(key, config) do
+      {:ok, nil} -> load_session_for_keys(rest, config)
+      {:ok, session} -> {:ok, session}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp load_matching_session(candidate, metadata_filters, tenant_id_filter, config)
+       when is_map(candidate) and is_map(metadata_filters) do
+    case obvious_tenant_mismatch?(candidate, tenant_id_filter) do
+      true ->
+        {:ok, nil}
+
+      false ->
+        with {:ok, session} <- load_session_for_candidate(candidate, config) do
+          if matching_session?(session, metadata_filters, tenant_id_filter) do
+            {:ok, session}
+          else
+            {:ok, nil}
+          end
+        end
+    end
+  end
+
+  defp obvious_tenant_mismatch?(%{tenant_id: nil}, _tenant_id_filter), do: false
+  defp obvious_tenant_mismatch?(_candidate, nil), do: false
+
+  defp obvious_tenant_mismatch?(%{tenant_id: tenant_id}, tenant_id_filter)
+       when is_binary(tenant_id_filter) do
+    tenant_id != tenant_id_filter
+  end
+
+  defp matching_session?(nil, _metadata_filters, _tenant_id_filter), do: false
+
+  defp matching_session?(session, metadata_filters, tenant_id_filter) do
+    tenant_match?(Map.get(session, :tenant_id), tenant_id_filter) and
+      metadata_match?(Map.get(session, :metadata, %{}), metadata_filters)
+  end
+
+  defp build_session_page(sessions, limit)
+       when is_list(sessions) and is_integer(limit) and limit > 0 do
+    {page_sessions, extra} = Enum.split(sessions, limit)
+
+    %{
+      sessions: page_sessions,
+      next_cursor:
+        if(extra == [] or page_sessions == [], do: nil, else: List.last(page_sessions).id)
+    }
+  end
+
   defp session_page(sessions, limit, cursor, metadata_filters, tenant_id_filter) do
     filtered =
       sessions
@@ -503,17 +985,11 @@ defmodule Starcite.Archive.Adapter.S3 do
       |> Enum.sort_by(& &1.id)
       |> Enum.filter(fn session ->
         (is_nil(cursor) or session.id > cursor) and
-          (is_nil(tenant_id_filter) or session.tenant_id == tenant_id_filter) and
-          Enum.all?(metadata_filters, fn {key, expected} -> session.metadata[key] == expected end)
+          tenant_match?(Map.get(session, :tenant_id), tenant_id_filter) and
+          metadata_match?(Map.get(session, :metadata, %{}), metadata_filters)
       end)
 
-    {page_sessions, rest} = Enum.split(filtered, limit)
-
-    %{
-      sessions: page_sessions,
-      next_cursor:
-        if(rest == [] or page_sessions == [], do: nil, else: List.last(page_sessions).id)
-    }
+    build_session_page(filtered, limit)
   end
 
   defp dedupe_sessions(sessions) when is_list(sessions) do
@@ -523,6 +999,174 @@ defmodule Starcite.Archive.Adapter.S3 do
     end)
     |> Map.values()
   end
+
+  defp sort_candidates_after_cursor(candidates, nil) when is_list(candidates) do
+    Enum.sort_by(candidates, & &1.id)
+  end
+
+  defp sort_candidates_after_cursor(candidates, cursor)
+       when is_list(candidates) and is_binary(cursor) and cursor != "" do
+    candidates
+    |> Enum.filter(&(&1.id > cursor))
+    |> Enum.sort_by(& &1.id)
+  end
+
+  defp session_candidates(keys, config) when is_list(keys) do
+    keys
+    |> Enum.reduce(%{}, fn key, acc ->
+      case session_candidate(key, config) do
+        {:ok, %{id: id} = candidate} -> Map.put_new(acc, id, candidate)
+        :error -> acc
+      end
+    end)
+    |> Map.values()
+  end
+
+  defp session_candidate(key, config) when is_binary(key) do
+    prefix = Layout.session_prefix(config)
+
+    if String.starts_with?(key, prefix) do
+      key
+      |> String.trim_leading(prefix)
+      |> session_candidate_from_suffix(key)
+    else
+      :error
+    end
+  end
+
+  defp session_candidate_from_suffix("", _key), do: :error
+
+  defp session_candidate_from_suffix(suffix, key) when is_binary(suffix) and is_binary(key) do
+    case String.split(suffix, "/", trim: true) do
+      [session_segment] ->
+        with {:ok, session_id} <- decode_session_segment(session_segment) do
+          {:ok, %{id: session_id, tenant_id: nil, key: key}}
+        end
+
+      [tenant_segment, session_segment] ->
+        with {:ok, tenant_id} <- decode_base64url(tenant_segment),
+             {:ok, session_id} <- decode_session_segment(session_segment) do
+          {:ok, %{id: session_id, tenant_id: tenant_id, key: key}}
+        end
+
+      _other ->
+        :error
+    end
+  end
+
+  defp decode_session_segment(segment) when is_binary(segment) and segment != "" do
+    segment
+    |> String.trim_trailing(".json")
+    |> decode_base64url()
+  end
+
+  defp decode_session_segment(_segment), do: :error
+
+  defp decode_base64url(segment) when is_binary(segment) and segment != "" do
+    case Base.url_decode64(segment, padding: false) do
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  defp decode_base64url(_segment), do: :error
+
+  defp decode_ordered_segment(segment) when is_binary(segment) and segment != "" do
+    case Base.decode16(segment, case: :lower) do
+      {:ok, value} when is_binary(value) and value != "" -> {:ok, value}
+      _ -> :error
+    end
+  end
+
+  defp decode_ordered_segment(_segment), do: :error
+
+  defp tenant_match?(_tenant_id, nil), do: true
+
+  defp tenant_match?(tenant_id, tenant_id_filter)
+       when is_binary(tenant_id) and is_binary(tenant_id_filter) do
+    tenant_id == tenant_id_filter
+  end
+
+  defp tenant_match?(_tenant_id, _tenant_id_filter), do: false
+
+  defp metadata_match?(_metadata, filters) when map_size(filters) == 0, do: true
+
+  defp metadata_match?(metadata, filters) when is_map(metadata) and is_map(filters) do
+    Enum.all?(filters, fn {key, expected} -> Map.get(metadata, key) == expected end)
+  end
+
+  defp metadata_match?(_metadata, _filters), do: false
+
+  defp materialize_session_order_indexes(sessions, config, mark_ready? \\ true)
+
+  defp materialize_session_order_indexes(sessions, config, mark_ready?)
+       when is_list(sessions) and is_boolean(mark_ready?) do
+    sessions
+    |> Enum.reduce_while(:ok, fn
+      %{id: id, tenant_id: tenant_id}, :ok ->
+        with :ok <- put_session_tenant_index(config, id, tenant_id),
+             :ok <- put_session_order_indexes(config, id, tenant_id) do
+          {:cont, :ok}
+        else
+          {:error, :unavailable} -> {:halt, {:error, :archive_write_unavailable}}
+          {:error, _reason} = error -> {:halt, error}
+        end
+
+      _session, :ok ->
+        {:cont, :ok}
+    end)
+    |> case do
+      :ok ->
+        if mark_ready?, do: mark_session_order_ready(config), else: :ok
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp backfill_session_order_indexes_for_keys([], _config), do: :ok
+
+  defp backfill_session_order_indexes_for_keys(keys, config) when is_list(keys) do
+    case load_sessions(Enum.uniq(keys), config) do
+      {:ok, sessions} -> materialize_session_order_indexes(sessions, config, false)
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp session_order_backfill_targets(keys, config) when is_list(keys) do
+    Enum.reduce(keys, {%{}, []}, fn key, {tenant_keys, legacy_keys} = acc ->
+      case session_candidate(key, config) do
+        {:ok, %{tenant_id: tenant_id}} when is_binary(tenant_id) and tenant_id != "" ->
+          {Map.update(tenant_keys, tenant_id, [key], &[key | &1]), legacy_keys}
+
+        {:ok, %{tenant_id: nil}} ->
+          {tenant_keys, [key | legacy_keys]}
+
+        :error ->
+          acc
+      end
+    end)
+    |> then(fn {tenant_keys, legacy_keys} ->
+      {
+        Map.new(tenant_keys, fn {tenant_id, grouped_keys} ->
+          {tenant_id, Enum.uniq(grouped_keys)}
+        end),
+        Enum.uniq(legacy_keys)
+      }
+    end)
+  end
+
+  defp ordered_list_batch_size(limit) when is_integer(limit) and limit > 0 do
+    min(max(limit * @ordered_list_batch_factor, limit + 1), 1_000)
+  end
+
+  defp maybe_put_page_opt(opts, _key, nil), do: opts
+  defp maybe_put_page_opt(opts, _key, ""), do: opts
+  defp maybe_put_page_opt(opts, key, value), do: Keyword.put(opts, key, value)
+
+  defp normalize_session_put_result(:ok), do: :ok
+  defp normalize_session_put_result({:error, :precondition_failed}), do: :ok
+  defp normalize_session_put_result({:error, :unavailable}), do: {:error, :unavailable}
 
   defp event_put_opts(nil), do: [content_type: "application/x-ndjson", if_none_match: "*"]
   defp event_put_opts(etag), do: [content_type: "application/x-ndjson", if_match: etag]

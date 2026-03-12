@@ -135,7 +135,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
       |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
       |> apply_metadata_filters(metadata)
       |> order_by([s], asc: s.id)
-      |> limit(^limit)
+      |> limit(^(limit + 1))
 
     rows = Repo.all(query)
 
@@ -161,7 +161,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
         |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
         |> apply_metadata_filters(metadata)
         |> order_by([s], asc: s.id)
-        |> limit(^limit)
+        |> limit(^(limit + 1))
 
       rows = Repo.all(query)
 
@@ -269,20 +269,15 @@ defmodule Starcite.Archive.Adapter.Postgres do
     end)
   end
 
-  defp next_cursor(rows, limit) when is_list(rows) and length(rows) == limit do
-    %SessionRecord{id: id} = List.last(rows)
-    id
-  end
-
-  defp next_cursor(_rows, _limit), do: nil
-
   defp build_session_page(rows, limit) when is_list(rows) and is_integer(limit) and limit > 0 do
-    sessions = normalize_session_rows(rows)
+    {page_rows, extra_rows} = Enum.split(rows, limit)
+    sessions = normalize_session_rows(page_rows)
 
     {:ok,
      %{
        sessions: sessions,
-       next_cursor: next_cursor(rows, limit)
+       next_cursor:
+         if(extra_rows == [] or page_rows == [], do: nil, else: List.last(page_rows).id)
      }}
   end
 
