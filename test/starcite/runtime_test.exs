@@ -545,6 +545,58 @@ defmodule Starcite.RuntimeTest do
   end
 
   describe "Concurrent access" do
+    test "multiple sessions can be created concurrently" do
+      ids =
+        for i <- 1..25 do
+          "ses-create-concurrent-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+        end
+
+      results =
+        ids
+        |> Task.async_stream(
+          fn id -> WritePath.create_session(id: id, tenant_id: "acme", title: "Draft") end,
+          max_concurrency: 25,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, %{id: _}}, &1))
+
+      Enum.each(ids, fn id ->
+        assert {:ok, session} = ReadPath.get_session(id)
+        assert session.id == id
+      end)
+    end
+
+    test "concurrent creates for the same session id only commit once" do
+      id = unique_id("ses-create-race")
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn _ ->
+            WritePath.create_session(id: id, tenant_id: "acme", title: "Race")
+          end,
+          max_concurrency: 20,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      successes = Enum.count(results, &match?({:ok, %{id: ^id}}, &1))
+      failures = Enum.count(results, &match?({:error, :session_exists}, &1))
+
+      assert successes >= 1
+      assert successes + failures == 20
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.id == id
+      assert session.title == "Race"
+      assert session.last_seq == 0
+      assert {:error, :session_exists} = WritePath.create_session(id: id, tenant_id: "acme")
+    end
+
     test "multiple sessions can append concurrently" do
       ids =
         for i <- 1..10 do
