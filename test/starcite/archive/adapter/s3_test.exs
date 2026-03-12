@@ -2,7 +2,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.Adapter.S3
-  alias Starcite.Archive.Adapter.S3.Config
+  alias Starcite.Archive.Adapter.S3.{Config, Layout}
   alias Starcite.Archive.Adapter.S3.Schema
   alias Starcite.Auth.Principal
 
@@ -14,10 +14,17 @@ defmodule Starcite.Archive.Adapter.S3Test do
     def get_object(%{bucket: bucket}, key) do
       Agent.update(@store, &increment_call(&1, :get, key))
 
-      case Agent.get(@store, fn state -> state |> bucket_objects(bucket) |> Map.get(key) end) do
-        nil -> {:ok, :not_found}
-        %{body: body, etag: etag} -> {:ok, {body, etag}}
-      end
+      Agent.get_and_update(@store, fn state ->
+        metrics = Map.get(state, :__metrics__, %{get_object_count: 0})
+
+        response =
+          case state |> bucket_objects(bucket) |> Map.get(key) do
+            nil -> {:ok, :not_found}
+            %{body: body, etag: etag} -> {:ok, {body, etag}}
+          end
+
+        {response, Map.put(state, :__metrics__, increment_metric(metrics, :get_object_count))}
+      end)
     end
 
     def put_object(%{bucket: bucket}, key, body, opts \\ []) do
@@ -49,6 +56,7 @@ defmodule Starcite.Archive.Adapter.S3Test do
           state
           |> bucket_objects(bucket)
           |> Map.keys()
+          |> Enum.filter(&is_binary/1)
           |> Enum.filter(&String.starts_with?(&1, prefix))
           |> Enum.sort()
         end)
@@ -61,6 +69,46 @@ defmodule Starcite.Archive.Adapter.S3Test do
         state
         |> Map.get(:calls, %{})
         |> Map.get({op, key}, 0)
+      end)
+    end
+
+    def list_keys_page(%{bucket: bucket}, prefix, opts \\ []) do
+      max_keys = Keyword.get(opts, :max_keys, 1_000)
+      start_after = Keyword.get(opts, :start_after)
+      continuation_token = Keyword.get(opts, :continuation_token)
+
+      keys =
+        Agent.get(@store, fn state ->
+          state
+          |> bucket_objects(bucket)
+          |> Map.keys()
+          |> Enum.filter(&is_binary/1)
+          |> Enum.filter(&String.starts_with?(&1, prefix))
+          |> Enum.sort()
+          |> then(fn sorted ->
+            case continuation_token || start_after do
+              nil -> sorted
+              marker -> Enum.filter(sorted, &(&1 > marker))
+            end
+          end)
+        end)
+
+      page_keys = Enum.take(keys, max_keys)
+
+      {:ok,
+       %{
+         keys: page_keys,
+         next_continuation_token:
+           if(length(keys) > max_keys and page_keys != [], do: List.last(page_keys), else: nil),
+         truncated?: length(keys) > max_keys
+       }}
+    end
+
+    def get_object_count do
+      Agent.get(@store, fn state ->
+        state
+        |> Map.get(:__metrics__, %{})
+        |> Map.get(:get_object_count, 0)
       end)
     end
 
@@ -95,6 +143,10 @@ defmodule Starcite.Archive.Adapter.S3Test do
         Map.update(calls || %{}, {op, key}, 1, &(&1 + 1))
       end)
     end
+
+    defp increment_metric(metrics, key) do
+      Map.update(metrics, key, 1, &(&1 + 1))
+    end
   end
 
   setup do
@@ -102,7 +154,10 @@ defmodule Starcite.Archive.Adapter.S3Test do
       id: FakeClient.store_name(),
       start:
         {Agent, :start_link,
-         [fn -> %{objects: %{}, calls: %{}} end, [name: FakeClient.store_name()]]}
+         [
+           fn -> %{objects: %{}, calls: %{}, __metrics__: %{get_object_count: 0}} end,
+           [name: FakeClient.store_name()]
+         ]}
     })
 
     session_prefix = "s3-test-#{System.unique_integer([:positive, :monotonic])}"
@@ -163,6 +218,8 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     assert "#{prefix}/sessions/v1/#{tenant}/#{session}.json" in keys
     assert "#{prefix}/session-tenants/v1/#{session}.json" in keys
+    assert Layout.session_order_tenant_key(%{prefix: prefix}, "acme", session_id) in keys
+    assert Layout.session_order_global_key(%{prefix: prefix}, "acme", session_id) in keys
     assert "#{prefix}/events/v1/#{tenant}/#{session}/1.ndjson" in keys
 
     refute "#{prefix}/sessions/v1/#{session}.json" in keys
@@ -371,6 +428,235 @@ defmodule Starcite.Archive.Adapter.S3Test do
              )
 
     assert by_ids_tenant_scoped.sessions |> Enum.map(& &1.id) == ["ses-a"]
+  end
+
+  test "tenant-scoped pagination uses the ordered index in steady state", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-a-acme",
+               title: "A",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-b-beta",
+               title: "B",
+               tenant_id: "beta",
+               creator_principal: principal_for_tenant("beta"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-c-acme",
+               title: "C",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               Layout.session_order_ready_key(%{prefix: prefix}),
+               ~s({"ready":true})
+             )
+
+    assert {:ok, page} =
+             S3.list_sessions(%{limit: 1, cursor: nil, metadata: %{}, tenant_id: "acme"})
+
+    assert Enum.map(page.sessions, & &1.id) == ["ses-a-acme"]
+    assert page.next_cursor == "ses-a-acme"
+    assert FakeClient.get_object_count() == 3
+  end
+
+  test "global pagination uses the ordered index in steady state", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-a",
+               title: "A",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-b",
+               title: "B",
+               tenant_id: "beta",
+               creator_principal: principal_for_tenant("beta"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             S3.upsert_session(%{
+               id: "ses-c",
+               title: "C",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               Layout.session_order_ready_key(%{prefix: prefix}),
+               ~s({"ready":true})
+             )
+
+    assert {:ok, page_1} = S3.list_sessions(%{limit: 2, cursor: nil, metadata: %{}})
+    assert Enum.map(page_1.sessions, & &1.id) == ["ses-a", "ses-b"]
+    assert page_1.next_cursor == "ses-b"
+
+    assert {:ok, page_2} =
+             S3.list_sessions(%{limit: 2, cursor: page_1.next_cursor, metadata: %{}})
+
+    assert Enum.map(page_2.sessions, & &1.id) == ["ses-c"]
+    assert page_2.next_cursor == nil
+  end
+
+  test "backfill_session_order_indexes backfills every tenant and marks ready", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+    acme_session_id = "ses-startup-acme-#{System.unique_integer([:positive, :monotonic])}"
+    beta_session_id = "ses-startup-beta-#{System.unique_integer([:positive, :monotonic])}"
+    legacy_session_id = "ses-startup-legacy-#{System.unique_integer([:positive, :monotonic])}"
+    acme_tenant = Base.url_encode64("acme", padding: false)
+    beta_tenant = Base.url_encode64("beta", padding: false)
+    acme_session = Base.url_encode64(acme_session_id, padding: false)
+    beta_session = Base.url_encode64(beta_session_id, padding: false)
+    legacy_session = Base.url_encode64(legacy_session_id, padding: false)
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               "#{prefix}/sessions/v1/#{acme_tenant}/#{acme_session}.json",
+               Schema.encode_session(%{
+                 id: acme_session_id,
+                 title: "Acme startup",
+                 tenant_id: "acme",
+                 creator_principal: principal_for_tenant("acme"),
+                 metadata: %{},
+                 archived_seq: 0,
+                 created_at: created_at
+               })
+             )
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               "#{prefix}/sessions/v1/#{beta_tenant}/#{beta_session}.json",
+               Schema.encode_session(%{
+                 id: beta_session_id,
+                 title: "Beta startup",
+                 tenant_id: "beta",
+                 creator_principal: principal_for_tenant("beta"),
+                 metadata: %{},
+                 archived_seq: 0,
+                 created_at: created_at
+               })
+             )
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               "#{prefix}/sessions/v1/#{legacy_session}.json",
+               Schema.encode_session(%{
+                 id: legacy_session_id,
+                 title: "Legacy startup",
+                 tenant_id: "acme",
+                 creator_principal: principal_for_tenant("acme"),
+                 metadata: %{},
+                 archived_seq: 0,
+                 created_at: created_at
+               })
+             )
+
+    assert {:ok,
+            %{
+              ready_already?: false,
+              tenants: 2,
+              tenant_sessions: 2,
+              legacy_sessions: 1,
+              sessions_total: 3
+            }} = S3.backfill_session_order_indexes()
+
+    assert {:ok, keys} = FakeClient.list_keys(%{bucket: bucket}, "#{prefix}/session-order/v1/")
+
+    assert Layout.session_order_ready_key(%{prefix: prefix}) in keys
+    assert Layout.session_order_tenant_key(%{prefix: prefix}, "acme", acme_session_id) in keys
+    assert Layout.session_order_tenant_key(%{prefix: prefix}, "beta", beta_session_id) in keys
+    assert Layout.session_order_tenant_key(%{prefix: prefix}, "acme", legacy_session_id) in keys
+  end
+
+  test "list_sessions backfills session-order indexes for legacy session blobs", %{
+    prefix: prefix,
+    bucket: bucket
+  } do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+    session_id = "ses-s3-legacy-#{System.unique_integer([:positive, :monotonic])}"
+    tenant = Base.url_encode64("acme", padding: false)
+    session = Base.url_encode64(session_id, padding: false)
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               "#{prefix}/sessions/v1/#{tenant}/#{session}.json",
+               Schema.encode_session(%{
+                 id: session_id,
+                 title: "Legacy",
+                 tenant_id: "acme",
+                 creator_principal: principal_for_tenant("acme"),
+                 metadata: %{},
+                 archived_seq: 0,
+                 created_at: created_at
+               })
+             )
+
+    assert :ok =
+             FakeClient.put_object(
+               %{bucket: bucket},
+               "#{prefix}/session-tenants/v1/#{session}.json",
+               Schema.encode_session_tenant_index("acme")
+             )
+
+    assert {:ok, page} =
+             S3.list_sessions(%{limit: 10, cursor: nil, metadata: %{}, tenant_id: "acme"})
+
+    assert [%{id: ^session_id}] = page.sessions
+
+    assert {:ok, keys} = FakeClient.list_keys(%{bucket: bucket}, "#{prefix}/session-order/v1/")
+    assert Layout.session_order_tenant_key(%{prefix: prefix}, "acme", session_id) in keys
+    assert Layout.session_order_global_key(%{prefix: prefix}, "acme", session_id) in keys
+    assert Layout.session_order_ready_key(%{prefix: prefix}) in keys
   end
 
   test "update_session_archived_seq updates the stored session row" do

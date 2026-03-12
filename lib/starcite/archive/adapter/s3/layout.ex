@@ -15,6 +15,7 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
   @events_prefix "events/v1"
   @sessions_prefix "sessions/v1"
   @session_tenants_prefix "session-tenants/v1"
+  @session_order_prefix "session-order/v1"
   @schema_prefix "schema"
 
   @spec group_event_rows([map()], pos_integer()) ::
@@ -55,6 +56,28 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
   @spec session_tenant_index_prefix(map()) :: String.t()
   def session_tenant_index_prefix(%{prefix: prefix}), do: "#{prefix}/#{@session_tenants_prefix}/"
 
+  @spec session_order_ready_key(map()) :: String.t()
+  def session_order_ready_key(%{prefix: prefix}),
+    do: "#{prefix}/#{@session_order_prefix}/meta/ready.json"
+
+  @spec session_order_global_prefix(map()) :: String.t()
+  def session_order_global_prefix(%{prefix: prefix}),
+    do: "#{prefix}/#{@session_order_prefix}/global/"
+
+  @spec session_order_global_key(map(), String.t(), String.t()) :: String.t()
+  def session_order_global_key(%{prefix: prefix}, tenant_id, session_id),
+    do:
+      "#{prefix}/#{@session_order_prefix}/global/#{ordered_encode(session_id)}/#{encode(tenant_id)}.json"
+
+  @spec session_order_tenant_prefix(map(), String.t()) :: String.t()
+  def session_order_tenant_prefix(%{prefix: prefix}, tenant_id),
+    do: "#{prefix}/#{@session_order_prefix}/tenants/#{encode(tenant_id)}/"
+
+  @spec session_order_tenant_key(map(), String.t(), String.t()) :: String.t()
+  def session_order_tenant_key(%{prefix: prefix}, tenant_id, session_id),
+    do:
+      "#{prefix}/#{@session_order_prefix}/tenants/#{encode(tenant_id)}/#{ordered_encode(session_id)}.json"
+
   @spec schema_prefix(map()) :: String.t()
   def schema_prefix(%{prefix: prefix}), do: "#{prefix}/#{@schema_prefix}/"
 
@@ -71,6 +94,10 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
 
   @spec chunk_start_for(pos_integer(), pos_integer()) :: pos_integer()
   def chunk_start_for(seq, chunk_size), do: div(seq - 1, chunk_size) * chunk_size + 1
+
+  @spec ordered_encode(String.t()) :: String.t()
+  def ordered_encode(value) when is_binary(value) and value != "",
+    do: Base.encode16(value, case: :lower)
 
   defp encode(value), do: Base.url_encode64(value, padding: false)
 end
