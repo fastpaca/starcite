@@ -229,6 +229,71 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one auth-stage outcome.
+
+  Measurements:
+    - `:count` - fixed at 1 per auth stage
+    - `:duration_ms` - elapsed stage time in milliseconds
+
+  Metadata:
+    - `:stage` (`:plug`, `:jwt_verify`, or `:jwks_fetch`)
+    - `:mode` (`:none` or `:jwt`)
+    - `:outcome` (`:ok` or `:error`)
+    - `:error_reason` (`:none` for success)
+    - `:source` (`:none`, `:cache`, or `:refresh`)
+  """
+  @spec auth(
+          :plug | :jwt_verify | :jwks_fetch,
+          :none | :jwt,
+          :ok | :error,
+          non_neg_integer(),
+          atom(),
+          :none | :cache | :refresh
+        ) :: :ok
+  def auth(stage, mode, outcome, duration_ms, error_reason, source \\ :none)
+      when stage in [:plug, :jwt_verify, :jwks_fetch] and mode in [:none, :jwt] and
+             outcome in [:ok, :error] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_atom(error_reason) and source in [:none, :cache, :refresh] do
+    execute_if_enabled(
+      [:starcite, :auth],
+      %{count: 1, duration_ms: duration_ms},
+      %{
+        stage: stage,
+        mode: mode,
+        outcome: outcome,
+        error_reason: error_reason,
+        source: source
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one explicit edge-stage timing.
+
+  Measurements:
+    - `:count` - fixed at 1 per stage
+    - `:duration_ms` - elapsed stage time in milliseconds
+
+  Metadata:
+    - `:stage` (`:controller_entry`)
+    - `:method`
+  """
+  @spec edge_stage(:controller_entry, String.t(), non_neg_integer()) :: :ok
+  def edge_stage(stage, method, duration_ms)
+      when stage in [:controller_entry] and is_binary(method) and method != "" and
+             is_integer(duration_ms) and duration_ms >= 0 do
+    execute_if_enabled(
+      [:starcite, :edge, :stage],
+      %{count: 1, duration_ms: duration_ms},
+      %{stage: stage, method: method}
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one event-store write.
 
   Measurements:

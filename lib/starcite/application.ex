@@ -22,6 +22,9 @@ defmodule Starcite.Application do
         repo_spec(),
         # PubSub before runtime
         pubsub_spec(),
+        # Dedicated JWKS HTTP client and async refresh coordinator
+        jwks_http_spec(),
+        StarciteWeb.Auth.JWKSRefresher,
         # DNS / clustering
         dns_cluster_spec(),
         # Control-plane liveness and routing intent
@@ -73,6 +76,10 @@ defmodule Starcite.Application do
 
   defp pubsub_spec do
     {Phoenix.PubSub, name: Starcite.PubSub}
+  end
+
+  defp jwks_http_spec do
+    {Finch, name: StarciteWeb.Auth.JWKSFinch, pools: %{default: [size: 32, count: 1]}}
   end
 
   defp cluster_children([]), do: []

@@ -2,17 +2,31 @@ defmodule StarciteWeb.Auth.JWT do
   @moduledoc false
 
   alias Joken.Signer
+  alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.JWKS
 
   @spec verify(String.t(), map()) :: {:ok, map()} | {:error, atom()}
   def verify(token, config) when is_binary(token) and token != "" and is_map(config) do
-    with {:ok, header} <- peek_header(token),
-         {:ok, kid} <- kid_from_header(header),
-         {:ok, signer} <- JWKS.fetch_signing_key(config, kid),
-         {:ok, claims} <- verify_signature(token, signer),
-         :ok <- validate_claims(claims, config) do
-      {:ok, claims}
-    end
+    started_at = System.monotonic_time()
+
+    result =
+      with {:ok, header} <- peek_header(token),
+           {:ok, kid} <- kid_from_header(header),
+           {:ok, signer} <- JWKS.fetch_signing_key(config, kid),
+           {:ok, claims} <- verify_signature(token, signer),
+           :ok <- validate_claims(claims, config) do
+        {:ok, claims}
+      end
+
+    Telemetry.auth(
+      :jwt_verify,
+      :jwt,
+      jwt_outcome(result),
+      elapsed_ms(started_at),
+      jwt_error_reason(result)
+    )
+
+    result
   end
 
   def verify(_token, _config), do: {:error, :invalid_jwt}
@@ -115,4 +129,16 @@ defmodule StarciteWeb.Auth.JWT do
   end
 
   defp validate_issued_at(_iat, _leeway_seconds), do: {:error, :invalid_jwt_claims}
+
+  defp elapsed_ms(started_at) when is_integer(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+  end
+
+  defp jwt_outcome({:ok, _claims}), do: :ok
+  defp jwt_outcome({:error, _reason}), do: :error
+
+  defp jwt_error_reason({:ok, _claims}), do: :none
+  defp jwt_error_reason({:error, reason}) when is_atom(reason), do: reason
 end

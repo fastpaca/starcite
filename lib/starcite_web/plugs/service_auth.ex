@@ -12,6 +12,7 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   import Plug.Conn
 
   alias Plug.Conn
+  alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.{Config, Context, Identity, JWT}
   alias StarciteWeb.Plugs.RedactSensitiveQuery
 
@@ -22,7 +23,18 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   def call(%Conn{assigns: %{auth: %Context{}}} = conn, _opts), do: conn
 
   def call(%Conn{} = conn, _opts) do
-    case authenticate_conn(conn) do
+    started_at = System.monotonic_time()
+    result = authenticate_conn(conn)
+
+    Telemetry.auth(
+      :plug,
+      mode(),
+      auth_outcome(result),
+      elapsed_ms(started_at),
+      auth_error_reason(result)
+    )
+
+    case result do
       {:ok, auth_context} ->
         assign(conn, :auth, auth_context)
 
@@ -201,4 +213,16 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
       true -> {:ok, trimmed}
     end
   end
+
+  defp elapsed_ms(started_at) when is_integer(started_at) do
+    System.monotonic_time()
+    |> Kernel.-(started_at)
+    |> System.convert_time_unit(:native, :millisecond)
+  end
+
+  defp auth_outcome({:ok, _auth_context}), do: :ok
+  defp auth_outcome({:error, _reason}), do: :error
+
+  defp auth_error_reason({:ok, _auth_context}), do: :none
+  defp auth_error_reason({:error, reason}) when is_atom(reason), do: reason
 end
