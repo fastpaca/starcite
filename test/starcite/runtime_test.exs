@@ -606,6 +606,92 @@ defmodule Starcite.RuntimeTest do
       assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 200)
       assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
     end
+
+    test "one session can batch many concurrent append_events requests and keep contiguous sequence order" do
+      id = unique_id("ses-hot-batches")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        1..50
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_events(id, [
+              %{
+                type: "content",
+                payload: %{text: "m#{n}-a"},
+                actor: "agent:1",
+                producer_id: "writer-batch:#{n}:a",
+                producer_seq: 1
+              },
+              %{
+                type: "content",
+                payload: %{text: "m#{n}-b"},
+                actor: "agent:1",
+                producer_id: "writer-batch:#{n}:b",
+                producer_seq: 1
+              }
+            ])
+          end,
+          max_concurrency: 50,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, %{results: [_ | _]}}, &1))
+
+      seqs =
+        results
+        |> Enum.flat_map(fn {:ok, %{results: replies}} ->
+          Enum.map(replies, & &1.seq)
+        end)
+        |> Enum.sort()
+
+      assert seqs == Enum.to_list(1..100)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 200)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
+    end
+
+    test "concurrent replay conflicts commit one event and reject the conflicting append" do
+      id = unique_id("ses-hot-conflict")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        [
+          %{
+            type: "state",
+            payload: %{state: "running"},
+            actor: "agent:1",
+            producer_id: "writer-conflict",
+            producer_seq: 1
+          },
+          %{
+            type: "state",
+            payload: %{state: "completed"},
+            actor: "agent:1",
+            producer_id: "writer-conflict",
+            producer_seq: 1
+          }
+        ]
+        |> Task.async_stream(
+          &WritePath.append_event(id, &1),
+          max_concurrency: 2,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.count(results, &match?({:ok, %{seq: 1, deduped: false}}, &1)) == 1
+      assert Enum.count(results, &match?({:error, :producer_replay_conflict}, &1)) == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == 1
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert Enum.map(events, & &1.seq) == [1]
+      assert hd(events).payload.state in ["running", "completed"]
+    end
   end
 
   defp append_event(id, event, opts \\ [])
