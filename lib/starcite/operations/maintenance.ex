@@ -22,11 +22,21 @@ defmodule Starcite.Operations.Maintenance do
     undrain_node(node, :maintenance)
   end
 
-  @spec undrain_node(node(), atom()) :: :ok | {:error, :invalid_cluster_node | term()}
+  @spec undrain_node(node(), atom()) ::
+          :ok | {:error, :invalid_cluster_node | :node_still_draining | term()}
   def undrain_node(node, source) when is_atom(node) and is_atom(source) do
     with :ok <- ensure_cluster_node(node),
+         :ok <- ensure_drained(node),
          :ok <- Store.mark_node_ready(node, source) do
       :ok
+    end
+  end
+
+  defp ensure_drained(node) when is_atom(node) do
+    case Store.drain_status(node) do
+      {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} -> :ok
+      {:ok, _status} -> {:error, :node_still_draining}
+      {:error, reason} -> {:error, reason}
     end
   end
 
