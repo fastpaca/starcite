@@ -33,7 +33,7 @@ defmodule Starcite.Application do
       |> Enum.reject(&is_nil/1)
       |> Enum.concat([
         # Endpoint last
-        StarciteWeb.Endpoint
+        {StarciteWeb.Endpoint, adapter: Phoenix.Endpoint.Cowboy2Adapter}
       ])
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]

@@ -19,12 +19,12 @@ defmodule StarciteWeb.TailWebSocketIntegrationTest do
 
     {:ok, _pid} =
       start_supervised(
-        {Bandit,
+        {Plug.Cowboy,
          plug: StarciteWeb.Endpoint,
          scheme: :http,
          ip: {127, 0, 0, 1},
          port: port,
-         startup_log: false}
+         ref: :"tail_socket_test_#{port}"}
       )
 
     {:ok, port: port}

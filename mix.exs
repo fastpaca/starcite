@@ -53,7 +53,6 @@ defmodule Starcite.MixProject do
       {:prom_ex, "~> 1.11"},
       {:libcluster, "~> 3.3"},
       {:jason, "~> 1.2"},
-      {:bandit, "~> 1.5"},
       {:phoenix_pubsub_redis, "~> 3.0"},
       {:redix, "~> 1.5"},
       {:uniq, "~> 0.6"},
