@@ -278,6 +278,62 @@ defmodule Starcite.Routing.StoreTest do
     assert assignment.replicas == [Node.self()]
   end
 
+  test "undrain_node rejects nodes with active or moving drain work" do
+    peer = :"routing-store-undrain-peer@127.0.0.1"
+    session_id = "routing-store-undrain-#{System.unique_integer([:positive, :monotonic])}"
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :draining,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(peer, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), peer],
+               status: :moving,
+               target_owner: peer,
+               transfer_id: "xfer-undrain-1",
+               updated_at_ms: now_ms
+             })
+
+    assert {:error, :node_still_draining} =
+             Starcite.Operations.Maintenance.undrain_node(Node.self())
+  end
+
+  test "undrain_node allows a fully drained node to return ready" do
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self()])
+    Application.put_env(:starcite, :routing_replication_factor, 1)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok = Starcite.Operations.Maintenance.undrain_node(Node.self())
+    assert Store.node_status(Node.self()) == :ready
+  end
+
   test "emits node state transition telemetry with the transition source" do
     handler_id = "routing-node-state-#{System.unique_integer([:positive, :monotonic])}"
     test_pid = self()
