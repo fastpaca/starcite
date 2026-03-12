@@ -9,6 +9,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def event_metrics(_opts) do
     [
       edge_http_metrics(),
+      edge_stage_metrics(),
+      auth_metrics(),
       ingestion_metrics(),
       routing_metrics(),
       request_slo_metrics(),
@@ -51,6 +53,52 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :duration,
           unit: {:native, :millisecond},
           description: "HTTP request duration at the Cowboy request boundary",
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
+  end
+
+  defp edge_stage_metrics do
+    Event.build(
+      :starcite_edge_stage_metrics,
+      [
+        counter("starcite_edge_stage_total",
+          event_name: [:starcite, :edge, :stage],
+          measurement: :count,
+          description: "Explicit edge-stage observations before controller timing",
+          tags: [:stage, :method]
+        ),
+        distribution("starcite_edge_stage_duration_ms",
+          event_name: [:starcite, :edge, :stage],
+          measurement: :duration_ms,
+          description: "Explicit edge-stage duration in milliseconds",
+          tags: [:stage, :method],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
+  end
+
+  defp auth_metrics do
+    Event.build(
+      :starcite_auth_metrics,
+      [
+        counter("starcite_auth_total",
+          event_name: [:starcite, :auth],
+          measurement: :count,
+          description: "Authentication-stage outcomes",
+          tags: [:stage, :mode, :outcome, :error_reason, :source]
+        ),
+        distribution("starcite_auth_duration_ms",
+          event_name: [:starcite, :auth],
+          measurement: :duration_ms,
+          description: "Authentication-stage duration in milliseconds",
+          tags: [:stage, :mode, :outcome, :source],
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]

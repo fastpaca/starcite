@@ -611,6 +611,24 @@ defmodule StarciteWeb.SessionControllerTest do
       assert conn.status == 201
       assert_receive_endpoint_stop("POST", 201)
     end
+
+    test "append emits edge-stage telemetry before controller timing starts" do
+      attach_edge_stage_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+      assert_receive_edge_stage(:controller_entry, "POST")
+    end
   end
 
   defp token_for(private_key, kid, overrides)
@@ -679,6 +697,25 @@ defmodule StarciteWeb.SessionControllerTest do
         [:phoenix, :endpoint, :stop],
         fn _event, measurements, metadata, pid ->
           send(pid, {:endpoint_stop_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_edge_stage_handler do
+    handler_id = "edge-stage-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :edge, :stage],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:edge_stage_event, measurements, metadata})
         end,
         test_pid
       )
@@ -757,6 +794,32 @@ defmodule StarciteWeb.SessionControllerTest do
        when is_binary(method) and is_integer(status) do
     deadline = System.monotonic_time(:millisecond) + 1_000
     do_assert_receive_endpoint_stop(method, status, deadline)
+  end
+
+  defp assert_receive_edge_stage(stage, method)
+       when stage in [:controller_entry] and is_binary(method) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_edge_stage(stage, method, deadline)
+  end
+
+  defp do_assert_receive_edge_stage(stage, method, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:edge_stage_event, %{count: 1, duration_ms: duration_ms},
+       %{stage: ^stage, method: ^method}} ->
+        assert is_integer(duration_ms)
+        assert duration_ms >= 0
+        :ok
+
+      {:edge_stage_event, _measurements, _metadata} ->
+        do_assert_receive_edge_stage(stage, method, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for edge-stage telemetry stage=#{inspect(stage)} method=#{inspect(method)}"
+        )
+    end
   end
 
   defp do_assert_receive_endpoint_stop(method, status, deadline) do
