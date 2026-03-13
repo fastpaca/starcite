@@ -375,6 +375,55 @@ defmodule Starcite.Routing.StoreTest do
     assert owner_counts == %{Node.self() => 10, peer_a => 10, peer_b => 10}
   end
 
+  test "concurrent ensure_assignment never places ownership on a draining node" do
+    peer_a = :"routing-store-draining-a@127.0.0.1"
+    peer_b = :"routing-store-draining-b@127.0.0.1"
+    peer_c = :"routing-store-draining-c@127.0.0.1"
+    nodes = [Node.self(), peer_a, peer_b, peer_c]
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(:starcite, :cluster_node_ids, nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :draining,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    Enum.each([peer_a, peer_b, peer_c], fn node ->
+      assert :ok =
+               put_node_record(node, %{
+                 status: :ready,
+                 lease_until_ms: now_ms + 60_000,
+                 updated_at_ms: now_ms
+               })
+    end)
+
+    owner_counts =
+      1..24
+      |> Task.async_stream(
+        fn i ->
+          session_id =
+            "routing-store-draining-balanced-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+          assert {:ok, assignment} = Store.ensure_assignment(session_id)
+          refute assignment.owner == Node.self()
+          assert Enum.sort(assignment.replicas) == Enum.sort([peer_a, peer_b, peer_c])
+          assignment.owner
+        end,
+        max_concurrency: 24,
+        timeout: 5_000,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, owner} -> owner end)
+      |> Enum.frequencies()
+
+    assert owner_counts == %{peer_a => 8, peer_b => 8, peer_c => 8}
+  end
+
   test "recovers local node readiness and claims after a local Khepri reset" do
     session_id = "routing-store-reset-recovery-#{System.unique_integer([:positive, :monotonic])}"
     now_ms = System.system_time(:millisecond)

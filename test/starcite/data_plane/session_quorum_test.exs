@@ -527,6 +527,87 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
   end
 
+  test "stale clients hammering the old owner during moving transfer do not leak writes", %{
+    peers: peers
+  } do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-moving-stale-owner-#{System.unique_integer([:positive, :monotonic])}"
+
+    initial_assignment = %{
+      owner: peer_a,
+      epoch: 1,
+      replicas: [peer_a, Node.self(), peer_b],
+      status: :active,
+      updated_at_ms: System.system_time(:millisecond)
+    }
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               initial_assignment,
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    assert :ok = seed_replica_set(peer_a, Session.new(session_id), [])
+
+    assert {:ok, reply} =
+             :rpc.call(
+               peer_a,
+               WritePath,
+               :append_event,
+               [session_id, append_input("moving-stale-owner", 1)],
+               5_000
+             )
+
+    assert reply.seq == 1
+
+    assert :ok =
+             seed_moving_assignment(session_id, peer_a, Node.self(), [peer_a, Node.self(), peer_b])
+
+    assert true =
+             :rpc.call(
+               peer_a,
+               :ets,
+               :insert,
+               [:starcite_routing_assignment_cache, {session_id, initial_assignment}],
+               5_000
+             )
+
+    results =
+      1..20
+      |> Task.async_stream(
+        fn i ->
+          :rpc.call(
+            peer_a,
+            SessionQuorum,
+            :append_event,
+            [session_id, append_input("moving-stale-owner-#{i}", 1), nil],
+            5_000
+          )
+        end,
+        max_concurrency: 20,
+        timeout: 7_500,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, result} -> result end)
+
+    assert Enum.all?(results, fn
+             {:error, reason} ->
+               reason in [:not_owner, :ownership_transfer_in_progress] or
+                 match?({:not_leader, _}, reason)
+
+             _other ->
+               false
+           end)
+
+    assert {:ok, session} = SessionQuorum.get_session(session_id)
+    assert session.last_seq == 1
+
+    assert {:ok, events} = Starcite.ReadPath.get_events_from_cursor(session_id, 0, 10)
+    assert Enum.map(events, & &1.seq) == [1]
+  end
+
   test "owner crash after quorum success but before reply does not duplicate the append", %{
     peers: peers
   } do
