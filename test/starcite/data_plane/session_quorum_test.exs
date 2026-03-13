@@ -418,6 +418,93 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
   end
 
+  test "creates and appends continue while an expired owner is being failed over", %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    failover_session_id = "ses-failover-live-#{System.unique_integer([:positive, :monotonic])}"
+    seed_session = Session.new(failover_session_id)
+    now_ms = System.system_time(:millisecond)
+
+    put_assignment(failover_session_id, peer_a, [peer_a, Node.self(), peer_b])
+    assert :ok = seed_replica_set(peer_a, seed_session, [])
+
+    assert {:ok, reply} =
+             :rpc.call(
+               peer_a,
+               WritePath,
+               :append_event,
+               [failover_session_id, append_input("failover-live-writer", 1)],
+               5_000
+             )
+
+    assert reply.seq == 1
+    assert :ok = stop_peer_data_plane(peer_a)
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:nodes, peer_a],
+               %{
+                 status: :ready,
+                 lease_until_ms: now_ms - 1,
+                 owned_session_count: 1,
+                 updated_at_ms: now_ms
+               },
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    create_append_task =
+      Task.async(fn ->
+        1..24
+        |> Task.async_stream(
+          fn i ->
+            session_id =
+              "ses-failover-live-claim-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+            assert {:ok, _session} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+            assert {:ok, append_reply} =
+                     WritePath.append_event(session_id, append_input(session_id, 1))
+
+            {session_id, append_reply.seq}
+          end,
+          max_concurrency: 24,
+          timeout: 7_500,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+      end)
+
+    failover_task = Task.async(fn -> Store.reassign_sessions_from(peer_a) end)
+
+    create_results = Task.await(create_append_task, 10_000)
+    assert {:ok, 1} = Task.await(failover_task, 5_000)
+
+    assert Enum.all?(create_results, fn {_session_id, seq} -> seq == 1 end)
+
+    Enum.each(create_results, fn {session_id, _seq} ->
+      assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+      assert assignment.owner in [Node.self(), peer_b]
+      refute peer_a in assignment.replicas
+      assert Enum.all?(assignment.replicas, &(&1 in [Node.self(), peer_b]))
+    end)
+
+    eventually(
+      fn ->
+        assert {:ok, %{owner: owner, epoch: 2, status: :active}} =
+                 Store.get_assignment(failover_session_id, favor: :consistency)
+
+        assert owner in [Node.self(), peer_b]
+        assert owner != peer_a
+      end,
+      timeout: 6_000
+    )
+
+    assert {:ok, routed_reply} =
+             WritePath.append_event(failover_session_id, append_input("failover-live-writer", 2))
+
+    assert routed_reply.seq == 2
+  end
+
   test "restart during drain keeps the node out of the ready set while drain work remains", %{
     peers: peers
   } do

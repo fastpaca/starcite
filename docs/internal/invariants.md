@@ -36,6 +36,8 @@ Current coverage:
 - New claims must stay evenly balanced across the eligible ready set.
 - New claims must continue to exclude an expired owner while that owner's existing
   sessions are concurrently being failed over.
+- Concurrent create traffic must remain available while lease-expiry failover is
+  reassigning old owners.
 
 Current coverage:
 - [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
@@ -63,6 +65,8 @@ Current coverage:
 - A stale former owner must also reject appends while the session is still `:moving`.
 - Followers must never accept owner append commands.
 - Ownership movement must fence writes by `epoch`, not by local liveness hints.
+- Concurrent append traffic must remain available while lease-expiry failover is
+  reassigning an expired owner.
 
 Current coverage:
 - [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
