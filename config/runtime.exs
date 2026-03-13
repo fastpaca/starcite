@@ -105,6 +105,15 @@ parse_fraction! = fn env_name, raw ->
   end
 end
 
+if shutdown_drain_timeout_ms = get_optional_env.("STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS") do
+  config :starcite,
+         :shutdown_drain_timeout_ms,
+         parse_positive_integer!.(
+           "STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS",
+           shutdown_drain_timeout_ms
+         )
+end
+
 if cluster_node_ids = get_optional_env.("CLUSTER_NODES") do
   config :starcite,
          :cluster_node_ids,

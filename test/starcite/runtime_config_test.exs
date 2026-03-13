@@ -5,11 +5,13 @@ defmodule Starcite.RuntimeConfigTest do
   @cluster_nodes_env "CLUSTER_NODES"
   @routing_replication_factor_env "STARCITE_ROUTING_REPLICATION_FACTOR"
   @enable_telemetry_env "STARCITE_ENABLE_TELEMETRY"
+  @shutdown_drain_timeout_env "STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS"
   @runtime_envs [
     @routing_store_dir_env,
     @cluster_nodes_env,
     @routing_replication_factor_env,
-    @enable_telemetry_env
+    @enable_telemetry_env,
+    @shutdown_drain_timeout_env
   ]
 
   setup do
@@ -105,6 +107,15 @@ defmodule Starcite.RuntimeConfigTest do
 
     prom_ex_config = Keyword.fetch!(starcite_config, Starcite.Observability.PromEx)
     assert Keyword.fetch!(prom_ex_config, :enabled) == false
+  end
+
+  test "runtime config applies shutdown drain timeout override" do
+    System.put_env(@shutdown_drain_timeout_env, "45000")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    assert Keyword.fetch!(starcite_config, :shutdown_drain_timeout_ms) == 45_000
   end
 
   defp restore_env(env_name, nil), do: System.delete_env(env_name)

@@ -163,9 +163,10 @@ defmodule Starcite.Application do
 
       drain_result = Starcite.Operations.drain_node(Node.self(), :shutdown)
       wait_result = Starcite.Operations.wait_local_drained(drain_timeout_ms())
+      drain_status = Starcite.Operations.drain_status(Node.self())
 
       Logger.warning(
-        "Starcite shutdown drain finished node=#{inspect(Node.self())} drain_result=#{inspect(drain_result)} wait_result=#{inspect(wait_result)}"
+        "Starcite shutdown drain finished node=#{inspect(Node.self())} drain_result=#{inspect(drain_result)} wait_result=#{inspect(wait_result)} drain_status=#{inspect(drain_status)}"
       )
     end
 
@@ -173,7 +174,7 @@ defmodule Starcite.Application do
   end
 
   defp drain_timeout_ms do
-    case Application.get_env(:starcite, :shutdown_drain_timeout_ms, 5_000) do
+    case Application.get_env(:starcite, :shutdown_drain_timeout_ms, 30_000) do
       value when is_integer(value) and value > 0 ->
         value
 
