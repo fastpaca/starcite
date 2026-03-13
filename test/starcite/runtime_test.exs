@@ -873,6 +873,89 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
     end
 
+    test "expected_seq barrier requests stay coherent under concurrent batched appends" do
+      id = unique_id("ses-expected-seq-barrier")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      barrier_task =
+        Task.async(fn ->
+          append_event(
+            id,
+            %{
+              type: "content",
+              payload: %{text: "barrier"},
+              actor: "agent:1",
+              producer_id: "writer:barrier",
+              producer_seq: 1
+            },
+            expected_seq: 0
+          )
+        end)
+
+      concurrent_results =
+        1..50
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_event(id, %{
+              type: "content",
+              payload: %{text: "m#{n}"},
+              actor: "agent:1",
+              producer_id: "writer:#{n}",
+              producer_seq: 1
+            })
+          end,
+          max_concurrency: 50,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      barrier_result = Task.await(barrier_task, 5_000)
+      results = [barrier_result | concurrent_results]
+
+      assert Enum.all?(results, fn
+               {:ok, _reply} -> true
+               {:error, {:expected_seq_conflict, 0, _last_seq}} -> true
+               _other -> false
+             end)
+
+      successes =
+        Enum.filter(results, fn
+          {:ok, _reply} -> true
+          _other -> false
+        end)
+
+      conflicts =
+        Enum.filter(results, fn
+          {:error, {:expected_seq_conflict, 0, _last_seq}} -> true
+          _other -> false
+        end)
+
+      assert length(successes) + length(conflicts) == 51
+      assert length(conflicts) in [0, 1]
+
+      case barrier_result do
+        {:ok, reply} ->
+          assert reply.seq == 1
+
+        {:error, {:expected_seq_conflict, 0, last_seq}} ->
+          assert last_seq >= 1
+      end
+
+      successful_seqs =
+        successes
+        |> Enum.map(fn {:ok, reply} -> reply.seq end)
+        |> Enum.sort()
+
+      assert successful_seqs == Enum.to_list(1..length(successes))
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == length(successes)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..length(successes))
+    end
+
     test "concurrent replay conflicts commit one event and reject the conflicting append" do
       id = unique_id("ses-hot-conflict")
       {:ok, _} = WritePath.create_session(id: id)

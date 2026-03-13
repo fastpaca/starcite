@@ -352,6 +352,7 @@ defmodule Starcite.DataPlane.SessionLog do
          {:ok, next_session, next_events, outcome} <- execute_append_request(session, request) do
       next_session = normalize_session_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
+      run_test_hook(:before_quorum_replicate, next_session, events)
 
       case SessionQuorum.replicate_state(next_session, events, request.replicas) do
         :ok ->
@@ -392,6 +393,7 @@ defmodule Starcite.DataPlane.SessionLog do
 
     if successful_outcomes?(outcomes) do
       committed_events = put_events_epoch(events_acc, next_session.epoch)
+      run_test_hook(:before_quorum_replicate, next_session, committed_events)
 
       case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
         :ok ->
