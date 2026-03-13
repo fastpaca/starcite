@@ -1041,6 +1041,16 @@ defmodule Starcite.Routing.Store do
           end)
       end
     else
+      {:error, :mismatching_node} ->
+        :ok =
+          Telemetry.routing_invariant(
+            session_id,
+            :commit_transfer,
+            :commit_transfer_invalid_state
+          )
+
+        {:error, :mismatching_node}
+
       {:error, reason} ->
         retry_after_local_store_reset(reason, attempt, fn ->
           do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
@@ -1054,38 +1064,54 @@ defmodule Starcite.Routing.Store do
               is_integer(failed_at_ms) and failed_at_ms >= 0 and is_integer(attempt) and
               attempt >= 0 do
     with {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      next =
-        activate_assignment(
-          current,
-          target_node,
-          ready_node_list(node_records, failed_at_ms),
-          failed_at_ms
-        )
+      ready_nodes = ready_node_list(node_records, failed_at_ms)
 
-      case khepri_call(fn ->
-             :khepri.compare_and_swap(
-               store_id(),
-               session_path(session_id),
-               exact_match_pattern(current),
-               next,
-               command_options()
-             )
-           end) do
-        :ok ->
-          :ok = cache_assignment(session_id, next)
-          :ok = Telemetry.routing_failover(session_id, current.owner, next.owner, :lease_expired)
-          :ok
+      if target_node in ready_nodes and target_node != current.owner do
+        next =
+          activate_assignment(
+            current,
+            target_node,
+            ready_nodes,
+            failed_at_ms
+          )
 
-        {:error, reason} ->
-          retry_after_local_store_reset(reason, attempt, fn ->
-            do_failover_assignment_local(
-              session_id,
-              current,
-              target_node,
-              failed_at_ms,
-              attempt + 1
-            )
-          end)
+        case khepri_call(fn ->
+               :khepri.compare_and_swap(
+                 store_id(),
+                 session_path(session_id),
+                 exact_match_pattern(current),
+                 next,
+                 command_options()
+               )
+             end) do
+          :ok ->
+            :ok = cache_assignment(session_id, next)
+
+            :ok =
+              Telemetry.routing_failover(session_id, current.owner, next.owner, :lease_expired)
+
+            :ok
+
+          {:error, reason} ->
+            retry_after_local_store_reset(reason, attempt, fn ->
+              do_failover_assignment_local(
+                session_id,
+                current,
+                target_node,
+                failed_at_ms,
+                attempt + 1
+              )
+            end)
+        end
+      else
+        :ok =
+          Telemetry.routing_invariant(
+            session_id,
+            :failover_assignment,
+            :failover_target_not_ready
+          )
+
+        {:error, :target_not_ready}
       end
     else
       {:error, reason} ->

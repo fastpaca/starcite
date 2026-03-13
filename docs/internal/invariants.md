@@ -167,6 +167,9 @@ Current coverage:
 - Transfer start and commit must emit counters.
 - Lease-expiry failover must emit counters.
 - Stale-owner / transfer fences must emit counters.
+- Impossible routing-state mutations must emit counters, including:
+  - transfer commit against a non-moving assignment
+  - failover against a non-ready target
 - Append boundary telemetry must exist at the two critical crash boundaries:
   - `before_quorum_replicate`
   - `after_commit_before_reply`
@@ -181,7 +184,6 @@ Current coverage:
 - No long-running multi-hour soak with rolling restart/drain/create/append/tail invariants.
 - No explicit impossible-state production assertion yet for:
   - epoch regression on authoritative assignment updates
-  - transfer commit on a non-moving assignment
   - watermark regression at publication time
 
 ## Rule
