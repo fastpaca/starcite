@@ -655,6 +655,78 @@ defmodule Starcite.RuntimeTest do
       assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 10_000)
       assert EventStore.session_size(id) == 0
     end
+
+    test "does not regress the committed frontier when acked below the current archive cursor" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      for n <- 1..4 do
+        {:ok, _} =
+          append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert EventStore.session_size(id) == 1
+
+      assert {:ok, %{archived_seq: 3, trimmed: 0}} = WritePath.ack_archived(id, 1)
+      assert EventStore.session_size(id) == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.archived_seq == 3
+
+      assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
+      assert cursor.committed_seq == 3
+    end
+  end
+
+  describe "replica monotonicity" do
+    test "ignores stale lower-epoch replica state even when it advertises a larger last_seq" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      for n <- 1..2 do
+        {:ok, _} =
+          append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
+
+      assert {:ok, %Session{} = current} = SessionQuorum.get_session(id)
+
+      newer =
+        %Session{
+          current
+          | epoch: current.epoch + 1,
+            archived_seq: current.archived_seq + 1
+        }
+
+      assert :ok = SessionQuorum.apply_replica(newer, [])
+      assert {:ok, %Session{} = promoted} = SessionQuorum.get_session(id)
+      assert promoted.epoch == newer.epoch
+      assert promoted.last_seq == current.last_seq
+      assert promoted.archived_seq == newer.archived_seq
+
+      stale =
+        %Session{
+          promoted
+          | epoch: current.epoch,
+            last_seq: promoted.last_seq + 50,
+            archived_seq: promoted.archived_seq + 50
+        }
+
+      assert :ok = SessionQuorum.apply_replica(stale, [])
+
+      assert {:ok, %Session{} = final} = SessionQuorum.get_session(id)
+      assert final.epoch == promoted.epoch
+      assert final.last_seq == promoted.last_seq
+      assert final.archived_seq == promoted.archived_seq
+    end
   end
 
   describe "session log recovery" do

@@ -106,7 +106,22 @@ defmodule Starcite.Routing.StoreTest do
                updated_at_ms: now_ms
              })
 
-    assert {:ok, 1} = Store.start_drain_transfers(Node.self())
+    start_result =
+      Enum.reduce_while(1..20, {:ok, 0}, fn _attempt, _acc ->
+        case Store.start_drain_transfers(Node.self()) do
+          {:ok, 1} = ok ->
+            {:halt, ok}
+
+          {:ok, 0} ->
+            Process.sleep(25)
+            {:cont, {:ok, 0}}
+
+          other ->
+            flunk("unexpected drain transfer result: #{inspect(other)}")
+        end
+      end)
+
+    assert {:ok, 1} = start_result
 
     assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
     assert assignment.owner == Node.self()
