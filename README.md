@@ -18,6 +18,13 @@ Consumers replay from any cursor and continue live on the same connection.
 If a browser refreshes, a WebSocket drops, or work moves between agents,
 the session stays intact.
 
+A Starcite session is a managed durable communication context: stable session
+identity, an ordered append-only history, and cursor-based resume. Your app can
+map conversations, runs, threads, or workflows onto a Starcite session ID;
+Starcite stays authoritative for the session stream and minimal envelope
+metadata, while your app remains authoritative for richer business objects and
+broader query workloads. See the [Session Contract](docs/session-contract.md).
+
 ## When To Use Starcite
 
 **Use it when** you've hit the failure modes that every production AI UI eventually hits:
@@ -82,7 +89,8 @@ bunx starcite --help
 
 ## API At A Glance
 
-Three operations: **create** a session, **append** an event, **tail** from a cursor.
+Core operations: **create** a session, **append** an event, **tail** from a cursor.
+Starcite also exposes a basic session catalog for tenant-scoped listing.
 
 <details>
 <summary>curl</summary>
@@ -246,6 +254,7 @@ Your orchestrator stays yours.
 
 - [REST API](docs/api/rest.md)
 - [WebSocket API](docs/api/websocket.md)
+- [Session Contract](docs/session-contract.md)
 - [Architecture](docs/architecture.md)
 - [Self-hosting](docs/self-hosting.md)
 - [Why Agent UIs Lose Messages on Refresh](https://starcite.ai/blog/why-agent-uis-lose-messages-on-refresh) (blog)
