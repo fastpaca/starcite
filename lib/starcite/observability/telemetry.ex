@@ -550,6 +550,37 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one ownership fence on the routing/data plane.
+
+  Measurements:
+    - `:count` - fixed at 1 per fence
+
+  Metadata:
+    - `:node` - local node name
+    - `:session_id`
+    - `:source` (`:session_router` or `:session_log`)
+    - `:reason` (`:not_leader`, `:ownership_transfer_in_progress`, or `:not_owner`)
+  """
+  @spec routing_fence(String.t(), :session_router | :session_log, atom()) :: :ok
+  def routing_fence(session_id, source, reason)
+      when is_binary(session_id) and session_id != "" and
+             source in [:session_router, :session_log] and
+             reason in [:not_leader, :ownership_transfer_in_progress, :not_owner] do
+    execute_if_enabled(
+      [:starcite, :routing, :fence],
+      %{count: 1},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        source: source,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one routing transfer lifecycle event.
 
   Measurements:

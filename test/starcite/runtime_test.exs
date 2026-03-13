@@ -158,6 +158,64 @@ defmodule Starcite.RuntimeTest do
       assert SessionQuorum.local_owner?(id)
     end
 
+    test "follower session log emits a routing fence when it receives an append" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      peer = :"runtime-follower-peer@127.0.0.1"
+      id = unique_id("ses")
+      session = %Session{Session.new(id) | epoch: 1}
+      handler_id = "routing-fence-runtime-#{System.unique_integer([:positive, :monotonic])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:starcite, :routing, :fence],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:routing_fence_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+        :telemetry.detach(handler_id)
+      end)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Starcite.Runtime.TestHelper.reset()
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: peer,
+                 epoch: 1,
+                 replicas: [peer, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      assert :ok = SessionStore.put_session(session)
+      assert {:ok, ^session} = SessionQuorum.get_session(id)
+      refute SessionQuorum.local_owner?(id)
+
+      [{pid, _value}] =
+        Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+
+      assert {:error, :not_owner} =
+               :gen_batch_server.call(
+                 pid,
+                 {:append_event, %{type: "content", payload: %{text: "nope"}}, nil,
+                  [peer, Node.self()]},
+                 5_000
+               )
+
+      assert_receive {:routing_fence_event, %{count: 1},
+                      %{session_id: ^id, source: :session_log, reason: :not_owner}},
+                     1_000
+    end
+
     test "watcher startup rejoins a drained node as ready" do
       assert :ok = RoutingStore.mark_node_drained(Node.self())
       assert RoutingStore.node_status(Node.self()) == :drained

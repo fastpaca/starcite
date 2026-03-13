@@ -275,6 +275,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
           description: "Routing node lifecycle transitions by source",
           tags: [:node, :from, :to, :source]
         ),
+        counter("starcite_routing_fence_total",
+          event_name: [:starcite, :routing, :fence],
+          measurement: :count,
+          description: "Routing/data-plane ownership fences by source and reason",
+          tags: [:node, :source, :reason]
+        ),
         counter("starcite_routing_transfer_total",
           event_name: [:starcite, :routing, :transfer],
           measurement: :count,
