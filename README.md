@@ -18,12 +18,10 @@ Consumers replay from any cursor and continue live on the same connection.
 If a browser refreshes, a WebSocket drops, or work moves between agents,
 the session stays intact.
 
-A Starcite session is a managed durable communication context: stable session
-identity, an ordered append-only history, and cursor-based resume. Your app can
-map conversations, runs, threads, or workflows onto a Starcite session ID;
-Starcite stays authoritative for the session stream and minimal envelope
-metadata, while your app remains authoritative for richer business objects and
-broader query workloads. See the [Session Contract](docs/session-contract.md).
+A Starcite session is a durable communication context: stable session identity,
+an ordered history, and cursor-based resume. Use it as the durable stream
+behind a thread, run, or workflow; keep your broader app objects and rich
+queries in your own database. See the [Session Contract](docs/session-contract.md).
 
 ## When To Use Starcite
 

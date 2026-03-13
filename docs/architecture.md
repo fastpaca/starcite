@@ -4,10 +4,10 @@ Starcite is a clustered session-stream service. Each session is an ordered,
 append-only event log, optimized for low-latency durable appends with cursor-based
 replay.
 
-A Starcite session is a managed durable communication context, not a replacement
-for your broader application database. Starcite owns the session stream, replay
-semantics, and minimal session envelope; your application remains authoritative
-for richer business objects and broad query surfaces. See
+A Starcite session is a durable communication context, not a replacement for
+your broader application database. Starcite owns the session stream and minimal
+session envelope; your app owns richer business objects and broad query
+surfaces. See
 the [Session Contract](session-contract.md).
 
 ![Starcite Architecture](img/architecture.png)
@@ -20,8 +20,7 @@ The edge handles client connections, auth, and protocol translation.
 
 **Session API** — REST endpoints for creating sessions, appending events, and a
 basic tenant-scoped session catalog. Validates input, enforces tenant fencing,
-and delegates to the data plane. It is not intended to act as an arbitrary
-session query engine.
+and delegates to the data plane. It is not an arbitrary session query engine.
 
 **Tailer** — WebSocket handler for `tail`. Upgrades to a long-lived process that
 manages replay and live streaming. This is the only stateful process per client
@@ -37,7 +36,7 @@ The data plane owns session state, event ordering, and durable storage. Writes r
 write nodes only (consensus). Reads run on every node.
 
 Session state here means the durable stream plus the minimal session envelope
-required to create, authorize, route, and resume that stream.
+needed to create, authorize, route, and resume it.
 
 ### Router
 
@@ -160,8 +159,8 @@ The archiver never touches the critical path. If it falls behind or fails, appen
 and tail continue unaffected.
 
 Archive backends are optimized for durable replay and recovery, not arbitrary
-session query semantics. If Starcite needs richer session catalog behavior, that
-catalog must be designed explicitly rather than inferred from archive layout.
+session queries. Richer catalog behavior should be designed explicitly rather
+than inferred from archive layout.
 
 ## Control plane
 
