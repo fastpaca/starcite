@@ -678,6 +678,40 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one routing invariant violation.
+
+  Measurements:
+    - `:count` - fixed at 1 per violation
+
+  Metadata:
+    - `:session_id`
+    - `:source` (`:commit_transfer` or `:failover_assignment`)
+    - `:reason`
+  """
+  @spec routing_invariant(
+          String.t(),
+          :commit_transfer | :failover_assignment,
+          :commit_transfer_invalid_state | :failover_target_not_ready
+        ) :: :ok
+  def routing_invariant(session_id, source, reason)
+      when is_binary(session_id) and session_id != "" and
+             source in [:commit_transfer, :failover_assignment] and
+             reason in [:commit_transfer_invalid_state, :failover_target_not_ready] do
+    execute_if_enabled(
+      [:starcite, :routing, :invariant],
+      %{count: 1},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        source: source,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit a successful session create event.
   """
   @spec session_create(String.t(), String.t()) :: :ok

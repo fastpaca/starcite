@@ -292,6 +292,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Routing failover activations by source and target node",
           tags: [:source_node, :target_node, :reason]
+        ),
+        counter("starcite_routing_invariant_total",
+          event_name: [:starcite, :routing, :invariant],
+          measurement: :count,
+          description: "Routing invariant violations by source and reason",
+          tags: [:node, :source, :reason]
         )
       ]
     )

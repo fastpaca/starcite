@@ -473,10 +473,11 @@ defmodule Starcite.Routing.StoreTest do
   end
 
   test "concurrent claims during lease-expiry failover never use the expired owner" do
+    expired_owner = :"routing-store-failover-expired-owner@127.0.0.1"
     peer_a = :"routing-store-failover-claim-a@127.0.0.1"
     peer_b = :"routing-store-failover-claim-b@127.0.0.1"
     peer_c = :"routing-store-failover-claim-c@127.0.0.1"
-    nodes = [Node.self(), peer_a, peer_b, peer_c]
+    nodes = [expired_owner, Node.self(), peer_a, peer_b, peer_c]
     now_ms = System.system_time(:millisecond)
 
     Application.put_env(:starcite, :cluster_node_ids, nodes)
@@ -484,13 +485,13 @@ defmodule Starcite.Routing.StoreTest do
     TestHelper.reset()
 
     assert :ok =
-             put_node_record(Node.self(), %{
+             put_node_record(expired_owner, %{
                status: :ready,
                lease_until_ms: now_ms - 1,
                updated_at_ms: now_ms
              })
 
-    Enum.each([peer_a, peer_b, peer_c], fn node ->
+    Enum.each([Node.self(), peer_a, peer_b, peer_c], fn node ->
       assert :ok =
                put_node_record(node, %{
                  status: :ready,
@@ -506,9 +507,9 @@ defmodule Starcite.Routing.StoreTest do
 
         assert :ok =
                  put_assignment(session_id, %{
-                   owner: Node.self(),
+                   owner: expired_owner,
                    epoch: 1,
-                   replicas: [Node.self(), peer_a, peer_b],
+                   replicas: [expired_owner, peer_a, peer_b],
                    status: :active,
                    updated_at_ms: now_ms
                  })
@@ -516,7 +517,7 @@ defmodule Starcite.Routing.StoreTest do
         session_id
       end
 
-    failover_task = Task.async(fn -> Store.reassign_sessions_from(Node.self()) end)
+    failover_task = Task.async(fn -> Store.reassign_sessions_from(expired_owner) end)
 
     claimed_assignments =
       1..24
@@ -537,16 +538,17 @@ defmodule Starcite.Routing.StoreTest do
     assert {:ok, 18} = Task.await(failover_task, 5_000)
 
     assert Enum.all?(claimed_assignments, fn assignment ->
-             assignment.owner in [peer_a, peer_b, peer_c] and
-               assignment.owner != Node.self() and
-               Enum.sort(assignment.replicas) == Enum.sort([peer_a, peer_b, peer_c])
+             assignment.owner in [Node.self(), peer_a, peer_b, peer_c] and
+               assignment.owner != expired_owner and
+               expired_owner not in assignment.replicas and
+               Enum.all?(assignment.replicas, &(&1 in [Node.self(), peer_a, peer_b, peer_c]))
            end)
 
     Enum.each(seeded_session_ids, fn session_id ->
       assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
-      refute assignment.owner == Node.self()
+      refute assignment.owner == expired_owner
       assert assignment.status == :active
-      assert Node.self() not in assignment.replicas
+      assert expired_owner not in assignment.replicas
     end)
   end
 
@@ -805,6 +807,122 @@ defmodule Starcite.Routing.StoreTest do
 
     assert source_node == Atom.to_string(Node.self())
     assert target_node == Atom.to_string(standby)
+  end
+
+  test "emits invariant telemetry when transfer commit targets a non-moving assignment" do
+    peer = :"routing-store-invariant-peer@127.0.0.1"
+
+    session_id =
+      "routing-store-invariant-transfer-#{System.unique_integer([:positive, :monotonic])}"
+
+    handler_id = "routing-invariant-transfer-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :invariant],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_invariant_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    TestHelper.reset()
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), peer],
+               status: :active,
+               updated_at_ms: now_ms
+             })
+
+    assert {:error, :mismatching_node} = Store.commit_transfer(session_id, "xfer-missing")
+
+    assert_receive {:routing_invariant_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source: :commit_transfer,
+                      reason: :commit_transfer_invalid_state
+                    }},
+                   1_000
+  end
+
+  test "emits invariant telemetry when failover target is no longer ready" do
+    target = :"routing-store-invariant-target@127.0.0.1"
+
+    session_id =
+      "routing-store-invariant-failover-#{System.unique_integer([:positive, :monotonic])}"
+
+    handler_id = "routing-invariant-failover-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :invariant],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_invariant_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), target])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(target, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    current = %{
+      owner: Node.self(),
+      epoch: 1,
+      replicas: [Node.self(), target],
+      status: :active,
+      updated_at_ms: now_ms
+    }
+
+    assert :ok = put_assignment(session_id, current)
+
+    assert {:error, :target_not_ready} =
+             GenServer.call(
+               Store,
+               {:run_local, :failover_assignment, [session_id, current, target, now_ms]},
+               5_000
+             )
+
+    assert_receive {:routing_invariant_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source: :failover_assignment,
+                      reason: :failover_target_not_ready
+                    }},
+                   1_000
   end
 
   defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
