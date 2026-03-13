@@ -8,8 +8,7 @@ stable session identity, durable writes before ack, ordered replay, and live
 continuation on the same stream.
 
 Starcite is authoritative for the session stream and its minimal envelope
-metadata. It is not intended to replace the customer's broader application
-database.
+metadata. It is not intended to replace your broader application database.
 
 ## Core Model
 
@@ -39,10 +38,9 @@ That basic catalog surface includes creating a session, reading it by ID, and a
 small tenant-scoped list view suitable for recent-session UX and operational
 inspection.
 
-## What Customers Own
+## What Your App Owns
 
-Customers remain authoritative for their broader business objects and query
-workloads.
+You remain authoritative for your broader business objects and query workloads.
 
 That usually includes:
 
@@ -50,10 +48,10 @@ That usually includes:
 - user/workspace/project relationships
 - rich relational metadata and ownership models
 - search, analytics, dashboards, inboxes, and arbitrary filtering/sorting
-- any browse/query pattern that depends on the customer's product semantics
+- any browse/query pattern that depends on your product semantics
 
-A customer application can map one of its own objects to a Starcite `session_id`
-and use Starcite as the durable communication layer for that object.
+Your application can map one of its own objects to a Starcite `session_id` and
+use Starcite as the durable communication layer for that object.
 
 ## API Scope
 
@@ -95,7 +93,7 @@ explicitly as a first-class subsystem with a clear schema and consistency model.
 - Do not let archive layout define the public query model by accident.
 - Treat every new session query shape as a product decision, not an adapter trick.
 - New catalog semantics require an explicit schema and ownership model.
-- Prefer customer-owned application catalogs for customer-specific browse and search experiences.
+- Prefer app-owned catalogs for product-specific browse and search experiences.
 
 ## Practical Guidance
 
@@ -110,5 +108,5 @@ Examples:
 - an agent run may reference a Starcite session
 - a workflow execution may reference a Starcite session
 
-In each case, Starcite stores the durable interaction history. The customer app
-stores the richer object model and the broader query surface around it.
+In each case, Starcite stores the durable interaction history. Your app stores
+the richer object model and the broader query surface around it.

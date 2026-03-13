@@ -5,9 +5,9 @@ append-only event log, optimized for low-latency durable appends with cursor-bas
 replay.
 
 A Starcite session is a managed durable communication context, not a replacement
-for the customer's broader application database. Starcite owns the session
-stream, replay semantics, and minimal session envelope; customer applications
-remain authoritative for richer business objects and broad query surfaces. See
+for your broader application database. Starcite owns the session stream, replay
+semantics, and minimal session envelope; your application remains authoritative
+for richer business objects and broad query surfaces. See
 the [Session Contract](session-contract.md).
 
 ![Starcite Architecture](img/architecture.png)
