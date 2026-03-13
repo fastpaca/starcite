@@ -179,6 +179,128 @@ defmodule Starcite.Routing.StoreTest do
     assert standby in assignment.replicas
   end
 
+  test "reassign_sessions_from promotes the moving target owner when it is ready" do
+    target_owner = :"routing-store-moving-target@127.0.0.1"
+    standby = :"routing-store-moving-standby@127.0.0.1"
+
+    session_id =
+      "routing-store-moving-failover-#{System.unique_integer([:positive, :monotonic])}"
+
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(
+      :starcite,
+      :cluster_node_ids,
+      [Node.self(), target_owner, standby]
+    )
+
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(target_owner, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(standby, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), target_owner, standby],
+               status: :moving,
+               target_owner: target_owner,
+               transfer_id: "xfer-failover-1",
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.reassign_sessions_from(Node.self())
+
+    assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+    assert assignment.owner == target_owner
+    assert assignment.epoch == 2
+    assert assignment.status == :active
+    assert target_owner in assignment.replicas
+    refute Map.has_key?(assignment, :target_owner)
+    refute Map.has_key?(assignment, :transfer_id)
+  end
+
+  test "reassign_sessions_from falls back when a moving target owner is unavailable" do
+    target_owner = :"routing-store-moving-unavailable@127.0.0.1"
+    standby = :"routing-store-moving-fallback@127.0.0.1"
+
+    session_id =
+      "routing-store-moving-fallback-#{System.unique_integer([:positive, :monotonic])}"
+
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(
+      :starcite,
+      :cluster_node_ids,
+      [Node.self(), target_owner, standby]
+    )
+
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(target_owner, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(standby, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), target_owner, standby],
+               status: :moving,
+               target_owner: target_owner,
+               transfer_id: "xfer-failover-2",
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.reassign_sessions_from(Node.self())
+
+    assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+    assert assignment.owner == standby
+    assert assignment.epoch == 2
+    assert assignment.status == :active
+    assert standby in assignment.replicas
+    refute Map.has_key?(assignment, :target_owner)
+    refute Map.has_key?(assignment, :transfer_id)
+  end
+
   test "ensure_assignment balances owners across ready nodes" do
     peer_a = :"routing-store-balance-a@127.0.0.1"
     peer_b = :"routing-store-balance-b@127.0.0.1"
