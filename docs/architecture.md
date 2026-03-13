@@ -3,10 +3,10 @@
 Starcite is a clustered session-stream service. Each session is an ordered,
 append-only event stream with cursor-based replay and low-latency live delivery.
 
-A Starcite session is a managed durable communication context, not a replacement
-for your broader application database. Starcite owns the session stream, replay
-semantics, and minimal session envelope; your application remains authoritative
-for richer business objects and broad query surfaces. See
+A Starcite session is a durable communication context, not a replacement for
+your broader application database. Starcite owns the session stream and minimal
+session envelope; your app owns richer business objects and broad query
+surfaces. See
 the [Session Contract](session-contract.md).
 
 ![Starcite Architecture](img/architecture.png)
@@ -19,8 +19,7 @@ The edge handles client protocol, auth, and policy enforcement.
 
 **Session API** — REST endpoints for creating sessions, appending events, and a
 basic tenant-scoped session catalog. Validates input, enforces tenant fencing,
-and delegates to the data plane. It is not intended to act as an arbitrary
-session query engine.
+and delegates to the data plane. It is not an arbitrary session query engine.
 
 **Tailer** - WebSocket handler for `/tail`. Replays historical events from cursor,
 then streams live updates. Buffers live updates during replay and flushes when
@@ -35,7 +34,7 @@ The data plane owns session sequencing, replay semantics, hot event retention, a
 async archival.
 
 Session state here means the durable stream plus the minimal session envelope
-required to create, authorize, route, and resume that stream.
+needed to create, authorize, route, and resume it.
 
 ### Session logs
 
@@ -109,8 +108,8 @@ After a successful flush, it calls archive ack on the local session log, which a
 Archive writes are idempotent. Archiver failures do not block append/tail hot paths.
 
 Archive backends are optimized for durable replay and recovery, not arbitrary
-session query semantics. If Starcite needs richer session catalog behavior, that
-catalog must be designed explicitly rather than inferred from archive layout.
+session queries. Richer catalog behavior should be designed explicitly rather
+than inferred from archive layout.
 
 ## Control plane
 
