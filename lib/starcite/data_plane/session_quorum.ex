@@ -287,13 +287,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   @spec local_session_ids() :: [String.t()]
   def local_session_ids do
-    @supervisor
-    |> DynamicSupervisor.which_children()
-    |> Enum.flat_map(fn
-      {_id, pid, _type, _modules} when is_pid(pid) -> Registry.keys(@registry, pid)
-      _other -> []
-    end)
-    |> Enum.uniq()
+    case {Process.whereis(@supervisor), Process.whereis(@registry)} do
+      {supervisor, registry} when is_pid(supervisor) and is_pid(registry) ->
+        supervisor
+        |> DynamicSupervisor.which_children()
+        |> Enum.flat_map(fn
+          {_id, pid, _type, _modules} when is_pid(pid) -> Registry.keys(@registry, pid)
+          _other -> []
+        end)
+        |> Enum.uniq()
+
+      _other ->
+        []
+    end
   end
 
   @doc false
@@ -483,7 +489,12 @@ defmodule Starcite.DataPlane.SessionQuorum do
           {:ok, routing_assignment()} | {:error, term()}
   defp require_local_owner_assignment(session_id)
        when is_binary(session_id) and session_id != "" do
+    local_node = Node.self()
+
     case local_owner_assignment(session_id, :low_latency) do
+      {:ok, %{owner: owner}} when owner == local_node ->
+        local_owner_assignment(session_id, :consistency)
+
       {:ok, assignment} ->
         {:ok, assignment}
 

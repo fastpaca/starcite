@@ -71,6 +71,8 @@ Current coverage:
 Current coverage:
 - [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
 - [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
+- short rolling drain/restart/create/append drill in
+  [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ### Sequence and ordering
 - `seq` is monotonic within an active `(session_id, epoch)` lineage.
@@ -125,6 +127,8 @@ Current coverage:
 
 Current coverage:
 - [tail_socket_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite_web/tail_socket_test.exs)
+- distributed rolling drain/restart/create/append/live-tail chaos drill in
+  [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ### Gap semantics
 - Resume discontinuity must be explicit via a `gap` frame.
@@ -186,6 +190,9 @@ Current coverage:
 
 ## Known Gaps
 - No long-running multi-hour soak with rolling restart/drain/create/append/tail invariants.
+- No full websocket tail consumer in the rolling drain/restart chaos drill yet; the current
+  short drill proves internal live cursor delivery, final `last_seq` monotonicity,
+  and latest-event hot visibility from the active owner.
 - No explicit impossible-state production assertion yet for:
   - epoch regression on authoritative assignment updates
   - watermark regression at publication time

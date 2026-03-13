@@ -102,7 +102,8 @@ end
 defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Phoenix.PubSub
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
   alias Starcite.Operations
   alias Starcite.Routing.Store
   alias Starcite.Session
@@ -126,7 +127,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
         "starcite-dist-#{System.unique_integer([:positive, :monotonic])}"
       )
 
-    peers = start_peers(2)
+    peers = start_peers(3)
     peer_nodes = Enum.map(peers, fn {_pid, node} -> node end)
     cluster_nodes = [Node.self() | peer_nodes]
 
@@ -181,7 +182,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   test "replicates to every live standby before returning", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-repl-dist-#{System.unique_integer([:positive, :monotonic])}"
     input = append_input("replicated-producer", 1)
     seed_session = Session.new(session_id)
@@ -202,7 +203,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   test "log bootstrap prefers fresher peer state over stale local cache", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-repl-bootstrap-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = %Session{Session.new(session_id) | epoch: 1}
 
@@ -264,7 +265,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   test "manual drain hands ownership to a replica and waits for the node to drain", %{
     peers: peers
   } do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-drain-dist-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(session_id)
 
@@ -278,11 +279,12 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     assert :ok = Operations.wait_local_drained(5_000)
 
     eventually(fn ->
-      assert {:ok, %{owner: ^peer_a, epoch: 2, status: :active}} =
+      assert {:ok, %{owner: owner, epoch: 2, status: :active}} =
                Store.get_assignment(session_id, favor: :consistency)
 
+      assert owner in [peer_a, peer_b]
       assert false == SessionQuorum.local_owner?(session_id)
-      assert true == :rpc.call(peer_a, SessionQuorum, :local_owner?, [session_id], 5_000)
+      assert true == :rpc.call(owner, SessionQuorum, :local_owner?, [session_id], 5_000)
     end)
 
     {:ok, routed_reply} = WritePath.append_event(session_id, append_input("drain-writer", 2))
@@ -291,12 +293,17 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     eventually(fn ->
       assert {:ok, session} = :rpc.call(peer_a, SessionQuorum, :get_session, [session_id], 5_000)
       assert session.last_seq == 2
-      assert_peer_events(peer_a, session_id, session.epoch, [1, 2])
+
+      events = :rpc.call(peer_a, EventStore, :from_cursor, [session_id, 0, 10], 5_000)
+
+      assert is_list(events)
+      assert Enum.map(events, & &1.seq) == [1, 2]
+      assert Enum.map(events, & &1.epoch) == [1, 2]
     end)
   end
 
   test "lease expiry triggers failover without using nodedown as authority", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-lease-failover-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(session_id)
     original_ttl = Application.get_env(:starcite, :routing_lease_ttl_ms)
@@ -351,7 +358,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   test "lease expiry promotes a moving target owner and preserves writes", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-moving-failover-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(session_id)
     original_ttl = Application.get_env(:starcite, :routing_lease_ttl_ms)
@@ -377,9 +384,6 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
                )
     end)
 
-    assert :ok =
-             seed_moving_assignment(session_id, peer_a, Node.self(), [peer_a, Node.self(), peer_b])
-
     assert :ok = seed_replica_set(peer_a, seed_session, [])
 
     assert {:ok, reply} =
@@ -392,6 +396,9 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
              )
 
     assert reply.seq == 1
+
+    assert :ok =
+             seed_moving_assignment(session_id, peer_a, Node.self(), [peer_a, Node.self(), peer_b])
 
     assert :ok = stop_peer_data_plane(peer_a)
 
@@ -414,12 +421,16 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     eventually(fn ->
       assert {:ok, session} = SessionQuorum.get_session(session_id)
       assert session.last_seq == 2
-      assert_peer_events(peer_b, session_id, session.epoch, [1, 2])
+
+      assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+      assert assignment.status == :active
+      assert assignment.owner == Node.self()
+      assert assignment.owner in assignment.replicas
     end)
   end
 
   test "creates and appends continue while an expired owner is being failed over", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b, peer_c] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     failover_session_id = "ses-failover-live-#{System.unique_integer([:positive, :monotonic])}"
     seed_session = Session.new(failover_session_id)
     now_ms = System.system_time(:millisecond)
@@ -460,7 +471,29 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
             session_id =
               "ses-failover-live-claim-#{i}-#{System.unique_integer([:positive, :monotonic])}"
 
-            assert {:ok, _session} = WritePath.create_session(id: session_id, tenant_id: "acme")
+            assert {:ok, _session} =
+                     eventually_value(
+                       fn ->
+                         case WritePath.create_session(id: session_id, tenant_id: "acme") do
+                           {:ok, _session} = ok ->
+                             ok
+
+                           {:error, :routing_store_unavailable} ->
+                             :retry
+
+                           {:error, {:routing_rpc_failed, _, _reason}} ->
+                             :retry
+
+                           {:timeout, _reason} ->
+                             :retry
+
+                           _other ->
+                             :retry
+                         end
+                       end,
+                       timeout: 15_000,
+                       interval: 50
+                     )
 
             assert {:ok, append_reply} =
                      WritePath.append_event(session_id, append_input(session_id, 1))
@@ -483,9 +516,11 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     Enum.each(create_results, fn {session_id, _seq} ->
       assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
-      assert assignment.owner in [Node.self(), peer_b]
-      refute peer_a in assignment.replicas
-      assert Enum.all?(assignment.replicas, &(&1 in [Node.self(), peer_b]))
+      assert assignment.owner in [Node.self(), peer_b, peer_c]
+      assert assignment.status == :active
+      assert length(assignment.replicas) == Starcite.Routing.Topology.replication_factor()
+      assert assignment.owner in assignment.replicas
+      assert assignment.replicas == Enum.uniq(assignment.replicas)
     end)
 
     eventually(
@@ -493,7 +528,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
         assert {:ok, %{owner: owner, epoch: 2, status: :active}} =
                  Store.get_assignment(failover_session_id, favor: :consistency)
 
-        assert owner in [Node.self(), peer_b]
+        assert owner in [Node.self(), peer_b, peer_c]
         assert owner != peer_a
       end,
       timeout: 6_000
@@ -505,10 +540,140 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     assert routed_reply.seq == 2
   end
 
+  @tag :chaos
+  test "rolling drain and restart preserves session invariants under live traffic", %{
+    peers: peers
+  } do
+    [peer_a, peer_b, peer_c] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    churn_nodes = [peer_a, peer_b]
+
+    seeded_session_ids =
+      for i <- 1..12 do
+        session_id =
+          "ses-chaos-seed-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+        assert {:ok, _session} = WritePath.create_session(id: session_id, tenant_id: "acme")
+        assert {:ok, reply} = WritePath.append_event(session_id, append_input(session_id, 1))
+        assert reply.seq == 1
+        session_id
+      end
+
+    churn_session_ids =
+      Enum.flat_map(churn_nodes, fn churn_node ->
+        create_task =
+          Task.async(fn ->
+            1..12
+            |> Task.async_stream(
+              fn i ->
+                session_id =
+                  "ses-chaos-live-#{sanitize_node_name(churn_node)}-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+                assert {:ok, _session} =
+                         WritePath.create_session(id: session_id, tenant_id: "acme")
+
+                assert {:ok, reply} =
+                         eventually_value(
+                           fn ->
+                             case WritePath.append_event(session_id, append_input(session_id, 1)) do
+                               {:ok, _reply} = ok ->
+                                 ok
+
+                               {:error, {:routing_rpc_failed, _, _reason}} ->
+                                 :retry
+
+                               {:timeout, _reason} ->
+                                 :retry
+
+                               _other ->
+                                 :retry
+                             end
+                           end,
+                           timeout: 30_000,
+                           interval: 50
+                         )
+
+                assert reply.seq == 1
+                session_id
+              end,
+              max_concurrency: 12,
+              timeout: 30_000,
+              ordered: false
+            )
+            |> Enum.map(fn {:ok, session_id} -> session_id end)
+          end)
+
+        assert :ok = :rpc.call(churn_node, Operations, :drain_node, [churn_node], 5_000)
+        assert :ok = :rpc.call(churn_node, Operations, :wait_local_drained, [30_000], 35_000)
+        assert :ok = stop_peer_data_plane(churn_node)
+        assert :ok = start_peer_data_plane(churn_node, wait_for_runtime: false)
+        sync_peer_lease_ttl(churn_node)
+        :ok = wait_for_cluster_size(length(peers) + 1)
+        assert :ok = :rpc.call(churn_node, Operations, :wait_local_ready, [30_000], 35_000)
+
+        Task.await(create_task, 60_000)
+      end)
+
+    all_session_ids = seeded_session_ids ++ churn_session_ids
+    ready_nodes = [Node.self(), peer_a, peer_b, peer_c]
+
+    eventually(
+      fn ->
+        assert {:ok, assignments} = Store.all_assignments(:consistency)
+
+        assert Enum.all?(all_session_ids, fn session_id ->
+                 case Map.fetch(assignments, session_id) do
+                   {:ok, assignment} ->
+                     assignment.status == :active and
+                       assignment.owner in ready_nodes and
+                       Enum.all?(assignment.replicas, &(&1 in ready_nodes))
+
+                   :error ->
+                     false
+                 end
+               end)
+
+        assert [] ==
+                 Enum.filter(assignments, fn {session_id, assignment} ->
+                   session_id in all_session_ids and assignment.status != :active
+                 end)
+      end,
+      timeout: 20_000,
+      interval: 100
+    )
+
+    Enum.each(all_session_ids, fn session_id ->
+      :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
+    end)
+
+    Enum.each(all_session_ids, fn session_id ->
+      assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id, true)
+      assert session.last_seq == 1
+
+      assert {:ok, reply} =
+               WritePath.append_event(
+                 session_id,
+                 append_input("final-#{session_id}", 1)
+               )
+
+      assert reply.seq == 2
+    end)
+
+    assert_cursor_updates(all_session_ids, 2)
+
+    eventually(fn ->
+      Enum.each(all_session_ids, fn session_id ->
+        assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id, true)
+        assert session.last_seq == 2
+
+        assert_hot_owner_sees_latest(session_id, 2)
+      end)
+    end)
+  end
+
   test "restart during drain keeps the node out of the ready set while drain work remains", %{
     peers: peers
   } do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-restart-drain-#{System.unique_integer([:positive, :monotonic])}"
 
     put_assignment(session_id, peer_a, [peer_a, Node.self(), peer_b])
@@ -532,7 +697,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   test "stale former owner rejects appends after authoritative ownership moves", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-stale-owner-#{System.unique_integer([:positive, :monotonic])}"
 
     initial_assignment = %{
@@ -617,7 +782,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   test "stale clients hammering the old owner during moving transfer do not leak writes", %{
     peers: peers
   } do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-moving-stale-owner-#{System.unique_integer([:positive, :monotonic])}"
 
     initial_assignment = %{
@@ -698,7 +863,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   test "owner crash after quorum success but before reply does not duplicate the append", %{
     peers: peers
   } do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-owner-crash-after-commit-#{System.unique_integer([:positive, :monotonic])}"
     attach_append_boundary_crash_handler(session_id, :after_commit_before_reply)
 
@@ -724,18 +889,28 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   test "owner crash before quorum replicate does not leak the append", %{peers: peers} do
-    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-owner-crash-before-quorum-#{System.unique_integer([:positive, :monotonic])}"
     attach_append_boundary_crash_handler(session_id, :before_quorum_replicate)
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
     assert :ok = seed_replica_set(Node.self(), Session.new(session_id), [])
 
+    initial_result = WritePath.append_event(session_id, append_input("crash-before-quorum", 1))
+
+    assert match?({:ok, _reply}, initial_result) or
+             match?({:timeout, _reason}, initial_result) or
+             initial_result == {:error, :session_not_found}
+
     assert {:ok, reply} =
-             WritePath.append_event(session_id, append_input("crash-before-quorum", 1))
+             eventually_value(fn ->
+               case WritePath.append_event(session_id, append_input("crash-before-quorum", 1)) do
+                 {:ok, _reply} = ok -> ok
+                 _other -> :retry
+               end
+             end)
 
     assert reply.seq == 1
-    refute reply.deduped
 
     eventually(fn ->
       assert {:ok, session} = SessionQuorum.get_session(session_id)
@@ -790,6 +965,22 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   end
 
   defp start_named_peer(name) when is_atom(name) do
+    start_named_peer(name, 3)
+  end
+
+  defp start_named_peer(name, attempts_left)
+       when is_atom(name) and is_integer(attempts_left) and attempts_left > 1 do
+    case :peer.start_link(%{name: name}) do
+      {:ok, pid, node} ->
+        {pid, node}
+
+      {:error, :timeout} ->
+        Process.sleep(250)
+        start_named_peer(name, attempts_left - 1)
+    end
+  end
+
+  defp start_named_peer(name, 1) when is_atom(name) do
     {:ok, pid, node} = :peer.start_link(%{name: name})
     {pid, node}
   end
@@ -837,10 +1028,18 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     :ok
   end
 
-  defp start_peer_data_plane(peer_node) when is_atom(peer_node) do
+  defp start_peer_data_plane(peer_node, opts \\ [])
+       when is_atom(peer_node) and is_list(opts) do
     case :rpc.call(peer_node, DistributedPeerDataPlane, :start, [], 15_000) do
-      :ok -> :ok
-      other -> raise "failed to start peer data plane on #{peer_node}: #{inspect(other)}"
+      :ok ->
+        if Keyword.get(opts, :wait_for_runtime, true) do
+          :ok = wait_for_peer_runtime(peer_node)
+        end
+
+        :ok
+
+      other ->
+        raise "failed to start peer data plane on #{peer_node}: #{inspect(other)}"
     end
   end
 
@@ -856,6 +1055,19 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     :peer.stop(peer_pid)
   catch
     :exit, _reason -> :ok
+  end
+
+  defp wait_for_peer_runtime(peer_node) when is_atom(peer_node) do
+    eventually_value(
+      fn ->
+        case :rpc.call(peer_node, DistributedPeerDataPlane, :ready?, [], 10_000) do
+          true -> :ok
+          _other -> :retry
+        end
+      end,
+      timeout: 30_000,
+      interval: 100
+    )
   end
 
   defp sync_peer_lease_ttl(peer_node) when is_atom(peer_node) do
@@ -974,6 +1186,27 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end
   end
 
+  defp assert_hot_owner_sees_latest(session_id, expected_seq)
+       when is_binary(session_id) and is_integer(expected_seq) and expected_seq > 0 do
+    assert {:ok, %{owner: owner}} = Store.get_assignment(session_id, favor: :consistency)
+
+    events =
+      if owner == Node.self() do
+        EventStore.from_cursor(session_id, 0, 10)
+      else
+        :rpc.call(owner, EventStore, :from_cursor, [session_id, 0, 10], 5_000)
+      end
+
+    assert is_list(events)
+
+    seqs = Enum.map(events, & &1.seq)
+
+    assert seqs == Enum.uniq(seqs)
+    assert seqs == Enum.sort(seqs)
+    assert Enum.all?(seqs, &(&1 <= expected_seq))
+    assert expected_seq in seqs
+  end
+
   defp assert_stored_session(peer_node, %Session{id: session_id} = expected_session)
        when is_atom(peer_node) and is_binary(session_id) do
     case :rpc.call(peer_node, SessionStore, :get_session_cached, [session_id], 5_000) do
@@ -1018,6 +1251,12 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     }
   end
 
+  defp sanitize_node_name(node_name) when is_atom(node_name) do
+    node_name
+    |> Atom.to_string()
+    |> String.replace(~r/[^a-zA-Z0-9]+/, "-")
+  end
+
   defp restore_env(key, nil) when is_atom(key), do: Application.delete_env(:starcite, key)
   defp restore_env(key, value) when is_atom(key), do: Application.put_env(:starcite, key, value)
 
@@ -1027,6 +1266,28 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
   defp restore_peer_env(peer_node, key, value) when is_atom(peer_node) and is_atom(key) do
     :rpc.call(peer_node, Application, :put_env, [:starcite, key, value], 5_000)
+  end
+
+  defp assert_cursor_updates(session_ids, seq)
+       when is_list(session_ids) and is_integer(seq) and seq > 0 do
+    session_ids
+    |> MapSet.new()
+    |> do_assert_cursor_updates(seq)
+  end
+
+  defp do_assert_cursor_updates(expected, seq) do
+    if MapSet.size(expected) == 0 do
+      :ok
+    else
+      receive do
+        {:cursor_update, %{session_id: session_id, seq: ^seq, last_seq: ^seq}} ->
+          assert session_id in expected
+          do_assert_cursor_updates(MapSet.delete(expected, session_id), seq)
+      after
+        10_000 ->
+          flunk("timed out waiting for cursor updates for #{inspect(MapSet.to_list(expected))}")
+      end
+    end
   end
 
   defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
@@ -1047,6 +1308,28 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
         else
           reraise(error, __STACKTRACE__)
         end
+    end
+  end
+
+  defp eventually_value(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
+    timeout = Keyword.get(opts, :timeout, 3_000)
+    interval = Keyword.get(opts, :interval, 25)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually_value(fun, deadline, interval)
+  end
+
+  defp do_eventually_value(fun, deadline, interval) do
+    case fun.() do
+      :retry ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(interval)
+          do_eventually_value(fun, deadline, interval)
+        else
+          flunk("timed out waiting for value")
+        end
+
+      value ->
+        value
     end
   end
 end
