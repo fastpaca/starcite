@@ -567,6 +567,43 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     assert Enum.map(events, & &1.seq) == [1]
   end
 
+  test "owner crash before quorum replicate does not leak the append", %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-owner-crash-before-quorum-#{System.unique_integer([:positive, :monotonic])}"
+    hook_key = {SessionLog, :test_hook}
+
+    on_exit(fn ->
+      :persistent_term.erase(hook_key)
+    end)
+
+    put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
+    assert :ok = seed_replica_set(Node.self(), Session.new(session_id), [])
+
+    :persistent_term.put(
+      hook_key,
+      fn :before_quorum_replicate, %Session{id: ^session_id}, [_event] ->
+        :persistent_term.erase(hook_key)
+        Process.exit(self(), :kill)
+      end
+    )
+
+    assert {:ok, reply} =
+             WritePath.append_event(session_id, append_input("crash-before-quorum", 1))
+
+    assert reply.seq == 1
+    refute reply.deduped
+
+    eventually(fn ->
+      assert {:ok, session} = SessionQuorum.get_session(session_id)
+      assert session.last_seq == 1
+      assert_peer_events(peer_a, session_id, session.epoch, [1])
+      assert_peer_events(peer_b, session_id, session.epoch, [1])
+    end)
+
+    assert {:ok, events} = Starcite.ReadPath.get_events_from_cursor(session_id, 0, 10)
+    assert Enum.map(events, & &1.seq) == [1]
+  end
+
   defp start_peers(count) when is_integer(count) and count > 0 do
     Enum.map(1..count, fn _index ->
       start_named_peer(:"replication_peer_#{System.unique_integer([:positive])}")
