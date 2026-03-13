@@ -418,6 +418,32 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
   end
 
+  test "restart during drain keeps the node out of the ready set while drain work remains", %{
+    peers: peers
+  } do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-restart-drain-#{System.unique_integer([:positive, :monotonic])}"
+
+    put_assignment(session_id, peer_a, [peer_a, Node.self(), peer_b])
+
+    assert :ok = :rpc.call(peer_a, Operations, :drain_node, [peer_a], 5_000)
+
+    eventually(fn ->
+      assert :draining == Store.node_status(peer_a)
+    end)
+
+    assert :ok = stop_peer_data_plane(peer_a)
+    assert :ok = start_peer_data_plane(peer_a)
+    sync_peer_lease_ttl(peer_a)
+    :ok = wait_for_cluster_size(length(peers) + 1)
+
+    eventually(fn ->
+      assert :draining == :rpc.call(peer_a, Operations, :node_status, [peer_a], 5_000)
+      assert false == :rpc.call(peer_a, Operations, :local_ready, [], 5_000)
+      refute peer_a in Store.ready_nodes()
+    end)
+  end
+
   defp start_peers(count) when is_integer(count) and count > 0 do
     Enum.map(1..count, fn _index ->
       start_named_peer(:"replication_peer_#{System.unique_integer([:positive])}")
