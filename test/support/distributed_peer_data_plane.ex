@@ -54,6 +54,12 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     :ok
   end
 
+  def ready? do
+    Enum.all?([@registry, @supervisor, Starcite.PubSub, Store, Watcher, EventStore], fn name ->
+      is_pid(Process.whereis(name))
+    end) and is_pid(Process.whereis(:starcite_session_store))
+  end
+
   defp run(caller, ref) when is_pid(caller) do
     Process.flag(:trap_exit, true)
     true = Process.register(self(), __MODULE__)
@@ -76,6 +82,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
 
   defp start_runtime do
     {:ok, _apps} = Application.ensure_all_started(:elixir)
+    {:ok, _apps} = Application.ensure_all_started(:telemetry)
     {:ok, _apps} = Application.ensure_all_started(:cachex)
     {:ok, _apps} = Application.ensure_all_started(:phoenix_pubsub)
     {:ok, _apps} = Application.ensure_all_started(:khepri)

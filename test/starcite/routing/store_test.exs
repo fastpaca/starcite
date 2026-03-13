@@ -545,11 +545,13 @@ defmodule Starcite.Routing.StoreTest do
                Enum.all?(assignment.replicas, &(&1 in [Node.self(), peer_a, peer_b, peer_c]))
            end)
 
-    Enum.each(seeded_session_ids, fn session_id ->
-      assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
-      refute assignment.owner == expired_owner
-      assert assignment.status == :active
-      assert expired_owner not in assignment.replicas
+    eventually(fn ->
+      Enum.each(seeded_session_ids, fn session_id ->
+        assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+        refute assignment.owner == expired_owner
+        assert assignment.status == :active
+        assert expired_owner not in assignment.replicas
+      end)
     end)
   end
 
@@ -932,6 +934,27 @@ defmodule Starcite.Routing.StoreTest do
 
   defp put_node_record(node, record) when is_atom(node) and is_map(record) do
     :khepri.put(Store.store_id(), [:nodes, Atom.to_string(node)], record, khepri_opts())
+  end
+
+  defp eventually(fun, opts \\ []) when is_function(fun, 0) and is_list(opts) do
+    timeout = Keyword.get(opts, :timeout, 3_000)
+    interval = Keyword.get(opts, :interval, 25)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline, interval)
+  end
+
+  defp do_eventually(fun, deadline, interval) do
+    try do
+      fun.()
+    rescue
+      error in [ExUnit.AssertionError] ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(interval)
+          do_eventually(fun, deadline, interval)
+        else
+          reraise(error, __STACKTRACE__)
+        end
+    end
   end
 
   defp khepri_opts do
