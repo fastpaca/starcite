@@ -472,6 +472,84 @@ defmodule Starcite.Routing.StoreTest do
     assert Enum.sort(assignment.replicas) == Enum.sort([peer_a, peer_b, peer_c])
   end
 
+  test "concurrent claims during lease-expiry failover never use the expired owner" do
+    peer_a = :"routing-store-failover-claim-a@127.0.0.1"
+    peer_b = :"routing-store-failover-claim-b@127.0.0.1"
+    peer_c = :"routing-store-failover-claim-c@127.0.0.1"
+    nodes = [Node.self(), peer_a, peer_b, peer_c]
+    now_ms = System.system_time(:millisecond)
+
+    Application.put_env(:starcite, :cluster_node_ids, nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    Enum.each([peer_a, peer_b, peer_c], fn node ->
+      assert :ok =
+               put_node_record(node, %{
+                 status: :ready,
+                 lease_until_ms: now_ms + 60_000,
+                 updated_at_ms: now_ms
+               })
+    end)
+
+    seeded_session_ids =
+      for i <- 1..18 do
+        session_id =
+          "routing-store-expired-failover-seeded-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+        assert :ok =
+                 put_assignment(session_id, %{
+                   owner: Node.self(),
+                   epoch: 1,
+                   replicas: [Node.self(), peer_a, peer_b],
+                   status: :active,
+                   updated_at_ms: now_ms
+                 })
+
+        session_id
+      end
+
+    failover_task = Task.async(fn -> Store.reassign_sessions_from(Node.self()) end)
+
+    claimed_assignments =
+      1..24
+      |> Task.async_stream(
+        fn i ->
+          session_id =
+            "routing-store-expired-failover-claim-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+
+          assert {:ok, assignment} = Store.ensure_assignment(session_id)
+          assignment
+        end,
+        max_concurrency: 24,
+        timeout: 5_000,
+        ordered: false
+      )
+      |> Enum.map(fn {:ok, assignment} -> assignment end)
+
+    assert {:ok, 18} = Task.await(failover_task, 5_000)
+
+    assert Enum.all?(claimed_assignments, fn assignment ->
+             assignment.owner in [peer_a, peer_b, peer_c] and
+               assignment.owner != Node.self() and
+               Enum.sort(assignment.replicas) == Enum.sort([peer_a, peer_b, peer_c])
+           end)
+
+    Enum.each(seeded_session_ids, fn session_id ->
+      assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+      refute assignment.owner == Node.self()
+      assert assignment.status == :active
+      assert Node.self() not in assignment.replicas
+    end)
+  end
+
   test "recovers local node readiness and claims after a local Khepri reset" do
     session_id = "routing-store-reset-recovery-#{System.unique_integer([:positive, :monotonic])}"
     now_ms = System.system_time(:millisecond)

@@ -34,6 +34,8 @@ Current coverage:
 - New claims must exclude draining nodes.
 - New claims must exclude ready-but-expired nodes.
 - New claims must stay evenly balanced across the eligible ready set.
+- New claims must continue to exclude an expired owner while that owner's existing
+  sessions are concurrently being failed over.
 
 Current coverage:
 - [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
@@ -181,7 +183,6 @@ Current coverage:
   - epoch regression on authoritative assignment updates
   - transfer commit on a non-moving assignment
   - watermark regression at publication time
-- No direct invariant yet for concurrent create traffic during lease-expiry failover.
 
 ## Rule
 If a property is important enough to mention in the contract or architecture docs, it
