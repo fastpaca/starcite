@@ -68,6 +68,7 @@ lag separately from Starcite's own replication.
 | `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
 | `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. This is the cluster membership list. |
 | `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
+| `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` | How long a node waits for drain completion before shutdown continues. Default `30000`. Increase this if a node can own hundreds of active sessions during rollouts. |
 | `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
 | `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
 | `STARCITE_RA_WAL_DATA_DIR` | Optional separate Ra WAL path. Put this on the lowest-latency persistent volume you have. |
@@ -148,6 +149,10 @@ For production rollouts, operate one node at a time:
    ```bash
    bin/starcite rpc "Starcite.Operations.wait_local_drained(30000)"
    ```
+
+   For production rollouts, keep the node's stop grace period at or above
+   `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS`. If the node is terminated earlier than that,
+   drain can be interrupted mid-transfer.
 
 3. **Restart/redeploy** the node — a restarted drained node rejoins as `ready`
    automatically once the release is healthy again.
