@@ -350,6 +350,74 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     )
   end
 
+  test "lease expiry promotes a moving target owner and preserves writes", %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-moving-failover-#{System.unique_integer([:positive, :monotonic])}"
+    seed_session = Session.new(session_id)
+    original_ttl = Application.get_env(:starcite, :routing_lease_ttl_ms)
+
+    on_exit(fn ->
+      restore_env(:routing_lease_ttl_ms, original_ttl)
+
+      Enum.each([peer_a, peer_b], fn peer_node ->
+        _ = restore_peer_env(peer_node, :routing_lease_ttl_ms, original_ttl)
+      end)
+    end)
+
+    Application.put_env(:starcite, :routing_lease_ttl_ms, 300)
+
+    Enum.each([peer_a, peer_b], fn peer_node ->
+      assert :ok =
+               :rpc.call(
+                 peer_node,
+                 Application,
+                 :put_env,
+                 [:starcite, :routing_lease_ttl_ms, 300],
+                 5_000
+               )
+    end)
+
+    assert :ok =
+             seed_moving_assignment(session_id, peer_a, Node.self(), [peer_a, Node.self(), peer_b])
+
+    assert :ok = seed_replica_set(peer_a, seed_session, [])
+
+    assert {:ok, reply} =
+             :rpc.call(
+               peer_a,
+               WritePath,
+               :append_event,
+               [session_id, append_input("moving-writer", 1)],
+               5_000
+             )
+
+    assert reply.seq == 1
+
+    assert :ok = stop_peer_data_plane(peer_a)
+
+    eventually(
+      fn ->
+        assert {:ok, %{owner: owner, epoch: 2, status: :active}} =
+                 Store.get_assignment(session_id, favor: :consistency)
+
+        assert owner == Node.self()
+        assert true == SessionQuorum.local_owner?(session_id)
+      end,
+      timeout: 6_000
+    )
+
+    assert {:ok, routed_reply} =
+             WritePath.append_event(session_id, append_input("moving-writer", 2))
+
+    assert routed_reply.seq == 2
+
+    eventually(fn ->
+      assert {:ok, session} = SessionQuorum.get_session(session_id)
+      assert session.last_seq == 2
+      assert_peer_events(peer_b, session_id, session.epoch, [1, 2])
+    end)
+  end
+
   defp start_peers(count) when is_integer(count) and count > 0 do
     Enum.map(1..count, fn _index ->
       start_named_peer(:"replication_peer_#{System.unique_integer([:positive])}")
@@ -473,6 +541,28 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
                  epoch: 1,
                  replicas: replicas,
                  status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               },
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    :ok
+  end
+
+  defp seed_moving_assignment(session_id, owner, target_owner, replicas)
+       when is_binary(session_id) and is_atom(owner) and is_atom(target_owner) and
+              is_list(replicas) do
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               %{
+                 owner: owner,
+                 epoch: 1,
+                 replicas: replicas,
+                 status: :moving,
+                 target_owner: target_owner,
+                 transfer_id: "xfer-#{System.unique_integer([:positive, :monotonic])}",
                  updated_at_ms: System.system_time(:millisecond)
                },
                %{async: false, reply_from: :local, timeout: 5_000}
