@@ -85,8 +85,39 @@ defmodule Starcite.Routing.Watcher do
       {:ok, %{status: :ready}} ->
         %{state | boot_rejoin_pending: false}
 
-      {:ok, %{status: status}} when status in [:draining, :drained] ->
+      {:ok, %{status: :draining}} ->
+        rejoin_draining_node(state)
+
+      {:ok, %{status: :drained}} ->
+        rejoin_drained_node(state)
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp rejoin_draining_node(state) when is_map(state) do
+    case Store.drain_status(Node.self()) do
+      {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} ->
+        _ = Store.mark_node_drained(Node.self(), :startup)
+        state
+
+      {:ok, _status} ->
+        state
+
+      {:error, _reason} ->
+        state
+    end
+  end
+
+  defp rejoin_drained_node(state) when is_map(state) do
+    case Store.drain_status(Node.self()) do
+      {:ok, %{active_owned_sessions: 0, moving_sessions: 0}} ->
         _ = Store.mark_node_ready(Node.self(), :startup)
+        state
+
+      {:ok, _status} ->
+        _ = Store.mark_node_draining(Node.self(), :startup)
         state
 
       {:error, _reason} ->
