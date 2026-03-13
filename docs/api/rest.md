@@ -5,8 +5,7 @@ and tail are the core operations, with a small session catalog around them.
 
 Sessions are Starcite-owned durable communication contexts. The public API
 supports the session stream and a small tenant-scoped session catalog; it is not
-intended to replace the customer's broader application database or arbitrary
-query layer.
+intended to replace your broader application database or arbitrary query layer.
 
 Operational endpoints such as `/health/*`, `/metrics`, and `pprof` live on a
 separate ops port and are not part of the public API surface.
