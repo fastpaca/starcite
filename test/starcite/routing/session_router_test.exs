@@ -17,6 +17,7 @@ defmodule Starcite.Routing.SessionRouterTest do
   end
 
   test "ensure_local_owner/2 returns not_leader with redirect hint when local node is not owner" do
+    attach_routing_fence_handler()
     session_id = "session-router-follower"
     owner = :"owner@127.0.0.1"
     assignment = %{owner: owner, epoch: 5}
@@ -26,6 +27,10 @@ defmodule Starcite.Routing.SessionRouterTest do
                self: :"follower@127.0.0.1",
                assignment: assignment
              )
+
+    assert_receive {:routing_fence_event, %{count: 1},
+                    %{session_id: ^session_id, source: :session_router, reason: :not_leader}},
+                   1_000
   end
 
   test "ensure_local_owner/2 returns not_leader when no assignment exists" do
@@ -35,6 +40,7 @@ defmodule Starcite.Routing.SessionRouterTest do
   end
 
   test "ensure_local_owner/2 rejects moving assignments" do
+    attach_routing_fence_handler()
     session_id = "session-router-moving"
     assignment = %{owner: Node.self(), epoch: 4, status: :moving}
 
@@ -43,6 +49,14 @@ defmodule Starcite.Routing.SessionRouterTest do
                self: Node.self(),
                assignment: assignment
              )
+
+    assert_receive {:routing_fence_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source: :session_router,
+                      reason: :ownership_transfer_in_progress
+                    }},
+                   1_000
   end
 
   test "local_owner_epoch/3 uses assignment epoch when available" do
@@ -281,6 +295,25 @@ defmodule Starcite.Routing.SessionRouterTest do
         [:starcite, :routing, :result],
         fn _event, measurements, metadata, pid ->
           send(pid, {:routing_result_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_routing_fence_handler do
+    handler_id = "routing-fence-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :fence],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_fence_event, measurements, metadata})
         end,
         test_pid
       )

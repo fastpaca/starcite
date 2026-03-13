@@ -230,6 +230,7 @@ defmodule Starcite.DataPlane.SessionLog do
          data,
          actions
        ) do
+    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
     {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
   end
 
@@ -238,6 +239,7 @@ defmodule Starcite.DataPlane.SessionLog do
          data,
          actions
        ) do
+    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
     {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
   end
 
@@ -292,6 +294,7 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp process_single({:call, from, {:ack_archived, _upto_seq, _replicas}}, data, actions) do
+    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
     {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
   end
 
@@ -355,6 +358,7 @@ defmodule Starcite.DataPlane.SessionLog do
           :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
           :ok = publish_events(next_session, events)
           :ok = SessionStore.put_session(next_session)
+          run_test_hook(:after_commit_before_reply, next_session, events)
 
           reply = finalize_success_outcome(outcome, next_session.epoch, next_session.archived_seq)
           {%{data | session: next_session}, actions ++ [{:reply, request.from, {:ok, reply}}]}
@@ -394,6 +398,7 @@ defmodule Starcite.DataPlane.SessionLog do
           :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
           :ok = publish_events(next_session, committed_events)
           :ok = SessionStore.put_session(next_session)
+          run_test_hook(:after_commit_before_reply, next_session, committed_events)
 
           reply_actions =
             Enum.map(outcomes, fn outcome ->
@@ -691,4 +696,15 @@ defmodule Starcite.DataPlane.SessionLog do
        do: tenant_id
 
   defp event_principal_tenant_id(_metadata), do: nil
+
+  defp run_test_hook(stage, %Session{} = session, events)
+       when is_atom(stage) and is_list(events) do
+    case :persistent_term.get({__MODULE__, :test_hook}, nil) do
+      hook when is_function(hook, 3) ->
+        hook.(stage, session, events)
+
+      _other ->
+        :ok
+    end
+  end
 end

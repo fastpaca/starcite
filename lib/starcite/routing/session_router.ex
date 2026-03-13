@@ -91,12 +91,17 @@ defmodule Starcite.Routing.SessionRouter do
         :ok
 
       {:ok, %{status: :moving}} ->
+        :ok =
+          Telemetry.routing_fence(session_id, :session_router, :ownership_transfer_in_progress)
+
         {:error, :ownership_transfer_in_progress}
 
       {:ok, %{owner: owner}} when is_atom(owner) ->
+        :ok = Telemetry.routing_fence(session_id, :session_router, :not_leader)
         {:error, {:not_leader, {:session_owner, owner}}}
 
       {:error, :not_found} ->
+        :ok = Telemetry.routing_fence(session_id, :session_router, :not_leader)
         {:error, :not_leader}
 
       {:error, reason} ->
@@ -223,6 +228,9 @@ defmodule Starcite.Routing.SessionRouter do
               refreshes_remaining >= 0 and is_integer(refresh_count) and refresh_count >= 0 do
     case refresh_assignment(session_id, route_opts) do
       {:ok, %{status: :moving}} ->
+        :ok =
+          Telemetry.routing_fence(session_id, :session_router, :ownership_transfer_in_progress)
+
         {{:error, :ownership_transfer_in_progress}, refresh_count}
 
       {:ok, %{owner: owner}} when is_atom(owner) and owner != previous_owner ->
@@ -241,6 +249,7 @@ defmodule Starcite.Routing.SessionRouter do
         )
 
       {:ok, %{owner: ^previous_owner}} ->
+        :ok = Telemetry.routing_fence(session_id, :session_router, :not_leader)
         {{:error, {:routing_rpc_failed, previous_owner, :stale_assignment}}, refresh_count}
 
       {:error, reason} ->
