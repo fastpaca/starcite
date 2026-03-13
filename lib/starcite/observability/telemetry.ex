@@ -581,6 +581,43 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one append lifecycle boundary inside the session log.
+
+  Measurements:
+    - `:count` - fixed at 1 per boundary event
+    - `:event_count` - number of events in the append operation
+
+  Metadata:
+    - `:node`
+    - `:session_id`
+    - `:tenant_id`
+    - `:stage` (`:before_quorum_replicate` or `:after_commit_before_reply`)
+  """
+  @spec append_boundary(
+          String.t(),
+          String.t(),
+          :before_quorum_replicate | :after_commit_before_reply,
+          non_neg_integer()
+        ) :: :ok
+  def append_boundary(session_id, tenant_id, stage, event_count)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and stage in [:before_quorum_replicate, :after_commit_before_reply] and
+             is_integer(event_count) and event_count >= 0 do
+    execute_if_enabled(
+      [:starcite, :append, :boundary],
+      %{count: 1, event_count: event_count},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        tenant_id: tenant_id,
+        stage: stage
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit telemetry for one routing transfer lifecycle event.
 
   Measurements:

@@ -356,6 +356,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_event_store_metrics,
       [
+        counter("starcite_append_boundary_total",
+          event_name: [:starcite, :append, :boundary],
+          measurement: :count,
+          description: "Append lifecycle boundary events inside the session log",
+          tags: [:node, :tenant_id, :stage]
+        ),
         counter("starcite_event_store_backpressure_total",
           event_name: [:starcite, :event_store, :backpressure],
           measurement: :count,

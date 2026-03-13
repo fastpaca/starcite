@@ -352,14 +352,28 @@ defmodule Starcite.DataPlane.SessionLog do
          {:ok, next_session, next_events, outcome} <- execute_append_request(session, request) do
       next_session = normalize_session_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
-      run_test_hook(:before_quorum_replicate, next_session, events)
+
+      :ok =
+        Telemetry.append_boundary(
+          next_session.id,
+          next_session.tenant_id,
+          :before_quorum_replicate,
+          length(events)
+        )
 
       case SessionQuorum.replicate_state(next_session, events, request.replicas) do
         :ok ->
           :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
           :ok = publish_events(next_session, events)
           :ok = SessionStore.put_session(next_session)
-          run_test_hook(:after_commit_before_reply, next_session, events)
+
+          :ok =
+            Telemetry.append_boundary(
+              next_session.id,
+              next_session.tenant_id,
+              :after_commit_before_reply,
+              length(events)
+            )
 
           reply = finalize_success_outcome(outcome, next_session.epoch, next_session.archived_seq)
           {%{data | session: next_session}, actions ++ [{:reply, request.from, {:ok, reply}}]}
@@ -393,14 +407,28 @@ defmodule Starcite.DataPlane.SessionLog do
 
     if successful_outcomes?(outcomes) do
       committed_events = put_events_epoch(events_acc, next_session.epoch)
-      run_test_hook(:before_quorum_replicate, next_session, committed_events)
+
+      :ok =
+        Telemetry.append_boundary(
+          next_session.id,
+          next_session.tenant_id,
+          :before_quorum_replicate,
+          length(committed_events)
+        )
 
       case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
         :ok ->
           :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
           :ok = publish_events(next_session, committed_events)
           :ok = SessionStore.put_session(next_session)
-          run_test_hook(:after_commit_before_reply, next_session, committed_events)
+
+          :ok =
+            Telemetry.append_boundary(
+              next_session.id,
+              next_session.tenant_id,
+              :after_commit_before_reply,
+              length(committed_events)
+            )
 
           reply_actions =
             Enum.map(outcomes, fn outcome ->
@@ -698,15 +726,4 @@ defmodule Starcite.DataPlane.SessionLog do
        do: tenant_id
 
   defp event_principal_tenant_id(_metadata), do: nil
-
-  defp run_test_hook(stage, %Session{} = session, events)
-       when is_atom(stage) and is_list(events) do
-    case :persistent_term.get({__MODULE__, :test_hook}, nil) do
-      hook when is_function(hook, 3) ->
-        hook.(stage, session, events)
-
-      _other ->
-        :ok
-    end
-  end
 end

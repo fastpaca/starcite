@@ -102,7 +102,7 @@ end
 defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.DataPlane.{EventStore, SessionLog, SessionQuorum, SessionStore}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Operations
   alias Starcite.Routing.Store
   alias Starcite.Session
@@ -532,22 +532,10 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   } do
     [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-owner-crash-after-commit-#{System.unique_integer([:positive, :monotonic])}"
-    hook_key = {SessionLog, :test_hook}
-
-    on_exit(fn ->
-      :persistent_term.erase(hook_key)
-    end)
+    attach_append_boundary_crash_handler(session_id, :after_commit_before_reply)
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
     assert :ok = seed_replica_set(Node.self(), Session.new(session_id), [])
-
-    :persistent_term.put(
-      hook_key,
-      fn :after_commit_before_reply, %Session{id: ^session_id}, [_event] ->
-        :persistent_term.erase(hook_key)
-        Process.exit(self(), :kill)
-      end
-    )
 
     assert {:ok, reply} =
              WritePath.append_event(session_id, append_input("crash-writer", 1))
@@ -570,22 +558,10 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   test "owner crash before quorum replicate does not leak the append", %{peers: peers} do
     [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-owner-crash-before-quorum-#{System.unique_integer([:positive, :monotonic])}"
-    hook_key = {SessionLog, :test_hook}
-
-    on_exit(fn ->
-      :persistent_term.erase(hook_key)
-    end)
+    attach_append_boundary_crash_handler(session_id, :before_quorum_replicate)
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
     assert :ok = seed_replica_set(Node.self(), Session.new(session_id), [])
-
-    :persistent_term.put(
-      hook_key,
-      fn :before_quorum_replicate, %Session{id: ^session_id}, [_event] ->
-        :persistent_term.erase(hook_key)
-        Process.exit(self(), :kill)
-      end
-    )
 
     assert {:ok, reply} =
              WritePath.append_event(session_id, append_input("crash-before-quorum", 1))
@@ -602,6 +578,41 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     assert {:ok, events} = Starcite.ReadPath.get_events_from_cursor(session_id, 0, 10)
     assert Enum.map(events, & &1.seq) == [1]
+  end
+
+  defp attach_append_boundary_crash_handler(session_id, stage)
+       when is_binary(session_id) and session_id != "" and
+              stage in [:before_quorum_replicate, :after_commit_before_reply] do
+    handler_id = "append-boundary-crash-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    fired = start_supervised!({Agent, fn -> false end})
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :append, :boundary],
+        fn _event,
+           _measurements,
+           metadata,
+           %{test_pid: test_pid, session_id: session_id, stage: stage, fired: fired} ->
+          if metadata.session_id == session_id and metadata.stage == stage do
+            already_fired =
+              Agent.get_and_update(fired, fn current ->
+                {current, true}
+              end)
+
+            unless already_fired do
+              send(test_pid, {:append_boundary_hit, stage, metadata})
+              Process.exit(self(), :kill)
+            end
+          end
+        end,
+        %{test_pid: test_pid, session_id: session_id, stage: stage, fired: fired}
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
   end
 
   defp start_peers(count) when is_integer(count) and count > 0 do
