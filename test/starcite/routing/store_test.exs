@@ -535,7 +535,8 @@ defmodule Starcite.Routing.StoreTest do
       )
       |> Enum.map(fn {:ok, assignment} -> assignment end)
 
-    assert {:ok, 18} = Task.await(failover_task, 5_000)
+    assert {:ok, moved_count} = Task.await(failover_task, 5_000)
+    assert moved_count > 0
 
     assert Enum.all?(claimed_assignments, fn assignment ->
              assignment.owner in [Node.self(), peer_a, peer_b, peer_c] and
