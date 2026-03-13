@@ -483,6 +483,155 @@ defmodule Starcite.Routing.StoreTest do
     assert node_name == Atom.to_string(Node.self())
   end
 
+  test "emits transfer telemetry when drain transfers start and commit" do
+    peer = :"routing-store-transfer-telemetry@127.0.0.1"
+
+    session_id =
+      "routing-store-transfer-telemetry-#{System.unique_integer([:positive, :monotonic])}"
+
+    transfer_handler = "routing-transfer-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        transfer_handler,
+        [:starcite, :routing, :transfer],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_transfer_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(transfer_handler)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    TestHelper.reset()
+
+    assert :ok = Store.mark_node_draining(Node.self())
+
+    assert :ok =
+             put_node_record(peer, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), peer],
+               status: :active,
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.start_drain_transfers(Node.self())
+
+    assert_receive {:routing_transfer_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source_node: source_node,
+                      target_node: target_node,
+                      action: :started
+                    }},
+                   1_000
+
+    assert source_node == Atom.to_string(Node.self())
+    assert target_node == Atom.to_string(peer)
+
+    assert {:ok, %{transfer_id: transfer_id}} =
+             Store.get_assignment(session_id, favor: :consistency)
+
+    assert {:ok, _assignment} = Store.commit_transfer(session_id, transfer_id)
+
+    assert_receive {:routing_transfer_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source_node: ^source_node,
+                      target_node: ^target_node,
+                      action: :committed
+                    }},
+                   1_000
+  end
+
+  test "emits failover telemetry when lease expiry reassigns ownership" do
+    peer = :"routing-store-failover-telemetry@127.0.0.1"
+    standby = :"routing-store-failover-target@127.0.0.1"
+
+    session_id =
+      "routing-store-failover-telemetry-#{System.unique_integer([:positive, :monotonic])}"
+
+    failover_handler = "routing-failover-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        failover_handler,
+        [:starcite, :routing, :failover],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_failover_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(failover_handler)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer, standby])
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(peer, %{
+               status: :drained,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(standby, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_assignment(session_id, %{
+               owner: Node.self(),
+               epoch: 1,
+               replicas: [Node.self(), peer, standby],
+               status: :active,
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, 1} = Store.reassign_sessions_from(Node.self())
+
+    assert_receive {:routing_failover_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source_node: source_node,
+                      target_node: target_node,
+                      reason: :lease_expired
+                    }},
+                   1_000
+
+    assert source_node == Atom.to_string(Node.self())
+    assert target_node == Atom.to_string(standby)
+  end
+
   defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
     :khepri.put(Store.store_id(), [:sessions, session_id], assignment, khepri_opts())
   end

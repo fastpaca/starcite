@@ -152,8 +152,14 @@ defmodule Starcite.Routing.Store do
                 |> Map.put(:updated_at_ms, started_at_ms)
 
               case compare_and_swap_assignment(session_id, assignment, next) do
-                :ok -> {acc + 1, Map.update(counts, target_node, 1, &(&1 + 1))}
-                {:error, _reason} -> {acc, counts}
+                :ok ->
+                  :ok =
+                    Telemetry.routing_transfer(session_id, owner_node, target_node, :started)
+
+                  {acc + 1, Map.update(counts, target_node, 1, &(&1 + 1))}
+
+                {:error, _reason} ->
+                  {acc, counts}
               end
           end
         end)
@@ -1026,6 +1032,7 @@ defmodule Starcite.Routing.Store do
            end) do
         :ok ->
           :ok = cache_assignment(session_id, next)
+          :ok = Telemetry.routing_transfer(session_id, current.owner, next.owner, :committed)
           {:ok, next}
 
         {:error, reason} ->
@@ -1066,6 +1073,7 @@ defmodule Starcite.Routing.Store do
            end) do
         :ok ->
           :ok = cache_assignment(session_id, next)
+          :ok = Telemetry.routing_failover(session_id, current.owner, next.owner, :lease_expired)
           :ok
 
         {:error, reason} ->

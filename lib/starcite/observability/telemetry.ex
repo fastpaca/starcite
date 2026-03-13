@@ -550,6 +550,66 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
+  Emit telemetry for one routing transfer lifecycle event.
+
+  Measurements:
+    - `:count` - fixed at 1 per transfer event
+
+  Metadata:
+    - `:session_id`
+    - `:source_node`
+    - `:target_node`
+    - `:action` (`:started` or `:committed`)
+  """
+  @spec routing_transfer(String.t(), node(), node(), :started | :committed) :: :ok
+  def routing_transfer(session_id, source_node, target_node, action)
+      when is_binary(session_id) and session_id != "" and is_atom(source_node) and
+             is_atom(target_node) and action in [:started, :committed] do
+    execute_if_enabled(
+      [:starcite, :routing, :transfer],
+      %{count: 1},
+      %{
+        session_id: session_id,
+        source_node: Atom.to_string(source_node),
+        target_node: Atom.to_string(target_node),
+        action: action
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one routing failover activation.
+
+  Measurements:
+    - `:count` - fixed at 1 per failover activation
+
+  Metadata:
+    - `:session_id`
+    - `:source_node`
+    - `:target_node`
+    - `:reason` (`:lease_expired`)
+  """
+  @spec routing_failover(String.t(), node(), node(), :lease_expired) :: :ok
+  def routing_failover(session_id, source_node, target_node, reason)
+      when is_binary(session_id) and session_id != "" and is_atom(source_node) and
+             is_atom(target_node) and reason in [:lease_expired] do
+    execute_if_enabled(
+      [:starcite, :routing, :failover],
+      %{count: 1},
+      %{
+        session_id: session_id,
+        source_node: Atom.to_string(source_node),
+        target_node: Atom.to_string(target_node),
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
   Emit a successful session create event.
   """
   @spec session_create(String.t(), String.t()) :: :ok

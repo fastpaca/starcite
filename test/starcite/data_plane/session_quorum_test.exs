@@ -444,6 +444,89 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
   end
 
+  test "stale former owner rejects appends after authoritative ownership moves", %{peers: peers} do
+    [peer_a, peer_b] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-stale-owner-#{System.unique_integer([:positive, :monotonic])}"
+
+    initial_assignment = %{
+      owner: peer_a,
+      epoch: 1,
+      replicas: [peer_a, Node.self(), peer_b],
+      status: :active,
+      updated_at_ms: System.system_time(:millisecond)
+    }
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               initial_assignment,
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    assert :ok = seed_replica_set(peer_a, Session.new(session_id), [])
+
+    assert {:ok, reply} =
+             :rpc.call(
+               peer_a,
+               WritePath,
+               :append_event,
+               [session_id, append_input("stale-owner-writer", 1)],
+               5_000
+             )
+
+    assert reply.seq == 1
+
+    authoritative_assignment = %{
+      owner: Node.self(),
+      epoch: 2,
+      replicas: [Node.self(), peer_a, peer_b],
+      status: :active,
+      updated_at_ms: System.system_time(:millisecond)
+    }
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               authoritative_assignment,
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    stale_assignment = initial_assignment
+
+    assert true =
+             :rpc.call(
+               peer_a,
+               :ets,
+               :insert,
+               [:starcite_routing_assignment_cache, {session_id, stale_assignment}],
+               5_000
+             )
+
+    assert {:error, reason} =
+             :rpc.call(
+               peer_a,
+               SessionQuorum,
+               :append_event,
+               [session_id, append_input("stale-owner-writer", 2), nil],
+               5_000
+             )
+
+    assert reason in [:not_owner, :ownership_transfer_in_progress] or
+             match?({:not_leader, _}, reason)
+
+    assert {:ok, routed_reply} =
+             WritePath.append_event(session_id, append_input("fresh-owner-writer", 2))
+
+    assert routed_reply.seq == 2
+
+    eventually(fn ->
+      assert false == :rpc.call(peer_a, SessionQuorum, :local_owner?, [session_id], 5_000)
+      assert true == SessionQuorum.local_owner?(session_id)
+    end)
+  end
+
   defp start_peers(count) when is_integer(count) and count > 0 do
     Enum.map(1..count, fn _index ->
       start_named_peer(:"replication_peer_#{System.unique_integer([:positive])}")

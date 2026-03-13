@@ -274,6 +274,18 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Routing node lifecycle transitions by source",
           tags: [:node, :from, :to, :source]
+        ),
+        counter("starcite_routing_transfer_total",
+          event_name: [:starcite, :routing, :transfer],
+          measurement: :count,
+          description: "Routing transfer lifecycle events",
+          tags: [:source_node, :target_node, :action]
+        ),
+        counter("starcite_routing_failover_total",
+          event_name: [:starcite, :routing, :failover],
+          measurement: :count,
+          description: "Routing failover activations by source and target node",
+          tags: [:source_node, :target_node, :reason]
         )
       ]
     )
