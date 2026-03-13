@@ -195,6 +195,64 @@ defmodule Starcite.RuntimeTest do
       assert :ok = Operations.wait_local_ready(5_000)
       assert {:ok, %{status: :ready}} = RoutingStore.node_record(Node.self(), favor: :consistency)
     end
+
+    test "watcher startup keeps a draining node draining while active sessions remain" do
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self()],
+                 status: :active,
+                 updated_at_ms: now_ms
+               })
+
+      assert :ok = RoutingStore.mark_node_draining(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :draining
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+
+      Process.sleep(250)
+      assert RoutingStore.node_status(Node.self()) == :draining
+      assert {:error, :timeout} = Operations.wait_local_ready(500)
+    end
+
+    test "watcher startup reopens a drained node back to draining when drain work remains" do
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self()],
+                 status: :moving,
+                 target_owner: :"peer@127.0.0.1",
+                 transfer_id: "xfer-startup-reopen",
+                 updated_at_ms: now_ms
+               })
+
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+
+      Process.sleep(250)
+      assert RoutingStore.node_status(Node.self()) == :draining
+      assert {:error, :timeout} = Operations.wait_local_ready(500)
+    end
   end
 
   describe "append_event/3" do

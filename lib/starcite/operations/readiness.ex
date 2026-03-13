@@ -13,9 +13,13 @@ defmodule Starcite.Operations.Readiness do
   @spec local_readiness(keyword()) :: map()
   def local_readiness(_opts \\ []) do
     cond do
-      local_drained() ->
+      Store.node_status(Node.self()) in [:draining, :drained] ->
         not_ready_result(:draining, %{}, %{
-          routing_store: %{ready?: false, reason: :draining, detail: %{}}
+          routing_store: %{
+            ready?: false,
+            reason: :draining,
+            detail: %{status: Store.node_status(Node.self())}
+          }
         })
 
       Store.running?() ->
