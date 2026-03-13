@@ -4,6 +4,12 @@ Starcite is a clustered session-stream service. Each session is an ordered,
 append-only event log, optimized for low-latency durable appends with cursor-based
 replay.
 
+A Starcite session is a managed durable communication context, not a replacement
+for the customer's broader application database. Starcite owns the session
+stream, replay semantics, and minimal session envelope; customer applications
+remain authoritative for richer business objects and broad query surfaces. See
+the [Session Contract](session-contract.md).
+
 ![Starcite Architecture](img/architecture.png)
 
 The system has three layers: **edge**, **data plane**, and **control plane**.
@@ -12,8 +18,10 @@ The system has three layers: **edge**, **data plane**, and **control plane**.
 
 The edge handles client connections, auth, and protocol translation.
 
-**Session API** — REST endpoints for creating sessions, appending events, and listing
-sessions. Validates input, enforces tenant fencing, and delegates to the data plane.
+**Session API** — REST endpoints for creating sessions, appending events, and a
+basic tenant-scoped session catalog. Validates input, enforces tenant fencing,
+and delegates to the data plane. It is not intended to act as an arbitrary
+session query engine.
 
 **Tailer** — WebSocket handler for `tail`. Upgrades to a long-lived process that
 manages replay and live streaming. This is the only stateful process per client
@@ -27,6 +35,9 @@ WebSocket connections accept the token as a header or query param.
 
 The data plane owns session state, event ordering, and durable storage. Writes run on
 write nodes only (consensus). Reads run on every node.
+
+Session state here means the durable stream plus the minimal session envelope
+required to create, authorize, route, and resume that stream.
 
 ### Router
 
@@ -147,6 +158,10 @@ retries and overlapping flushes.
 
 The archiver never touches the critical path. If it falls behind or fails, appends
 and tail continue unaffected.
+
+Archive backends are optimized for durable replay and recovery, not arbitrary
+session query semantics. If Starcite needs richer session catalog behavior, that
+catalog must be designed explicitly rather than inferred from archive layout.
 
 ## Control plane
 
