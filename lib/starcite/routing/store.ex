@@ -1064,7 +1064,8 @@ defmodule Starcite.Routing.Store do
             committed_at_ms
           )
 
-        with :ok <- ensure_assignment_epoch_progression(session_id, current, next, :commit_transfer) do
+        with :ok <-
+               ensure_assignment_epoch_progression(session_id, current, next, :commit_transfer) do
           case khepri_call(fn ->
                  :khepri.compare_and_swap(
                    store_id(),

@@ -270,7 +270,10 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     peers: peers
   } do
     [peer_a | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
-    session_id = "ses-bootstrap-empty-missing-catalog-#{System.unique_integer([:positive, :monotonic])}"
+
+    session_id =
+      "ses-bootstrap-empty-missing-catalog-#{System.unique_integer([:positive, :monotonic])}"
+
     principal = %Principal{tenant_id: "acme", id: "creator-1", type: :service}
     session = Session.new(session_id, tenant_id: "acme", creator_principal: principal)
 
@@ -284,7 +287,10 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     peers: peers
   } do
     [peer_a | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
-    session_id = "ses-bootstrap-empty-persisted-catalog-#{System.unique_integer([:positive, :monotonic])}"
+
+    session_id =
+      "ses-bootstrap-empty-persisted-catalog-#{System.unique_integer([:positive, :monotonic])}"
+
     principal = %Principal{tenant_id: "acme", id: "creator-1", type: :service}
     session = Session.new(session_id, tenant_id: "acme", creator_principal: principal)
 
@@ -963,7 +969,10 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     peers: peers
   } do
     [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
-    session_id = "ses-owner-timeout-after-commit-#{System.unique_integer([:positive, :monotonic])}"
+
+    session_id =
+      "ses-owner-timeout-after-commit-#{System.unique_integer([:positive, :monotonic])}"
+
     attach_append_boundary_delay_handler(session_id, :after_commit_before_reply, 2_500)
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
