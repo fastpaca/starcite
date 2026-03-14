@@ -254,6 +254,76 @@ defmodule Starcite.RuntimeTest do
       assert {:ok, %{status: :ready}} = RoutingStore.node_record(Node.self(), favor: :consistency)
     end
 
+    test "local readiness rejects an expired authoritative lease even with a stale ready cache" do
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        assert :ok = RoutingStore.renew_local_lease()
+      end)
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: now_ms + 60_000,
+            updated_at_ms: now_ms
+          }
+        })
+
+      assert :ok =
+               :khepri.put(
+                 RoutingStore.store_id(),
+                 [:nodes, Atom.to_string(Node.self())],
+                 %{
+                   status: :ready,
+                   lease_until_ms: now_ms - 1,
+                   updated_at_ms: now_ms
+                 },
+                 %{async: false, reply_from: :local, timeout: 5_000}
+               )
+
+      readiness = Operations.local_readiness(refresh?: true)
+      refute readiness.ready?
+      assert readiness.reason == :lease_expired
+      assert readiness.detail.lease_until_ms == now_ms - 1
+      assert {503, %{reason: "lease_expired"}} = StarciteWeb.Health.ready()
+    end
+
+    test "local readiness rejects a missing authoritative node record even with a stale ready cache" do
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        assert :ok = RoutingStore.renew_local_lease()
+      end)
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: now_ms + 60_000,
+            updated_at_ms: now_ms
+          }
+        })
+
+      assert :ok =
+               :khepri.delete(
+                 RoutingStore.store_id(),
+                 [:nodes, Atom.to_string(Node.self())],
+                 %{async: false, reply_from: :local, timeout: 5_000}
+               )
+
+      assert {:error, {:khepri, :node_not_found, _}} =
+               RoutingStore.node_record(Node.self(), favor: :consistency)
+
+      readiness = Operations.local_readiness(refresh?: true)
+      refute readiness.ready?
+      assert readiness.reason == :routing_sync
+      assert readiness.checks.routing_store.detail.status == :unknown
+      assert {503, %{reason: "routing_sync"}} = StarciteWeb.Health.ready()
+    end
+
     test "watcher startup keeps a draining node draining while active sessions remain" do
       id = unique_id("ses")
       now_ms = System.system_time(:millisecond)

@@ -29,6 +29,7 @@ defmodule StarciteWeb.Health do
   end
 
   defp readiness_reason(:draining, _mode), do: "draining"
+  defp readiness_reason(:lease_expired, _mode), do: "lease_expired"
   defp readiness_reason(_reason, _mode), do: "routing_sync"
 
   defp put_detail(body, detail) when map_size(detail) == 0, do: body
