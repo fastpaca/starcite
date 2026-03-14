@@ -66,7 +66,9 @@ defmodule StarciteWeb.Auth.JWKSTest do
   test "stale cached signer returns cache immediately and refreshes asynchronously" do
     attach_auth_handler()
     test_pid = self()
-    {config, _private_key, kid, bypass} = jwks_fixture!(jwks_refresh_ms: 10)
+
+    {config, _private_key, kid, bypass} =
+      jwks_fixture!(jwks_refresh_ms: 10, jwks_hard_expiry_ms: 1_000)
 
     assert {:ok, signer} = JWKS.fetch_signing_key(config, kid)
     assert is_struct(signer, Joken.Signer)
@@ -109,6 +111,33 @@ defmodule StarciteWeb.Auth.JWKSTest do
     assert Enum.all?(results, fn result -> match?({:ok, %Joken.Signer{}}, result) end)
   end
 
+  test "cached signer expires at configured hard expiry even when refresh interval is longer" do
+    {config, _private_key, kid, bypass} =
+      jwks_fixture!(jwks_refresh_ms: 1_000, jwks_hard_expiry_ms: 100)
+
+    assert {:ok, signer} = JWKS.fetch_signing_key(config, kid)
+    assert is_struct(signer, Joken.Signer)
+    assert {:ok, :fresh, ^signer} = JWKS.cached_signing_key(config, kid)
+
+    Process.sleep(150)
+
+    assert :miss = JWKS.cached_signing_key(config, kid)
+
+    Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(
+        200,
+        Jason.encode!(
+          AuthTestSupport.jwks_for_private_key(AuthTestSupport.generate_rsa_private_key(), kid)
+        )
+      )
+    end)
+
+    assert {:ok, refreshed_signer} = JWKS.fetch_signing_key(config, kid)
+    assert is_struct(refreshed_signer, Joken.Signer)
+  end
+
   defp jwks_fixture!(overrides \\ []) do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
@@ -124,6 +153,12 @@ defmodule StarciteWeb.Auth.JWKSTest do
     config = %{
       jwks_url: "http://localhost:#{bypass.port}#{@jwks_path}",
       jwks_refresh_ms: Keyword.get(overrides, :jwks_refresh_ms, 60_000),
+      jwks_hard_expiry_ms:
+        Keyword.get(
+          overrides,
+          :jwks_hard_expiry_ms,
+          Keyword.get(overrides, :jwks_refresh_ms, 60_000)
+        ),
       issuer: @issuer,
       audience: @audience,
       mode: :jwt,

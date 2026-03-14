@@ -81,6 +81,11 @@ lag separately from Starcite's own replication.
 **JWT auth** (when `STARCITE_AUTH_MODE=jwt`) additionally requires:
 `STARCITE_AUTH_JWT_ISSUER`, `STARCITE_AUTH_JWT_AUDIENCE`, `STARCITE_AUTH_JWKS_URL`.
 
+Optional JWT cache controls:
+- `STARCITE_AUTH_JWKS_REFRESH_MS` controls background JWKS refresh cadence.
+- `STARCITE_AUTH_JWKS_HARD_EXPIRY_MS` controls how long a cached signing key remains
+  valid without a successful refresh. Default: same as `STARCITE_AUTH_JWKS_REFRESH_MS`.
+
 **S3 backend** additionally requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`.
 Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
 `STARCITE_S3_SECRET_ACCESS_KEY`, `STARCITE_S3_PATH_STYLE`.

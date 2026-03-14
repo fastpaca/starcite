@@ -10,7 +10,8 @@ defmodule StarciteWeb.Auth.Config do
           audience: String.t() | nil,
           jwks_url: String.t() | nil,
           jwt_leeway_seconds: non_neg_integer(),
-          jwks_refresh_ms: pos_integer()
+          jwks_refresh_ms: pos_integer(),
+          jwks_hard_expiry_ms: pos_integer()
         }
 
   @spec load() :: t()
@@ -21,7 +22,13 @@ defmodule StarciteWeb.Auth.Config do
     base = %{
       mode: mode,
       jwt_leeway_seconds: Map.get(opts, :jwt_leeway_seconds, @default_jwt_leeway_seconds),
-      jwks_refresh_ms: Map.get(opts, :jwks_refresh_ms, @default_jwks_refresh_ms)
+      jwks_refresh_ms: Map.get(opts, :jwks_refresh_ms, @default_jwks_refresh_ms),
+      jwks_hard_expiry_ms:
+        Map.get(
+          opts,
+          :jwks_hard_expiry_ms,
+          Map.get(opts, :jwks_refresh_ms, @default_jwks_refresh_ms)
+        )
     }
 
     case mode do
