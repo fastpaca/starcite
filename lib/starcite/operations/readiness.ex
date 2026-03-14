@@ -12,22 +12,53 @@ defmodule Starcite.Operations.Readiness do
 
   @spec local_readiness(keyword()) :: map()
   def local_readiness(_opts \\ []) do
+    now_ms = System.system_time(:millisecond)
+
     cond do
-      Store.node_status(Node.self()) in [:draining, :drained] ->
-        not_ready_result(:draining, %{}, %{
+      not Store.running?() ->
+        not_ready_result(:routing_sync, %{}, %{
+          routing_store: %{ready?: false, reason: :routing_sync, detail: %{}}
+        })
+
+      true ->
+        local_routing_readiness(now_ms)
+    end
+  end
+
+  defp local_routing_readiness(now_ms) when is_integer(now_ms) and now_ms >= 0 do
+    case Store.node_record(Node.self(), favor: :consistency) do
+      {:ok, %{status: :ready, lease_until_ms: lease_until_ms}}
+      when is_integer(lease_until_ms) and lease_until_ms > now_ms ->
+        ready_result(%{
           routing_store: %{
-            ready?: false,
-            reason: :draining,
-            detail: %{status: Store.node_status(Node.self())}
+            ready?: true,
+            reason: :ok,
+            detail: %{status: :ready, lease_until_ms: lease_until_ms}
           }
         })
 
-      Store.running?() ->
-        ready_result(%{routing_store: %{ready?: true, reason: :ok, detail: %{}}})
+      {:ok, %{status: status}} when status in [:draining, :drained] ->
+        not_ready_result(:draining, %{status: status}, %{
+          routing_store: %{
+            ready?: false,
+            reason: :draining,
+            detail: %{status: status}
+          }
+        })
 
-      true ->
+      {:ok, %{status: :ready, lease_until_ms: lease_until_ms}}
+      when is_integer(lease_until_ms) ->
+        not_ready_result(:lease_expired, %{lease_until_ms: lease_until_ms}, %{
+          routing_store: %{
+            ready?: false,
+            reason: :lease_expired,
+            detail: %{status: :ready, lease_until_ms: lease_until_ms}
+          }
+        })
+
+      _other ->
         not_ready_result(:routing_sync, %{}, %{
-          routing_store: %{ready?: false, reason: :routing_sync, detail: %{}}
+          routing_store: %{ready?: false, reason: :routing_sync, detail: %{status: :unknown}}
         })
     end
   end
