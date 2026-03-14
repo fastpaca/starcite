@@ -923,6 +923,30 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     assert Enum.map(events, & &1.seq) == [1]
   end
 
+  test "owner timeout after commit before reply surfaces timeout without internal replay", %{
+    peers: peers
+  } do
+    [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-owner-timeout-after-commit-#{System.unique_integer([:positive, :monotonic])}"
+    attach_append_boundary_delay_handler(session_id, :after_commit_before_reply, 2_500)
+
+    put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
+    assert :ok = seed_replica_set(Node.self(), Session.new(session_id), [])
+
+    assert {:timeout, :session_log_call_timeout} =
+             WritePath.append_event(session_id, append_input("timeout-writer", 1))
+
+    eventually(fn ->
+      assert {:ok, session} = SessionQuorum.get_session(session_id)
+      assert session.last_seq == 1
+      assert_peer_events(peer_a, session_id, session.epoch, [1])
+      assert_peer_events(peer_b, session_id, session.epoch, [1])
+    end)
+
+    assert {:ok, events} = Starcite.ReadPath.get_events_from_cursor(session_id, 0, 10)
+    assert Enum.map(events, & &1.seq) == [1]
+  end
+
   defp attach_append_boundary_crash_handler(session_id, stage)
        when is_binary(session_id) and session_id != "" and
               stage in [:before_quorum_replicate, :after_commit_before_reply] do
@@ -951,6 +975,40 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
           end
         end,
         %{test_pid: test_pid, session_id: session_id, stage: stage, fired: fired}
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_append_boundary_delay_handler(session_id, stage, sleep_ms)
+       when is_binary(session_id) and session_id != "" and
+              stage in [:before_quorum_replicate, :after_commit_before_reply] and
+              is_integer(sleep_ms) and sleep_ms > 0 do
+    handler_id = "append-boundary-delay-#{System.unique_integer([:positive, :monotonic])}"
+    fired = start_supervised!({Agent, fn -> false end})
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :append, :boundary],
+        fn _event,
+           _measurements,
+           metadata,
+           %{session_id: session_id, stage: stage, sleep_ms: sleep_ms, fired: fired} ->
+          if metadata.session_id == session_id and metadata.stage == stage do
+            already_fired =
+              Agent.get_and_update(fired, fn current ->
+                {current, true}
+              end)
+
+            unless already_fired do
+              Process.sleep(sleep_ms)
+            end
+          end
+        end,
+        %{session_id: session_id, stage: stage, sleep_ms: sleep_ms, fired: fired}
       )
 
     on_exit(fn ->
