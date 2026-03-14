@@ -38,6 +38,10 @@ write nodes only (consensus). Reads run on every node.
 Session state here means the durable stream plus the minimal session envelope
 needed to create, authorize, route, and resume it.
 
+In practice that splits into a small session header and a separate write state.
+The header carries identity and catalog fields. The write state carries append
+sequencing, deduplication state, and archive progress.
+
 ### Router
 
 Routes requests to the correct Raft group. Session-to-group assignment is a
@@ -120,9 +124,9 @@ edge cases like leadership transitions where a broadcast might be missed.
 
 ### Raft FSM
 
-The state machine at the heart of the data plane. Each Raft group holds state for all
-sessions assigned to it: session metadata, ordered event logs, producer deduplication
-state, and archive progress.
+The state machine at the heart of the data plane. Each Raft group holds the hot
+write state for sessions assigned to it: session routing/tenant fields, ordered
+event progress, producer deduplication state, and archive progress.
 
 On commit, the FSM assigns the next `seq` and produces a PubSub side effect. On
 `ack_archived`, it advances the archive cursor so evicted events can be reclaimed.
@@ -133,8 +137,9 @@ On commit, the FSM assigns the next `seq` and produces a PubSub side effect. On
 recently accessed archived events. The read path checks here first (hot), falls back
 to the archive (cold). Has memory pressure management to bound total usage.
 
-**Session Store** — cache for session metadata. Avoids hitting the archive on every
-session lookup. Misses load from the archive backend.
+**Session Store** — cache for the lean session header/runtime fields needed for
+auth, routing, and hydrate-on-miss. Avoids hitting the archive on every session
+lookup. Misses load from the archive backend.
 
 Both are populated on writes and read-through on misses.
 

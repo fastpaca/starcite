@@ -46,6 +46,7 @@ general-purpose query engine.
 ## Storage Implications
 
 - hot-path state exists to serve append, replay, and resume
+- session identity/catalog data and append-time write state are separate concerns
 - archive backends exist for durability, recovery, and replay
 - archive storage is not the source of truth for arbitrary query semantics
 

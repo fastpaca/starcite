@@ -1,6 +1,11 @@
 defmodule Starcite.Session.Event do
   @moduledoc """
   Session event type contracts.
+
+  These types describe the event maps produced by
+  `Starcite.Session.WriteState.append_event/2` and handed off to the data-plane
+  event store. The module is intentionally just a contract; it does not own any
+  behavior.
   """
 
   @type input :: %{

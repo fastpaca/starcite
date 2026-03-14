@@ -18,8 +18,6 @@ defmodule Mix.Tasks.Bench.Raft do
   @default_timeout_ms 2_000
   @default_archive_flush_interval_ms 60_000
 
-  @default_tail_keep 1_000
-  @default_producer_max_entries 10_000
   @default_hydrate_archived_seq 1
 
   @tenant_id "bench"
@@ -231,7 +229,6 @@ defmodule Mix.Tasks.Bench.Raft do
     clear_event_store()
 
     timeout_ms = context.config.raft_timeout_ms
-    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
     counter = :atomics.new(1, [])
     :atomics.put(counter, 1, 0)
 
@@ -244,18 +241,9 @@ defmodule Mix.Tasks.Bench.Raft do
       session =
         %Starcite.Session{
           id: session_id,
-          title: "Hydrated",
-          creator_principal: context.principal,
           tenant_id: @tenant_id,
-          metadata: %{bench: true, scenario: "raft_hydrate_session"},
           last_seq: context.config.hydrate_archived_seq,
-          archived_seq: context.config.hydrate_archived_seq,
-          inserted_at: inserted_at,
-          retention: %{
-            tail_keep: @default_tail_keep,
-            producer_max_entries: @default_producer_max_entries
-          },
-          producer_cursors: %{}
+          archived_seq: context.config.hydrate_archived_seq
         }
 
       hydrate_result =

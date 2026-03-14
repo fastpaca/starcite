@@ -1,17 +1,15 @@
 defmodule Starcite.DataPlane.RaftFSM do
   @moduledoc """
   Raft state machine for Starcite sessions.
-
-  Stores session state (including auth-critical fields) and applies ordered commands through Raft consensus.
   """
 
   @behaviour :ra_machine
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Session
-  alias Starcite.Session.ProducerIndex
+  alias Starcite.Session.{Header, WriteState}
 
-  @machine_version 1
+  @machine_version 3
 
   @checkpoint_interval_entries Application.compile_env(
                                  :starcite,
@@ -21,7 +19,7 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   defstruct [:group_id, :sessions, :last_checkpoint_index]
 
-  @type session_state :: %Session{producer_cursors: ProducerIndex.t()}
+  @type session_state :: WriteState.t()
 
   @type t :: %__MODULE__{
           group_id: term(),
@@ -40,6 +38,8 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def which_module(0), do: __MODULE__
 
+  def which_module(1), do: __MODULE__
+  def which_module(2), do: __MODULE__
   def which_module(@machine_version), do: __MODULE__
 
   def which_module(version) do
@@ -57,17 +57,21 @@ defmodule Starcite.DataPlane.RaftFSM do
       ) do
     case Map.get(state.sessions, session_id) do
       nil ->
-        session = Session.new_raft(session_id, title, creator_principal, tenant_id, metadata)
+        header = Header.new_raft(session_id, title, creator_principal, tenant_id, metadata)
+        session = Session.new_from_header(header)
+        # Raft keeps only the append-time WriteState. Header metadata is used
+        # for the create response and archive persistence, not for hot mutation.
+        write_state = WriteState.new(session)
 
-        new_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
+        new_state = %{state | sessions: Map.put(state.sessions, session_id, write_state)}
 
         reply_with_optional_effects(
           meta,
           new_state,
-          {:reply, {:ok, Session.to_map(session)}}
+          {:reply, {:ok, Session.to_map(session, header)}}
         )
 
-      %Session{} ->
+      %WriteState{} ->
         reply_with_optional_effects(
           meta,
           state,
@@ -79,12 +83,19 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(meta, {:append_event, session_id, input, expected_seq}, state) do
     case Map.get(state.sessions, session_id) do
-      %Session{} = session ->
+      %WriteState{} = write_state ->
+        session = WriteState.session(write_state)
+
         with :ok <- guard_expected_seq(session, expected_seq),
-             {:ok, updated_session, reply, event_to_store} <-
-               append_one_to_session(session, input) do
+             {:ok, updated_write_state, reply, event_to_store} <-
+               append_one_to_session(write_state, input) do
+          updated_session = WriteState.session(updated_write_state)
           :ok = put_appended_event(session_id, updated_session.tenant_id, event_to_store)
-          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+
+          new_state = %{
+            state
+            | sessions: Map.put(state.sessions, session_id, updated_write_state)
+          }
 
           effect = build_effect_for_event(session_id, event_to_store)
           reply = {:reply, {:ok, reply}}
@@ -111,12 +122,19 @@ defmodule Starcite.DataPlane.RaftFSM do
       when is_list(inputs) and
              (is_nil(expected_seq) or (is_integer(expected_seq) and expected_seq >= 0)) do
     case Map.get(state.sessions, session_id) do
-      %Session{} = session ->
+      %WriteState{} = write_state ->
+        session = WriteState.session(write_state)
+
         with :ok <- guard_expected_seq(session, expected_seq),
-             {:ok, updated_session, replies, events_to_store} <-
-               append_to_session(session, inputs) do
+             {:ok, updated_write_state, replies, events_to_store} <-
+               append_to_session(write_state, inputs) do
+          updated_session = WriteState.session(updated_write_state)
           :ok = put_appended_events(session_id, updated_session.tenant_id, events_to_store)
-          new_state = %{state | sessions: Map.put(state.sessions, session_id, updated_session)}
+
+          new_state = %{
+            state
+            | sessions: Map.put(state.sessions, session_id, updated_write_state)
+          }
 
           effects = build_effects_for_events(session_id, events_to_store)
           reply = {:reply, {:ok, %{results: replies, last_seq: updated_session.last_seq}}}
@@ -150,16 +168,18 @@ defmodule Starcite.DataPlane.RaftFSM do
          archived_advanced_acc}
         when is_binary(session_id) and session_id != "" and is_integer(upto_seq) and upto_seq >= 0 ->
           case Map.get(sessions, session_id) do
-            %Session{} = session ->
+            %WriteState{} = write_state ->
+              session = WriteState.session(write_state)
               previous_archived_seq = session.archived_seq
-              {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
+              {updated_write_state, _trimmed} = WriteState.persist_ack(write_state, upto_seq)
+              updated_session = WriteState.session(updated_write_state)
               session_evicted? = evict_session_after_ack?(updated_session, previous_archived_seq)
 
               new_sessions =
                 if session_evicted? do
                   Map.delete(sessions, session_id)
                 else
-                  Map.put(sessions, session_id, updated_session)
+                  Map.put(sessions, session_id, updated_write_state)
                 end
 
               next_state = %{state_acc | sessions: new_sessions}
@@ -180,7 +200,7 @@ defmodule Starcite.DataPlane.RaftFSM do
                 updated_session.last_seq,
                 updated_session.archived_seq,
                 trimmed,
-                updated_session.retention.tail_keep,
+                Session.tail_keep(),
                 tail_size
               )
 
@@ -234,11 +254,15 @@ defmodule Starcite.DataPlane.RaftFSM do
   @impl true
   def apply(meta, {:hydrate_session, %Session{id: session_id} = session}, state) do
     case Map.get(state.sessions, session_id) do
-      %Session{} ->
+      %WriteState{} ->
         reply_with_optional_effects(meta, state, {:reply, {:ok, :already_hot}})
 
       nil ->
-        next_state = %{state | sessions: Map.put(state.sessions, session_id, session)}
+        next_state = %{
+          state
+          | sessions: Map.put(state.sessions, session_id, WriteState.new(session))
+        }
+
         reply_with_optional_effects(meta, next_state, {:reply, {:ok, :hydrated}})
     end
   end
@@ -254,10 +278,10 @@ defmodule Starcite.DataPlane.RaftFSM do
   @doc """
   Query one session by ID.
   """
-  @spec query_session(t(), String.t()) :: {:ok, session_state()} | {:error, :session_not_found}
+  @spec query_session(t(), String.t()) :: {:ok, Session.t()} | {:error, :session_not_found}
   def query_session(state, session_id) do
     case Map.get(state.sessions, session_id) do
-      %Session{} = session -> {:ok, session}
+      %WriteState{} = write_state -> {:ok, WriteState.session(write_state)}
       nil -> {:error, :session_not_found}
     end
   end
@@ -298,47 +322,51 @@ defmodule Starcite.DataPlane.RaftFSM do
 
   defp release_cursor_effect(_meta, _archived_advanced?, _state), do: nil
 
-  defp append_to_session(%Session{} = session, inputs)
+  defp append_to_session(%WriteState{} = write_state, inputs)
        when is_list(inputs) and inputs != [] do
-    do_append_to_session(session, inputs, [], [])
+    do_append_to_session(write_state, inputs, [], [])
   end
 
-  defp append_to_session(%Session{}, []), do: {:error, :invalid_event}
+  defp append_to_session(%WriteState{}, []), do: {:error, :invalid_event}
 
-  defp append_one_to_session(%Session{} = session, input) when is_map(input) do
-    case Session.append_event(session, input) do
-      {:appended, updated_session, event} ->
+  defp append_one_to_session(%WriteState{} = write_state, input) when is_map(input) do
+    case WriteState.append_event(write_state, input) do
+      {:appended, updated_write_state, event} ->
+        updated_session = WriteState.session(updated_write_state)
         reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-        {:ok, updated_session, reply, event}
+        {:ok, updated_write_state, reply, event}
 
-      {:deduped, updated_session, seq} ->
+      {:deduped, updated_write_state, seq} ->
+        updated_session = WriteState.session(updated_write_state)
         reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-        {:ok, updated_session, reply, nil}
+        {:ok, updated_write_state, reply, nil}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp append_one_to_session(%Session{}, _input), do: {:error, :invalid_event}
+  defp append_one_to_session(%WriteState{}, _input), do: {:error, :invalid_event}
 
-  defp do_append_to_session(%Session{} = session, [input | rest], replies, events) do
-    case Session.append_event(session, input) do
-      {:appended, updated_session, event} ->
+  defp do_append_to_session(%WriteState{} = write_state, [input | rest], replies, events) do
+    case WriteState.append_event(write_state, input) do
+      {:appended, updated_write_state, event} ->
+        updated_session = WriteState.session(updated_write_state)
         reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-        do_append_to_session(updated_session, rest, [reply | replies], [event | events])
+        do_append_to_session(updated_write_state, rest, [reply | replies], [event | events])
 
-      {:deduped, updated_session, seq} ->
+      {:deduped, updated_write_state, seq} ->
+        updated_session = WriteState.session(updated_write_state)
         reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-        do_append_to_session(updated_session, rest, [reply | replies], events)
+        do_append_to_session(updated_write_state, rest, [reply | replies], events)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp do_append_to_session(%Session{} = session, [], replies, events) do
-    {:ok, session, Enum.reverse(replies), Enum.reverse(events)}
+  defp do_append_to_session(%WriteState{} = write_state, [], replies, events) do
+    {:ok, write_state, Enum.reverse(replies), Enum.reverse(events)}
   end
 
   defp put_appended_events(_session_id, _tenant_id, []), do: :ok
@@ -404,13 +432,83 @@ defmodule Starcite.DataPlane.RaftFSM do
 
     sessions =
       case Map.get(state, :sessions) do
-        value when is_map(value) -> value
+        value when is_map(value) -> normalize_sessions(value)
         _ -> %{}
       end
 
     state
     |> Map.put(:last_checkpoint_index, last_checkpoint_index)
     |> Map.put(:sessions, sessions)
+  end
+
+  defp normalize_sessions(sessions) when is_map(sessions) do
+    Enum.reduce(sessions, %{}, fn
+      {session_id, %WriteState{} = write_state}, acc ->
+        Map.put(acc, session_id, normalize_write_state(session_id, write_state))
+
+      {session_id, %Session{} = session}, acc ->
+        Map.put(acc, session_id, normalize_legacy_session_state(session_id, session))
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp normalize_session(session_id, %Session{} = session)
+       when is_binary(session_id) and session_id != "" do
+    tenant_id = valid_tenant_id!(Map.get(session, :tenant_id), session_id)
+
+    normalized = Session.new(session_id, tenant_id: tenant_id)
+
+    %Session{
+      normalized
+      | last_seq: non_neg_integer!(Map.get(session, :last_seq), :last_seq, session_id),
+        archived_seq: non_neg_integer!(Map.get(session, :archived_seq), :archived_seq, session_id)
+    }
+  end
+
+  defp normalize_write_state(
+         session_id,
+         %WriteState{session: %Session{} = session, producer_cursors: producer_cursors}
+       )
+       when is_binary(session_id) and session_id != "" do
+    WriteState.new(
+      normalize_session(session_id, session),
+      normalize_producer_cursors(producer_cursors)
+    )
+  end
+
+  defp normalize_legacy_session_state(session_id, %Session{} = session)
+       when is_binary(session_id) and session_id != "" do
+    WriteState.new(
+      normalize_session(session_id, session),
+      normalize_producer_cursors(Map.get(session, :producer_cursors))
+    )
+  end
+
+  defp valid_tenant_id!(tenant_id, session_id)
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
+              session_id != "",
+       do: tenant_id
+
+  defp valid_tenant_id!(tenant_id, session_id) do
+    raise ArgumentError,
+          "invalid session tenant_id for #{inspect(session_id)}: #{inspect(tenant_id)}"
+  end
+
+  defp normalize_producer_cursors(producer_cursors) when is_map(producer_cursors),
+    do: producer_cursors
+
+  defp normalize_producer_cursors(_producer_cursors), do: %{}
+
+  defp non_neg_integer!(value, field, session_id)
+       when is_integer(value) and value >= 0 and is_atom(field) and is_binary(session_id) and
+              session_id != "",
+       do: value
+
+  defp non_neg_integer!(value, field, session_id) do
+    raise ArgumentError,
+          "invalid session #{field} for #{inspect(session_id)}: #{inspect(value)}"
   end
 
   defp build_effects_for_events(_session_id, []), do: []
