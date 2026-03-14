@@ -369,6 +369,15 @@ jwks_refresh_ms =
       parse_positive_integer!.("STARCITE_AUTH_JWKS_REFRESH_MS", raw)
   end
 
+jwks_hard_expiry_ms =
+  case System.get_env("STARCITE_AUTH_JWKS_HARD_EXPIRY_MS") do
+    nil ->
+      Keyword.get(default_auth_opts, :jwks_hard_expiry_ms, jwks_refresh_ms)
+
+    raw ->
+      parse_positive_integer!.("STARCITE_AUTH_JWKS_HARD_EXPIRY_MS", raw)
+  end
+
 missing_auth_value! = fn auth_mode, env_name ->
   case auth_mode do
     :jwt ->
@@ -426,7 +435,8 @@ auth_config =
       [
         mode: :none,
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms
+        jwks_refresh_ms: jwks_refresh_ms,
+        jwks_hard_expiry_ms: jwks_hard_expiry_ms
       ]
 
     :jwt ->
@@ -450,7 +460,8 @@ auth_config =
         audience: audience,
         jwks_url: jwks_url,
         jwt_leeway_seconds: jwt_leeway_seconds,
-        jwks_refresh_ms: jwks_refresh_ms
+        jwks_refresh_ms: jwks_refresh_ms,
+        jwks_hard_expiry_ms: jwks_hard_expiry_ms
       ]
   end
 

@@ -48,7 +48,8 @@ config :starcite, StarciteWeb.Auth,
   audience: "starcite-api",
   jwks_url: "http://localhost:4000/.well-known/jwks.json",
   jwt_leeway_seconds: 1,
-  jwks_refresh_ms: :timer.seconds(60)
+  jwks_refresh_ms: :timer.seconds(60),
+  jwks_hard_expiry_ms: :timer.seconds(60)
 
 # Configures Elixir's Logger
 config :logger, :default_formatter,

@@ -9,8 +9,6 @@ defmodule StarciteWeb.Auth.JWKS do
 
   @request_headers [{"accept", "application/json"}]
   @cache_prefix :starcite_auth_jwks
-  @hard_expiry_multiplier 5
-  @min_hard_expiry_ms :timer.minutes(5)
   @finch StarciteWeb.Auth.JWKSFinch
 
   @type signing_key :: Signer.t()
@@ -72,14 +70,20 @@ defmodule StarciteWeb.Auth.JWKS do
   def cached_signing_key(_config, _kid), do: :miss
 
   @spec refresh_url(map()) :: :ok | {:error, atom()}
-  def refresh_url(%{jwks_url: url, jwks_refresh_ms: refresh_ms})
-      when is_binary(url) and url != "" and is_integer(refresh_ms) and refresh_ms > 0 do
+  def refresh_url(%{jwks_url: url} = config) when is_binary(url) and url != "" do
     now_ms = System.system_time(:millisecond)
+    refresh_ms = Map.get(config, :jwks_refresh_ms)
+    hard_expiry_ms = Map.get(config, :jwks_hard_expiry_ms, refresh_ms)
 
-    with {:ok, body} <- fetch_jwks(url),
+    with true <- is_integer(refresh_ms) and refresh_ms > 0,
+         true <- is_integer(hard_expiry_ms) and hard_expiry_ms > 0,
+         {:ok, body} <- fetch_jwks(url),
          {:ok, key_entries} <- parse_jwks(body) do
-      write_keys(url, key_entries, now_ms, refresh_ms)
+      write_keys(url, key_entries, now_ms, refresh_ms, hard_expiry_ms)
     else
+      false ->
+        {:error, :invalid_jwks_config}
+
       {:error, reason} ->
         Logger.warning("JWKS refresh failed for #{url}: #{inspect(reason)}")
         {:error, :jwks_unavailable}
@@ -134,10 +138,10 @@ defmodule StarciteWeb.Auth.JWKS do
     {@cache_prefix, :signing_key, url, kid}
   end
 
-  defp write_keys(url, key_entries, now_ms, refresh_ms)
+  defp write_keys(url, key_entries, now_ms, refresh_ms, hard_expiry_ms)
        when is_binary(url) and is_list(key_entries) and is_integer(now_ms) and
               is_integer(refresh_ms) and
-              refresh_ms > 0 do
+              refresh_ms > 0 and is_integer(hard_expiry_ms) and hard_expiry_ms > 0 do
     stale_kids =
       case :persistent_term.get(meta_key(url), nil) do
         %{kids: kids} when is_list(kids) ->
@@ -156,7 +160,7 @@ defmodule StarciteWeb.Auth.JWKS do
     :persistent_term.put(meta_key(url), %{
       kids: Enum.map(key_entries, &elem(&1, 0)),
       refresh_at_ms: now_ms + refresh_ms,
-      expire_at_ms: now_ms + max(refresh_ms * @hard_expiry_multiplier, @min_hard_expiry_ms)
+      expire_at_ms: now_ms + hard_expiry_ms
     })
 
     :ok
