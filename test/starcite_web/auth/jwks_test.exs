@@ -138,7 +138,7 @@ defmodule StarciteWeb.Auth.JWKSTest do
     assert is_struct(refreshed_signer, Joken.Signer)
   end
 
-  test "refresh recovers after the refresher task crashes mid-flight" do
+  test "refresh_async recovers after the refresher task crashes mid-flight" do
     bypass = Bypass.open()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
     jwks = AuthTestSupport.jwks_for_private_key(AuthTestSupport.generate_rsa_private_key(), kid)
@@ -161,16 +161,13 @@ defmodule StarciteWeb.Auth.JWKSTest do
       |> resp(200, Jason.encode!(jwks))
     end)
 
-    fetch_task =
-      Task.async(fn ->
-        JWKS.fetch_signing_key(config, kid)
-      end)
+    assert :ok = StarciteWeb.Auth.JWKSRefresher.refresh_async(config)
 
     %{task_pid: refresh_pid} = wait_for_refresh_entry(config.jwks_url)
     assert is_pid(refresh_pid)
     Process.exit(refresh_pid, :kill)
 
-    assert {:error, :jwks_unavailable} = Task.await(fetch_task, 5_000)
+    assert :ok = wait_for_refresh_idle(config.jwks_url)
 
     Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
       conn
@@ -178,8 +175,15 @@ defmodule StarciteWeb.Auth.JWKSTest do
       |> resp(200, Jason.encode!(jwks))
     end)
 
-    assert {:ok, signer} = JWKS.fetch_signing_key(config, kid)
-    assert is_struct(signer, Joken.Signer)
+    assert :ok = StarciteWeb.Auth.JWKSRefresher.refresh_async(config)
+    %{task_pid: next_refresh_pid} = wait_for_refresh_entry(config.jwks_url)
+    assert is_pid(next_refresh_pid)
+    refute next_refresh_pid == refresh_pid
+
+    eventually(fn ->
+      assert {:ok, :fresh, signer} = JWKS.cached_signing_key(config, kid)
+      assert is_struct(signer, Joken.Signer)
+    end)
   end
 
   defp jwks_fixture!(overrides \\ []) do
@@ -251,6 +255,46 @@ defmodule StarciteWeb.Auth.JWKSTest do
         Process.sleep(25)
         do_wait_for_refresh_entry(url, deadline)
     end
+  end
+
+  defp wait_for_refresh_idle(url, timeout_ms \\ 1_000)
+       when is_binary(url) and url != "" and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_refresh_idle(url, deadline)
+  end
+
+  defp do_wait_for_refresh_idle(url, deadline) do
+    entry = :sys.get_state(StarciteWeb.Auth.JWKSRefresher)[url]
+
+    cond do
+      is_map(entry) and not entry.in_flight and is_nil(entry.task_pid) and is_nil(entry.task_ref) ->
+        :ok
+
+      System.monotonic_time(:millisecond) >= deadline ->
+        flunk("timed out waiting for JWKS refresher to leave in-flight state for #{url}")
+
+      true ->
+        Process.sleep(25)
+        do_wait_for_refresh_idle(url, deadline)
+    end
+  end
+
+  defp eventually(fun, timeout_ms \\ 1_000)
+       when is_function(fun, 0) and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_eventually(fun, deadline)
+  end
+
+  defp do_eventually(fun, deadline) do
+    fun.()
+  rescue
+    error in [ExUnit.AssertionError] ->
+      if System.monotonic_time(:millisecond) >= deadline do
+        reraise error, __STACKTRACE__
+      else
+        Process.sleep(25)
+        do_eventually(fun, deadline)
+      end
   end
 
   defp assert_receive_auth_event(stage, mode, outcome, error_reason, source) do

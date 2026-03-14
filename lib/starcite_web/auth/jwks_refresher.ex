@@ -14,6 +14,8 @@ defmodule StarciteWeb.Auth.JWKSRefresher do
 
   def fetch(config, kid) when is_map(config) and is_binary(kid) and kid != "" do
     GenServer.call(__MODULE__, {:fetch, config, kid}, 5_000)
+  catch
+    :exit, _reason -> {:error, :jwks_unavailable}
   end
 
   def refresh_async(config) when is_map(config) do
