@@ -353,37 +353,7 @@ defmodule Starcite.DataPlane.SessionLog do
       next_session = normalize_session_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
 
-      :ok =
-        Telemetry.append_boundary(
-          next_session.id,
-          next_session.tenant_id,
-          :before_quorum_replicate,
-          length(events)
-        )
-
-      case SessionQuorum.replicate_state(next_session, events, request.replicas) do
-        :ok ->
-          publish_session = preserve_publication_watermark(next_session)
-          :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
-          :ok = publish_events(publish_session, events)
-          :ok = SessionStore.put_session(publish_session)
-
-          :ok =
-            Telemetry.append_boundary(
-              publish_session.id,
-              publish_session.tenant_id,
-              :after_commit_before_reply,
-              length(events)
-            )
-
-          reply =
-            finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
-
-          {%{data | session: publish_session}, actions ++ [{:reply, request.from, {:ok, reply}}]}
-
-        {:error, _reason} = error ->
-          {data, actions ++ [{:reply, request.from, error}]}
-      end
+      commit_single_append(data, actions, request.from, next_session, events, outcome, request.replicas)
     else
       {:error, reason} ->
         {data, actions ++ [{:reply, request.from, {:error, reason}}]}
@@ -411,44 +381,7 @@ defmodule Starcite.DataPlane.SessionLog do
     if successful_outcomes?(outcomes) do
       committed_events = put_events_epoch(events_acc, next_session.epoch)
 
-      :ok =
-        Telemetry.append_boundary(
-          next_session.id,
-          next_session.tenant_id,
-          :before_quorum_replicate,
-          length(committed_events)
-        )
-
-      case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
-        :ok ->
-          publish_session = preserve_publication_watermark(next_session)
-          :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
-          :ok = publish_events(publish_session, committed_events)
-          :ok = SessionStore.put_session(publish_session)
-
-          :ok =
-            Telemetry.append_boundary(
-              publish_session.id,
-              publish_session.tenant_id,
-              :after_commit_before_reply,
-              length(committed_events)
-            )
-
-          reply_actions =
-            Enum.map(outcomes, fn outcome ->
-              {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
-            end)
-
-          {%{data | session: publish_session}, actions ++ reply_actions}
-
-        {:error, _reason} = error ->
-          reply_actions =
-            Enum.map(outcomes, fn outcome ->
-              {:reply, outcome_from(outcome), finalize_failure_outcome(outcome, error)}
-            end)
-
-          {data, actions ++ reply_actions}
-      end
+      commit_append_group(data, actions, next_session, committed_events, outcomes, replicas)
     else
       reply_actions =
         Enum.map(outcomes, fn outcome ->
@@ -518,6 +451,117 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp outcome_from({_kind, from, _payload}), do: from
+
+  defp commit_single_append(
+         data,
+         actions,
+         from,
+         next_session,
+         [],
+         outcome,
+         _replicas
+       ) do
+    publish_session = preserve_publication_watermark(next_session)
+    :ok = SessionStore.put_session(publish_session)
+    reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
+    {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+  end
+
+  defp commit_single_append(
+         data,
+         actions,
+         from,
+         next_session,
+         events,
+         outcome,
+         replicas
+       )
+       when is_list(events) do
+    :ok =
+      Telemetry.append_boundary(
+        next_session.id,
+        next_session.tenant_id,
+        :before_quorum_replicate,
+        length(events)
+      )
+
+    case SessionQuorum.replicate_state(next_session, events, replicas) do
+      :ok ->
+        publish_session = preserve_publication_watermark(next_session)
+        :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
+        :ok = publish_events(publish_session, events)
+        :ok = SessionStore.put_session(publish_session)
+
+        :ok =
+          Telemetry.append_boundary(
+            publish_session.id,
+            publish_session.tenant_id,
+            :after_commit_before_reply,
+            length(events)
+          )
+
+        reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
+
+        {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+
+      {:error, _reason} = error ->
+        {data, actions ++ [{:reply, from, error}]}
+    end
+  end
+
+  defp commit_append_group(data, actions, next_session, [], outcomes, _replicas) do
+    publish_session = preserve_publication_watermark(next_session)
+    :ok = SessionStore.put_session(publish_session)
+
+    reply_actions =
+      Enum.map(outcomes, fn outcome ->
+        {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
+      end)
+
+    {%{data | session: publish_session}, actions ++ reply_actions}
+  end
+
+  defp commit_append_group(data, actions, next_session, committed_events, outcomes, replicas)
+       when is_list(committed_events) do
+    :ok =
+      Telemetry.append_boundary(
+        next_session.id,
+        next_session.tenant_id,
+        :before_quorum_replicate,
+        length(committed_events)
+      )
+
+    case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
+      :ok ->
+        publish_session = preserve_publication_watermark(next_session)
+        :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
+        :ok = publish_events(publish_session, committed_events)
+        :ok = SessionStore.put_session(publish_session)
+
+        :ok =
+          Telemetry.append_boundary(
+            publish_session.id,
+            publish_session.tenant_id,
+            :after_commit_before_reply,
+            length(committed_events)
+          )
+
+        reply_actions =
+          Enum.map(outcomes, fn outcome ->
+            {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
+          end)
+
+        {%{data | session: publish_session}, actions ++ reply_actions}
+
+      {:error, _reason} = error ->
+        reply_actions =
+          Enum.map(outcomes, fn outcome ->
+            {:reply, outcome_from(outcome), finalize_failure_outcome(outcome, error)}
+          end)
+
+        {data, actions ++ reply_actions}
+    end
+  end
 
   defp role_for_session(session_id) when is_binary(session_id) and session_id != "" do
     case SessionRouter.ensure_local_owner(session_id) do
