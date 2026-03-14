@@ -83,17 +83,20 @@ defmodule Starcite.DataPlane.SessionStore do
   """
   @spec get_session_cached(String.t()) :: {:ok, Session.t()} | :error
   def get_session_cached(session_id) when is_binary(session_id) and session_id != "" do
-    case Cachex.get(@cache, session_id) do
-      {:ok, %Session{} = session} ->
-        maybe_refresh_ttl(session_id, session)
-        {:ok, session}
-
-      _ ->
-        :error
-    end
+    cache_get(session_id, true)
   end
 
   def get_session_cached(_session_id), do: :error
+
+  @doc """
+  Read one session from hot cache without mutating TTL state.
+  """
+  @spec peek_session_cached(String.t()) :: {:ok, Session.t()} | :error
+  def peek_session_cached(session_id) when is_binary(session_id) and session_id != "" do
+    cache_get(session_id, false)
+  end
+
+  def peek_session_cached(_session_id), do: :error
 
   @doc """
   Delete one session by id.
@@ -205,6 +208,18 @@ defmodule Starcite.DataPlane.SessionStore do
     case Cachex.put(@cache, session_id, session, ttl: cache_ttl_ms()) do
       {:ok, _result} -> :ok
       _ -> :ok
+    end
+  end
+
+  defp cache_get(session_id, touch?)
+       when is_binary(session_id) and session_id != "" and is_boolean(touch?) do
+    case Cachex.get(@cache, session_id) do
+      {:ok, %Session{} = session} ->
+        if touch?, do: maybe_refresh_ttl(session_id, session)
+        {:ok, session}
+
+      _ ->
+        :error
     end
   end
 

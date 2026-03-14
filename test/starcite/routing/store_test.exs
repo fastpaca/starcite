@@ -860,6 +860,65 @@ defmodule Starcite.Routing.StoreTest do
                    1_000
   end
 
+  test "rejects authoritative assignment updates that regress epoch" do
+    peer = :"routing-store-epoch-regression-peer@127.0.0.1"
+
+    session_id =
+      "routing-store-epoch-regression-#{System.unique_integer([:positive, :monotonic])}"
+
+    handler_id = "routing-invariant-epoch-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :invariant],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_invariant_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+    Application.put_env(:starcite, :routing_replication_factor, 2)
+    TestHelper.reset()
+
+    current = %{
+      owner: Node.self(),
+      epoch: 3,
+      replicas: [Node.self(), peer],
+      status: :active,
+      updated_at_ms: now_ms
+    }
+
+    next = %{current | epoch: 2, updated_at_ms: now_ms + 1}
+
+    assert :ok = put_assignment(session_id, current)
+
+    assert {:error, :epoch_regression} =
+             GenServer.call(
+               Store,
+               {:run_local, :compare_and_swap_assignment, [session_id, current, next]},
+               5_000
+             )
+
+    assert_receive {:routing_invariant_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source: :compare_and_swap_assignment,
+                      reason: :assignment_epoch_regression
+                    }},
+                   1_000
+
+    assert {:ok, stored} = Store.get_assignment(session_id, favor: :consistency)
+    assert stored == current
+  end
+
   test "emits invariant telemetry when failover target is no longer ready" do
     target = :"routing-store-invariant-target@127.0.0.1"
 

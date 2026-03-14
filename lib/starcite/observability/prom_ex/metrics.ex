@@ -298,6 +298,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Routing invariant violations by source and reason",
           tags: [:node, :source, :reason]
+        ),
+        counter("starcite_data_plane_invariant_total",
+          event_name: [:starcite, :data_plane, :invariant],
+          measurement: :count,
+          description: "Data-plane invariant violations by source and reason",
+          tags: [:node, :source, :reason]
         )
       ]
     )
