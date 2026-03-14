@@ -1,13 +1,6 @@
 defmodule Starcite.DataPlane.SessionStore do
   @moduledoc """
   Cachex-backed canonical session read store.
-
-  `SessionStore` serves session reads as hot/cold tiers:
-
-  - hot: Cachex in-memory session cache
-  - cold: archive session catalog lookup via `Starcite.Archive.SessionCatalog`
-
-  Cache misses hydrate from archive and populate cache for follow-up reads.
   """
 
   alias Starcite.Archive.SessionCatalog
@@ -73,6 +66,8 @@ defmodule Starcite.DataPlane.SessionStore do
         {:ok, session}
 
       _ ->
+        # Cache only stores the lean Session snapshot; header metadata and
+        # append-time state stay in their own boundaries.
         fetch_session_from_archive(session_id, true)
     end
   end

@@ -5,6 +5,9 @@ defmodule Starcite.Session.ProducerIndex do
   State is maintained per session and keyed by `producer_id`.
   Each cursor stores only the latest producer sequence and hash,
   which bounds memory to active producers instead of event volume.
+
+  `ProducerIndex` is an internal helper for `Starcite.Session.WriteState`; the
+  read path never touches it directly.
   """
 
   @type cursor :: %{

@@ -4,6 +4,12 @@ Starcite is a clustered session-stream service. Each session is an ordered,
 append-only event log, optimized for low-latency durable appends with cursor-based
 replay.
 
+A Starcite session is a durable communication context, not a replacement for
+your broader application database. Starcite owns the session stream and minimal
+session envelope; your app owns richer business objects and broad query
+surfaces. See
+the [Session Contract](session-contract.md).
+
 ![Starcite Architecture](img/architecture.png)
 
 The system has three layers: **edge**, **data plane**, and **control plane**.
@@ -12,8 +18,9 @@ The system has three layers: **edge**, **data plane**, and **control plane**.
 
 The edge handles client connections, auth, and protocol translation.
 
-**Session API** — REST endpoints for creating sessions, appending events, and listing
-sessions. Validates input, enforces tenant fencing, and delegates to the data plane.
+**Session API** — REST endpoints for creating sessions, appending events, and a
+basic tenant-scoped session catalog. Validates input, enforces tenant fencing,
+and delegates to the data plane. It is not an arbitrary session query engine.
 
 **Tailer** — WebSocket handler for `tail`. Upgrades to a long-lived process that
 manages replay and live streaming. This is the only stateful process per client
@@ -27,6 +34,13 @@ WebSocket connections accept the token as a header or query param.
 
 The data plane owns session state, event ordering, and durable storage. Writes run on
 write nodes only (consensus). Reads run on every node.
+
+Session state here means the durable stream plus the minimal session envelope
+needed to create, authorize, route, and resume it.
+
+In practice that splits into a small session header and a separate write state.
+The header carries identity and catalog fields. The write state carries append
+sequencing, deduplication state, and archive progress.
 
 ### Router
 
@@ -110,9 +124,9 @@ edge cases like leadership transitions where a broadcast might be missed.
 
 ### Raft FSM
 
-The state machine at the heart of the data plane. Each Raft group holds state for all
-sessions assigned to it: session metadata, ordered event logs, producer deduplication
-state, and archive progress.
+The state machine at the heart of the data plane. Each Raft group holds the hot
+write state for sessions assigned to it: session routing/tenant fields, ordered
+event progress, producer deduplication state, and archive progress.
 
 On commit, the FSM assigns the next `seq` and produces a PubSub side effect. On
 `ack_archived`, it advances the archive cursor so evicted events can be reclaimed.
@@ -123,8 +137,9 @@ On commit, the FSM assigns the next `seq` and produces a PubSub side effect. On
 recently accessed archived events. The read path checks here first (hot), falls back
 to the archive (cold). Has memory pressure management to bound total usage.
 
-**Session Store** — cache for session metadata. Avoids hitting the archive on every
-session lookup. Misses load from the archive backend.
+**Session Store** — cache for the lean session header/runtime fields needed for
+auth, routing, and hydrate-on-miss. Avoids hitting the archive on every session
+lookup. Misses load from the archive backend.
 
 Both are populated on writes and read-through on misses.
 
@@ -147,6 +162,10 @@ retries and overlapping flushes.
 
 The archiver never touches the critical path. If it falls behind or fails, appends
 and tail continue unaffected.
+
+Archive backends are optimized for durable replay and recovery, not arbitrary
+session queries. Richer catalog behavior should be designed explicitly rather
+than inferred from archive layout.
 
 ## Control plane
 

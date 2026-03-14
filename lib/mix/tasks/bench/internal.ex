@@ -4,6 +4,7 @@ defmodule Mix.Tasks.Bench.Internal do
   alias Starcite.Config.Size
   alias Starcite.DataPlane.EventStore
   alias Starcite.Session
+  alias Starcite.Session.WriteState
   alias Starcite.WritePath
   alias Starcite.DataPlane.RaftFSM
 
@@ -53,11 +54,11 @@ defmodule Mix.Tasks.Bench.Internal do
       session = %Session{base_session | last_seq: seq - 1}
       event_with_producer = with_bench_producer(input_event_template, "bench-session", 1)
 
-      case Session.append_event(session, event_with_producer) do
+      case WriteState.append_event(WriteState.new(session), event_with_producer) do
         {:appended, _updated, _event} ->
           :ok
 
-        {:deduped, _session, _seq} ->
+        {:deduped, _write_state, _seq} ->
           :ok
 
         {:error, reason} ->

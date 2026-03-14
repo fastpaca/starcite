@@ -63,7 +63,7 @@ defmodule Starcite.RuntimeTest do
       {:ok, _session} = WritePath.create_session(id: id, creator_principal: principal)
       assert {:ok, loaded} = SessionStore.get_session(id)
       assert loaded.id == id
-      assert loaded.creator_principal == principal
+      assert loaded.tenant_id == principal.tenant_id
     end
 
     test "auth lookup returns session store hit without raft/archive read-through" do
@@ -74,8 +74,7 @@ defmodule Starcite.RuntimeTest do
 
       assert {:ok, loaded} = ReadPath.get_session(id)
       assert loaded.id == id
-      assert loaded.creator_principal == principal
-      assert loaded.metadata["source"] == "cache"
+      assert loaded.tenant_id == principal.tenant_id
     end
   end
 

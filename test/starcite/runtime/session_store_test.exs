@@ -4,6 +4,7 @@ defmodule Starcite.DataPlane.SessionStoreTest do
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.SessionStore
   alias Starcite.Session
+  alias Starcite.Session.WriteState
 
   setup do
     original_adapter = Application.get_env(:starcite, :archive_adapter)
@@ -31,8 +32,8 @@ defmodule Starcite.DataPlane.SessionStoreTest do
     session = Session.new("ses-store-2", creator_principal: principal())
     assert :ok = SessionStore.put_session(session)
 
-    {:appended, updated, _event} =
-      Session.append_event(session, %{
+    {:appended, write_state, _event} =
+      WriteState.append_event(WriteState.new(session), %{
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",
@@ -43,6 +44,8 @@ defmodule Starcite.DataPlane.SessionStoreTest do
         source: nil,
         idempotency_key: nil
       })
+
+    updated = WriteState.session(write_state)
 
     assert :ok = SessionStore.put_session(updated)
     assert {:ok, loaded} = SessionStore.get_session("ses-store-2")

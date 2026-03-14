@@ -3,6 +3,7 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
 
   alias Starcite.DataPlane.EventStore
   alias Starcite.DataPlane.RaftFSM
+  alias Starcite.Session.WriteState
 
   setup do
     EventStore.clear()
@@ -15,10 +16,35 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   end
 
   test "declares raft machine version mapping" do
-    assert RaftFSM.version() == 1
+    assert RaftFSM.version() == 3
     assert RaftFSM.which_module(0) == RaftFSM
     assert RaftFSM.which_module(1) == RaftFSM
+    assert RaftFSM.which_module(2) == RaftFSM
+    assert RaftFSM.which_module(3) == RaftFSM
     assert_raise ArgumentError, fn -> RaftFSM.which_module(99) end
+  end
+
+  test "machine-version upgrade normalizes legacy session shape into write state" do
+    session_id = unique_session_id()
+    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
+
+    legacy_state = %RaftFSM{
+      group_id: 0,
+      sessions: %{
+        session_id =>
+          legacy_session_state(session_id, inserted_at, "Hydrated", %{"source" => "archive"})
+      },
+      last_checkpoint_index: nil
+    }
+
+    {normalized_state, :ok} = RaftFSM.apply(nil, {:machine_version, 2, 3}, legacy_state)
+
+    assert {:ok, session} = RaftFSM.query_session(normalized_state, session_id)
+    assert session.last_seq == 1
+    assert session.archived_seq == 1
+
+    assert %WriteState{producer_cursors: %{"writer:test" => %{producer_seq: 1}}} =
+             Map.fetch!(normalized_state.sessions, session_id)
   end
 
   test "ack_archived evicts drained sessions and hydrate resets producer cursors" do
@@ -54,7 +80,6 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
     assert {:ok, hydrated} = RaftFSM.query_session(state, session_id)
     assert hydrated.last_seq == 1
     assert hydrated.archived_seq == 1
-    assert hydrated.producer_cursors == %{}
 
     {_, {:reply, {:ok, :already_hot}}} =
       RaftFSM.apply(nil, {:hydrate_session, hydrated_session}, state)
@@ -433,22 +458,45 @@ defmodule Starcite.DataPlane.RaftFSMEventStoreTest do
   end
 
   defp hydrated_session(session_id, inserted_at, title, metadata) do
+    _ = {inserted_at, title, metadata}
+
     %Starcite.Session{
       id: session_id,
-      title: title,
-      creator_principal: %Starcite.Auth.Principal{
+      tenant_id: "acme",
+      last_seq: 1,
+      archived_seq: 1
+    }
+  end
+
+  defp legacy_session_state(session_id, inserted_at, title, metadata) do
+    %Starcite.Session{
+      id: session_id,
+      tenant_id: "acme",
+      last_seq: 1,
+      archived_seq: 1
+    }
+    |> Map.put(:retention, %{tail_keep: 1000, producer_max_entries: 10_000})
+    |> Map.put(
+      :producer_cursors,
+      %{
+        "writer:test" => %{
+          producer_seq: 1,
+          session_seq: 1,
+          hash: <<0::64>>
+        }
+      }
+    )
+    |> Map.put(:title, title)
+    |> Map.put(
+      :creator_principal,
+      %Starcite.Auth.Principal{
         tenant_id: "acme",
         id: "user-1",
         type: :user
-      },
-      tenant_id: "acme",
-      metadata: metadata,
-      last_seq: 1,
-      archived_seq: 1,
-      inserted_at: inserted_at,
-      retention: %{tail_keep: 1000, producer_max_entries: 10_000},
-      producer_cursors: %{}
-    }
+      }
+    )
+    |> Map.put(:metadata, metadata)
+    |> Map.put(:inserted_at, inserted_at)
   end
 
   defp event_payload(text, opts \\ []) do

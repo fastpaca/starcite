@@ -607,9 +607,7 @@ defmodule Starcite.ArchiveTest do
             fn ->
               {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
               assert {:ok, session} = RaftAccess.query_session(server_id, session_id)
-              assert session.title == "Draft"
-              assert session.creator_principal == creator_principal
-              assert session.metadata == %{"workflow" => "legal"}
+              assert session.tenant_id == "acme"
               assert session.last_seq == 2
               assert session.archived_seq == 1
             end,

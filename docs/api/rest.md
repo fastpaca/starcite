@@ -1,7 +1,11 @@
 # REST API
 
-All public API endpoints are under `/v1`. The API is small by design — three
-operations on one resource type (sessions).
+All public API endpoints are under `/v1`. The API is small by design — append
+and tail are the core operations, with a small session catalog around them.
+
+Sessions are Starcite-owned durable communication contexts. The public API
+supports the session stream and a small tenant-scoped session catalog; it is not
+your broader application database or arbitrary query layer.
 
 Operational endpoints such as `/health/*`, `/metrics`, and `pprof` live on a
 separate ops port and are not part of the public API surface.
@@ -55,6 +59,7 @@ Create a session. Requires `session:create`.
 
 List sessions. Requires `session:read`.
 
+- This is a basic session catalog endpoint, not a general-purpose query surface
 - Always tenant-fenced by JWT `tenant_id`
 - If JWT has `session_id`, result set is constrained to that session
 - Supports `limit`, `cursor`, and metadata filters (exact matching)

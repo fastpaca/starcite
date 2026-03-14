@@ -1,14 +1,12 @@
 defmodule Starcite.Archive.SessionCatalog do
   @moduledoc """
   Persisted session catalog boundary.
-
-  Owns the archived session row contract used for create persistence and
-  hydrate-on-miss recovery.
   """
 
   alias Starcite.Archive.Store
   alias Starcite.Auth.Principal
   alias Starcite.Session
+  alias Starcite.Session.Header
 
   @spec persist_created(map(), Principal.t(), String.t(), map()) :: :ok | {:error, term()}
   def persist_created(
@@ -38,8 +36,10 @@ defmodule Starcite.Archive.SessionCatalog do
     with {:ok, %{sessions: sessions}} when is_list(sessions) <-
            Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
          {:ok, row} <- select_row(session_id, sessions),
-         {:ok, session} <- row_to_session(session_id, row) do
-      {:ok, session}
+         {:ok, header, archived_seq} <- row_to_session(session_id, row) do
+      # Archive restores the lean Session snapshot; append-only write state is
+      # rebuilt in the data plane when the session becomes active again.
+      {:ok, Session.hydrate(header, archived_seq)}
     end
   end
 
@@ -70,8 +70,8 @@ defmodule Starcite.Archive.SessionCatalog do
               is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 do
     with {:ok, timestamp} <- session_created_at(created_at) do
       try do
-        session =
-          Session.new(session_id,
+        header =
+          Header.new(session_id,
             title: title,
             tenant_id: tenant_id,
             creator_principal: creator_principal,
@@ -79,7 +79,7 @@ defmodule Starcite.Archive.SessionCatalog do
             timestamp: timestamp
           )
 
-        {:ok, %Session{session | last_seq: archived_seq, archived_seq: archived_seq}}
+        {:ok, header, archived_seq}
       rescue
         ArgumentError -> {:error, :archive_read_unavailable}
       end
