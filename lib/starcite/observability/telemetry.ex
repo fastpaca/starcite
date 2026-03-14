@@ -693,6 +693,7 @@ defmodule Starcite.Observability.Telemetry do
           :compare_and_swap_assignment | :commit_transfer | :failover_assignment,
           :assignment_epoch_regression
           | :commit_transfer_invalid_state
+          | :commit_transfer_target_not_ready
           | :failover_target_not_ready
         ) :: :ok
   def routing_invariant(session_id, source, reason)
@@ -701,6 +702,7 @@ defmodule Starcite.Observability.Telemetry do
              reason in [
                :assignment_epoch_regression,
                :commit_transfer_invalid_state,
+               :commit_transfer_target_not_ready,
                :failover_target_not_ready
              ] do
     execute_if_enabled(
