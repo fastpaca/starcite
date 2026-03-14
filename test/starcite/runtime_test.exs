@@ -643,6 +643,29 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1]
     end
 
+    test "rejects replay when the first returned event skips past the cursor" do
+      missing_id = unique_id("missing-gap")
+
+      for seq <- [7, 8] do
+        :ok =
+          EventStore.put_event(missing_id, "acme", %{
+            seq: seq,
+            type: "content",
+            payload: %{text: "rogue-#{seq}"},
+            actor: "agent:1",
+            producer_id: "writer:test",
+            producer_seq: seq,
+            source: nil,
+            metadata: %{},
+            refs: %{},
+            idempotency_key: nil,
+            inserted_at: NaiveDateTime.utc_now()
+          })
+      end
+
+      assert {:error, :event_gap_detected} = ReadPath.get_events_from_cursor(missing_id, 5, 100)
+    end
+
     test "returns ordered events across archive cold + ETS hot boundary" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)

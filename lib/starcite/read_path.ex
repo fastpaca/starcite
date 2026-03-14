@@ -107,14 +107,17 @@ defmodule Starcite.ReadPath do
   defp do_get_events_from_cursor(id, cursor, limit) do
     with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
          {:ok, cold_events} <- maybe_read_cold_events(id, cursor, limit, hot_events),
-         {:ok, merged} <- merge_events(cold_events, hot_events, limit) do
+         {:ok, merged} <- merge_events(cold_events, hot_events, cursor, limit) do
       {:ok, merged}
     else
       {:error, :archive_read_unavailable} ->
         with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
-             {:ok, merged} <- merge_events([], hot_events, limit) do
+             {:ok, merged} <- merge_events([], hot_events, cursor, limit) do
           {:ok, merged}
         end
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -145,21 +148,26 @@ defmodule Starcite.ReadPath do
     {:ok, EventStore.from_cursor(id, cursor, limit)}
   end
 
-  defp merge_events(cold_events, hot_events, limit) do
+  defp merge_events(cold_events, hot_events, cursor, limit)
+       when is_list(cold_events) and is_list(hot_events) and is_integer(cursor) and cursor >= 0 and
+              is_integer(limit) and limit > 0 do
     merged =
       (cold_events ++ hot_events)
       |> Enum.uniq_by(& &1.seq)
       |> Enum.sort_by(& &1.seq)
       |> Enum.take(limit)
 
-    ensure_gap_free(merged)
+    ensure_gap_free(cursor, merged)
   end
 
-  defp ensure_gap_free([]), do: {:ok, []}
+  defp ensure_gap_free(_cursor, []), do: {:ok, []}
 
-  defp ensure_gap_free([_single] = events), do: {:ok, events}
+  defp ensure_gap_free(cursor, [%{seq: seq} | _events]) when seq != cursor + 1,
+    do: {:error, :event_gap_detected}
 
-  defp ensure_gap_free(events) do
+  defp ensure_gap_free(_cursor, [_single] = events), do: {:ok, events}
+
+  defp ensure_gap_free(_cursor, events) do
     gap? =
       events
       |> Enum.reduce_while(nil, fn event, previous_seq ->
