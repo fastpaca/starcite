@@ -426,13 +426,13 @@ defmodule Starcite.DataPlane.SessionQuorum do
   defp safe_call(pid, message) when is_pid(pid) do
     :gen_batch_server.call(pid, message, @call_timeout)
   catch
-    :exit, _reason -> {:timeout, :session_log_unavailable}
+    :exit, reason -> normalize_call_exit(reason)
   end
 
   defp safe_log_call(session_id, pid, message)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
     case safe_call(pid, message) do
-      {:timeout, :session_log_unavailable} ->
+      {:error, :session_log_unavailable} ->
         with {:ok, replacement_pid} <- ensure_log_loaded(session_id) do
           safe_call(replacement_pid, message)
         end
@@ -441,6 +441,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
         other
     end
   end
+
+  defp normalize_call_exit({reason, {:gen_batch_server, :call, _args}}) do
+    normalize_call_exit(reason)
+  end
+
+  defp normalize_call_exit({:timeout, _details}), do: {:timeout, :session_log_call_timeout}
+  defp normalize_call_exit(:timeout), do: {:timeout, :session_log_call_timeout}
+  defp normalize_call_exit(:noproc), do: {:error, :session_log_unavailable}
+  defp normalize_call_exit({:noproc, _details}), do: {:error, :session_log_unavailable}
+  defp normalize_call_exit(:normal), do: {:error, :session_log_unavailable}
+  defp normalize_call_exit(:shutdown), do: {:error, :session_log_unavailable}
+  defp normalize_call_exit({:shutdown, _details}), do: {:error, :session_log_unavailable}
+  defp normalize_call_exit(_reason), do: {:timeout, :session_log_call_timeout}
 
   defp ensure_log_epoch_current(session_id, pid, assignment \\ nil)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
