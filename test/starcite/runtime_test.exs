@@ -450,6 +450,57 @@ defmodule Starcite.RuntimeTest do
       assert second.last_seq == 1
     end
 
+    test "deduped retry does not require fresh quorum" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      missing = :"missing-dedup-replica@127.0.0.1"
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      {:ok, _} = WritePath.create_session(id: id)
+
+      event = %{
+        type: "state",
+        payload: %{state: "running"},
+        actor: "agent:1",
+        producer_id: "writer-1",
+        producer_seq: 1
+      }
+
+      assert {:ok, first} = append_event(id, event)
+      refute first.deduped
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), missing])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self(), missing],
+                 status: :active,
+                 updated_at_ms: now_ms
+               })
+
+      true = :ets.delete(:starcite_routing_assignment_cache, id)
+
+      assert {:ok, second} = append_event(id, event)
+      assert second.deduped
+      assert second.seq == 1
+      assert second.last_seq == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == 1
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert Enum.map(events, & &1.seq) == [1]
+    end
+
     test "errors on producer replay conflict" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
