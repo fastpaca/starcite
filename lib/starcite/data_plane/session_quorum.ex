@@ -10,6 +10,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   - replicating committed session state to standby logs and waiting for quorum
   """
 
+  alias Starcite.Archive.SessionCatalog
   alias Starcite.DataPlane.{EventStore, SessionLog, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.{SessionRouter, Store}
@@ -580,7 +581,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp load_bootstrap_source(session_id) when is_binary(session_id) and session_id != "" do
     local_session = local_cached_session(session_id)
-    freshest_peer = freshest_peer_bootstrap(session_id)
+    freshest_peer = eligible_peer_bootstrap(session_id)
 
     cond do
       freshest_peer == nil and local_session == nil ->
@@ -616,6 +617,19 @@ defmodule Starcite.DataPlane.SessionQuorum do
         _other -> freshest
       end
     end)
+  end
+
+  defp eligible_peer_bootstrap(session_id) when is_binary(session_id) and session_id != "" do
+    case freshest_peer_bootstrap(session_id) do
+      %{session: %Session{last_seq: 0, archived_seq: 0}} = snapshot ->
+        case SessionCatalog.get_session(session_id) do
+          {:ok, %Session{}} -> snapshot
+          _other -> nil
+        end
+
+      snapshot ->
+        snapshot
+    end
   end
 
   defp peer_bootstrap_nodes(session_id) when is_binary(session_id) and session_id != "" do
