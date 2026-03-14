@@ -1053,34 +1053,47 @@ defmodule Starcite.Routing.Store do
            assignment_from_khepri(do_get_assignment_local(session_id, :consistency)),
          :ok <- ensure_matching_transfer(current, transfer_id),
          {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)) do
-      next =
-        activate_assignment(
-          current,
-          current.target_owner,
-          ready_node_list(node_records, committed_at_ms),
-          committed_at_ms
-        )
+      ready_nodes = ready_node_list(node_records, committed_at_ms)
 
-      with :ok <- ensure_assignment_epoch_progression(session_id, current, next, :commit_transfer) do
-        case khepri_call(fn ->
-               :khepri.compare_and_swap(
-                 store_id(),
-                 session_path(session_id),
-                 exact_match_pattern(current),
-                 next,
-                 command_options()
-               )
-             end) do
-          :ok ->
-            :ok = cache_assignment(session_id, next)
-            :ok = Telemetry.routing_transfer(session_id, current.owner, next.owner, :committed)
-            {:ok, next}
+      if current.target_owner in ready_nodes and current.target_owner != current.owner do
+        next =
+          activate_assignment(
+            current,
+            current.target_owner,
+            ready_nodes,
+            committed_at_ms
+          )
 
-          {:error, reason} ->
-            retry_after_local_store_reset(reason, attempt, fn ->
-              do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
-            end)
+        with :ok <- ensure_assignment_epoch_progression(session_id, current, next, :commit_transfer) do
+          case khepri_call(fn ->
+                 :khepri.compare_and_swap(
+                   store_id(),
+                   session_path(session_id),
+                   exact_match_pattern(current),
+                   next,
+                   command_options()
+                 )
+               end) do
+            :ok ->
+              :ok = cache_assignment(session_id, next)
+              :ok = Telemetry.routing_transfer(session_id, current.owner, next.owner, :committed)
+              {:ok, next}
+
+            {:error, reason} ->
+              retry_after_local_store_reset(reason, attempt, fn ->
+                do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
+              end)
+          end
         end
+      else
+        :ok =
+          Telemetry.routing_invariant(
+            session_id,
+            :commit_transfer,
+            :commit_transfer_target_not_ready
+          )
+
+        {:error, :target_not_ready}
       end
     else
       {:error, :mismatching_node} ->

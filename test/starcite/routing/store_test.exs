@@ -860,6 +860,85 @@ defmodule Starcite.Routing.StoreTest do
                    1_000
   end
 
+  test "rejects transfer commit when target owner is no longer ready" do
+    target = :"routing-store-transfer-target@127.0.0.1"
+    peer = :"routing-store-transfer-peer@127.0.0.1"
+
+    session_id =
+      "routing-store-transfer-target-#{System.unique_integer([:positive, :monotonic])}"
+
+    handler_id =
+      "routing-invariant-transfer-target-#{System.unique_integer([:positive, :monotonic])}"
+
+    test_pid = self()
+    now_ms = System.system_time(:millisecond)
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :routing, :invariant],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:routing_invariant_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self(), target, peer])
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(target, %{
+               status: :draining,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(peer, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    current = %{
+      owner: Node.self(),
+      epoch: 1,
+      replicas: [Node.self(), target, peer],
+      status: :moving,
+      target_owner: target,
+      transfer_id: "xfer-target-not-ready",
+      updated_at_ms: now_ms
+    }
+
+    assert :ok = put_assignment(session_id, current)
+
+    assert {:error, :target_not_ready} =
+             Store.commit_transfer(session_id, "xfer-target-not-ready")
+
+    assert_receive {:routing_invariant_event, %{count: 1},
+                    %{
+                      session_id: ^session_id,
+                      source: :commit_transfer,
+                      reason: :commit_transfer_target_not_ready
+                    }},
+                   1_000
+
+    assert {:ok, stored} = Store.get_assignment(session_id, favor: :consistency)
+    assert stored == current
+  end
+
   test "rejects authoritative assignment updates that regress epoch" do
     peer = :"routing-store-epoch-regression-peer@127.0.0.1"
 
