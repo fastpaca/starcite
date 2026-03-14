@@ -1,6 +1,8 @@
 defmodule Starcite.DataPlane.SessionQuorumTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Archive.SessionCatalog
+  alias Starcite.Auth.Principal
   alias Starcite.DataPlane.SessionQuorum
   alias Starcite.Routing.Store
   alias Starcite.Session
@@ -103,6 +105,8 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   use ExUnit.Case, async: false
 
   alias Phoenix.PubSub
+  alias Starcite.Archive.SessionCatalog
+  alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
   alias Starcite.Operations
   alias Starcite.Routing.Store
@@ -260,6 +264,38 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
 
     assert_peer_session(peer_a, session_three)
+  end
+
+  test "empty peer bootstrap is ignored when the session catalog row was never persisted", %{
+    peers: peers
+  } do
+    [peer_a | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-bootstrap-empty-missing-catalog-#{System.unique_integer([:positive, :monotonic])}"
+    principal = %Principal{tenant_id: "acme", id: "creator-1", type: :service}
+    session = Session.new(session_id, tenant_id: "acme", creator_principal: principal)
+
+    put_assignment(session_id, Node.self(), [Node.self(), peer_a])
+    assert :ok = seed_peer_cache(peer_a, session, [])
+
+    assert {:error, :session_not_found} = SessionQuorum.get_session(session_id)
+  end
+
+  test "empty peer bootstrap remains available when the session catalog row exists", %{
+    peers: peers
+  } do
+    [peer_a | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    session_id = "ses-bootstrap-empty-persisted-catalog-#{System.unique_integer([:positive, :monotonic])}"
+    principal = %Principal{tenant_id: "acme", id: "creator-1", type: :service}
+    session = Session.new(session_id, tenant_id: "acme", creator_principal: principal)
+
+    put_assignment(session_id, Node.self(), [Node.self(), peer_a])
+    assert :ok = seed_peer_cache(peer_a, session, [])
+    assert :ok = SessionCatalog.persist_created(Session.to_map(session), principal, "acme", %{})
+
+    assert {:ok, bootstrapped} = SessionQuorum.get_session(session_id)
+    assert bootstrapped.id == session_id
+    assert bootstrapped.last_seq == 0
+    assert bootstrapped.archived_seq == 0
   end
 
   test "manual drain hands ownership to a replica and waits for the node to drain", %{
