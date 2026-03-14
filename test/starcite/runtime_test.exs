@@ -71,7 +71,10 @@ defmodule Starcite.RuntimeTest do
     end
 
     test "returns not found for missing session" do
-      assert {:error, :session_not_found} = ReadPath.get_session("missing")
+      session_id = unique_id("missing")
+
+      assert {:error, :session_not_found} = ReadPath.get_session(session_id)
+      assert {:error, :not_found} = RoutingStore.get_assignment(session_id, favor: :consistency)
     end
 
     test "create_session warms session store for immediate reads" do

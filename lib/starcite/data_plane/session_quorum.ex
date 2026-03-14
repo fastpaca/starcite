@@ -633,9 +633,13 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp peer_bootstrap_nodes(session_id) when is_binary(session_id) and session_id != "" do
-    session_id
-    |> SessionRouter.replica_nodes()
-    |> Enum.reject(&(&1 == Node.self()))
+    case Store.get_assignment(session_id, favor: :consistency) do
+      {:ok, %{replicas: replicas}} when is_list(replicas) ->
+        Enum.reject(replicas, &(&1 == Node.self()))
+
+      _other ->
+        []
+    end
   end
 
   defp fetch_peer_bootstrap(peer_node, session_id)
