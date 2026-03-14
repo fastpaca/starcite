@@ -353,7 +353,15 @@ defmodule Starcite.DataPlane.SessionLog do
       next_session = normalize_session_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
 
-      commit_single_append(data, actions, request.from, next_session, events, outcome, request.replicas)
+      commit_single_append(
+        data,
+        actions,
+        request.from,
+        next_session,
+        events,
+        outcome,
+        request.replicas
+      )
     else
       {:error, reason} ->
         {data, actions ++ [{:reply, request.from, {:error, reason}}]}
@@ -500,7 +508,8 @@ defmodule Starcite.DataPlane.SessionLog do
             length(events)
           )
 
-        reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
+        reply =
+          finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
         {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
 
@@ -686,12 +695,10 @@ defmodule Starcite.DataPlane.SessionLog do
     Telemetry.cursor_update_emitted(session_id, tenant_id, seq, last_seq)
   end
 
-  defp publish_events(_session, []), do: :ok
-
   defp publish_events(%Session{id: session_id, tenant_id: tenant_id, last_seq: last_seq}, events)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" and
-              is_integer(last_seq) and last_seq >= 0 and is_list(events) do
+              is_integer(last_seq) and last_seq >= 0 and is_list(events) and events != [] do
     Enum.each(events, &publish_event(session_id, tenant_id, last_seq, &1))
     :ok
   end
