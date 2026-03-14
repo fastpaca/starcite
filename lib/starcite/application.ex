@@ -24,6 +24,7 @@ defmodule Starcite.Application do
         pubsub_spec(),
         # Dedicated JWKS HTTP client and async refresh coordinator
         jwks_http_spec(),
+        jwks_task_supervisor_spec(),
         StarciteWeb.Auth.JWKSRefresher,
         # DNS / clustering
         dns_cluster_spec(),
@@ -80,6 +81,10 @@ defmodule Starcite.Application do
 
   defp jwks_http_spec do
     {Finch, name: StarciteWeb.Auth.JWKSFinch, pools: %{default: [size: 32, count: 1]}}
+  end
+
+  defp jwks_task_supervisor_spec do
+    {Task.Supervisor, name: StarciteWeb.Auth.JWKSTaskSupervisor}
   end
 
   defp cluster_children([]), do: []
