@@ -681,6 +681,68 @@ defmodule Starcite.RuntimeTest do
       assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
       assert cursor.committed_seq == 3
     end
+
+    test "emits invariant telemetry and preserves the committed frontier when publication sees a stale lower watermark" do
+      id = unique_id("ses")
+
+      handler_id =
+        "data-plane-invariant-runtime-#{System.unique_integer([:positive, :monotonic])}"
+
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:starcite, :data_plane, :invariant],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:data_plane_invariant_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
+      on_exit(fn ->
+        :telemetry.detach(handler_id)
+      end)
+
+      {:ok, _} = WritePath.create_session(id: id)
+
+      assert {:ok, _reply} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "seed"},
+                 actor: "agent:1"
+               })
+
+      assert {:ok, %Session{} = current} = SessionQuorum.get_session(id)
+
+      assert :ok =
+               SessionStore.put_session(%Session{
+                 current
+                 | archived_seq: current.archived_seq + 1
+               })
+
+      assert {:ok, reply} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "next"},
+                 actor: "agent:1"
+               })
+
+      assert_receive {:data_plane_invariant_event, %{count: 1},
+                      %{
+                        session_id: ^id,
+                        source: :publish_events,
+                        reason: :publication_watermark_regression
+                      }},
+                     1_000
+
+      assert reply.committed_cursor.seq == 1
+      assert {:ok, session} = SessionQuorum.get_session(id)
+      assert session.archived_seq == 1
+
+      assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
+      assert cursor.committed_seq == 1
+    end
   end
 
   describe "replica monotonicity" do

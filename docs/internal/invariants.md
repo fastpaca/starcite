@@ -176,8 +176,11 @@ Current coverage:
 - Lease-expiry failover must emit counters.
 - Stale-owner / transfer fences must emit counters.
 - Impossible routing-state mutations must emit counters, including:
+  - assignment update with a regressed epoch
   - transfer commit against a non-moving assignment
   - failover against a non-ready target
+- Publication-time watermark regression must emit a counter and preserve the higher
+  committed frontier instead of regressing it locally.
 - Append boundary telemetry must exist at the two critical crash boundaries:
   - `before_quorum_replicate`
   - `after_commit_before_reply`
@@ -193,9 +196,6 @@ Current coverage:
 - No full websocket tail consumer in the rolling drain/restart chaos drill yet; the current
   short drill proves internal live cursor delivery, final `last_seq` monotonicity,
   and latest-event hot visibility from the active owner.
-- No explicit impossible-state production assertion yet for:
-  - epoch regression on authoritative assignment updates
-  - watermark regression at publication time
 
 ## Rule
 If a property is important enough to mention in the contract or architecture docs, it

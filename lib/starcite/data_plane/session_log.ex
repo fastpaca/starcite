@@ -363,20 +363,23 @@ defmodule Starcite.DataPlane.SessionLog do
 
       case SessionQuorum.replicate_state(next_session, events, request.replicas) do
         :ok ->
+          publish_session = preserve_publication_watermark(next_session)
           :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
-          :ok = publish_events(next_session, events)
-          :ok = SessionStore.put_session(next_session)
+          :ok = publish_events(publish_session, events)
+          :ok = SessionStore.put_session(publish_session)
 
           :ok =
             Telemetry.append_boundary(
-              next_session.id,
-              next_session.tenant_id,
+              publish_session.id,
+              publish_session.tenant_id,
               :after_commit_before_reply,
               length(events)
             )
 
-          reply = finalize_success_outcome(outcome, next_session.epoch, next_session.archived_seq)
-          {%{data | session: next_session}, actions ++ [{:reply, request.from, {:ok, reply}}]}
+          reply =
+            finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
+
+          {%{data | session: publish_session}, actions ++ [{:reply, request.from, {:ok, reply}}]}
 
         {:error, _reason} = error ->
           {data, actions ++ [{:reply, request.from, error}]}
@@ -418,24 +421,25 @@ defmodule Starcite.DataPlane.SessionLog do
 
       case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
         :ok ->
+          publish_session = preserve_publication_watermark(next_session)
           :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
-          :ok = publish_events(next_session, committed_events)
-          :ok = SessionStore.put_session(next_session)
+          :ok = publish_events(publish_session, committed_events)
+          :ok = SessionStore.put_session(publish_session)
 
           :ok =
             Telemetry.append_boundary(
-              next_session.id,
-              next_session.tenant_id,
+              publish_session.id,
+              publish_session.tenant_id,
               :after_commit_before_reply,
               length(committed_events)
             )
 
           reply_actions =
             Enum.map(outcomes, fn outcome ->
-              {:reply, outcome_from(outcome), finalize_outcome(outcome, next_session)}
+              {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
             end)
 
-          {%{data | session: next_session}, actions ++ reply_actions}
+          {%{data | session: publish_session}, actions ++ reply_actions}
 
         {:error, _reason} = error ->
           reply_actions =
@@ -646,6 +650,31 @@ defmodule Starcite.DataPlane.SessionLog do
               is_integer(last_seq) and last_seq >= 0 and is_list(events) do
     Enum.each(events, &publish_event(session_id, tenant_id, last_seq, &1))
     :ok
+  end
+
+  defp preserve_publication_watermark(
+         %Session{id: session_id, tenant_id: tenant_id, epoch: epoch, archived_seq: archived_seq} =
+           next_session
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and is_integer(epoch) and epoch >= 0 and
+              is_integer(archived_seq) and archived_seq >= 0 do
+    case SessionStore.peek_session_cached(session_id) do
+      {:ok, %Session{epoch: ^epoch, archived_seq: cached_archived_seq}}
+      when is_integer(cached_archived_seq) and cached_archived_seq > archived_seq ->
+        :ok =
+          Telemetry.data_plane_invariant(
+            session_id,
+            tenant_id,
+            :publish_events,
+            :publication_watermark_regression
+          )
+
+        %Session{next_session | archived_seq: cached_archived_seq}
+
+      _other ->
+        next_session
+    end
   end
 
   defp evict_archived_events(_session_id, previous_archived_seq, updated_archived_seq)

@@ -685,24 +685,67 @@ defmodule Starcite.Observability.Telemetry do
 
   Metadata:
     - `:session_id`
-    - `:source` (`:commit_transfer` or `:failover_assignment`)
+    - `:source` (`:compare_and_swap_assignment`, `:commit_transfer`, or `:failover_assignment`)
     - `:reason`
   """
   @spec routing_invariant(
           String.t(),
-          :commit_transfer | :failover_assignment,
-          :commit_transfer_invalid_state | :failover_target_not_ready
+          :compare_and_swap_assignment | :commit_transfer | :failover_assignment,
+          :assignment_epoch_regression
+          | :commit_transfer_invalid_state
+          | :failover_target_not_ready
         ) :: :ok
   def routing_invariant(session_id, source, reason)
       when is_binary(session_id) and session_id != "" and
-             source in [:commit_transfer, :failover_assignment] and
-             reason in [:commit_transfer_invalid_state, :failover_target_not_ready] do
+             source in [:compare_and_swap_assignment, :commit_transfer, :failover_assignment] and
+             reason in [
+               :assignment_epoch_regression,
+               :commit_transfer_invalid_state,
+               :failover_target_not_ready
+             ] do
     execute_if_enabled(
       [:starcite, :routing, :invariant],
       %{count: 1},
       %{
         node: current_node_name(),
         session_id: session_id,
+        source: source,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one data-plane invariant violation.
+
+  Measurements:
+    - `:count` - fixed at 1 per violation
+
+  Metadata:
+    - `:session_id`
+    - `:tenant_id`
+    - `:source` (`:publish_events`)
+    - `:reason` (`:publication_watermark_regression`)
+  """
+  @spec data_plane_invariant(
+          String.t(),
+          String.t(),
+          :publish_events,
+          :publication_watermark_regression
+        ) :: :ok
+  def data_plane_invariant(session_id, tenant_id, source, reason)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and source in [:publish_events] and
+             reason in [:publication_watermark_regression] do
+    execute_if_enabled(
+      [:starcite, :data_plane, :invariant],
+      %{count: 1},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        tenant_id: tenant_id,
         source: source,
         reason: reason
       }

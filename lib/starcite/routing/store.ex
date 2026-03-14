@@ -505,21 +505,29 @@ defmodule Starcite.Routing.Store do
 
   def do_compare_and_swap_assignment_local(session_id, current, next)
       when is_binary(session_id) and is_map(current) and is_map(next) do
-    case khepri_call(fn ->
-           :khepri.compare_and_swap(
-             store_id(),
-             session_path(session_id),
-             exact_match_pattern(current),
+    with :ok <-
+           ensure_assignment_epoch_progression(
+             session_id,
+             current,
              next,
-             command_options()
-           )
-         end) do
-      :ok ->
-        :ok = cache_assignment(session_id, next)
-        :ok
+             :compare_and_swap_assignment
+           ) do
+      case khepri_call(fn ->
+             :khepri.compare_and_swap(
+               store_id(),
+               session_path(session_id),
+               exact_match_pattern(current),
+               next,
+               command_options()
+             )
+           end) do
+        :ok ->
+          :ok = cache_assignment(session_id, next)
+          :ok
 
-      {:error, reason} ->
-        {:error, reason}
+        {:error, reason} ->
+          {:error, reason}
+      end
     end
   end
 
@@ -818,6 +826,38 @@ defmodule Starcite.Routing.Store do
     |> Map.delete(:transfer_id)
   end
 
+  defp ensure_assignment_epoch_progression(session_id, current, next, source)
+       when is_binary(session_id) and session_id != "" and is_map(current) and is_map(next) and
+              source in [:compare_and_swap_assignment, :commit_transfer, :failover_assignment] do
+    current_epoch = assignment_epoch(current)
+    next_epoch = assignment_epoch(next)
+
+    cond do
+      next_epoch < current_epoch ->
+        :ok = Telemetry.routing_invariant(session_id, source, :assignment_epoch_regression)
+        {:error, :epoch_regression}
+
+      owner_changed?(current, next) and next_epoch <= current_epoch ->
+        :ok = Telemetry.routing_invariant(session_id, source, :assignment_epoch_regression)
+        {:error, :epoch_regression}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp owner_changed?(current, next)
+       when is_map(current) and is_map(next) do
+    Map.get(current, :owner) != Map.get(next, :owner)
+  end
+
+  defp assignment_epoch(assignment) when is_map(assignment) do
+    case Map.get(assignment, :epoch) do
+      value when is_integer(value) and value >= 0 -> value
+      _ -> 0
+    end
+  end
+
   defp new_transfer_id do
     "xfer-#{System.unique_integer([:positive, :monotonic])}"
   end
@@ -1021,24 +1061,26 @@ defmodule Starcite.Routing.Store do
           committed_at_ms
         )
 
-      case khepri_call(fn ->
-             :khepri.compare_and_swap(
-               store_id(),
-               session_path(session_id),
-               exact_match_pattern(current),
-               next,
-               command_options()
-             )
-           end) do
-        :ok ->
-          :ok = cache_assignment(session_id, next)
-          :ok = Telemetry.routing_transfer(session_id, current.owner, next.owner, :committed)
-          {:ok, next}
+      with :ok <- ensure_assignment_epoch_progression(session_id, current, next, :commit_transfer) do
+        case khepri_call(fn ->
+               :khepri.compare_and_swap(
+                 store_id(),
+                 session_path(session_id),
+                 exact_match_pattern(current),
+                 next,
+                 command_options()
+               )
+             end) do
+          :ok ->
+            :ok = cache_assignment(session_id, next)
+            :ok = Telemetry.routing_transfer(session_id, current.owner, next.owner, :committed)
+            {:ok, next}
 
-        {:error, reason} ->
-          retry_after_local_store_reset(reason, attempt, fn ->
-            do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
-          end)
+          {:error, reason} ->
+            retry_after_local_store_reset(reason, attempt, fn ->
+              do_commit_transfer_local(session_id, transfer_id, committed_at_ms, attempt + 1)
+            end)
+        end
       end
     else
       {:error, :mismatching_node} ->
@@ -1075,33 +1117,41 @@ defmodule Starcite.Routing.Store do
             failed_at_ms
           )
 
-        case khepri_call(fn ->
-               :khepri.compare_and_swap(
-                 store_id(),
-                 session_path(session_id),
-                 exact_match_pattern(current),
+        with :ok <-
+               ensure_assignment_epoch_progression(
+                 session_id,
+                 current,
                  next,
-                 command_options()
-               )
-             end) do
-          :ok ->
-            :ok = cache_assignment(session_id, next)
+                 :failover_assignment
+               ) do
+          case khepri_call(fn ->
+                 :khepri.compare_and_swap(
+                   store_id(),
+                   session_path(session_id),
+                   exact_match_pattern(current),
+                   next,
+                   command_options()
+                 )
+               end) do
+            :ok ->
+              :ok = cache_assignment(session_id, next)
 
-            :ok =
-              Telemetry.routing_failover(session_id, current.owner, next.owner, :lease_expired)
+              :ok =
+                Telemetry.routing_failover(session_id, current.owner, next.owner, :lease_expired)
 
-            :ok
+              :ok
 
-          {:error, reason} ->
-            retry_after_local_store_reset(reason, attempt, fn ->
-              do_failover_assignment_local(
-                session_id,
-                current,
-                target_node,
-                failed_at_ms,
-                attempt + 1
-              )
-            end)
+            {:error, reason} ->
+              retry_after_local_store_reset(reason, attempt, fn ->
+                do_failover_assignment_local(
+                  session_id,
+                  current,
+                  target_node,
+                  failed_at_ms,
+                  attempt + 1
+                )
+              end)
+          end
         end
       else
         :ok =
