@@ -96,7 +96,7 @@ defmodule Starcite.Application do
   end
 
   defp dns_cluster_spec do
-    query = Application.get_env(:starcite, :dns_cluster_query) || :ignore
+    query = Application.get_env(:starcite, :dns_cluster_query, :ignore)
 
     if Code.ensure_loaded?(DNSCluster) and query != :ignore do
       {DNSCluster, query: query}

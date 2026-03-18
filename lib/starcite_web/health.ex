@@ -24,14 +24,15 @@ defmodule StarciteWeb.Health do
         reason: readiness_reason(readiness.reason, mode)
       }
 
-      {503, put_detail(body, readiness.detail)}
+      if map_size(readiness.detail) == 0 do
+        {503, body}
+      else
+        {503, Map.put(body, :detail, readiness.detail)}
+      end
     end
   end
 
   defp readiness_reason(:draining, _mode), do: "draining"
   defp readiness_reason(:lease_expired, _mode), do: "lease_expired"
   defp readiness_reason(_reason, _mode), do: "routing_sync"
-
-  defp put_detail(body, detail) when map_size(detail) == 0, do: body
-  defp put_detail(body, detail), do: Map.put(body, :detail, detail)
 end

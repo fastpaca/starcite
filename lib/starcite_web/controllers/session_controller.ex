@@ -71,7 +71,7 @@ defmodule StarciteWeb.SessionController do
     with :ok <- Policy.allowed_to_access_session(auth, id),
          :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
-         {:ok, reply} <- append_event(id, event, expected_seq) do
+         {:ok, reply} <- append_reply(id, event, expected_seq) do
       :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
       {:ok, reply}
     else
@@ -90,9 +90,9 @@ defmodule StarciteWeb.SessionController do
 
   def append_api(_auth, _id, _params), do: {:error, :invalid_event}
 
-  defp append_event(id, event, nil), do: WritePath.append_event(id, event)
+  defp append_reply(id, event, nil), do: WritePath.append_event(id, event)
 
-  defp append_event(id, event, expected_seq),
+  defp append_reply(id, event, expected_seq),
     do: WritePath.append_event(id, event, expected_seq: expected_seq)
 
   defp ingest_edge_error_reason({:error, {:not_leader, _leader}}), do: :not_leader

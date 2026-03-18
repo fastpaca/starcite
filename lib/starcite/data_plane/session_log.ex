@@ -546,9 +546,19 @@ defmodule Starcite.DataPlane.SessionLog do
   defp commit_session(%Session{} = next_session, events) when is_list(events) do
     publish_session = preserve_publication_watermark(next_session)
     :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
-    :ok = maybe_publish_events(publish_session, events)
+    if events != [], do: :ok = publish_events(publish_session, events)
     :ok = SessionStore.put_session(publish_session)
-    :ok = maybe_emit_commit_boundary(publish_session, events)
+
+    if events != [] do
+      :ok =
+        Telemetry.append_boundary(
+          publish_session.id,
+          publish_session.tenant_id,
+          :after_commit_before_reply,
+          length(events)
+        )
+    end
+
     {:ok, publish_session}
   end
 
@@ -681,25 +691,6 @@ defmodule Starcite.DataPlane.SessionLog do
               is_integer(last_seq) and last_seq >= 0 and is_list(events) and events != [] do
     Enum.each(events, &publish_event(session_id, tenant_id, last_seq, &1))
     :ok
-  end
-
-  defp maybe_publish_events(_session, []), do: :ok
-  defp maybe_publish_events(%Session{} = session, events), do: publish_events(session, events)
-
-  defp maybe_emit_commit_boundary(_session, []), do: :ok
-
-  defp maybe_emit_commit_boundary(
-         %Session{id: session_id, tenant_id: tenant_id},
-         events
-       )
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and is_list(events) do
-    Telemetry.append_boundary(
-      session_id,
-      tenant_id,
-      :after_commit_before_reply,
-      length(events)
-    )
   end
 
   defp preserve_publication_watermark(

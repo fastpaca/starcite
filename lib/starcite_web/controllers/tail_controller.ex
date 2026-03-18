@@ -50,16 +50,14 @@ defmodule StarciteWeb.TailController do
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
-  defp parse_cursor_param(%{"cursor" => cursor}), do: parse_cursor(cursor)
+  defp parse_cursor_param(%{"cursor" => nil}), do: {:ok, Cursor.new(nil, 0)}
+  defp parse_cursor_param(%{"cursor" => cursor}), do: Cursor.normalize(cursor)
   defp parse_cursor_param(%{}), do: {:ok, Cursor.new(nil, 0)}
 
   defp parse_frame_batch_size_param(%{"batch_size" => batch_size}),
     do: parse_frame_batch_size(batch_size)
 
   defp parse_frame_batch_size_param(%{}), do: {:ok, @default_tail_frame_batch_size}
-
-  defp parse_cursor(nil), do: {:ok, Cursor.new(nil, 0)}
-  defp parse_cursor(cursor), do: Cursor.normalize(cursor)
 
   defp parse_frame_batch_size(batch_size)
        when is_integer(batch_size) and batch_size >= @default_tail_frame_batch_size and
