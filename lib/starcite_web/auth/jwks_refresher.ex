@@ -87,51 +87,11 @@ defmodule StarciteWeb.Auth.JWKSRefresher do
   end
 
   def handle_info({ref, result}, state) when is_reference(ref) do
-    case find_entry_by_ref(state, ref) do
-      {url, entry} ->
-        Process.demonitor(ref, [:flush])
-
-        Enum.each(entry.waiters, fn {from, kid} ->
-          GenServer.reply(from, reply_for_fetch(entry.config, kid, result))
-        end)
-
-        next_entry = %{
-          entry
-          | in_flight: false,
-            waiters: [],
-            timer_ref: schedule_refresh(url, entry.config, result),
-            task_ref: nil,
-            task_pid: nil
-        }
-
-        {:noreply, Map.put(state, url, next_entry)}
-
-      nil ->
-        {:noreply, state}
-    end
+    {:noreply, finish_refresh(state, ref, result, true)}
   end
 
   def handle_info({:DOWN, ref, :process, _pid, _reason}, state) when is_reference(ref) do
-    case find_entry_by_ref(state, ref) do
-      {url, entry} ->
-        Enum.each(entry.waiters, fn {from, _kid} ->
-          GenServer.reply(from, {:error, :jwks_unavailable})
-        end)
-
-        next_entry = %{
-          entry
-          | in_flight: false,
-            waiters: [],
-            timer_ref: schedule_refresh(url, entry.config, {:error, :jwks_unavailable}),
-            task_ref: nil,
-            task_pid: nil
-        }
-
-        {:noreply, Map.put(state, url, next_entry)}
-
-      nil ->
-        {:noreply, state}
-    end
+    {:noreply, finish_refresh(state, ref, {:error, :jwks_unavailable}, false)}
   end
 
   defp new_entry(config) do
@@ -174,6 +134,38 @@ defmodule StarciteWeb.Auth.JWKSRefresher do
   defp cancel_timer(timer_ref) do
     Process.cancel_timer(timer_ref)
     :ok
+  end
+
+  defp finish_refresh(state, ref, result, demonitor?)
+       when is_map(state) and is_reference(ref) and is_boolean(demonitor?) do
+    case find_entry_by_ref(state, ref) do
+      {url, entry} ->
+        if demonitor?, do: Process.demonitor(ref, [:flush])
+
+        reply_waiters(entry, result)
+        Map.put(state, url, complete_refresh(url, entry, result))
+
+      nil ->
+        state
+    end
+  end
+
+  defp complete_refresh(url, entry, result) when is_binary(url) and is_map(entry) do
+    %{
+      entry
+      | in_flight: false,
+        waiters: [],
+        timer_ref: schedule_refresh(url, entry.config, result),
+        task_ref: nil,
+        task_pid: nil
+    }
+  end
+
+  defp reply_waiters(entry, result) when is_map(entry) do
+    Enum.each(entry.waiters, fn
+      {from, kid} ->
+        GenServer.reply(from, reply_for_fetch(entry.config, kid, result))
+    end)
   end
 
   defp find_entry_by_ref(state, ref) when is_map(state) and is_reference(ref) do

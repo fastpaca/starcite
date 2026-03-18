@@ -469,8 +469,7 @@ defmodule Starcite.DataPlane.SessionLog do
          outcome,
          _replicas
        ) do
-    publish_session = preserve_publication_watermark(next_session)
-    :ok = SessionStore.put_session(publish_session)
+    {:ok, publish_session} = commit_session(next_session, [])
     reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
     {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
   end
@@ -485,29 +484,8 @@ defmodule Starcite.DataPlane.SessionLog do
          replicas
        )
        when is_list(events) do
-    :ok =
-      Telemetry.append_boundary(
-        next_session.id,
-        next_session.tenant_id,
-        :before_quorum_replicate,
-        length(events)
-      )
-
-    case SessionQuorum.replicate_state(next_session, events, replicas) do
-      :ok ->
-        publish_session = preserve_publication_watermark(next_session)
-        :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
-        :ok = publish_events(publish_session, events)
-        :ok = SessionStore.put_session(publish_session)
-
-        :ok =
-          Telemetry.append_boundary(
-            publish_session.id,
-            publish_session.tenant_id,
-            :after_commit_before_reply,
-            length(events)
-          )
-
+    case replicate_and_commit(next_session, events, replicas) do
+      {:ok, publish_session} ->
         reply =
           finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
@@ -519,8 +497,7 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp commit_append_group(data, actions, next_session, [], outcomes, _replicas) do
-    publish_session = preserve_publication_watermark(next_session)
-    :ok = SessionStore.put_session(publish_session)
+    {:ok, publish_session} = commit_session(next_session, [])
 
     reply_actions =
       Enum.map(outcomes, fn outcome ->
@@ -532,29 +509,8 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp commit_append_group(data, actions, next_session, committed_events, outcomes, replicas)
        when is_list(committed_events) do
-    :ok =
-      Telemetry.append_boundary(
-        next_session.id,
-        next_session.tenant_id,
-        :before_quorum_replicate,
-        length(committed_events)
-      )
-
-    case SessionQuorum.replicate_state(next_session, committed_events, replicas) do
-      :ok ->
-        publish_session = preserve_publication_watermark(next_session)
-        :ok = put_appended_events(next_session.id, next_session.tenant_id, committed_events)
-        :ok = publish_events(publish_session, committed_events)
-        :ok = SessionStore.put_session(publish_session)
-
-        :ok =
-          Telemetry.append_boundary(
-            publish_session.id,
-            publish_session.tenant_id,
-            :after_commit_before_reply,
-            length(committed_events)
-          )
-
+    case replicate_and_commit(next_session, committed_events, replicas) do
+      {:ok, publish_session} ->
         reply_actions =
           Enum.map(outcomes, fn outcome ->
             {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
@@ -570,6 +526,30 @@ defmodule Starcite.DataPlane.SessionLog do
 
         {data, actions ++ reply_actions}
     end
+  end
+
+  defp replicate_and_commit(next_session, events, replicas)
+       when is_struct(next_session, Session) and is_list(events) do
+    :ok =
+      Telemetry.append_boundary(
+        next_session.id,
+        next_session.tenant_id,
+        :before_quorum_replicate,
+        length(events)
+      )
+
+    with :ok <- SessionQuorum.replicate_state(next_session, events, replicas) do
+      commit_session(next_session, events)
+    end
+  end
+
+  defp commit_session(%Session{} = next_session, events) when is_list(events) do
+    publish_session = preserve_publication_watermark(next_session)
+    :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
+    :ok = maybe_publish_events(publish_session, events)
+    :ok = SessionStore.put_session(publish_session)
+    :ok = maybe_emit_commit_boundary(publish_session, events)
+    {:ok, publish_session}
   end
 
   defp role_for_session(session_id) when is_binary(session_id) and session_id != "" do
@@ -701,6 +681,25 @@ defmodule Starcite.DataPlane.SessionLog do
               is_integer(last_seq) and last_seq >= 0 and is_list(events) and events != [] do
     Enum.each(events, &publish_event(session_id, tenant_id, last_seq, &1))
     :ok
+  end
+
+  defp maybe_publish_events(_session, []), do: :ok
+  defp maybe_publish_events(%Session{} = session, events), do: publish_events(session, events)
+
+  defp maybe_emit_commit_boundary(_session, []), do: :ok
+
+  defp maybe_emit_commit_boundary(
+         %Session{id: session_id, tenant_id: tenant_id},
+         events
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and is_list(events) do
+    Telemetry.append_boundary(
+      session_id,
+      tenant_id,
+      :after_commit_before_reply,
+      length(events)
+    )
   end
 
   defp preserve_publication_watermark(
