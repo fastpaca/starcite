@@ -111,24 +111,17 @@ defmodule StarciteWeb.TailSocket do
     if seq <= state.cursor do
       {:ok, state}
     else
-      queue_empty? = :queue.is_empty(state.replay_queue)
-      buffer_empty? = map_size(state.live_buffer) == 0
-
-      if state.replay_done and queue_empty? and buffer_empty? do
+      if tail_idle?(state) do
         case resolve_live_cursor_update_event(state.session_id, state.principal, update) do
           {:ok, event} ->
             next_state = update_cursor_state(state, event)
             push_events_frame([event], next_state)
 
           :error ->
-            buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
-            next_state = %{state | live_buffer: buffered}
-            {:ok, maybe_schedule_drain(next_state)}
+            {:ok, buffer_cursor_update(state, seq, update)}
         end
       else
-        buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
-        next_state = %{state | live_buffer: buffered}
-        {:ok, maybe_schedule_drain(next_state)}
+        {:ok, buffer_cursor_update(state, seq, update)}
       end
     end
   end
@@ -260,13 +253,7 @@ defmodule StarciteWeb.TailSocket do
 
   defp event_from_cursor_update(%{event: %{seq: seq} = event} = update, seq)
        when is_integer(seq) and seq > 0 do
-    epoch =
-      case Map.get(update, :epoch) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> 0
-      end
-
-    {:ok, Map.put_new(event, :epoch, epoch)}
+    {:ok, Map.put_new(event, :epoch, event_epoch(update, 0))}
   end
 
   defp event_from_cursor_update(_update, _seq), do: :error
@@ -325,12 +312,9 @@ defmodule StarciteWeb.TailSocket do
   defp observe_cursor_update(_update, _state), do: :ok
 
   defp cursor_update_mode(seq, state) when is_integer(seq) and seq > 0 do
-    queue_empty? = :queue.is_empty(state.replay_queue)
-    buffer_empty? = map_size(state.live_buffer) == 0
-
     cond do
       seq <= state.cursor -> :stale
-      state.replay_done and queue_empty? and buffer_empty? -> :live_fast_path
+      tail_idle?(state) -> :live_fast_path
       true -> :buffered
     end
   end
@@ -446,12 +430,7 @@ defmodule StarciteWeb.TailSocket do
 
   defp render_event(event, fallback_epoch)
        when is_map(event) and (is_integer(fallback_epoch) or is_nil(fallback_epoch)) do
-    epoch =
-      case Map.get(event, :epoch) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> fallback_epoch || 0
-      end
-
+    epoch = event_epoch(event, fallback_epoch || 0)
     seq = Map.get(event, :seq)
 
     event
@@ -484,13 +463,11 @@ defmodule StarciteWeb.TailSocket do
 
   defp update_cursor_state(state, %{seq: seq} = event)
        when is_map(state) and is_integer(seq) and seq > 0 do
-    epoch =
-      case Map.get(event, :epoch) do
-        value when is_integer(value) and value >= 0 -> value
-        _ -> state.cursor_epoch
-      end
-
-    %{state | cursor: max(state.cursor, seq), cursor_epoch: epoch}
+    %{
+      state
+      | cursor: max(state.cursor, seq),
+        cursor_epoch: event_epoch(event, state.cursor_epoch)
+    }
   end
 
   defp put_event_epoch(event, epoch)
@@ -499,6 +476,25 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp put_event_epoch(event, _epoch) when is_map(event), do: event
+
+  defp tail_idle?(state) when is_map(state) do
+    state.replay_done and :queue.is_empty(state.replay_queue) and map_size(state.live_buffer) == 0
+  end
+
+  defp buffer_cursor_update(state, seq, update)
+       when is_map(state) and is_integer(seq) and seq > 0 and is_map(update) do
+    state
+    |> Map.put(:live_buffer, Map.put(state.live_buffer, seq, {:cursor_update, update}))
+    |> maybe_schedule_drain()
+  end
+
+  defp event_epoch(value, fallback)
+       when is_map(value) and (is_integer(fallback) or is_nil(fallback)) do
+    case Map.get(value, :epoch) do
+      epoch when is_integer(epoch) and epoch >= 0 -> epoch
+      _ -> fallback
+    end
+  end
 
   defp elapsed_ms_since(started_at) when is_integer(started_at) do
     System.monotonic_time()
