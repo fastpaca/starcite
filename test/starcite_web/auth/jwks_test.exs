@@ -124,6 +124,8 @@ defmodule StarciteWeb.Auth.JWKSTest do
     assert :miss = JWKS.cached_signing_key(config, kid)
 
     Bypass.expect_once(bypass, "GET", @jwks_path, fn conn ->
+      Process.sleep(150)
+
       conn
       |> put_resp_content_type("application/json")
       |> resp(

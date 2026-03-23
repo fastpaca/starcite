@@ -71,7 +71,6 @@ defmodule StarciteWeb.Auth.JWKS do
 
   @spec refresh_url(map()) :: :ok | {:error, atom()}
   def refresh_url(%{jwks_url: url} = config) when is_binary(url) and url != "" do
-    now_ms = System.system_time(:millisecond)
     refresh_ms = Map.get(config, :jwks_refresh_ms)
     hard_expiry_ms = Map.get(config, :jwks_hard_expiry_ms, refresh_ms)
 
@@ -79,6 +78,7 @@ defmodule StarciteWeb.Auth.JWKS do
          true <- is_integer(hard_expiry_ms) and hard_expiry_ms > 0,
          {:ok, body} <- fetch_jwks(url),
          {:ok, key_entries} <- parse_jwks(body) do
+      now_ms = System.system_time(:millisecond)
       write_keys(url, key_entries, now_ms, refresh_ms, hard_expiry_ms)
     else
       false ->
