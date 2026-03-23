@@ -132,7 +132,7 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
   - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
   - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js`
   - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
-- Avoid adding start/stop wrapper scripts for Docker Compose workflows; keep local failover drills explicit (`docker compose kill/pause/up`) and document them in `docs/local-testing.md`.
+- Avoid adding start/stop wrapper scripts for Docker Compose workflows; keep local failover drills explicit (`docker compose kill/pause/up`) and document them only when the main operational docs genuinely need them.
 - Treat cluster runs as optional vibe checks for local iteration; default to faster `mix test` loops when cluster behavior is not under test.
 - For k6 throughput tests, distinguish offered rate from effective throughput (`events_sent`/`http_reqs`) and always inspect `dropped_iterations` and failure rate before concluding the service ceiling.
 - For append benchmarks, avoid artificial contention by using enough sessions and stable producer identity/sequence generation; otherwise results overstate contention bottlenecks.

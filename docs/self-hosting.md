@@ -140,8 +140,6 @@ The key constraint: never restart more than one node at a time. Starcite uses
 in-memory replication with quorum writes — taking two nodes down simultaneously means
 some groups lose quorum and can't accept writes.
 
-For the explicit local Compose drill, use [local-testing.md](local-testing.md).
-
 For production rollouts, operate one node at a time:
 
 1. **Drain** — tells the cluster to stop routing new requests to this node:

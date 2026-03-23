@@ -1,10 +1,7 @@
 # Starcite Invariants
 
-Status: Draft v0.1  
-Visibility: Internal only
-
 This document is the explicit invariant inventory for the current Khepri control plane
-plus batched `SessionLog` data plane. It is intentionally stricter than product copy.
+plus batched `SessionLog` data plane.
 
 ## Purpose
 - Define the states that must never be violated.
