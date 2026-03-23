@@ -16,20 +16,12 @@ defmodule StarciteWeb.ApiAuthJwtTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, StarciteWeb.Auth)
-    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
 
     on_exit(fn ->
       if is_nil(previous_auth) do
         Application.delete_env(:starcite, StarciteWeb.Auth)
       else
         Application.put_env(:starcite, StarciteWeb.Auth, previous_auth)
-      end
-
-      if is_nil(previous_archive_adapter) do
-        Application.delete_env(:starcite, :archive_adapter)
-      else
-        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
       end
 
       :ok = JWKS.clear_cache()

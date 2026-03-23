@@ -17,8 +17,6 @@ defmodule StarciteWeb.SessionControllerTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
-    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
@@ -48,12 +46,6 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.delete_env(:starcite, @auth_env_key)
       else
         Application.put_env(:starcite, @auth_env_key, previous_auth)
-      end
-
-      if is_nil(previous_archive_adapter) do
-        Application.delete_env(:starcite, :archive_adapter)
-      else
-        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
       end
 
       :ok = JWKS.clear_cache()
