@@ -3,9 +3,9 @@ defmodule Starcite.Archive do
   Pull-based archiver.
 
   - periodically scans local `EventStore` session cursors
-  - archives only sessions for groups led on this node
+  - archives local in-memory session-log buffers
   - persists batches through `Starcite.Archive.Store`
-  - acknowledges archived progress through the write path (`WritePath.ack_archived/1`)
+  - acknowledges archived progress via the local session log (`WritePath.ack_archived_local/2`)
 
   Archive persistence failures are treated as fatal for this worker: the process
   crashes and relies on supervisor restart rather than masking write failures.
@@ -13,10 +13,13 @@ defmodule Starcite.Archive do
 
   use GenServer
 
+  @dialyzer {:nowarn_function, [persist_rows: 5, put_archived_seq: 3]}
+
   alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
   alias Starcite.{WritePath}
-  alias Starcite.DataPlane.{EventStore, RaftAccess, RaftManager}
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Routing.Store, as: RoutingStore
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -29,7 +32,6 @@ defmodule Starcite.Archive do
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
     adapter_mod = Keyword.get(opts, :adapter, Store.adapter())
     adapter_opts = Keyword.get(opts, :adapter_opts, [])
-    single_local_write_node = single_local_write_node?()
 
     {:ok, _} = adapter_mod.start_link(adapter_opts)
 
@@ -39,7 +41,6 @@ defmodule Starcite.Archive do
      %{
        interval: interval,
        adapter: adapter_mod,
-       single_local_write_node: single_local_write_node,
        archived_seq_cache: %{},
        tenant_cache: %{}
      }}
@@ -48,42 +49,29 @@ defmodule Starcite.Archive do
   @impl true
   def handle_info(:flush_tick, state) do
     start = System.monotonic_time(:millisecond)
-    session_ids = EventStore.session_ids()
+
+    session_ids =
+      EventStore.session_ids()
+      |> local_owned_session_ids()
+
     ordered_session_ids = fair_session_order(session_ids, state.tenant_cache)
 
-    {stats, pending_acks, archived_seq_cache, tenant_cache} =
+    {stats, archived_seq_cache, tenant_cache} =
       Enum.reduce(
         ordered_session_ids,
-        {zero_stats(), [], state.archived_seq_cache, state.tenant_cache},
-        fn session_id, {stats_acc, pending_acks_acc, archived_seq_cache_acc, tenant_cache_acc} ->
-          {session_stats, pending_ack, archived_seq_cache_next, tenant_cache_next} =
+        {zero_stats(), state.archived_seq_cache, state.tenant_cache},
+        fn session_id, {stats_acc, archived_seq_cache_acc, tenant_cache_acc} ->
+          {session_stats, archived_seq_cache_next, tenant_cache_next} =
             flush_session(
               session_id,
               state.adapter,
               archived_seq_cache_acc,
-              tenant_cache_acc,
-              state.single_local_write_node
+              tenant_cache_acc
             )
 
-          next_pending_acks =
-            case pending_ack do
-              nil -> pending_acks_acc
-              ack -> [ack | pending_acks_acc]
-            end
-
-          {
-            merge_stats(stats_acc, session_stats),
-            next_pending_acks,
-            archived_seq_cache_next,
-            tenant_cache_next
-          }
+          {merge_stats(stats_acc, session_stats), archived_seq_cache_next, tenant_cache_next}
         end
       )
-
-    {ack_stats, archived_seq_cache} =
-      apply_archive_acks(Enum.reverse(pending_acks), archived_seq_cache)
-
-    stats = merge_stats(stats, ack_stats)
 
     archived_seq_cache = Map.take(archived_seq_cache, session_ids)
     tenant_cache = Map.take(tenant_cache, session_ids)
@@ -111,11 +99,10 @@ defmodule Starcite.Archive do
          session_id,
          adapter,
          archived_seq_cache,
-         tenant_cache,
-         single_local_write_node
+         tenant_cache
        )
        when is_binary(session_id) and session_id != "" and is_map(archived_seq_cache) and
-              is_map(tenant_cache) and is_boolean(single_local_write_node) do
+              is_map(tenant_cache) do
     with {:ok, max_seq} <- EventStore.max_seq(session_id),
          {:ok, archived_seq, archived_seq_cache} <-
            load_archived_seq(session_id, archived_seq_cache) do
@@ -123,17 +110,14 @@ defmodule Starcite.Archive do
 
       cond do
         pending_before == 0 ->
-          {zero_stats(), nil, archived_seq_cache, tenant_cache}
-
-        ensure_local_group_leader(session_id, single_local_write_node) != :ok ->
-          {zero_stats(), nil, archived_seq_cache, tenant_cache}
+          {zero_stats(), archived_seq_cache, tenant_cache}
 
         true ->
           rows =
             EventStore.from_cursor(session_id, archived_seq, archive_batch_size())
             |> Enum.map(&Map.put(&1, :session_id, session_id))
 
-          {session_stats, pending_ack, tenant_id} =
+          {session_stats, next_archived_seq, tenant_id} =
             persist_rows(
               rows,
               session_id,
@@ -144,14 +128,13 @@ defmodule Starcite.Archive do
 
           {
             session_stats,
-            pending_ack,
-            archived_seq_cache,
+            put_archived_seq(archived_seq_cache, session_id, next_archived_seq),
             put_session_tenant(tenant_cache, session_id, tenant_id)
           }
       end
     else
       _ ->
-        {zero_stats(), nil, Map.delete(archived_seq_cache, session_id),
+        {zero_stats(), Map.delete(archived_seq_cache, session_id),
          Map.delete(tenant_cache, session_id)}
     end
   end
@@ -187,22 +170,55 @@ defmodule Starcite.Archive do
           )
 
         upto_seq = contiguous_upto(rows)
-        :ok = persist_session_archived_seq(adapter, session_id, tenant_id, upto_seq)
 
-        {
-          zero_stats(),
-          %{
-            session_id: session_id,
-            tenant_id: tenant_id,
-            attempted: attempted,
-            inserted: inserted,
-            bytes_attempted: bytes_attempted,
-            pending_before: pending_before,
-            max_seq: max_seq,
-            upto_seq: upto_seq
-          },
-          tenant_id
-        }
+        case WritePath.ack_archived_local(session_id, upto_seq) do
+          {:ok, %{archived_seq: acked_seq}} ->
+            pending_after = max(max_seq - acked_seq, 0)
+            avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
+
+            Telemetry.archive_batch(
+              session_id,
+              tenant_id,
+              attempted,
+              bytes_attempted,
+              avg_event_bytes,
+              pending_after
+            )
+
+            bytes_inserted =
+              if attempted > 0 do
+                div(bytes_attempted * inserted, attempted)
+              else
+                0
+              end
+
+            {
+              %{
+                attempted: attempted,
+                inserted: inserted,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: bytes_inserted,
+                pending_after: pending_after,
+                pending_sessions: if(pending_after > 0, do: 1, else: 0)
+              },
+              acked_seq,
+              tenant_id
+            }
+
+          _ack_error ->
+            {
+              %{
+                attempted: attempted,
+                inserted: 0,
+                bytes_attempted: bytes_attempted,
+                bytes_inserted: 0,
+                pending_after: pending_before,
+                pending_sessions: 1
+              },
+              nil,
+              tenant_id
+            }
+        end
 
       {:ok, other} ->
         raise "archive adapter returned invalid insert count for #{session_id}: #{inspect(other)}"
@@ -211,126 +227,6 @@ defmodule Starcite.Archive do
         raise "archive write failed for #{session_id}: #{inspect(reason)}"
     end
   end
-
-  defp persist_session_archived_seq(adapter, session_id, tenant_id, archived_seq)
-       when is_atom(adapter) and is_binary(session_id) and session_id != "" and
-              is_binary(tenant_id) and tenant_id != "" and is_integer(archived_seq) and
-              archived_seq >= 0 do
-    case Store.update_session_archived_seq(adapter, session_id, tenant_id, archived_seq) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        raise "archive session upsert failed for #{session_id}: #{inspect(reason)}"
-    end
-  end
-
-  defp apply_archive_acks([], archived_seq_cache) when is_map(archived_seq_cache),
-    do: {zero_stats(), archived_seq_cache}
-
-  defp apply_archive_acks(pending_acks, archived_seq_cache)
-       when is_list(pending_acks) and is_map(archived_seq_cache) do
-    ack_entries = Enum.map(pending_acks, &{&1.session_id, &1.upto_seq})
-
-    case WritePath.ack_archived(ack_entries) do
-      {:ok, %{applied: applied, failed: failed}} when is_list(applied) and is_list(failed) ->
-        applied_by_session = Map.new(applied, &{&1.session_id, &1})
-        failed_by_session = Map.new(failed, &{&1.session_id, &1.reason})
-
-        Enum.reduce(pending_acks, {zero_stats(), archived_seq_cache}, fn pending_ack,
-                                                                         {stats_acc, cache_acc} ->
-          apply_archive_ack_result(
-            pending_ack,
-            Map.get(applied_by_session, pending_ack.session_id),
-            Map.get(failed_by_session, pending_ack.session_id),
-            stats_acc,
-            cache_acc
-          )
-        end)
-
-      other ->
-        apply_archive_ack_failure(pending_acks, archived_seq_cache, other)
-    end
-  end
-
-  defp apply_archive_ack_result(
-         pending_ack,
-         %{archived_seq: archived_seq},
-         _failure_reason,
-         stats_acc,
-         archived_seq_cache
-       )
-       when is_integer(archived_seq) and archived_seq >= 0 do
-    pending_after = max(pending_ack.max_seq - archived_seq, 0)
-    avg_event_bytes = average_bytes(pending_ack.bytes_attempted, pending_ack.attempted)
-
-    Telemetry.archive_batch(
-      pending_ack.session_id,
-      pending_ack.tenant_id,
-      pending_ack.attempted,
-      pending_ack.bytes_attempted,
-      avg_event_bytes,
-      pending_after
-    )
-
-    stats =
-      %{
-        attempted: pending_ack.attempted,
-        inserted: pending_ack.inserted,
-        bytes_attempted: pending_ack.bytes_attempted,
-        bytes_inserted:
-          inserted_bytes(pending_ack.bytes_attempted, pending_ack.inserted, pending_ack.attempted),
-        pending_after: pending_after,
-        pending_sessions: if(pending_after > 0, do: 1, else: 0)
-      }
-
-    {
-      merge_stats(stats_acc, stats),
-      put_archived_seq(archived_seq_cache, pending_ack.session_id, archived_seq)
-    }
-  end
-
-  defp apply_archive_ack_result(
-         pending_ack,
-         _applied_result,
-         _failure_reason,
-         stats_acc,
-         archived_seq_cache
-       ) do
-    {
-      merge_stats(stats_acc, archive_ack_failure_stats(pending_ack)),
-      archived_seq_cache
-    }
-  end
-
-  defp apply_archive_ack_failure(pending_acks, archived_seq_cache, _reason)
-       when is_list(pending_acks) and is_map(archived_seq_cache) do
-    stats =
-      Enum.reduce(pending_acks, zero_stats(), fn pending_ack, stats_acc ->
-        merge_stats(stats_acc, archive_ack_failure_stats(pending_ack))
-      end)
-
-    {stats, archived_seq_cache}
-  end
-
-  defp archive_ack_failure_stats(pending_ack) when is_map(pending_ack) do
-    %{
-      attempted: pending_ack.attempted,
-      inserted: 0,
-      bytes_attempted: pending_ack.bytes_attempted,
-      bytes_inserted: 0,
-      pending_after: pending_ack.pending_before,
-      pending_sessions: 1
-    }
-  end
-
-  defp average_bytes(_bytes_attempted, attempted) when attempted <= 0, do: 0
-  defp average_bytes(bytes_attempted, attempted), do: div(bytes_attempted, attempted)
-
-  defp inserted_bytes(_bytes_attempted, _inserted, attempted) when attempted <= 0, do: 0
-
-  defp inserted_bytes(bytes_attempted, inserted, attempted),
-    do: div(bytes_attempted * inserted, attempted)
 
   defp archive_batch_tenant_id!(session_id, [%{tenant_id: tenant_id} | rest])
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
@@ -369,33 +265,6 @@ defmodule Starcite.Archive do
     |> elem(1)
   end
 
-  defp ensure_local_group_leader(_session_id, true), do: :ok
-
-  defp ensure_local_group_leader(session_id, false)
-       when is_binary(session_id) and session_id != "" do
-    group_id = RaftManager.group_for_session(session_id)
-    server_id = RaftManager.server_id(group_id)
-
-    case :ra.members({server_id, Node.self()}) do
-      {:ok, _members, {^server_id, leader_node}} ->
-        if leader_node == Node.self(), do: :ok, else: :error
-
-      _ ->
-        :error
-    end
-  end
-
-  defp single_local_write_node? do
-    if RaftManager.replication_factor() == 1 do
-      case RaftManager.write_nodes() do
-        [write_node] when write_node == node() -> true
-        _ -> false
-      end
-    else
-      false
-    end
-  end
-
   defp load_archived_seq(session_id, archived_seq_cache)
        when is_binary(session_id) and is_map(archived_seq_cache) do
     case Map.fetch(archived_seq_cache, session_id) do
@@ -403,13 +272,47 @@ defmodule Starcite.Archive do
         {:ok, archived_seq, archived_seq_cache}
 
       _ ->
-        with {:ok, archived_seq} <- RaftAccess.fetch_archived_seq(session_id) do
+        with {:ok, archived_seq} <- archived_seq_for_session(session_id) do
           {:ok, archived_seq, Map.put(archived_seq_cache, session_id, archived_seq)}
         else
           _ -> {:error, :session_lookup_failed}
         end
     end
   end
+
+  defp archived_seq_for_session(session_id) when is_binary(session_id) and session_id != "" do
+    case SessionStore.get_session_cached(session_id) do
+      {:ok, %{archived_seq: archived_seq}}
+      when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq}
+
+      :error ->
+        SessionQuorum.fetch_archived_seq(session_id)
+    end
+  end
+
+  defp local_owned_session_ids(session_ids) when is_list(session_ids) do
+    local_node = Node.self()
+
+    case RoutingStore.all_assignments(:low_latency) do
+      {:ok, assignments} ->
+        Enum.filter(session_ids, fn session_id ->
+          case assignments do
+            %{^session_id => %{owner: ^local_node, status: status}}
+            when status in [:active, :moving] ->
+              true
+
+            _other ->
+              false
+          end
+        end)
+
+      {:error, _reason} ->
+        []
+    end
+  end
+
+  defp put_archived_seq(cache, _session_id, nil), do: cache
 
   defp put_archived_seq(cache, session_id, archived_seq)
        when is_map(cache) and is_binary(session_id) and is_integer(archived_seq) and

@@ -1,6 +1,9 @@
 defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
+  plug StarciteWeb.Plugs.EdgeStage, :start
+  plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: false
+
   plug CORSPlug,
     origin: "*",
     credentials: false,
@@ -17,5 +20,6 @@ defmodule StarciteWeb.Endpoint do
     json_decoder: Phoenix.json_library()
 
   plug Plug.MethodOverride
+  plug StarciteWeb.Plugs.EdgeStage, :controller_entry
   plug StarciteWeb.Router
 end

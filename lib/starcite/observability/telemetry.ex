@@ -119,48 +119,80 @@ defmodule Starcite.Observability.Telemetry do
   Metadata:
     - `:node` – local Erlang node name as a string
     - `:operation` (`:append_event` or `:append_events`)
-    - `:phase` (`:total`, `:route`, or `:ack`)
+    - `:phase` (`:total`, `:route`, `:dispatch`, or `:ack`)
     - `:outcome` (`:ok`, `:error`, or `:timeout`)
+    - `:error_reason` – stable failure class atom (`:none` for success)
   """
   @spec request(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           :ok | :error | :timeout,
           non_neg_integer()
         ) :: :ok
   def request(operation, phase, outcome, duration_ms)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 do
-    request(operation, phase, outcome, duration_ms, current_node_name())
+    request(operation, phase, outcome, duration_ms, :none, current_node_name())
   end
 
   @spec request_result(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           {:ok, term()} | {:error, term()} | {:timeout, term()},
           non_neg_integer()
         ) :: :ok
   def request_result(operation, phase, result, duration_ms)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              is_integer(duration_ms) and duration_ms >= 0 do
-    request(operation, phase, request_outcome(result), duration_ms)
+    request(
+      operation,
+      phase,
+      request_outcome(result),
+      duration_ms,
+      request_error_reason(result)
+    )
   end
 
   @spec request(
           :append_event | :append_events,
-          :total | :route | :ack,
+          :total | :route | :dispatch | :ack,
           :ok | :error | :timeout,
           non_neg_integer(),
+          atom()
+        ) :: :ok
+  def request(operation, phase, outcome, duration_ms, error_reason)
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
+             outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_atom(error_reason) do
+    request(operation, phase, outcome, duration_ms, error_reason, current_node_name())
+  end
+
+  @spec request(
+          :append_event | :append_events,
+          :total | :route | :dispatch | :ack,
+          :ok | :error | :timeout,
+          non_neg_integer(),
+          atom(),
           String.t()
         ) :: :ok
-  def request(operation, phase, outcome, duration_ms, node_name)
-      when operation in [:append_event, :append_events] and phase in [:total, :route, :ack] and
+  def request(operation, phase, outcome, duration_ms, error_reason, node_name)
+      when operation in [:append_event, :append_events] and
+             phase in [:total, :route, :dispatch, :ack] and
              outcome in [:ok, :error, :timeout] and is_integer(duration_ms) and duration_ms >= 0 and
-             is_binary(node_name) and node_name != "" do
+             is_atom(error_reason) and is_binary(node_name) and node_name != "" do
     execute_if_enabled(
       [:starcite, :request],
       %{count: 1, duration_ms: duration_ms},
-      %{node: node_name, operation: operation, phase: phase, outcome: outcome}
+      %{
+        node: node_name,
+        operation: operation,
+        phase: phase,
+        outcome: outcome,
+        error_reason: error_reason
+      }
     )
 
     :ok
@@ -191,6 +223,71 @@ defmodule Starcite.Observability.Telemetry do
       [:starcite, :read],
       %{count: 1, duration_ms: duration_ms},
       %{operation: operation, phase: phase, outcome: outcome}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one auth-stage outcome.
+
+  Measurements:
+    - `:count` - fixed at 1 per auth stage
+    - `:duration_ms` - elapsed stage time in milliseconds
+
+  Metadata:
+    - `:stage` (`:plug`, `:jwt_verify`, or `:jwks_fetch`)
+    - `:mode` (`:none` or `:jwt`)
+    - `:outcome` (`:ok` or `:error`)
+    - `:error_reason` (`:none` for success)
+    - `:source` (`:none`, `:cache`, or `:refresh`)
+  """
+  @spec auth(
+          :plug | :jwt_verify | :jwks_fetch,
+          :none | :jwt,
+          :ok | :error,
+          non_neg_integer(),
+          atom(),
+          :none | :cache | :refresh
+        ) :: :ok
+  def auth(stage, mode, outcome, duration_ms, error_reason, source \\ :none)
+      when stage in [:plug, :jwt_verify, :jwks_fetch] and mode in [:none, :jwt] and
+             outcome in [:ok, :error] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_atom(error_reason) and source in [:none, :cache, :refresh] do
+    execute_if_enabled(
+      [:starcite, :auth],
+      %{count: 1, duration_ms: duration_ms},
+      %{
+        stage: stage,
+        mode: mode,
+        outcome: outcome,
+        error_reason: error_reason,
+        source: source
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one explicit edge-stage timing.
+
+  Measurements:
+    - `:count` - fixed at 1 per stage
+    - `:duration_ms` - elapsed stage time in milliseconds
+
+  Metadata:
+    - `:stage` (`:controller_entry`)
+    - `:method`
+  """
+  @spec edge_stage(:controller_entry, String.t(), non_neg_integer()) :: :ok
+  def edge_stage(stage, method, duration_ms)
+      when stage in [:controller_entry] and is_binary(method) and method != "" and
+             is_integer(duration_ms) and duration_ms >= 0 do
+    execute_if_enabled(
+      [:starcite, :edge, :stage],
+      %{count: 1, duration_ms: duration_ms},
+      %{stage: stage, method: method}
     )
 
     :ok
@@ -309,19 +406,20 @@ defmodule Starcite.Observability.Telemetry do
     - `:session_id`
     - `:tenant_id`
     - `:seq`
-    - `:source` (`:ets` or `:storage`)
+    - `:source` (`:embedded`, `:event_store`, or `:storage`)
     - `:result` (`:hit` or `:miss`)
   """
   @spec tail_cursor_lookup(
           String.t(),
           String.t(),
           pos_integer(),
-          :ets | :storage,
+          :embedded | :event_store | :storage,
           :hit | :miss
         ) :: :ok
   def tail_cursor_lookup(session_id, tenant_id, seq, source, result)
       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(seq) and seq > 0 and source in [:ets, :storage] and
+             tenant_id != "" and is_integer(seq) and seq > 0 and
+             source in [:embedded, :event_store, :storage] and
              result in [:hit, :miss] do
     execute_if_enabled(
       [:starcite, :tail, :cursor_lookup],
@@ -333,242 +431,148 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
-  Emit telemetry for one Raft command execution outcome.
+  Emit telemetry when a tail socket receives a committed cursor update.
 
   Measurements:
-    - `:count` – fixed at 1 per command execution
+    - `:count` – fixed at 1 per received update
+    - `:publish_to_receive_ms` – wall-clock lag from commit publish to socket receipt
+    - `:replay_queue_size` – queued replay events before processing this update
+    - `:live_buffer_size` – buffered live updates before processing this update
 
   Metadata:
-    - `:node` – execution node name as a string
-    - `:command` (`:create_session`, `:append_event`, `:append_events`, `:ack_archived`, `:other`)
-    - `:outcome`
-      (`:local_ok`, `:local_error`, `:local_timeout`, `:leader_retry_ok`,
-      `:leader_retry_error`, or `:leader_retry_timeout`)
+    - `:session_id`
+    - `:tenant_id`
+    - `:seq`
+    - `:mode` (`:stale`, `:live_fast_path`, or `:buffered`)
   """
-  @spec raft_command_result(
-          :create_session | :append_event | :append_events | :ack_archived | :other,
-          :local_ok
-          | :local_error
-          | :local_timeout
-          | :leader_retry_ok
-          | :leader_retry_error
-          | :leader_retry_timeout
-        ) :: :ok
-  def raft_command_result(command, outcome)
-      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
-             outcome in [
-               :local_ok,
-               :local_error,
-               :local_timeout,
-               :leader_retry_ok,
-               :leader_retry_error,
-               :leader_retry_timeout
-             ] do
-    raft_command_result(command, outcome, current_node_name())
-  end
-
-  @spec raft_command_result(
-          :create_session | :append_event | :append_events | :ack_archived | :other,
-          :local_ok
-          | :local_error
-          | :local_timeout
-          | :leader_retry_ok
-          | :leader_retry_error
-          | :leader_retry_timeout,
-          String.t()
-        ) :: :ok
-  def raft_command_result(command, outcome, node_name)
-      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
-             outcome in [
-               :local_ok,
-               :local_error,
-               :local_timeout,
-               :leader_retry_ok,
-               :leader_retry_error,
-               :leader_retry_timeout
-             ] and is_binary(node_name) and node_name != "" do
-    execute_if_enabled(
-      [:starcite, :raft, :command],
-      %{count: 1},
-      %{node: node_name, command: command, outcome: outcome}
-    )
-
-    :ok
-  end
-
-  @doc """
-  Emit telemetry for one write-path Raft command attempt.
-
-  This emits the Raft command outcome event and, for append operations, the
-  write request `:ack` phase event on the same node.
-  """
-  @spec raft_command_attempt(
-          :create_session | :append_event | :append_events | :ack_archived | :other,
-          :local_ok
-          | :local_error
-          | :local_timeout
-          | :leader_retry_ok
-          | :leader_retry_error
-          | :leader_retry_timeout,
+  @spec tail_visibility(
           String.t(),
-          :append_event | :append_events | nil,
-          {:ok, term()} | {:error, term()} | {:timeout, term()},
+          String.t(),
+          pos_integer(),
+          :stale | :live_fast_path | :buffered,
+          non_neg_integer(),
+          non_neg_integer(),
           non_neg_integer()
         ) :: :ok
-  def raft_command_attempt(command, outcome, node_name, request_operation, result, duration_ms)
-      when command in [:create_session, :append_event, :append_events, :ack_archived, :other] and
-             outcome in [
-               :local_ok,
-               :local_error,
-               :local_timeout,
-               :leader_retry_ok,
-               :leader_retry_error,
-               :leader_retry_timeout
-             ] and is_binary(node_name) and node_name != "" and
-             request_operation in [:append_event, :append_events, nil] and
-             is_integer(duration_ms) and duration_ms >= 0 do
-    :ok = raft_command_result(command, outcome, node_name)
-
-    if request_operation in [:append_event, :append_events] do
-      :ok =
-        request(
-          request_operation,
-          :ack,
-          request_outcome(result),
-          duration_ms,
-          node_name
-        )
-    end
-
-    :ok
-  end
-
-  @doc """
-  Classify a write-path command into the exported Raft command dimension.
-  """
-  @spec write_path_command(term()) ::
-          :create_session | :append_event | :append_events | :ack_archived | :other
-  def write_path_command(
-        {:create_session, _id, _title, _creator_principal, _tenant_id, _metadata}
-      ),
-      do: :create_session
-
-  def write_path_command({:append_event, _id, _event, _expected_seq}), do: :append_event
-  def write_path_command({:append_events, _id, _events, _expected_seq}), do: :append_events
-  def write_path_command({:ack_archived, _entries}), do: :ack_archived
-  def write_path_command({:ack_archived, _id, _upto_seq}), do: :ack_archived
-  def write_path_command(_command), do: :other
-
-  @doc """
-  Classify a write-path command into the exported request-operation dimension.
-  """
-  @spec write_path_request_operation(term()) :: :append_event | :append_events | nil
-  def write_path_request_operation({:append_event, _id, _event, _expected_seq}), do: :append_event
-
-  def write_path_request_operation({:append_events, _id, _events, _expected_seq}),
-    do: :append_events
-
-  def write_path_request_operation(_command), do: nil
-
-  @doc """
-  Classify a routed write-path dispatch into the exported request-operation dimension.
-  """
-  @spec write_path_routing_operation(module(), atom()) ::
-          :create_session | :append_event | :append_events | nil
-  def write_path_routing_operation(Starcite.WritePath, :create_session_local), do: :create_session
-  def write_path_routing_operation(Starcite.WritePath, :append_event_local), do: :append_event
-  def write_path_routing_operation(Starcite.WritePath, :append_events_local), do: :append_events
-  def write_path_routing_operation(_remote_mod, _remote_fun), do: nil
-
-  @doc """
-  Emit a snapshot of local Raft group counts by role for this node.
-
-  Measurements:
-    - `:groups` – number of local groups currently observed in this role
-
-  Metadata:
-    - `:node` – local Erlang node name as a string
-    - `:role` (`:leader`, `:follower`, `:candidate`, `:other`, or `:down`)
-  """
-  @type raft_group_role_count_role :: :leader | :follower | :candidate | :other | :down
-
-  @spec raft_group_role_count(String.t(), raft_group_role_count_role(), non_neg_integer()) :: :ok
-  def raft_group_role_count(node_name, role, groups)
-      when is_binary(node_name) and node_name != "" and
-             role in [:leader, :follower, :candidate, :other, :down] and
-             is_integer(groups) and groups >= 0 do
+  def tail_visibility(
+        session_id,
+        tenant_id,
+        seq,
+        mode,
+        publish_to_receive_ms,
+        replay_queue_size,
+        live_buffer_size
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_integer(seq) and seq > 0 and mode in [:stale, :live_fast_path, :buffered] and
+             is_integer(publish_to_receive_ms) and publish_to_receive_ms >= 0 and
+             is_integer(replay_queue_size) and replay_queue_size >= 0 and
+             is_integer(live_buffer_size) and live_buffer_size >= 0 do
     execute_if_enabled(
-      [:starcite, :raft, :role_count],
-      %{groups: groups},
-      %{node: node_name, role: role}
+      [:starcite, :tail, :visibility],
+      %{
+        count: 1,
+        publish_to_receive_ms: publish_to_receive_ms,
+        replay_queue_size: replay_queue_size,
+        live_buffer_size: live_buffer_size
+      },
+      %{
+        session_id: session_id,
+        tenant_id: tenant_id,
+        seq: seq,
+        mode: mode
+      }
     )
 
     :ok
   end
 
   @doc """
-  Emit a per-group snapshot for the local Raft role on this node.
+  Emit telemetry for one routing execution result.
 
   Measurements:
-    - `:present` – `1` when the group is currently in this role on this node, else `0`
+    - `:count` – fixed at 1 per routed request
+    - `:refreshes` – authoritative assignment refreshes performed before completion
 
   Metadata:
-    - `:node` – local Erlang node name as a string
-    - `:group_id`
-    - `:role` (`:leader`, `:follower`, `:candidate`, `:other`, or `:down`)
+    - `:node` – cluster node name as a string
+    - `:target` (`:local`, `:remote`, or `:unassigned`)
+    - `:outcome` (`:ok`, `:error`, or `:timeout`)
+    - `:error_reason` – stable routing failure reason (`:none` for success)
   """
-  @spec raft_group_role_presence(
-          String.t(),
-          non_neg_integer(),
-          raft_group_role_count_role(),
-          0 | 1
+  @spec routing_result(
+          :local | :remote | :unassigned,
+          term(),
+          non_neg_integer()
         ) :: :ok
-  def raft_group_role_presence(node_name, group_id, role, present)
-      when is_binary(node_name) and node_name != "" and is_integer(group_id) and group_id >= 0 and
-             role in [:leader, :follower, :candidate, :other, :down] and present in [0, 1] do
+  def routing_result(target, result, refreshes)
+      when target in [:local, :remote, :unassigned] and is_integer(refreshes) and refreshes >= 0 do
     execute_if_enabled(
-      [:starcite, :raft, :group_role],
-      %{present: present},
-      %{node: node_name, group_id: group_id, role: role}
+      [:starcite, :routing, :result],
+      %{count: 1, refreshes: refreshes},
+      %{
+        node: current_node_name(),
+        target: target,
+        outcome: routing_outcome(result),
+        error_reason: routing_error_reason(result)
+      }
     )
 
     :ok
   end
 
   @doc """
-  Emit one leadership-transfer attempt outcome.
+  Emit telemetry for a routing node lifecycle state transition.
 
   Measurements:
-    - `:count` – fixed at 1 per transfer attempt
+    - `:count` - fixed at 1 per transition
 
   Metadata:
-    - `:group_id`
-    - `:source_node`
-    - `:target_node`
-    - `:outcome` (`:ok`, `:already_leader`, `:error`, or `:timeout`)
-    - `:reason`
+    - `:node` - cluster node name as a string
+    - `:from` - previous node lifecycle state
+    - `:to` - next node lifecycle state
+    - `:source` - transition initiator (`:maintenance`, `:startup`, `:watcher`, or `:shutdown`)
   """
-  @type raft_leadership_transfer_outcome :: :ok | :already_leader | :error | :timeout
+  @type routing_node_state :: :unknown | :ready | :draining | :drained
 
-  @spec raft_leadership_transfer(
-          non_neg_integer(),
-          String.t(),
-          String.t(),
-          raft_leadership_transfer_outcome(),
-          atom()
-        ) :: :ok
-  def raft_leadership_transfer(group_id, source_node, target_node, outcome, reason)
-      when is_integer(group_id) and group_id >= 0 and is_binary(source_node) and
-             source_node != "" and is_binary(target_node) and target_node != "" and
-             outcome in [:ok, :already_leader, :error, :timeout] and is_atom(reason) do
+  @spec routing_node_state(node(), routing_node_state(), :ready | :draining | :drained, atom()) ::
+          :ok
+  def routing_node_state(node, from, to, source)
+      when is_atom(node) and from in [:unknown, :ready, :draining, :drained] and
+             to in [:ready, :draining, :drained] and is_atom(source) do
     execute_if_enabled(
-      [:starcite, :raft, :leadership_transfer],
+      [:starcite, :routing, :node_state],
+      %{count: 1},
+      %{node: Atom.to_string(node), from: from, to: to, source: source}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one ownership fence on the routing/data plane.
+
+  Measurements:
+    - `:count` - fixed at 1 per fence
+
+  Metadata:
+    - `:node` - local node name
+    - `:session_id`
+    - `:source` (`:session_router` or `:session_log`)
+    - `:reason` (`:not_leader`, `:ownership_transfer_in_progress`, or `:not_owner`)
+  """
+  @spec routing_fence(String.t(), :session_router | :session_log, atom()) :: :ok
+  def routing_fence(session_id, source, reason)
+      when is_binary(session_id) and session_id != "" and
+             source in [:session_router, :session_log] and
+             reason in [:not_leader, :ownership_transfer_in_progress, :not_owner] do
+    execute_if_enabled(
+      [:starcite, :routing, :fence],
       %{count: 1},
       %{
-        group_id: group_id,
-        source_node: source_node,
-        target_node: target_node,
-        outcome: outcome,
+        node: current_node_name(),
+        session_id: session_id,
+        source: source,
         reason: reason
       }
     )
@@ -577,145 +581,179 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
-  Emit telemetry for one write/read-path routing decision before execution.
+  Emit telemetry for one append lifecycle boundary inside the session log.
 
   Measurements:
-    - `:count` – fixed at 1 per routed request
-    - `:replica_count` – configured replicas for the group
-    - `:ready_count` – currently ready replicas for the group
+    - `:count` - fixed at 1 per boundary event
+    - `:event_count` - number of events in the append operation
 
   Metadata:
-    - `:node` – routing node name as a string
-    - `:group_id`
-    - `:target` (`:local` or `:remote`)
-    - `:prefer_leader` (`true` or `false`)
-    - `:leader_hint` (`:disabled`, `:hit`, or `:miss`)
+    - `:node`
+    - `:session_id`
+    - `:tenant_id`
+    - `:stage` (`:before_quorum_replicate` or `:after_commit_before_reply`)
   """
-  @spec routing_decision(
-          non_neg_integer(),
-          :local | :remote,
-          boolean(),
-          :disabled | :hit | :miss,
-          non_neg_integer(),
+  @spec append_boundary(
+          String.t(),
+          String.t(),
+          :before_quorum_replicate | :after_commit_before_reply,
           non_neg_integer()
         ) :: :ok
-  def routing_decision(
-        group_id,
-        target,
-        prefer_leader,
-        leader_hint,
-        replica_count,
-        ready_count
-      )
-      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
-             is_boolean(prefer_leader) and
-             leader_hint in [:disabled, :hit, :miss] and is_integer(replica_count) and
-             replica_count >= 0 and is_integer(ready_count) and ready_count >= 0 do
+  def append_boundary(session_id, tenant_id, stage, event_count)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and stage in [:before_quorum_replicate, :after_commit_before_reply] and
+             is_integer(event_count) and event_count >= 0 do
     execute_if_enabled(
-      [:starcite, :routing, :decision],
-      %{count: 1, replica_count: replica_count, ready_count: ready_count},
+      [:starcite, :append, :boundary],
+      %{count: 1, event_count: event_count},
       %{
         node: current_node_name(),
-        group_id: group_id,
-        target: target,
-        prefer_leader: prefer_leader,
-        leader_hint: leader_hint
+        session_id: session_id,
+        tenant_id: tenant_id,
+        stage: stage
       }
     )
 
     :ok
   end
 
-  @spec routing_decision(
-          non_neg_integer(),
-          %{
-            target: :local | :remote,
-            prefer_leader: boolean(),
-            leader_hint: :disabled | :hit | :miss,
-            replica_count: non_neg_integer(),
-            ready_count: non_neg_integer()
-          }
-        ) :: :ok
-  def routing_decision(
-        group_id,
-        %{
-          target: target,
-          prefer_leader: prefer_leader,
-          leader_hint: leader_hint,
-          replica_count: replica_count,
-          ready_count: ready_count
-        }
-      )
-      when is_integer(group_id) and group_id >= 0 and target in [:local, :remote] and
-             is_boolean(prefer_leader) and leader_hint in [:disabled, :hit, :miss] and
-             is_integer(replica_count) and replica_count >= 0 and is_integer(ready_count) and
-             ready_count >= 0 do
-    routing_decision(group_id, target, prefer_leader, leader_hint, replica_count, ready_count)
-  end
-
   @doc """
-  Emit telemetry for one routing execution result after request execution.
+  Emit telemetry for one routing transfer lifecycle event.
 
   Measurements:
-    - `:count` – fixed at 1 per routed request
-    - `:attempts` – replica attempts performed for this request
-    - `:retries` – additional attempts beyond first (`max(attempts - 1, 0)`)
-    - `:leader_redirects` – number of leader redirect hints observed
+    - `:count` - fixed at 1 per transfer event
 
   Metadata:
-    - `:node` – routing node name as a string
-    - `:group_id`
-    - `:path` (`:local` or `:remote`)
-    - `:outcome` (`:ok`, `:error`, `:timeout`, `:badrpc`, `:no_candidates`, or `:other`)
+    - `:session_id`
+    - `:source_node`
+    - `:target_node`
+    - `:action` (`:started` or `:committed`)
   """
-  @spec routing_result(
-          non_neg_integer(),
-          :local | :remote,
-          :ok | :error | :timeout | :badrpc | :no_candidates | :other,
-          non_neg_integer(),
-          non_neg_integer(),
-          non_neg_integer()
-        ) :: :ok
-  def routing_result(group_id, path, outcome, attempts, retries, leader_redirects)
-      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
-             outcome in [:ok, :error, :timeout, :badrpc, :no_candidates, :other] and
-             is_integer(attempts) and attempts >= 0 and is_integer(retries) and retries >= 0 and
-             is_integer(leader_redirects) and leader_redirects >= 0 do
+  @spec routing_transfer(String.t(), node(), node(), :started | :committed) :: :ok
+  def routing_transfer(session_id, source_node, target_node, action)
+      when is_binary(session_id) and session_id != "" and is_atom(source_node) and
+             is_atom(target_node) and action in [:started, :committed] do
     execute_if_enabled(
-      [:starcite, :routing, :result],
+      [:starcite, :routing, :transfer],
+      %{count: 1},
       %{
-        count: 1,
-        attempts: attempts,
-        retries: retries,
-        leader_redirects: leader_redirects
-      },
-      %{node: current_node_name(), group_id: group_id, path: path, outcome: outcome}
+        session_id: session_id,
+        source_node: Atom.to_string(source_node),
+        target_node: Atom.to_string(target_node),
+        action: action
+      }
     )
 
     :ok
   end
 
-  @spec routing_result(
-          non_neg_integer(),
-          :local | :remote,
-          {:ok, term()} | {:error, term()} | {:timeout, term()} | term(),
-          %{attempts: non_neg_integer(), leader_redirects: non_neg_integer()}
-        ) :: :ok
-  def routing_result(group_id, path, result, %{
-        attempts: attempts,
-        leader_redirects: leader_redirects
-      })
-      when is_integer(group_id) and group_id >= 0 and path in [:local, :remote] and
-             is_integer(attempts) and attempts >= 0 and is_integer(leader_redirects) and
-             leader_redirects >= 0 do
-    routing_result(
-      group_id,
-      path,
-      routing_outcome(result),
-      attempts,
-      max(attempts - 1, 0),
-      leader_redirects
+  @doc """
+  Emit telemetry for one routing failover activation.
+
+  Measurements:
+    - `:count` - fixed at 1 per failover activation
+
+  Metadata:
+    - `:session_id`
+    - `:source_node`
+    - `:target_node`
+    - `:reason` (`:lease_expired`)
+  """
+  @spec routing_failover(String.t(), node(), node(), :lease_expired) :: :ok
+  def routing_failover(session_id, source_node, target_node, reason)
+      when is_binary(session_id) and session_id != "" and is_atom(source_node) and
+             is_atom(target_node) and reason in [:lease_expired] do
+    execute_if_enabled(
+      [:starcite, :routing, :failover],
+      %{count: 1},
+      %{
+        session_id: session_id,
+        source_node: Atom.to_string(source_node),
+        target_node: Atom.to_string(target_node),
+        reason: reason
+      }
     )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one routing invariant violation.
+
+  Measurements:
+    - `:count` - fixed at 1 per violation
+
+  Metadata:
+    - `:session_id`
+    - `:source` (`:compare_and_swap_assignment`, `:commit_transfer`, or `:failover_assignment`)
+    - `:reason`
+  """
+  @spec routing_invariant(
+          String.t(),
+          :compare_and_swap_assignment | :commit_transfer | :failover_assignment,
+          :assignment_epoch_regression
+          | :commit_transfer_invalid_state
+          | :commit_transfer_target_not_ready
+          | :failover_target_not_ready
+        ) :: :ok
+  def routing_invariant(session_id, source, reason)
+      when is_binary(session_id) and session_id != "" and
+             source in [:compare_and_swap_assignment, :commit_transfer, :failover_assignment] and
+             reason in [
+               :assignment_epoch_regression,
+               :commit_transfer_invalid_state,
+               :commit_transfer_target_not_ready,
+               :failover_target_not_ready
+             ] do
+    execute_if_enabled(
+      [:starcite, :routing, :invariant],
+      %{count: 1},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        source: source,
+        reason: reason
+      }
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one data-plane invariant violation.
+
+  Measurements:
+    - `:count` - fixed at 1 per violation
+
+  Metadata:
+    - `:session_id`
+    - `:tenant_id`
+    - `:source` (`:publish_events`)
+    - `:reason` (`:publication_watermark_regression`)
+  """
+  @spec data_plane_invariant(
+          String.t(),
+          String.t(),
+          :publish_events,
+          :publication_watermark_regression
+        ) :: :ok
+  def data_plane_invariant(session_id, tenant_id, source, reason)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and source in [:publish_events] and
+             reason in [:publication_watermark_regression] do
+    execute_if_enabled(
+      [:starcite, :data_plane, :invariant],
+      %{count: 1},
+      %{
+        node: current_node_name(),
+        session_id: session_id,
+        tenant_id: tenant_id,
+        source: source,
+        reason: reason
+      }
+    )
+
+    :ok
   end
 
   @doc """
@@ -760,6 +798,72 @@ defmodule Starcite.Observability.Telemetry do
       [:starcite, :session, :hydrate],
       %{count: 1},
       %{session_id: session_id, tenant_id: tenant_id, outcome: outcome, reason: reason}
+    )
+
+    :ok
+  end
+
+  @doc """
+  Emit telemetry for one in-memory session replication attempt.
+
+  Measurements:
+    - `:count` – fixed at 1 per attempt
+    - `:duration_ms` – elapsed replication time
+    - `:standby_count` – number of standby nodes considered
+    - `:required_remote_acks` – quorum-derived remote ack requirement
+    - `:successful_remote_acks` – remote acks obtained
+    - `:failure_count` – failed remote attempts
+
+  Metadata:
+    - `:session_id`
+    - `:tenant_id`
+    - `:outcome` (`:ok` or `:quorum_not_met`)
+    - `:failure_reason` (`:none`, `:badrpc`, `:timeout`, `:error`, etc.)
+  """
+  @spec session_replication(
+          String.t(),
+          String.t(),
+          :ok | :quorum_not_met,
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          atom()
+        ) :: :ok
+  def session_replication(
+        session_id,
+        tenant_id,
+        outcome,
+        duration_ms,
+        standby_count,
+        required_remote_acks,
+        successful_remote_acks,
+        failure_count,
+        failure_reason
+      )
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             outcome in [:ok, :quorum_not_met] and is_integer(duration_ms) and duration_ms >= 0 and
+             is_integer(standby_count) and standby_count >= 0 and
+             is_integer(required_remote_acks) and required_remote_acks >= 0 and
+             is_integer(successful_remote_acks) and successful_remote_acks >= 0 and
+             is_integer(failure_count) and failure_count >= 0 and is_atom(failure_reason) do
+    execute_if_enabled(
+      [:starcite, :replication, :session],
+      %{
+        count: 1,
+        duration_ms: duration_ms,
+        standby_count: standby_count,
+        required_remote_acks: required_remote_acks,
+        successful_remote_acks: successful_remote_acks,
+        failure_count: failure_count
+      },
+      %{
+        session_id: session_id,
+        tenant_id: tenant_id,
+        outcome: outcome,
+        failure_reason: failure_reason
+      }
     )
 
     :ok
@@ -815,7 +919,7 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   @doc """
-  Emit an event when an archive acknowledgement is applied by Raft.
+  Emit an event when an archive acknowledgement trims committed hot-tail events.
 
   Measurements:
     - `:lag` – last_seq - archived_seq (events)
@@ -946,12 +1050,54 @@ defmodule Starcite.Observability.Telemetry do
 
   defp request_outcome({:ok, _reply}), do: :ok
   defp request_outcome({:timeout, _reason}), do: :timeout
+  defp request_outcome({:error, {:timeout, _reason}}), do: :timeout
   defp request_outcome(_result), do: :error
 
+  defp request_error_reason({:ok, _reply}), do: :none
+  defp request_error_reason({:timeout, _reason}), do: :timeout
+  defp request_error_reason({:error, {:timeout, _reason}}), do: :timeout
+  defp request_error_reason({:error, {:expected_seq_conflict, _, _}}), do: :expected_seq_conflict
+  defp request_error_reason({:error, {:expected_seq_conflict, _}}), do: :expected_seq_conflict
+
+  defp request_error_reason({:error, {:producer_seq_conflict, _, _, _}}),
+    do: :producer_seq_conflict
+
+  defp request_error_reason({:error, :producer_replay_conflict}), do: :producer_replay_conflict
+
+  defp request_error_reason({:error, {:routing_rpc_failed, _node, _reason}}),
+    do: :routing_rpc_failed
+
+  defp request_error_reason({:error, {:replication_quorum_not_met, _details}}),
+    do: :replication_quorum_not_met
+
+  defp request_error_reason({:error, {:no_available_replicas, _failures}}),
+    do: :no_available_replicas
+
+  defp request_error_reason({:error, reason}) when is_atom(reason), do: reason
+  defp request_error_reason({:error, _reason}), do: :error
+  defp request_error_reason(_result), do: :error
+
   defp routing_outcome({:ok, _reply}), do: :ok
-  defp routing_outcome({:timeout, _leader}), do: :timeout
-  defp routing_outcome({:error, {:no_available_replicas, _failures}}), do: :no_candidates
-  defp routing_outcome({:badrpc, _reason}), do: :badrpc
+  defp routing_outcome({:timeout, _reason}), do: :timeout
+  defp routing_outcome({:error, {:timeout, _reason}}), do: :timeout
   defp routing_outcome({:error, _reason}), do: :error
-  defp routing_outcome(_result), do: :other
+  defp routing_outcome(_result), do: :ok
+
+  defp routing_error_reason({:ok, _reply}), do: :none
+  defp routing_error_reason({:timeout, _reason}), do: :timeout
+  defp routing_error_reason({:error, {:timeout, _reason}}), do: :timeout
+
+  defp routing_error_reason({:error, {:routing_rpc_failed, _node, reason}})
+       when is_atom(reason),
+       do: reason
+
+  defp routing_error_reason({:error, {:routing_rpc_failed, _node, _reason}}),
+    do: :routing_rpc_failed
+
+  defp routing_error_reason({:error, {:no_available_replicas, _failures}}),
+    do: :no_available_replicas
+
+  defp routing_error_reason({:error, reason}) when is_atom(reason), do: reason
+  defp routing_error_reason({:error, _reason}), do: :error
+  defp routing_error_reason(_result), do: :none
 end

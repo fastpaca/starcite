@@ -8,6 +8,7 @@ defmodule StarciteWeb.TailSocket do
   @behaviour WebSock
 
   alias Starcite.Auth.Principal
+  alias Starcite.Cursor
   alias Starcite.ReadPath
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Observability.Telemetry
@@ -27,19 +28,23 @@ defmodule StarciteWeb.TailSocket do
           auth_context: %Context{} = auth_context
         } = params
       )
-      when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
+      when is_binary(session_id) and session_id != "" and is_map(cursor) and
              (is_struct(principal, Principal) or is_nil(principal)) do
     topic = CursorUpdate.topic(session_id)
     :ok = PubSub.subscribe(Starcite.PubSub, topic)
     auth_expires_at = auth_expires_at(auth_context)
     frame_batch_size = Map.get(params, :frame_batch_size, @default_frame_batch_size)
+    cursor_seq = Map.fetch!(cursor, :seq)
+    cursor_epoch = Map.get(cursor, :epoch)
 
     state = %{
       session_id: session_id,
       topic: topic,
       principal: principal,
       auth_context: auth_context,
-      cursor: cursor,
+      requested_cursor: cursor,
+      cursor: cursor_seq,
+      cursor_epoch: cursor_epoch,
       frame_batch_size: frame_batch_size,
       replay_queue: :queue.new(),
       replay_done: false,
@@ -72,6 +77,7 @@ defmodule StarciteWeb.TailSocket do
   def handle_info(:auth_expired, state), do: close_for_auth_error(:token_expired, state)
 
   def handle_info({:cursor_update, update}, state) when is_map(update) do
+    observe_cursor_update(update, state)
     handle_cursor_update(update, state)
   end
 
@@ -81,7 +87,7 @@ defmodule StarciteWeb.TailSocket do
     case EventStore.max_seq(state.session_id) do
       {:ok, max_seq} when max_seq > state.cursor ->
         # Events exist beyond our cursor that we missed (likely a PubSub gap
-        # during Raft leadership transition). Re-enter replay to catch up.
+        # during owner transition). Re-enter replay to catch up.
         next_state =
           state
           |> Map.put(:replay_done, false)
@@ -105,24 +111,17 @@ defmodule StarciteWeb.TailSocket do
     if seq <= state.cursor do
       {:ok, state}
     else
-      queue_empty? = :queue.is_empty(state.replay_queue)
-      buffer_empty? = map_size(state.live_buffer) == 0
-
-      if state.replay_done and queue_empty? and buffer_empty? do
+      if tail_idle?(state) do
         case resolve_live_cursor_update_event(state.session_id, state.principal, update) do
           {:ok, event} ->
-            next_state = %{state | cursor: event.seq}
+            next_state = update_cursor_state(state, event)
             push_events_frame([event], next_state)
 
           :error ->
-            buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
-            next_state = %{state | live_buffer: buffered}
-            {:ok, maybe_schedule_drain(next_state)}
+            {:ok, buffer_cursor_update(state, seq, update)}
         end
       else
-        buffered = Map.put(state.live_buffer, seq, {:cursor_update, update})
-        next_state = %{state | live_buffer: buffered}
-        {:ok, maybe_schedule_drain(next_state)}
+        {:ok, buffer_cursor_update(state, seq, update)}
       end
     end
   end
@@ -135,7 +134,7 @@ defmodule StarciteWeb.TailSocket do
         next_state =
           state
           |> Map.put(:replay_queue, replay_queue)
-          |> Map.put(:cursor, max(state.cursor, last_event.seq))
+          |> update_cursor_state(last_event)
           |> maybe_schedule_drain()
 
         push_events_frame(events, next_state)
@@ -151,7 +150,11 @@ defmodule StarciteWeb.TailSocket do
 
   defp fetch_replay_batch(state) do
     case measure_read(:tail_catchup, fn ->
-           ReadPath.get_events_from_cursor(state.session_id, state.cursor, @replay_batch_size)
+           ReadPath.replay_from_cursor(
+             state.session_id,
+             Cursor.new(state.cursor_epoch, state.cursor),
+             @replay_batch_size
+           )
          end) do
       {:ok, []} ->
         state
@@ -165,6 +168,16 @@ defmodule StarciteWeb.TailSocket do
           |> maybe_schedule_drain()
 
         {:ok, next_state}
+
+      {:gap, gap} ->
+        next_state =
+          state
+          |> Map.put(:cursor, gap.next_cursor.seq)
+          |> Map.put(:cursor_epoch, gap.next_cursor.epoch)
+          |> Map.put(:replay_done, false)
+          |> maybe_schedule_drain()
+
+        push_gap_frame(gap, next_state)
 
       {:error, _reason} ->
         {:stop, :normal, state}
@@ -225,45 +238,91 @@ defmodule StarciteWeb.TailSocket do
   defp resolve_cursor_update_event(session_id, principal, %{seq: seq} = update)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
+    tenant_id = tail_tenant_id(update)
+
     case event_from_cursor_update(update, seq) do
       {:ok, event} ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :embedded, :hit)
         {:ok, event}
 
       :error ->
-        read_event_for_tail(session_id, principal, seq)
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :embedded, :miss)
+        read_event_for_tail(session_id, principal, tenant_id, seq, Map.get(update, :epoch))
     end
   end
 
-  defp event_from_cursor_update(%{event: %{seq: seq} = event}, seq)
+  defp event_from_cursor_update(%{event: %{seq: seq} = event} = update, seq)
        when is_integer(seq) and seq > 0 do
-    {:ok, event}
+    {:ok, Map.put_new(event, :epoch, event_epoch(update, 0))}
   end
 
   defp event_from_cursor_update(_update, _seq), do: :error
 
-  defp read_event_for_tail(session_id, principal, seq)
+  defp read_event_for_tail(session_id, principal, tenant_id, seq, epoch)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
     case EventStore.get_event(session_id, seq) do
       {:ok, event} ->
-        {:ok, event}
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :event_store, :hit)
+        {:ok, put_event_epoch(event, epoch)}
 
       :error ->
-        read_event_from_storage(session_id, principal, seq)
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :event_store, :miss)
+        read_event_from_storage(session_id, principal, tenant_id, seq, epoch)
     end
   end
 
-  defp read_event_from_storage(session_id, principal, seq)
+  defp read_event_from_storage(session_id, principal, tenant_id, seq, epoch)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
     case ReadPath.get_events_from_cursor(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
-        {:ok, event}
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :hit)
+        {:ok, put_event_epoch(event, epoch)}
 
       _ ->
+        Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :miss)
         :error
     end
   end
+
+  defp observe_cursor_update(
+         %{
+           session_id: session_id,
+           tenant_id: tenant_id,
+           seq: seq,
+           published_at_ms: published_at_ms
+         },
+         state
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and
+              is_integer(seq) and seq > 0 and is_integer(published_at_ms) and published_at_ms >= 0 do
+    Telemetry.tail_visibility(
+      session_id,
+      tenant_id,
+      seq,
+      cursor_update_mode(seq, state),
+      max(System.system_time(:millisecond) - published_at_ms, 0),
+      :queue.len(state.replay_queue),
+      map_size(state.live_buffer)
+    )
+  end
+
+  defp observe_cursor_update(_update, _state), do: :ok
+
+  defp cursor_update_mode(seq, state) when is_integer(seq) and seq > 0 do
+    cond do
+      seq <= state.cursor -> :stale
+      tail_idle?(state) -> :live_fast_path
+      true -> :buffered
+    end
+  end
+
+  defp tail_tenant_id(%{tenant_id: tenant_id}) when is_binary(tenant_id) and tenant_id != "",
+    do: tenant_id
+
+  defp tail_tenant_id(_update), do: "unknown"
 
   defp maybe_schedule_drain(state) do
     queue_non_empty? = not :queue.is_empty(state.replay_queue)
@@ -338,14 +397,28 @@ defmodule StarciteWeb.TailSocket do
   defp push_events_frame(events, %{frame_batch_size: frame_batch_size} = state)
        when is_list(events) and events != [] and is_integer(frame_batch_size) and
               frame_batch_size >= @default_frame_batch_size do
-    payload = encode_events_payload(events, frame_batch_size)
+    payload = encode_events_payload(events, frame_batch_size, state.cursor_epoch)
     {:push, {:text, payload}, state}
   end
 
-  defp encode_events_payload(events, frame_batch_size)
+  defp push_gap_frame(gap, state) when is_map(gap) and is_map(state) do
+    payload =
+      Jason.encode!(%{
+        type: "gap",
+        reason: to_string(gap.reason),
+        from_cursor: gap.from_cursor,
+        next_cursor: gap.next_cursor,
+        committed_cursor: gap.committed_cursor,
+        earliest_available_cursor: gap.earliest_available_cursor
+      })
+
+    {:push, {:text, payload}, state}
+  end
+
+  defp encode_events_payload(events, frame_batch_size, fallback_epoch)
        when is_list(events) and events != [] and is_integer(frame_batch_size) and
               frame_batch_size >= @default_frame_batch_size do
-    rendered_events = Enum.map(events, &render_event/1)
+    rendered_events = Enum.map(events, &render_event(&1, fallback_epoch))
 
     if frame_batch_size > @default_frame_batch_size do
       Jason.encode!(rendered_events)
@@ -355,8 +428,15 @@ defmodule StarciteWeb.TailSocket do
     end
   end
 
-  defp render_event(event) when is_map(event) do
-    Map.update(event, :inserted_at, nil, &iso8601_utc/1)
+  defp render_event(event, fallback_epoch)
+       when is_map(event) and (is_integer(fallback_epoch) or is_nil(fallback_epoch)) do
+    epoch = event_epoch(event, fallback_epoch || 0)
+    seq = Map.get(event, :seq)
+
+    event
+    |> Map.put_new(:epoch, epoch)
+    |> Map.put_new(:cursor, Cursor.new(epoch, seq))
+    |> Map.update(:inserted_at, nil, &iso8601_utc/1)
   end
 
   defp iso8601_utc(%NaiveDateTime{} = datetime) do
@@ -378,7 +458,43 @@ defmodule StarciteWeb.TailSocket do
   end
 
   defp read_outcome({:ok, _result}), do: :ok
+  defp read_outcome({:gap, _gap}), do: :ok
   defp read_outcome(_result), do: :error
+
+  defp update_cursor_state(state, %{seq: seq} = event)
+       when is_map(state) and is_integer(seq) and seq > 0 do
+    %{
+      state
+      | cursor: max(state.cursor, seq),
+        cursor_epoch: event_epoch(event, state.cursor_epoch)
+    }
+  end
+
+  defp put_event_epoch(event, epoch)
+       when is_map(event) and is_integer(epoch) and epoch >= 0 do
+    Map.put_new(event, :epoch, epoch)
+  end
+
+  defp put_event_epoch(event, _epoch) when is_map(event), do: event
+
+  defp tail_idle?(state) when is_map(state) do
+    state.replay_done and :queue.is_empty(state.replay_queue) and map_size(state.live_buffer) == 0
+  end
+
+  defp buffer_cursor_update(state, seq, update)
+       when is_map(state) and is_integer(seq) and seq > 0 and is_map(update) do
+    state
+    |> Map.put(:live_buffer, Map.put(state.live_buffer, seq, {:cursor_update, update}))
+    |> maybe_schedule_drain()
+  end
+
+  defp event_epoch(value, fallback)
+       when is_map(value) and (is_integer(fallback) or is_nil(fallback)) do
+    case Map.get(value, :epoch) do
+      epoch when is_integer(epoch) and epoch >= 0 -> epoch
+      _ -> fallback
+    end
+  end
 
   defp elapsed_ms_since(started_at) when is_integer(started_at) do
     System.monotonic_time()

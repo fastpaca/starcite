@@ -1,18 +1,15 @@
 defmodule Mix.Tasks.Starcite.Ops do
   @moduledoc """
-  Operator commands for static write-node control-plane state.
-
-  This task affects routing readiness only and never mutates Raft membership.
+  Operator commands for routing state.
 
   Usage:
 
       mix starcite.ops status
       mix starcite.ops ready-nodes
       mix starcite.ops drain
-      mix starcite.ops drain write-1@starcite.internal
+      mix starcite.ops drain routing-1@starcite.internal
       mix starcite.ops undrain
-      mix starcite.ops undrain write-1@starcite.internal
-      mix starcite.ops group-replicas 42
+      mix starcite.ops undrain routing-1@starcite.internal
       mix starcite.ops wait-ready
       mix starcite.ops wait-ready 60000
       mix starcite.ops wait-drained
@@ -21,10 +18,10 @@ defmodule Mix.Tasks.Starcite.Ops do
 
   use Mix.Task
 
-  alias Starcite.ControlPlane.Ops
+  alias Starcite.Operations, as: Ops
 
   @default_wait_timeout_ms 30_000
-  @shortdoc "Control-plane ops for static write-node routing state"
+  @shortdoc "Routing operations"
 
   @impl Mix.Task
   def run(args) do
@@ -38,6 +35,34 @@ defmodule Mix.Tasks.Starcite.Ops do
 
       ["ready-nodes"] ->
         print_nodes("ready_nodes", Ops.ready_nodes())
+
+      ["node-status"] ->
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          print_node_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["node-status", raw_node] ->
+        with {:ok, node} <- parse_node(raw_node) do
+          print_node_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["drain-status"] ->
+        with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
+          print_drain_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
+
+      ["drain-status", raw_node] ->
+        with {:ok, node} <- parse_node(raw_node) do
+          print_drain_status(node)
+        else
+          {:error, reason} -> Mix.raise(reason)
+        end
 
       ["drain"] ->
         with {:ok, node} <- parse_node(Atom.to_string(Node.self())) do
@@ -63,13 +88,6 @@ defmodule Mix.Tasks.Starcite.Ops do
       ["undrain", raw_node] ->
         with {:ok, node} <- parse_node(raw_node) do
           undrain(node)
-        else
-          {:error, reason} -> Mix.raise(reason)
-        end
-
-      ["group-replicas", raw_group_id] ->
-        with {:ok, group_id} <- parse_group_id(raw_group_id) do
-          print_nodes("group_#{group_id}_replicas", Ops.group_replicas(group_id))
         else
           {:error, reason} -> Mix.raise(reason)
         end
@@ -118,13 +136,17 @@ defmodule Mix.Tasks.Starcite.Ops do
     IO.puts("#{label}=#{rendered}")
   end
 
-  defp parse_group_id(raw_group_id) when is_binary(raw_group_id) do
-    case Ops.parse_group_id(raw_group_id) do
-      {:ok, group_id} ->
-        {:ok, group_id}
+  defp print_node_status(node) when is_atom(node) do
+    IO.puts("node_status=#{Ops.node_status(node)}")
+  end
 
-      {:error, :invalid_group_id} ->
-        {:error, "invalid group id #{inspect(raw_group_id)} (expected configured group range)"}
+  defp print_drain_status(node) when is_atom(node) do
+    case Ops.drain_status(node) do
+      {:ok, status} ->
+        IO.puts("drain_status=#{inspect(status, pretty: true)}")
+
+      {:error, reason} ->
+        Mix.raise("failed to fetch drain status for #{node}: #{inspect(reason)}")
     end
   end
 
@@ -145,7 +167,7 @@ defmodule Mix.Tasks.Starcite.Ops do
       {:ok, node} ->
         {:ok, node}
 
-      {:error, :invalid_write_node} ->
+      {:error, :invalid_cluster_node} ->
         node_name = String.trim(raw_node)
 
         known =
@@ -182,9 +204,10 @@ defmodule Mix.Tasks.Starcite.Ops do
     usage:
       mix starcite.ops status
       mix starcite.ops ready-nodes
+      mix starcite.ops node-status [node]
+      mix starcite.ops drain-status [node]
       mix starcite.ops drain [node]
       mix starcite.ops undrain [node]
-      mix starcite.ops group-replicas <group_id>
       mix starcite.ops wait-ready [timeout_ms]
       mix starcite.ops wait-drained [timeout_ms]
     """

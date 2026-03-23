@@ -5,12 +5,8 @@ defmodule StarciteWeb.Router do
     plug :accepts, ["json"]
   end
 
-  pipeline :jwt_auth do
-    plug StarciteWeb.Plugs.ServiceAuth
-  end
-
   scope "/v1", StarciteWeb do
-    pipe_through [:api, :jwt_auth]
+    pipe_through [:api]
 
     post "/sessions", SessionController, :create
     get "/sessions", SessionController, :index

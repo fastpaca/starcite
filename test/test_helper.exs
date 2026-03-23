@@ -1,6 +1,6 @@
 # Tests must run serially because runtime processes and application env
 # mutations are global.
-ExUnit.start(max_cases: 1)
+ExUnit.start(max_cases: 1, exclude: [chaos: true])
 
 unless Code.ensure_loaded?(Starcite.Runtime.TestHelper) do
   Code.require_file("support/runtime_helper.ex", __DIR__)

@@ -8,14 +8,103 @@ defmodule Starcite.Observability.PromEx.Metrics do
   @impl true
   def event_metrics(_opts) do
     [
+      edge_http_metrics(),
+      edge_stage_metrics(),
+      auth_metrics(),
       ingestion_metrics(),
-      raft_metrics(),
       routing_metrics(),
       request_slo_metrics(),
+      replication_metrics(),
       archive_metrics(),
       session_metrics(),
       event_store_metrics()
     ]
+  end
+
+  defp edge_http_metrics do
+    Event.build(
+      :starcite_edge_http_metrics,
+      [
+        counter("starcite_edge_http_total",
+          event_name: [:phoenix, :endpoint, :stop],
+          measurement: fn _measurements, _metadata -> 1 end,
+          description: "HTTP requests observed at the Phoenix endpoint boundary",
+          tags: [:method, :status_class],
+          tag_values: &edge_http_tag_values/1
+        ),
+        distribution("starcite_edge_http_duration_ms",
+          event_name: [:phoenix, :endpoint, :stop],
+          measurement: :duration,
+          unit: {:native, :millisecond},
+          description: "HTTP request duration from endpoint entry until response send",
+          tags: [:method, :status_class],
+          tag_values: &edge_http_tag_values/1,
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        ),
+        counter("starcite_cowboy_request_total",
+          event_name: [:cowboy, :request, :stop],
+          measurement: fn _measurements, _metadata -> 1 end,
+          description: "HTTP requests observed at the Cowboy request boundary"
+        ),
+        distribution("starcite_cowboy_request_duration_ms",
+          event_name: [:cowboy, :request, :stop],
+          measurement: :duration,
+          unit: {:native, :millisecond},
+          description: "HTTP request duration at the Cowboy request boundary",
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
+  end
+
+  defp edge_stage_metrics do
+    Event.build(
+      :starcite_edge_stage_metrics,
+      [
+        counter("starcite_edge_stage_total",
+          event_name: [:starcite, :edge, :stage],
+          measurement: :count,
+          description: "Explicit edge-stage observations before controller timing",
+          tags: [:stage, :method]
+        ),
+        distribution("starcite_edge_stage_duration_ms",
+          event_name: [:starcite, :edge, :stage],
+          measurement: :duration_ms,
+          description: "Explicit edge-stage duration in milliseconds",
+          tags: [:stage, :method],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
+  end
+
+  defp auth_metrics do
+    Event.build(
+      :starcite_auth_metrics,
+      [
+        counter("starcite_auth_total",
+          event_name: [:starcite, :auth],
+          measurement: :count,
+          description: "Authentication-stage outcomes",
+          tags: [:stage, :mode, :outcome, :error_reason, :source]
+        ),
+        distribution("starcite_auth_duration_ms",
+          event_name: [:starcite, :auth],
+          measurement: :duration_ms,
+          description: "Authentication-stage duration in milliseconds",
+          tags: [:stage, :mode, :outcome, :source],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
+        )
+      ]
+    )
   end
 
   defp ingestion_metrics do
@@ -110,13 +199,13 @@ defmodule Starcite.Observability.PromEx.Metrics do
         last_value("starcite_archive_tail_size",
           event_name: [:starcite, :archive, :ack],
           measurement: :tail_size,
-          description: "In-Raft tail size after trim",
+          description: "In-memory hot-tail size after trim",
           tags: [:tenant_id]
         ),
         counter("starcite_archive_trimmed_total",
           event_name: [:starcite, :archive, :ack],
           measurement: :trimmed,
-          description: "Total entries trimmed from Raft tail",
+          description: "Total entries trimmed from the in-memory hot tail",
           tags: [:tenant_id]
         )
       ]
@@ -130,14 +219,16 @@ defmodule Starcite.Observability.PromEx.Metrics do
         counter("starcite_request_total",
           event_name: [:starcite, :request],
           measurement: :count,
-          description: "Write request outcomes by node, operation, phase, and outcome",
-          tags: [:node, :operation, :phase, :outcome]
+          description:
+            "Write request outcomes by node, operation, phase, outcome, and error reason",
+          tags: [:node, :operation, :phase, :outcome, :error_reason]
         ),
         distribution("starcite_request_duration_ms",
           event_name: [:starcite, :request],
           measurement: :duration_ms,
-          description: "Write request duration in milliseconds by node, operation, and phase",
-          tags: [:node, :operation, :phase],
+          description:
+            "Write request duration in milliseconds by node, operation, phase, and outcome",
+          tags: [:node, :operation, :phase, :outcome],
           reporter_options: [
             buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
           ]
@@ -161,75 +252,87 @@ defmodule Starcite.Observability.PromEx.Metrics do
     )
   end
 
-  defp raft_metrics do
+  defp routing_metrics do
     Event.build(
-      :starcite_raft_metrics,
+      :starcite_routing_metrics,
       [
-        counter("starcite_raft_command_total",
-          event_name: [:starcite, :raft, :command],
+        counter("starcite_routing_result_total",
+          event_name: [:starcite, :routing, :result],
           measurement: :count,
-          description: "Raft command execution outcomes by node, command, and outcome",
-          tags: [:node, :command, :outcome]
+          description: "Routing execution outcomes by node, target, outcome, and error reason",
+          tags: [:node, :target, :outcome, :error_reason]
         ),
-        last_value("starcite_raft_groups",
-          event_name: [:starcite, :raft, :role_count],
-          measurement: :groups,
-          description: "Local Raft groups observed by role on this node",
-          tags: [:role, :node]
+        distribution("starcite_routing_refreshes",
+          event_name: [:starcite, :routing, :result],
+          measurement: :refreshes,
+          description: "Authoritative assignment refreshes per routed request",
+          tags: [:node, :target, :outcome],
+          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
         ),
-        last_value("starcite_raft_group_role",
-          event_name: [:starcite, :raft, :group_role],
-          measurement: :present,
-          description: "Whether a local Raft group is currently observed in a specific role",
-          tags: [:node, :group_id, :role]
-        ),
-        counter("starcite_raft_leadership_transfers_total",
-          event_name: [:starcite, :raft, :leadership_transfer],
+        counter("starcite_routing_node_state_total",
+          event_name: [:starcite, :routing, :node_state],
           measurement: :count,
-          description: "Leadership transfer attempts by group, target, outcome, and reason",
-          tags: [:group_id, :source_node, :target_node, :outcome, :reason]
+          description: "Routing node lifecycle transitions by source",
+          tags: [:node, :from, :to, :source]
+        ),
+        counter("starcite_routing_fence_total",
+          event_name: [:starcite, :routing, :fence],
+          measurement: :count,
+          description: "Routing/data-plane ownership fences by source and reason",
+          tags: [:node, :source, :reason]
+        ),
+        counter("starcite_routing_transfer_total",
+          event_name: [:starcite, :routing, :transfer],
+          measurement: :count,
+          description: "Routing transfer lifecycle events",
+          tags: [:source_node, :target_node, :action]
+        ),
+        counter("starcite_routing_failover_total",
+          event_name: [:starcite, :routing, :failover],
+          measurement: :count,
+          description: "Routing failover activations by source and target node",
+          tags: [:source_node, :target_node, :reason]
+        ),
+        counter("starcite_routing_invariant_total",
+          event_name: [:starcite, :routing, :invariant],
+          measurement: :count,
+          description: "Routing invariant violations by source and reason",
+          tags: [:node, :source, :reason]
+        ),
+        counter("starcite_data_plane_invariant_total",
+          event_name: [:starcite, :data_plane, :invariant],
+          measurement: :count,
+          description: "Data-plane invariant violations by source and reason",
+          tags: [:node, :source, :reason]
         )
       ]
     )
   end
 
-  defp routing_metrics do
+  defp replication_metrics do
     Event.build(
-      :starcite_routing_metrics,
+      :starcite_replication_metrics,
       [
-        counter("starcite_routing_decision_total",
-          event_name: [:starcite, :routing, :decision],
+        counter("starcite_replication_session_total",
+          event_name: [:starcite, :replication, :session],
           measurement: :count,
-          description:
-            "Routing decisions by node, target, leader preference, and leader hint status",
-          tags: [:node, :target, :prefer_leader, :leader_hint]
+          description: "In-memory session replication attempts by outcome and failure reason",
+          tags: [:tenant_id, :outcome, :failure_reason]
         ),
-        counter("starcite_routing_result_total",
-          event_name: [:starcite, :routing, :result],
-          measurement: :count,
-          description: "Routing execution outcomes by node, path, and outcome",
-          tags: [:node, :path, :outcome]
+        distribution("starcite_replication_session_duration_ms",
+          event_name: [:starcite, :replication, :session],
+          measurement: :duration_ms,
+          description: "In-memory session replication duration in milliseconds",
+          tags: [:outcome, :failure_reason],
+          reporter_options: [
+            buckets: [1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000]
+          ]
         ),
-        distribution("starcite_routing_attempts",
-          event_name: [:starcite, :routing, :result],
-          measurement: :attempts,
-          description: "Replica attempts per routed write request",
-          tags: [:node, :path],
-          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
-        ),
-        distribution("starcite_routing_retries",
-          event_name: [:starcite, :routing, :result],
-          measurement: :retries,
-          description: "Routing retries per routed write request",
-          tags: [:node, :path],
-          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
-        ),
-        distribution("starcite_routing_leader_redirects",
-          event_name: [:starcite, :routing, :result],
-          measurement: :leader_redirects,
-          description: "Leader redirect hints observed per routed write request",
-          tags: [:node, :path],
-          reporter_options: [buckets: [0, 1, 2, 3, 4, 5, 10]]
+        counter("starcite_replication_session_failures_total",
+          event_name: [:starcite, :replication, :session],
+          measurement: :failure_count,
+          description: "Total failed remote replication attempts",
+          tags: [:tenant_id, :failure_reason]
         )
       ]
     )
@@ -265,6 +368,12 @@ defmodule Starcite.Observability.PromEx.Metrics do
     Event.build(
       :starcite_event_store_metrics,
       [
+        counter("starcite_append_boundary_total",
+          event_name: [:starcite, :append, :boundary],
+          measurement: :count,
+          description: "Append lifecycle boundary events inside the session log",
+          tags: [:node, :tenant_id, :stage]
+        ),
         counter("starcite_event_store_backpressure_total",
           event_name: [:starcite, :event_store, :backpressure],
           measurement: :count,
@@ -294,8 +403,62 @@ defmodule Starcite.Observability.PromEx.Metrics do
           measurement: :count,
           description: "Tail cursor lookups by source and result",
           tags: [:source, :result, :tenant_id]
+        ),
+        counter("starcite_tail_visibility_total",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :count,
+          description: "Tail cursor update receipts by socket mode",
+          tags: [:mode, :tenant_id]
+        ),
+        distribution("starcite_tail_visibility_lag_ms",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :publish_to_receive_ms,
+          description: "Lag from committed cursor update publish to tail socket receipt",
+          tags: [:mode],
+          reporter_options: [
+            buckets: [
+              0,
+              1,
+              2,
+              5,
+              10,
+              20,
+              50,
+              100,
+              250,
+              500,
+              1_000,
+              2_500,
+              5_000,
+              10_000,
+              30_000,
+              60_000
+            ]
+          ]
+        ),
+        distribution("starcite_tail_replay_queue_size",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :replay_queue_size,
+          description: "Replay queue size when a tail socket receives a cursor update",
+          tags: [:mode],
+          reporter_options: [buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]]
+        ),
+        distribution("starcite_tail_live_buffer_size",
+          event_name: [:starcite, :tail, :visibility],
+          measurement: :live_buffer_size,
+          description: "Buffered live cursor updates when a tail socket receives a cursor update",
+          tags: [:mode],
+          reporter_options: [buckets: [0, 1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1_024]]
         )
       ]
     )
+  end
+
+  defp edge_http_tag_values(%{conn: %{method: method, status: status}})
+       when is_binary(method) and is_integer(status) do
+    %{
+      method: method,
+      status_class: "#{div(status, 100)}xx"
+    }
   end
 end

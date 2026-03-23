@@ -70,13 +70,20 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
 - Required: `type`, `payload`, `producer_id`, `producer_seq`
 - Optional: `source`, `metadata`, `refs`, `idempotency_key`, `expected_seq`
 - `actor` is derived from JWT `sub` when omitted; if provided, it must equal JWT `sub`
-- Response: `{"seq", "last_seq", "deduped"}`
+- Response includes:
+  - `seq`, `last_seq`, `deduped`
+  - `epoch`
+  - `cursor` (`{epoch, seq}` of the appended event)
+  - `committed_cursor` (current durable frontier for the session)
 
-### `GET /v1/sessions/:id/tail?cursor=N[&batch_size=M]`
+### `GET /v1/sessions/:id/tail?cursor=C[&batch_size=M]`
 
 WebSocket upgrade for replay + live stream. See the
 [WebSocket API](websocket.md) for frame format and reconnection semantics.
 
+- Optional `cursor` values:
+  - `N` (legacy sequence-only cursor)
+  - `E:N` (epoch-aware cursor, recommended)
 - Optional `batch_size` (`1..1000`): when `M > 1`, server emits JSON array frames
   with up to `M` events per frame
 - Requires `session:read`
@@ -85,13 +92,14 @@ WebSocket upgrade for replay + live stream. See the
 
 ## Behavioral rules
 
-- Append is sequenced per-session; response includes a monotonic `seq`.
+- Append is sequenced per-session; response includes monotonic `seq` and lineage `epoch`.
 - On retry with same `(producer_id, producer_seq)`:
   - same payload content → dedupe response with `deduped: true`
   - same IDs + different payload → conflict error
 - `expected_seq` enables optimistic concurrency — if the session's current `seq`
   doesn't match, the append is rejected with `409`.
-- `tail` replay is ordered by `seq` and continues with live commits after replay.
+- `tail` replay is ordered by active lineage (`epoch`, `seq`) and continues with live commits after replay.
+- Resume discontinuities are explicit via WebSocket `gap` frames (never silent).
 
 ## Error shape
 
@@ -111,4 +119,4 @@ Status codes:
 - `403` forbidden by scope/session/tenant policy
 - `404` session not found
 - `409` expected sequence or producer conflicts
-- `503` cluster unavailable or routing failure
+- `503` owner/routing unavailable, replication quorum unavailable, or routing failure

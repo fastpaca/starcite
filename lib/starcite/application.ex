@@ -2,13 +2,14 @@ defmodule Starcite.Application do
   @moduledoc false
 
   use Application
+  require Logger
   @archive_read_cache :starcite_archive_read_cache
 
   @impl true
   def start(_type, _args) do
     ops_port = ops_port()
     :ok = maybe_prepare_ops_server(ops_port)
-    :ok = Starcite.ControlPlane.WriteNodes.validate!()
+    :ok = Starcite.Routing.Topology.validate!()
     topologies = Application.get_env(:libcluster, :topologies, [])
 
     children =
@@ -21,11 +22,15 @@ defmodule Starcite.Application do
         repo_spec(),
         # PubSub before runtime
         pubsub_spec(),
+        # Dedicated JWKS HTTP client and async refresh coordinator
+        jwks_http_spec(),
+        jwks_task_supervisor_spec(),
+        StarciteWeb.Auth.JWKSRefresher,
         # DNS / clustering
         dns_cluster_spec(),
         # Control-plane liveness and routing intent
-        Starcite.ControlPlane.Supervisor,
-        # Data-plane runtime (Raft bootstrap, archive, event store)
+        Starcite.Routing.Supervisor,
+        # Data-plane runtime (owners, archive, event store)
         Starcite.DataPlane.Supervisor
       ]
       |> Enum.concat(ops_children(ops_port))
@@ -38,6 +43,12 @@ defmodule Starcite.Application do
 
     opts = [strategy: :one_for_one, name: Starcite.Supervisor]
     Supervisor.start_link(children, opts)
+  end
+
+  @impl true
+  def prep_stop(state) do
+    maybe_drain_before_stop()
+    state
   end
 
   defp prom_ex_spec do
@@ -68,6 +79,14 @@ defmodule Starcite.Application do
     {Phoenix.PubSub, name: Starcite.PubSub}
   end
 
+  defp jwks_http_spec do
+    {Finch, name: StarciteWeb.Auth.JWKSFinch, pools: %{default: [size: 32, count: 1]}}
+  end
+
+  defp jwks_task_supervisor_spec do
+    {Task.Supervisor, name: StarciteWeb.Auth.JWKSTaskSupervisor}
+  end
+
   defp cluster_children([]), do: []
 
   defp cluster_children(topologies) do
@@ -77,7 +96,7 @@ defmodule Starcite.Application do
   end
 
   defp dns_cluster_spec do
-    query = Application.get_env(:starcite, :dns_cluster_query) || :ignore
+    query = Application.get_env(:starcite, :dns_cluster_query, :ignore)
 
     if Code.ensure_loaded?(DNSCluster) and query != :ignore do
       {DNSCluster, query: query}
@@ -141,5 +160,32 @@ defmodule Starcite.Application do
       {Pprof.Servers.Profile, []},
       {Plug.Cowboy, scheme: :http, plug: StarciteWeb.OpsRouter, port: port, compress: true}
     ]
+  end
+
+  defp maybe_drain_before_stop do
+    if length(Starcite.Routing.Topology.nodes()) > 1 do
+      Logger.warning("Starcite shutdown drain starting node=#{inspect(Node.self())}")
+
+      drain_result = Starcite.Operations.drain_node(Node.self(), :shutdown)
+      wait_result = Starcite.Operations.wait_local_drained(drain_timeout_ms())
+      drain_status = Starcite.Operations.drain_status(Node.self())
+
+      Logger.warning(
+        "Starcite shutdown drain finished node=#{inspect(Node.self())} drain_result=#{inspect(drain_result)} wait_result=#{inspect(wait_result)} drain_status=#{inspect(drain_status)}"
+      )
+    end
+
+    :ok
+  end
+
+  defp drain_timeout_ms do
+    case Application.get_env(:starcite, :shutdown_drain_timeout_ms, 30_000) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :shutdown_drain_timeout_ms: #{inspect(value)} (expected positive integer)"
+    end
   end
 end

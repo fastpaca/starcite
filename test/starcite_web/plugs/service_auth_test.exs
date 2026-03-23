@@ -17,6 +17,7 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
 
   setup do
     previous_auth = Application.get_env(:starcite, @auth_env_key)
+    :ok = JWKS.clear_cache()
 
     on_exit(fn ->
       if is_nil(previous_auth) do
@@ -106,6 +107,35 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     configure_jwt_auth!("http://localhost:1#{@jwks_path}")
     conn = conn(:get, "/")
     assert {:error, :missing_bearer_token} = ServiceAuth.authenticate_conn(conn)
+  end
+
+  test "authenticate_conn emits auth telemetry and caches jwks by kid" do
+    attach_auth_handler()
+    {private_key, kid} = jwt_signing_fixture!()
+
+    token =
+      private_key
+      |> sign_token(kid, %{
+        "tenant_id" => "acme",
+        "sub" => "user:user-42",
+        "scope" => "session:create session:read session:append",
+        "session_id" => "ses-1"
+      })
+
+    conn =
+      conn(:get, "/v1/sessions")
+      |> put_req_header("authorization", "Bearer #{token}")
+
+    assert %Plug.Conn{assigns: %{auth: %Context{kind: :jwt}}} = ServiceAuth.call(conn, [])
+
+    assert_receive_auth_event(:jwks_fetch, :jwt, :ok, :none, :refresh)
+    assert_receive_auth_event(:jwt_verify, :jwt, :ok, :none, :none)
+    assert_receive_auth_event(:plug, :jwt, :ok, :none, :none)
+
+    assert {:ok, %Context{kind: :jwt}} = ServiceAuth.authenticate_token(token)
+
+    assert_receive_auth_event(:jwks_fetch, :jwt, :ok, :none, :cache)
+    assert_receive_auth_event(:jwt_verify, :jwt, :ok, :none, :none)
   end
 
   test "authenticate_conn allows requests when auth mode is none" do
@@ -289,6 +319,59 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
       jwt_leeway_seconds: 0,
       jwks_refresh_ms: 60_000
     )
+  end
+
+  defp attach_auth_handler do
+    handler_id = "auth-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :auth],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:auth_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp assert_receive_auth_event(stage, mode, outcome, error_reason, source)
+       when stage in [:plug, :jwt_verify, :jwks_fetch] and mode in [:none, :jwt] and
+              outcome in [:ok, :error] and is_atom(error_reason) and
+              source in [:none, :cache, :refresh] do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_auth_event(stage, mode, outcome, error_reason, source, deadline)
+  end
+
+  defp do_assert_receive_auth_event(stage, mode, outcome, error_reason, source, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:auth_event, %{count: 1, duration_ms: duration_ms},
+       %{
+         stage: ^stage,
+         mode: ^mode,
+         outcome: ^outcome,
+         error_reason: ^error_reason,
+         source: ^source
+       }} ->
+        assert is_integer(duration_ms)
+        assert duration_ms >= 0
+        :ok
+
+      {:auth_event, _measurements, _metadata} ->
+        do_assert_receive_auth_event(stage, mode, outcome, error_reason, source, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for auth telemetry stage=#{inspect(stage)} mode=#{inspect(mode)} outcome=#{inspect(outcome)} error_reason=#{inspect(error_reason)} source=#{inspect(source)}"
+        )
+    end
   end
 
   defp sign_token(private_key, kid, overrides)

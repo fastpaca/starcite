@@ -44,6 +44,7 @@ starcite-*.tar
 /priv/static/cache_manifest.json
 /priv/runtime/
 /priv/storage
+/priv/khepri/
 /priv/raft
 /priv/plts
 /tmp/test_raft

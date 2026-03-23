@@ -4,8 +4,9 @@ defmodule StarciteWeb.TailSocketTest do
   alias Starcite.Auth.Principal
   alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Archive.Store
+  alias Starcite.ReadPath
   alias Starcite.WritePath
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, RaftAccess}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Repo
   alias StarciteWeb.TailSocket
 
@@ -25,7 +26,9 @@ defmodule StarciteWeb.TailSocketTest do
       session_id: session_id,
       topic: CursorUpdate.topic(session_id),
       principal: principal,
+      requested_cursor: %{epoch: nil, seq: cursor},
       cursor: cursor,
+      cursor_epoch: nil,
       frame_batch_size: 1,
       replay_queue: :queue.new(),
       replay_done: false,
@@ -235,18 +238,16 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 1)
       insert_cold_rows(session_id, cold_rows)
-
-      assert {:ok,
-              %{applied: [%{session_id: ^session_id, archived_seq: 1, trimmed: 1}], failed: []}} =
-               WritePath.ack_archived(session_id, 1)
-
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
       assert :error = EventStore.get_event(session_id, 1)
 
       update = %{
         version: 1,
         session_id: session_id,
+        tenant_id: "acme",
         seq: 1,
         last_seq: 1,
+        published_at_ms: System.system_time(:millisecond),
         type: "content",
         actor: "agent:test",
         source: nil,
@@ -291,8 +292,8 @@ defmodule StarciteWeb.TailSocketTest do
       send(Starcite.Archive, :flush_tick)
 
       eventually(fn ->
-        {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(session_id)
-        assert {:error, :session_not_found} = RaftAccess.query_session(server_id, session_id)
+        {:ok, session} = ReadPath.get_session(session_id)
+        assert session.archived_seq == 1
         assert {:ok, _event} = EventStore.get_event(session_id, 1)
       end)
 
@@ -321,14 +322,96 @@ defmodule StarciteWeb.TailSocketTest do
 
       cold_rows = EventStore.from_cursor(session_id, 0, 2)
       insert_cold_rows(session_id, cold_rows)
-
-      assert {:ok,
-              %{applied: [%{session_id: ^session_id, archived_seq: 2, trimmed: 2}], failed: []}} =
-               WritePath.ack_archived(session_id, 2)
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
 
       {frames, final_state} = drain_until_idle(base_state(session_id, 0))
       assert frames == [1, 2, 3, 4]
       assert final_state.cursor == 4
+    end
+
+    test "emits epoch_stale gap when requested epoch is no longer active" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      stale_epoch_state = %{
+        base_state(session_id, 0)
+        | requested_cursor: %{epoch: 99, seq: 0},
+          cursor_epoch: 99
+      }
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, stale_epoch_state)
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "epoch_stale"
+      assert gap["from_cursor"] == %{"epoch" => 99, "seq" => 0}
+      assert is_map(gap["next_cursor"])
+      assert next_state.cursor_epoch == gap["next_cursor"]["epoch"]
+    end
+
+    test "emits rollback gap when stale epoch cursor points beyond active lineage head" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      stale_epoch_state = %{
+        base_state(session_id, 10)
+        | requested_cursor: %{epoch: 99, seq: 10},
+          cursor_epoch: 99
+      }
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, stale_epoch_state)
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "rollback"
+      assert gap["from_cursor"] == %{"epoch" => 99, "seq" => 10}
+      assert gap["next_cursor"]["seq"] == 1
+      assert next_state.cursor == 1
+      assert next_state.cursor_epoch == gap["next_cursor"]["epoch"]
+    end
+
+    test "emits cursor_expired gap when cursor falls below available floor" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id)
+
+      for n <- 1..3 do
+        {:ok, _} =
+          append_event(session_id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:test"
+          })
+      end
+
+      # Evict older hot entries without seeding cold storage to force an explicit
+      # replay floor jump.
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(session_id, 2)
+
+      assert {:push, {:text, payload}, next_state} =
+               TailSocket.handle_info(:drain_replay, base_state(session_id, 0))
+
+      gap = Jason.decode!(payload)
+      assert gap["type"] == "gap"
+      assert gap["reason"] == "cursor_expired"
+      assert gap["from_cursor"] == %{"epoch" => nil, "seq" => 0}
+      assert gap["next_cursor"]["seq"] == 2
+      assert next_state.cursor == 2
     end
   end
 
@@ -397,6 +480,189 @@ defmodule StarciteWeb.TailSocketTest do
                      1_000
 
       assert is_integer(duration_ms) and duration_ms >= 0
+    end
+  end
+
+  describe "cursor visibility telemetry" do
+    setup do
+      attach_telemetry_handler(
+        [:starcite, :cursor, :update],
+        :cursor_update_event
+      )
+
+      attach_telemetry_handler(
+        [:starcite, :tail, :cursor_lookup],
+        :tail_cursor_lookup_event
+      )
+
+      attach_telemetry_handler(
+        [:starcite, :tail, :visibility],
+        :tail_visibility_event
+      )
+
+      :ok
+    end
+
+    test "emits cursor update telemetry when committed events are published" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      assert_receive {:cursor_update_event, %{count: 1, lag: 0},
+                      %{session_id: ^session_id, tenant_id: "acme"}},
+                     1_000
+    end
+
+    test "emits embedded cursor lookup hit and live-fast-path visibility telemetry" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "state",
+          payload: %{state: "running"},
+          actor: "agent:test"
+        })
+
+      {:ok, update} = cursor_update_for(session_id, 1)
+      state = %{base_state(session_id, 0) | replay_done: true}
+
+      assert {:push, {:text, _payload}, _next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      assert_receive {:tail_visibility_event,
+                      %{
+                        count: 1,
+                        publish_to_receive_ms: publish_to_receive_ms,
+                        replay_queue_size: 0,
+                        live_buffer_size: 0
+                      },
+                      %{session_id: ^session_id, tenant_id: "acme", seq: 1, mode: :live_fast_path}},
+                     1_000
+
+      assert is_integer(publish_to_receive_ms) and publish_to_receive_ms >= 0
+
+      assert_receive {:tail_cursor_lookup_event, %{count: 1},
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :embedded,
+                        result: :hit
+                      }},
+                     1_000
+    end
+
+    test "emits fallback lookup telemetry when embedded event and ETS are both unavailable" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test"
+        })
+
+      cold_rows = EventStore.from_cursor(session_id, 0, 1)
+      insert_cold_rows(session_id, cold_rows)
+      assert {:ok, %{archived_seq: 1, trimmed: 1}} = WritePath.ack_archived(session_id, 1)
+      assert :error = EventStore.get_event(session_id, 1)
+
+      update = %{
+        version: 1,
+        session_id: session_id,
+        tenant_id: "acme",
+        seq: 1,
+        last_seq: 1,
+        published_at_ms: System.system_time(:millisecond),
+        type: "content",
+        actor: "agent:test",
+        source: nil,
+        inserted_at: NaiveDateTime.utc_now()
+      }
+
+      state = %{base_state(session_id, 0, principal_for_tenant("acme")) | replay_done: true}
+
+      assert {:push, {:text, _payload}, _next_state} =
+               TailSocket.handle_info({:cursor_update, update}, state)
+
+      assert_receive {:tail_cursor_lookup_event, %{count: 1},
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :embedded,
+                        result: :miss
+                      }},
+                     1_000
+
+      assert_receive {:tail_cursor_lookup_event, %{count: 1},
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :event_store,
+                        result: :miss
+                      }},
+                     1_000
+
+      assert_receive {:tail_cursor_lookup_event, %{count: 1},
+                      %{
+                        session_id: ^session_id,
+                        tenant_id: "acme",
+                        seq: 1,
+                        source: :storage,
+                        result: :hit
+                      }},
+                     1_000
+    end
+
+    test "emits buffered visibility telemetry while replay backlog exists" do
+      session_id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+      for text <- ["one", "two"] do
+        {:ok, _} =
+          append_event(session_id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "agent:test"
+          })
+      end
+
+      assert {:ok, state_after_fetch} =
+               TailSocket.handle_info(:drain_replay, base_state(session_id, 0))
+
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: "three"},
+          actor: "agent:test"
+        })
+
+      {:ok, update_three} = cursor_update_for(session_id, 3)
+
+      assert {:ok, _next_state} =
+               TailSocket.handle_info({:cursor_update, update_three}, state_after_fetch)
+
+      assert_receive {:tail_visibility_event,
+                      %{
+                        count: 1,
+                        publish_to_receive_ms: publish_to_receive_ms,
+                        replay_queue_size: replay_queue_size,
+                        live_buffer_size: 0
+                      }, %{session_id: ^session_id, tenant_id: "acme", seq: 3, mode: :buffered}},
+                     1_000
+
+      assert is_integer(publish_to_receive_ms) and publish_to_receive_ms >= 0
+      assert replay_queue_size > 0
     end
   end
 
@@ -472,9 +738,33 @@ defmodule StarciteWeb.TailSocketTest do
 
   defp cursor_update_for(session_id, seq) do
     with {:ok, event} <- EventStore.get_event(session_id, seq) do
-      {:cursor_update, update} = CursorUpdate.message(session_id, event, seq)
+      {:cursor_update, update} =
+        CursorUpdate.message(session_id, event_tenant_id!(event), event, seq)
+
       {:ok, update}
     end
+  end
+
+  defp attach_telemetry_handler(event_name, message_tag)
+       when is_list(event_name) and is_atom(message_tag) do
+    handler_id =
+      "#{message_tag}-#{System.unique_integer([:positive, :monotonic])}"
+
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        event_name,
+        fn _event, measurements, metadata, {pid, tag} ->
+          send(pid, {tag, measurements, metadata})
+        end,
+        {test_pid, message_tag}
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
@@ -558,18 +848,12 @@ defmodule StarciteWeb.TailSocketTest do
       :ok
     end
 
-    checked_out? =
-      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-        :ok -> true
-        {:already, _owner} -> false
-      end
-
-    if checked_out? do
-      on_exit(fn ->
-        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
-      end)
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
     end
 
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
 end

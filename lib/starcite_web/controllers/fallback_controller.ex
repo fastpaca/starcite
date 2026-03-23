@@ -44,15 +44,59 @@ defmodule StarciteWeb.FallbackController do
   end
 
   def call(conn, {:timeout, _leader}) do
-    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
+    error(
+      conn,
+      :service_unavailable,
+      "routing_timeout",
+      "Control-plane routing request timed out"
+    )
   end
 
   def call(conn, {:error, {:timeout, _leader}}) do
-    error(conn, :service_unavailable, "raft_timeout", "Cluster request timed out")
+    error(
+      conn,
+      :service_unavailable,
+      "routing_timeout",
+      "Control-plane routing request timed out"
+    )
   end
 
   def call(conn, {:error, {:no_available_replicas, _failures}}) do
-    error(conn, :service_unavailable, "raft_unavailable", "No available replicas")
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
+  def call(conn, {:error, {:routing_rpc_failed, _node, _reason}}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
+  def call(conn, {:error, :no_ready_cluster_nodes}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
+  end
+
+  def call(conn, {:error, {:replication_quorum_not_met, _details}}) do
+    error(
+      conn,
+      :service_unavailable,
+      "replication_unavailable",
+      "In-memory replication quorum was not met"
+    )
+  end
+
+  def call(conn, {:error, :ownership_transfer_in_progress}) do
+    error(
+      conn,
+      :service_unavailable,
+      "ownership_transfer_in_progress",
+      "Session ownership transfer is in progress"
+    )
+  end
+
+  def call(conn, {:error, :not_leader}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No active owner for session group")
+  end
+
+  def call(conn, {:error, {:not_leader, _leader}}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No active owner for session group")
   end
 
   def call(conn, {:error, :archive_read_unavailable}) do
@@ -101,7 +145,7 @@ defmodule StarciteWeb.FallbackController do
              :invalid_tail_batch_size,
              :invalid_limit,
              :invalid_list_query,
-             :invalid_write_node,
+             :invalid_cluster_node,
              :invalid_group_id,
              :invalid_websocket_upgrade,
              :invalid_session,
@@ -121,8 +165,8 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_tail_batch_size), do: "Invalid tail batch size value"
   defp reason_message(:invalid_limit), do: "Invalid limit value"
   defp reason_message(:invalid_list_query), do: "Invalid list query"
-  defp reason_message(:invalid_write_node), do: "Invalid write node"
-  defp reason_message(:invalid_group_id), do: "Invalid write group id"
+  defp reason_message(:invalid_cluster_node), do: "Invalid cluster node"
+  defp reason_message(:invalid_group_id), do: "Invalid routing group id"
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"

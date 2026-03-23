@@ -22,6 +22,7 @@ defmodule Starcite.Archive.Adapter.S3 do
   alias __MODULE__.{Config, Layout, Schema, SchemaControl}
 
   @config_key {__MODULE__, :config}
+  @tenant_cache_table __MODULE__.SessionTenantCache
 
   @impl true
   def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
@@ -81,7 +82,7 @@ defmodule Starcite.Archive.Adapter.S3 do
       created_at: created_at
     }
 
-    with :ok <- put_session_tenant_index(config, id, tenant_id),
+    with :ok <- ensure_session_tenant_index(config, id, tenant_id),
          result <- put_session(config, tenant_id, id, session) do
       case result do
         :ok -> :ok
@@ -154,7 +155,7 @@ defmodule Starcite.Archive.Adapter.S3 do
   defp write_chunk(tenant_id, session_id, chunk_start, rows, config, attempt) do
     with {:ok, expected_tenant_id} <- chunk_tenant_id(rows),
          true <- expected_tenant_id == tenant_id,
-         :ok <- put_session_tenant_index(config, session_id, expected_tenant_id),
+         :ok <- ensure_session_tenant_index(config, session_id, expected_tenant_id),
          {:ok, existing_events, etag} <-
            fetch_chunk(session_id, expected_tenant_id, chunk_start, config),
          {:ok, normalized_existing_events} <-
@@ -351,13 +352,20 @@ defmodule Starcite.Archive.Adapter.S3 do
            if_none_match: "*"
          ) do
       :ok ->
+        cache_session_tenant(config, session_id, tenant_id)
         :ok
 
       {:error, :precondition_failed} ->
         case fetch_session_tenant_index(config, session_id) do
-          {:ok, ^tenant_id} -> :ok
-          {:ok, _other_tenant_id} -> {:error, :archive_write_unavailable}
-          {:error, _reason} -> {:error, :archive_write_unavailable}
+          {:ok, ^tenant_id} ->
+            cache_session_tenant(config, session_id, tenant_id)
+            :ok
+
+          {:ok, _other_tenant_id} ->
+            {:error, :archive_write_unavailable}
+
+          {:error, _reason} ->
+            {:error, :archive_write_unavailable}
         end
 
       {:error, :unavailable} ->
@@ -376,6 +384,7 @@ defmodule Starcite.Archive.Adapter.S3 do
       {:ok, {body, _etag}} ->
         case Schema.decode_session_tenant_index(body) do
           {:ok, tenant_id, _migration_required} ->
+            cache_session_tenant(config, session_id, tenant_id)
             {:ok, tenant_id}
 
           {:error, _reason} = error ->
@@ -389,7 +398,65 @@ defmodule Starcite.Archive.Adapter.S3 do
 
   defp resolve_session_tenant(config, session_id)
        when is_binary(session_id) and session_id != "" do
-    fetch_session_tenant_index(config, session_id)
+    case cached_session_tenant(config, session_id) do
+      nil -> fetch_session_tenant_index(config, session_id)
+      tenant_id -> {:ok, tenant_id}
+    end
+  end
+
+  defp ensure_session_tenant_index(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    case cached_session_tenant(config, session_id) do
+      ^tenant_id ->
+        :ok
+
+      nil ->
+        put_session_tenant_index(config, session_id, tenant_id)
+
+      _other_tenant_id ->
+        {:error, :archive_write_unavailable}
+    end
+  end
+
+  defp cached_session_tenant(config, session_id)
+       when is_binary(session_id) and session_id != "" do
+    case :ets.lookup(tenant_cache_table(), tenant_cache_key(config, session_id)) do
+      [{_key, tenant_id}] -> tenant_id
+      [] -> nil
+    end
+  end
+
+  defp cache_session_tenant(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    true = :ets.insert(tenant_cache_table(), {tenant_cache_key(config, session_id), tenant_id})
+    :ok
+  end
+
+  defp tenant_cache_key(config, session_id)
+       when is_binary(session_id) and session_id != "" do
+    {config.bucket, config.prefix, session_id}
+  end
+
+  defp tenant_cache_table do
+    case :ets.whereis(@tenant_cache_table) do
+      :undefined ->
+        try do
+          :ets.new(@tenant_cache_table, [
+            :named_table,
+            :set,
+            :public,
+            read_concurrency: true,
+            write_concurrency: true
+          ])
+        rescue
+          ArgumentError -> @tenant_cache_table
+        end
+
+      tid ->
+        tid
+    end
   end
 
   defp event_chunk_keys(config, session_id, tenant_id, chunk_start)

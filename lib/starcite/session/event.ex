@@ -17,6 +17,7 @@ defmodule Starcite.Session.Event do
 
   @type t :: %{
           required(:seq) => non_neg_integer(),
+          optional(:epoch) => non_neg_integer(),
           required(:type) => String.t(),
           required(:payload) => map(),
           required(:actor) => String.t(),

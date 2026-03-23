@@ -4,11 +4,12 @@ defmodule Starcite.RuntimeTest do
   import ExUnit.CaptureLog
 
   alias Starcite.Auth.Principal
-  alias Starcite.ControlPlane.WriteNodes
+  alias Starcite.Operations
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.Archive.Store
-  alias Starcite.DataPlane.{EventStore, RaftAccess, RaftBootstrap, SessionStore}
-  alias Starcite.DataPlane.RaftManager
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Routing.Store, as: RoutingStore
+  alias Starcite.Routing.Watcher
   alias Starcite.Session
   alias Starcite.Repo
 
@@ -20,6 +21,15 @@ defmodule Starcite.RuntimeTest do
 
   defp unique_id(prefix) do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{:rand.uniform(999_999_999)}"
+  end
+
+  defp put_assignment(session_id, assignment) when is_binary(session_id) and is_map(assignment) do
+    :khepri.put(
+      Starcite.Routing.Store.store_id(),
+      [:sessions, session_id],
+      assignment,
+      %{async: false, reply_from: :local, timeout: 5_000}
+    )
   end
 
   describe "create/get session" do
@@ -46,15 +56,25 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
-      {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started(id)
-      {:ok, session} = RaftAccess.query_session(server_id, id)
+      {:ok, session} = ReadPath.get_session(id)
+      assert session.id == id
+      assert session.last_seq == 0
+    end
+
+    test "gets existing session through routed read" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      {:ok, session} = ReadPath.get_session_routed(id, true)
       assert session.id == id
       assert session.last_seq == 0
     end
 
     test "returns not found for missing session" do
-      {:ok, server_id, _group} = RaftAccess.locate_and_ensure_started("missing")
-      assert {:error, :session_not_found} = RaftAccess.query_session(server_id, "missing")
+      session_id = unique_id("missing")
+
+      assert {:error, :session_not_found} = ReadPath.get_session(session_id)
+      assert {:error, :not_found} = RoutingStore.get_assignment(session_id, favor: :consistency)
     end
 
     test "create_session warms session store for immediate reads" do
@@ -76,6 +96,293 @@ defmodule Starcite.RuntimeTest do
       assert loaded.id == id
       assert loaded.creator_principal == principal
       assert loaded.metadata["source"] == "cache"
+    end
+
+    test "create_session rolls back local owner/session cache when replication quorum fails" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+
+      id = unique_id("ses")
+      assert {:error, _reason} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      refute SessionQuorum.local_owner?(id)
+      assert :error == SessionStore.get_session_cached(id)
+      assert {:error, :session_not_found} = ReadPath.get_session(id)
+    end
+
+    test "local_owner? promotes a follower log after routing ownership changes" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      peer = :"runtime-owner-peer@127.0.0.1"
+      id = unique_id("ses")
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Starcite.Runtime.TestHelper.reset()
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: peer,
+                 epoch: 1,
+                 replicas: [peer, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      session = %Session{Session.new(id) | epoch: 1}
+      assert :ok = SessionStore.put_session(session)
+      assert {:ok, loaded} = SessionQuorum.get_session(id)
+      assert loaded.id == id
+      refute SessionQuorum.local_owner?(id)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 2,
+                 replicas: [Node.self(), peer],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      assert SessionQuorum.local_owner?(id)
+    end
+
+    test "follower session log emits a routing fence when it receives an append" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      peer = :"runtime-follower-peer@127.0.0.1"
+      id = unique_id("ses")
+      session = %Session{Session.new(id) | epoch: 1}
+      handler_id = "routing-fence-runtime-#{System.unique_integer([:positive, :monotonic])}"
+      test_pid = self()
+
+      :ok =
+        :telemetry.attach(
+          handler_id,
+          [:starcite, :routing, :fence],
+          fn _event, measurements, metadata, pid ->
+            send(pid, {:routing_fence_event, measurements, metadata})
+          end,
+          test_pid
+        )
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+        :telemetry.detach(handler_id)
+      end)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Starcite.Runtime.TestHelper.reset()
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: peer,
+                 epoch: 1,
+                 replicas: [peer, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      assert :ok = SessionStore.put_session(session)
+      assert {:ok, ^session} = SessionQuorum.get_session(id)
+      refute SessionQuorum.local_owner?(id)
+
+      [{pid, _value}] =
+        Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+
+      assert {:error, :not_owner} =
+               :gen_batch_server.call(
+                 pid,
+                 {:append_event, %{type: "content", payload: %{text: "nope"}}, nil,
+                  [peer, Node.self()]},
+                 5_000
+               )
+
+      assert_receive {:routing_fence_event, %{count: 1},
+                      %{session_id: ^id, source: :session_log, reason: :not_owner}},
+                     1_000
+    end
+
+    test "watcher startup rejoins a drained node as ready" do
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+      assert :ok = Operations.wait_local_ready(5_000)
+      assert RoutingStore.node_status(Node.self()) == :ready
+    end
+
+    test "watcher startup ignores a stale ready cache until the consistent store is ready" do
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: System.system_time(:millisecond) + 60_000,
+            updated_at_ms: 0
+          }
+        })
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+      assert :ok = Operations.wait_local_ready(5_000)
+      assert {:ok, %{status: :ready}} = RoutingStore.node_record(Node.self(), favor: :consistency)
+    end
+
+    test "local readiness rejects an expired authoritative lease even with a stale ready cache" do
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        assert :ok = RoutingStore.renew_local_lease()
+      end)
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: now_ms + 60_000,
+            updated_at_ms: now_ms
+          }
+        })
+
+      assert :ok =
+               :khepri.put(
+                 RoutingStore.store_id(),
+                 [:nodes, Atom.to_string(Node.self())],
+                 %{
+                   status: :ready,
+                   lease_until_ms: now_ms - 1,
+                   updated_at_ms: now_ms
+                 },
+                 %{async: false, reply_from: :local, timeout: 5_000}
+               )
+
+      readiness = Operations.local_readiness(refresh?: true)
+      refute readiness.ready?
+      assert readiness.reason == :lease_expired
+      assert readiness.detail.lease_until_ms == now_ms - 1
+      assert {503, %{reason: "lease_expired"}} = StarciteWeb.Health.ready()
+    end
+
+    test "local readiness rejects a missing authoritative node record even with a stale ready cache" do
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        assert :ok = RoutingStore.renew_local_lease()
+      end)
+
+      true =
+        :ets.insert(:starcite_routing_node_record_cache, {
+          Node.self(),
+          %{
+            status: :ready,
+            lease_until_ms: now_ms + 60_000,
+            updated_at_ms: now_ms
+          }
+        })
+
+      assert :ok =
+               :khepri.delete(
+                 RoutingStore.store_id(),
+                 [:nodes, Atom.to_string(Node.self())],
+                 %{async: false, reply_from: :local, timeout: 5_000}
+               )
+
+      assert {:error, {:khepri, :node_not_found, _}} =
+               RoutingStore.node_record(Node.self(), favor: :consistency)
+
+      readiness = Operations.local_readiness(refresh?: true)
+      refute readiness.ready?
+      assert readiness.reason == :routing_sync
+      assert readiness.checks.routing_store.detail.status == :unknown
+      assert {503, %{reason: "routing_sync"}} = StarciteWeb.Health.ready()
+    end
+
+    test "watcher startup keeps a draining node draining while active sessions remain" do
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self()],
+                 status: :active,
+                 updated_at_ms: now_ms
+               })
+
+      assert :ok = RoutingStore.mark_node_draining(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :draining
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+
+      Process.sleep(250)
+      assert RoutingStore.node_status(Node.self()) == :draining
+      assert {:error, :timeout} = Operations.wait_local_ready(500)
+    end
+
+    test "watcher startup reopens a drained node back to draining when drain work remains" do
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self()],
+                 status: :moving,
+                 target_owner: :"peer@127.0.0.1",
+                 transfer_id: "xfer-startup-reopen",
+                 updated_at_ms: now_ms
+               })
+
+      assert :ok = RoutingStore.mark_node_drained(Node.self())
+      assert RoutingStore.node_status(Node.self()) == :drained
+
+      old_pid = Process.whereis(Watcher)
+      assert is_pid(old_pid)
+      assert :ok = GenServer.stop(old_pid, :normal)
+
+      restarted_pid = wait_for_process_restart(Watcher, old_pid, 5_000)
+      assert is_pid(restarted_pid)
+
+      Process.sleep(250)
+      assert RoutingStore.node_status(Node.self()) == :draining
+      assert {:error, :timeout} = Operations.wait_local_ready(500)
     end
   end
 
@@ -143,6 +450,57 @@ defmodule Starcite.RuntimeTest do
       assert second.last_seq == 1
     end
 
+    test "deduped retry does not require fresh quorum" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      missing = :"missing-dedup-replica@127.0.0.1"
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      {:ok, _} = WritePath.create_session(id: id)
+
+      event = %{
+        type: "state",
+        payload: %{state: "running"},
+        actor: "agent:1",
+        producer_id: "writer-1",
+        producer_seq: 1
+      }
+
+      assert {:ok, first} = append_event(id, event)
+      refute first.deduped
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), missing])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self(), missing],
+                 status: :active,
+                 updated_at_ms: now_ms
+               })
+
+      true = :ets.delete(:starcite_routing_assignment_cache, id)
+
+      assert {:ok, second} = append_event(id, event)
+      assert second.deduped
+      assert second.seq == 1
+      assert second.last_seq == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == 1
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert Enum.map(events, & &1.seq) == [1]
+    end
+
     test "errors on producer replay conflict" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -164,6 +522,58 @@ defmodule Starcite.RuntimeTest do
                  producer_id: "writer-1",
                  producer_seq: 1
                })
+    end
+
+    test "does not leak visible state when replication quorum is not met" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      missing = :"missing-replica@127.0.0.1"
+      id = unique_id("ses")
+      now_ms = System.system_time(:millisecond)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      {:ok, _} = WritePath.create_session(id: id)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), missing])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: Node.self(),
+                 epoch: 1,
+                 replicas: [Node.self(), missing],
+                 status: :active,
+                 updated_at_ms: now_ms
+               })
+
+      true = :ets.delete(:starcite_routing_assignment_cache, id)
+      assert {:ok, assignment} = RoutingStore.get_assignment(id, favor: :consistency)
+      assert assignment.owner == Node.self()
+      assert assignment.replicas == [Node.self(), missing]
+
+      assert {:error, {:replication_quorum_not_met, details}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "should not commit"},
+                 actor: "agent:1"
+               })
+
+      assert details.required_remote_acks == 1
+      assert details.successful_remote_acks == 0
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == 0
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert events == []
+
+      assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
+      assert cursor.last_seq == 0
+      assert cursor.committed_seq == 0
     end
   end
 
@@ -259,8 +669,7 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
-               WritePath.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 3, 100)
       assert Enum.map(events, & &1.seq) == [4, 5]
@@ -288,6 +697,29 @@ defmodule Starcite.RuntimeTest do
       assert Enum.map(events, & &1.seq) == [1]
     end
 
+    test "rejects replay when the first returned event skips past the cursor" do
+      missing_id = unique_id("missing-gap")
+
+      for seq <- [7, 8] do
+        :ok =
+          EventStore.put_event(missing_id, "acme", %{
+            seq: seq,
+            type: "content",
+            payload: %{text: "rogue-#{seq}"},
+            actor: "agent:1",
+            producer_id: "writer:test",
+            producer_seq: seq,
+            source: nil,
+            metadata: %{},
+            refs: %{},
+            idempotency_key: nil,
+            inserted_at: NaiveDateTime.utc_now()
+          })
+      end
+
+      assert {:error, :event_gap_detected} = ReadPath.get_events_from_cursor(missing_id, 5, 100)
+    end
+
     test "returns ordered events across archive cold + ETS hot boundary" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -304,8 +736,7 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
-               WritePath.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
@@ -327,15 +758,14 @@ defmodule Starcite.RuntimeTest do
       cold_rows = EventStore.from_cursor(id, 0, 3)
       insert_cold_rows(id, cold_rows)
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
-               WritePath.ack_archived(id, 3)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
 
       {:ok, events} = ReadPath.get_events_from_cursor(id, 2, 2)
       assert Enum.map(events, & &1.seq) == [3, 4]
     end
   end
 
-  describe "ack_archived/1" do
+  describe "ack_archived/2" do
     test "is idempotent for the same archive cursor" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
@@ -349,14 +779,10 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 2, trimmed: 2}], failed: []}} =
-               WritePath.ack_archived(id, 2)
-
+      assert {:ok, %{archived_seq: 2, trimmed: 2}} = WritePath.ack_archived(id, 2)
       assert EventStore.session_size(id) == 2
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 2, trimmed: 0}], failed: []}} =
-               WritePath.ack_archived(id, 2)
-
+      assert {:ok, %{archived_seq: 2, trimmed: 0}} = WritePath.ack_archived(id, 2)
       assert EventStore.session_size(id) == 2
     end
 
@@ -373,17 +799,15 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
-               WritePath.ack_archived(id, 10_000)
-
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 10_000)
       assert EventStore.session_size(id) == 0
     end
 
-    test "coalesces duplicate sessions to the highest archived cursor in one batch" do
+    test "does not regress the committed frontier when acked below the current archive cursor" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
-      for n <- 1..3 do
+      for n <- 1..4 do
         {:ok, _} =
           append_event(id, %{
             type: "content",
@@ -392,122 +816,130 @@ defmodule Starcite.RuntimeTest do
           })
       end
 
-      assert {:ok, %{applied: [%{session_id: ^id, archived_seq: 3, trimmed: 3}], failed: []}} =
-               WritePath.ack_archived([{id, 1}, {id, 3}, {id, 2}])
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert EventStore.session_size(id) == 1
 
-      assert EventStore.session_size(id) == 0
+      assert {:ok, %{archived_seq: 3, trimmed: 0}} = WritePath.ack_archived(id, 1)
+      assert EventStore.session_size(id) == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.archived_seq == 3
+
+      assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
+      assert cursor.committed_seq == 3
     end
 
-    test "is best effort for missing sessions within a batch" do
-      first_id = unique_id("ses")
-      second_id = unique_id("ses")
-      missing_id = unique_id("ses-missing")
+    test "emits invariant telemetry and preserves the committed frontier when publication sees a stale lower watermark" do
+      id = unique_id("ses")
 
-      {:ok, _} = WritePath.create_session(id: first_id)
-      {:ok, _} = WritePath.create_session(id: second_id)
+      handler_id =
+        "data-plane-invariant-runtime-#{System.unique_integer([:positive, :monotonic])}"
 
-      {:ok, _} =
-        append_event(first_id, %{
-          type: "content",
-          payload: %{text: "one"},
-          actor: "agent:1"
-        })
-
-      {:ok, _} =
-        append_event(second_id, %{
-          type: "content",
-          payload: %{text: "two"},
-          actor: "agent:1"
-        })
-
-      assert {:ok, %{applied: applied, failed: failed}} =
-               WritePath.ack_archived([{first_id, 1}, {missing_id, 1}, {second_id, 1}])
-
-      assert Enum.sort_by(applied, & &1.session_id) == [
-               %{session_id: first_id, archived_seq: 1, trimmed: 1},
-               %{session_id: second_id, archived_seq: 1, trimmed: 1}
-             ]
-
-      assert failed == [%{session_id: missing_id, reason: :session_not_found}]
-      assert EventStore.session_size(first_id) == 0
-      assert EventStore.session_size(second_id) == 0
-    end
-  end
-
-  describe "Raft failover and recovery" do
-    test "runtime reconcile emits local raft leader count telemetry" do
-      handler_id = "raft-role-count-#{System.unique_integer([:positive, :monotonic])}"
-      group_role_handler_id = "raft-group-role-#{System.unique_integer([:positive, :monotonic])}"
       test_pid = self()
 
       :ok =
         :telemetry.attach(
           handler_id,
-          [:starcite, :raft, :role_count],
+          [:starcite, :data_plane, :invariant],
           fn _event, measurements, metadata, pid ->
-            send(pid, {:raft_role_count_event, measurements, metadata})
-          end,
-          test_pid
-        )
-
-      :ok =
-        :telemetry.attach(
-          group_role_handler_id,
-          [:starcite, :raft, :group_role],
-          fn _event, measurements, metadata, pid ->
-            send(pid, {:raft_group_role_event, measurements, metadata})
+            send(pid, {:data_plane_invariant_event, measurements, metadata})
           end,
           test_pid
         )
 
       on_exit(fn ->
         :telemetry.detach(handler_id)
-        :telemetry.detach(group_role_handler_id)
       end)
 
-      eventually(
-        fn ->
-          assert RaftBootstrap.ready?()
-        end,
-        timeout: 10_000
-      )
+      {:ok, _} = WritePath.create_session(id: id)
 
-      send(RaftBootstrap, :runtime_reconcile)
+      assert {:ok, _reply} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "seed"},
+                 actor: "agent:1"
+               })
 
-      assert_receive_raft_role_count(:leader, WriteNodes.num_groups(), Node.self())
-      assert_receive_raft_group_role(0, :leader, 1, Node.self())
-      assert_receive_raft_group_role(0, :follower, 0, Node.self())
+      assert {:ok, %Session{} = current} = SessionQuorum.get_session(id)
+
+      assert :ok =
+               SessionStore.put_session(%Session{
+                 current
+                 | archived_seq: current.archived_seq + 1
+               })
+
+      assert {:ok, reply} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "next"},
+                 actor: "agent:1"
+               })
+
+      assert_receive {:data_plane_invariant_event, %{count: 1},
+                      %{
+                        session_id: ^id,
+                        source: :publish_events,
+                        reason: :publication_watermark_regression
+                      }},
+                     1_000
+
+      assert reply.committed_cursor.seq == 1
+      assert {:ok, session} = SessionQuorum.get_session(id)
+      assert session.archived_seq == 1
+
+      assert {:ok, cursor} = SessionQuorum.fetch_cursor_snapshot(id)
+      assert cursor.committed_seq == 1
     end
+  end
 
-    test "starting a multi-replica local group does not trigger a local election" do
-      previous_num_groups = Application.get_env(:starcite, :num_groups)
-      previous_replication_factor = Application.get_env(:starcite, :write_replication_factor)
-      previous_write_node_ids = Application.get_env(:starcite, :write_node_ids)
+  describe "replica monotonicity" do
+    test "ignores stale lower-epoch replica state even when it advertises a larger last_seq" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id)
 
-      on_exit(fn ->
-        restore_env(:num_groups, previous_num_groups)
-        restore_env(:write_replication_factor, previous_replication_factor)
-        restore_env(:write_node_ids, previous_write_node_ids)
-        Starcite.Runtime.TestHelper.reset()
-      end)
+      for n <- 1..2 do
+        {:ok, _} =
+          append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:1"
+          })
+      end
 
-      Application.put_env(:starcite, :num_groups, 1)
-      Application.put_env(:starcite, :write_replication_factor, 3)
+      assert {:ok, %Session{} = current} = SessionQuorum.get_session(id)
 
-      Application.put_env(:starcite, :write_node_ids, [
-        Node.self(),
-        :"peer-a@127.0.0.1",
-        :"peer-b@127.0.0.1"
-      ])
+      newer =
+        %Session{
+          current
+          | epoch: current.epoch + 1,
+            archived_seq: current.archived_seq + 1
+        }
 
-      Starcite.Runtime.TestHelper.reset()
+      assert :ok = SessionQuorum.apply_replica(newer, [])
+      assert {:ok, %Session{} = promoted} = SessionQuorum.get_session(id)
+      assert promoted.epoch == newer.epoch
+      assert promoted.last_seq == current.last_seq
+      assert promoted.archived_seq == newer.archived_seq
 
-      assert_no_trigger_election(fn ->
-        assert :ok = RaftManager.start_group(0)
-      end)
+      stale =
+        %Session{
+          promoted
+          | epoch: current.epoch,
+            last_seq: promoted.last_seq + 50,
+            archived_seq: promoted.archived_seq + 50
+        }
+
+      assert :ok = SessionQuorum.apply_replica(stale, [])
+
+      assert {:ok, %Session{} = final} = SessionQuorum.get_session(id)
+      assert final.epoch == promoted.epoch
+      assert final.last_seq == promoted.last_seq
+      assert final.archived_seq == promoted.archived_seq
     end
+  end
 
-    test "recovers state after server crash and restart" do
+  describe "session log recovery" do
+    test "recovers state after owner crash and restart" do
       id = unique_id("ses-failover")
 
       capture_log(fn ->
@@ -522,9 +954,7 @@ defmodule Starcite.RuntimeTest do
 
         assert first.seq == 1
 
-        group_id = RaftManager.group_for_session(id)
-        server_id = RaftManager.server_id(group_id)
-        pid = Process.whereis(server_id)
+        [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
 
         ref = Process.monitor(pid)
         Process.exit(pid, :kill)
@@ -532,14 +962,15 @@ defmodule Starcite.RuntimeTest do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
-          2_000 -> flunk("Raft process did not die")
+          2_000 -> flunk("session log did not die")
         end
-
-        assert :ok = RaftManager.start_group(group_id)
 
         eventually(
           fn ->
-            assert Process.whereis(server_id)
+            assert match?(
+                     [{owner_pid, _}] when is_pid(owner_pid),
+                     Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+                   )
           end,
           timeout: 3_000
         )
@@ -563,6 +994,58 @@ defmodule Starcite.RuntimeTest do
   end
 
   describe "Concurrent access" do
+    test "multiple sessions can be created concurrently" do
+      ids =
+        for i <- 1..25 do
+          "ses-create-concurrent-#{i}-#{System.unique_integer([:positive, :monotonic])}"
+        end
+
+      results =
+        ids
+        |> Task.async_stream(
+          fn id -> WritePath.create_session(id: id, tenant_id: "acme", title: "Draft") end,
+          max_concurrency: 25,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, %{id: _}}, &1))
+
+      Enum.each(ids, fn id ->
+        assert {:ok, session} = ReadPath.get_session(id)
+        assert session.id == id
+      end)
+    end
+
+    test "concurrent creates for the same session id only commit once" do
+      id = unique_id("ses-create-race")
+
+      results =
+        1..20
+        |> Task.async_stream(
+          fn _ ->
+            WritePath.create_session(id: id, tenant_id: "acme", title: "Race")
+          end,
+          max_concurrency: 20,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      successes = Enum.count(results, &match?({:ok, %{id: ^id}}, &1))
+      failures = Enum.count(results, &match?({:error, :session_exists}, &1))
+
+      assert successes >= 1
+      assert successes + failures == 20
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.id == id
+      assert session.title == "Race"
+      assert session.last_seq == 0
+      assert {:error, :session_exists} = WritePath.create_session(id: id, tenant_id: "acme")
+    end
+
     test "multiple sessions can append concurrently" do
       ids =
         for i <- 1..10 do
@@ -589,6 +1072,210 @@ defmodule Starcite.RuntimeTest do
                _ -> false
              end)
     end
+
+    test "one session can batch many concurrent appends and keep contiguous sequence order" do
+      id = unique_id("ses-hot-lane")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        1..100
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_event(id, %{
+              type: "content",
+              payload: %{text: "m#{n}"},
+              actor: "agent:1",
+              producer_id: "writer:#{n}",
+              producer_seq: 1
+            })
+          end,
+          max_concurrency: 100,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, _}, &1))
+
+      seqs =
+        results
+        |> Enum.map(fn {:ok, reply} -> reply.seq end)
+        |> Enum.sort()
+
+      assert seqs == Enum.to_list(1..100)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 200)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
+    end
+
+    test "one session can batch many concurrent append_events requests and keep contiguous sequence order" do
+      id = unique_id("ses-hot-batches")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        1..50
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_events(id, [
+              %{
+                type: "content",
+                payload: %{text: "m#{n}-a"},
+                actor: "agent:1",
+                producer_id: "writer-batch:#{n}:a",
+                producer_seq: 1
+              },
+              %{
+                type: "content",
+                payload: %{text: "m#{n}-b"},
+                actor: "agent:1",
+                producer_id: "writer-batch:#{n}:b",
+                producer_seq: 1
+              }
+            ])
+          end,
+          max_concurrency: 50,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.all?(results, &match?({:ok, %{results: [_ | _]}}, &1))
+
+      seqs =
+        results
+        |> Enum.flat_map(fn {:ok, %{results: replies}} ->
+          Enum.map(replies, & &1.seq)
+        end)
+        |> Enum.sort()
+
+      assert seqs == Enum.to_list(1..100)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 200)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..100)
+    end
+
+    test "expected_seq barrier requests stay coherent under concurrent batched appends" do
+      id = unique_id("ses-expected-seq-barrier")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      barrier_task =
+        Task.async(fn ->
+          append_event(
+            id,
+            %{
+              type: "content",
+              payload: %{text: "barrier"},
+              actor: "agent:1",
+              producer_id: "writer:barrier",
+              producer_seq: 1
+            },
+            expected_seq: 0
+          )
+        end)
+
+      concurrent_results =
+        1..50
+        |> Task.async_stream(
+          fn n ->
+            WritePath.append_event(id, %{
+              type: "content",
+              payload: %{text: "m#{n}"},
+              actor: "agent:1",
+              producer_id: "writer:#{n}",
+              producer_seq: 1
+            })
+          end,
+          max_concurrency: 50,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      barrier_result = Task.await(barrier_task, 5_000)
+      results = [barrier_result | concurrent_results]
+
+      assert Enum.all?(results, fn
+               {:ok, _reply} -> true
+               {:error, {:expected_seq_conflict, 0, _last_seq}} -> true
+               _other -> false
+             end)
+
+      successes =
+        Enum.filter(results, fn
+          {:ok, _reply} -> true
+          _other -> false
+        end)
+
+      conflicts =
+        Enum.filter(results, fn
+          {:error, {:expected_seq_conflict, 0, _last_seq}} -> true
+          _other -> false
+        end)
+
+      assert length(successes) + length(conflicts) == 51
+      assert length(conflicts) in [0, 1]
+
+      case barrier_result do
+        {:ok, reply} ->
+          assert reply.seq == 1
+
+        {:error, {:expected_seq_conflict, 0, last_seq}} ->
+          assert last_seq >= 1
+      end
+
+      successful_seqs =
+        successes
+        |> Enum.map(fn {:ok, reply} -> reply.seq end)
+        |> Enum.sort()
+
+      assert successful_seqs == Enum.to_list(1..length(successes))
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == length(successes)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 100)
+      assert Enum.map(events, & &1.seq) == Enum.to_list(1..length(successes))
+    end
+
+    test "concurrent replay conflicts commit one event and reject the conflicting append" do
+      id = unique_id("ses-hot-conflict")
+      {:ok, _} = WritePath.create_session(id: id)
+
+      results =
+        [
+          %{
+            type: "state",
+            payload: %{state: "running"},
+            actor: "agent:1",
+            producer_id: "writer-conflict",
+            producer_seq: 1
+          },
+          %{
+            type: "state",
+            payload: %{state: "completed"},
+            actor: "agent:1",
+            producer_id: "writer-conflict",
+            producer_seq: 1
+          }
+        ]
+        |> Task.async_stream(
+          &WritePath.append_event(id, &1),
+          max_concurrency: 2,
+          timeout: 5_000,
+          ordered: false
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
+
+      assert Enum.count(results, &match?({:ok, %{seq: 1, deduped: false}}, &1)) == 1
+      assert Enum.count(results, &match?({:error, :producer_replay_conflict}, &1)) == 1
+
+      assert {:ok, session} = ReadPath.get_session(id)
+      assert session.last_seq == 1
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10)
+      assert Enum.map(events, & &1.seq) == [1]
+      assert hd(events).payload.state in ["running", "completed"]
+    end
   end
 
   defp append_event(id, event, opts \\ [])
@@ -611,101 +1298,6 @@ defmodule Starcite.RuntimeTest do
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
   end
-
-  defp assert_no_trigger_election(fun) when is_function(fun, 0) do
-    parent = self()
-
-    {:ok, _tracer} =
-      :dbg.tracer(
-        :process,
-        {fn msg, _state ->
-           send(parent, {:dbg, msg})
-           {:ok, nil}
-         end, nil}
-      )
-
-    {:ok, _} = :dbg.p(self(), [:call])
-    {:ok, matches} = :dbg.tpl(:ra, :trigger_election, :x)
-
-    assert Enum.any?(matches, fn
-             {:matched, _node, matched} when is_integer(matched) and matched >= 1 -> true
-             _ -> false
-           end)
-
-    try do
-      fun.()
-
-      refute_receive(
-        {:dbg, {:trace, _pid, :call, {:ra, :trigger_election, _args}}},
-        200,
-        "unexpected :ra.trigger_election/2 during local recovery"
-      )
-    after
-      :dbg.stop()
-    end
-  end
-
-  defp assert_receive_raft_role_count(role, groups, node_name)
-       when role in [:leader, :follower, :candidate, :other, :down] and
-              is_integer(groups) and groups >= 0 and is_atom(node_name) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_raft_role_count(role, groups, Atom.to_string(node_name), deadline)
-  end
-
-  defp assert_receive_raft_group_role(group_id, role, present, node_name)
-       when is_integer(group_id) and group_id >= 0 and
-              role in [:leader, :follower, :candidate, :other, :down] and
-              present in [0, 1] and is_atom(node_name) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-
-    do_assert_receive_raft_group_role(
-      group_id,
-      role,
-      present,
-      Atom.to_string(node_name),
-      deadline
-    )
-  end
-
-  defp do_assert_receive_raft_role_count(role, groups, node_name, deadline)
-       when is_binary(node_name) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {:raft_role_count_event, %{groups: ^groups}, %{node: ^node_name, role: ^role}} ->
-        :ok
-
-      {:raft_role_count_event, _measurements, _metadata} ->
-        do_assert_receive_raft_role_count(role, groups, node_name, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for raft role count telemetry role=#{inspect(role)} groups=#{inspect(groups)} node=#{inspect(node_name)}"
-        )
-    end
-  end
-
-  defp do_assert_receive_raft_group_role(group_id, role, present, node_name, deadline)
-       when is_binary(node_name) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-
-    receive do
-      {:raft_group_role_event, %{present: ^present},
-       %{node: ^node_name, group_id: ^group_id, role: ^role}} ->
-        :ok
-
-      {:raft_group_role_event, _measurements, _metadata} ->
-        do_assert_receive_raft_group_role(group_id, role, present, node_name, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for raft group role telemetry group_id=#{inspect(group_id)} role=#{inspect(role)} present=#{inspect(present)} node=#{inspect(node_name)}"
-        )
-    end
-  end
-
-  defp restore_env(key, nil) when is_atom(key), do: Application.delete_env(:starcite, key)
-  defp restore_env(key, value) when is_atom(key), do: Application.put_env(:starcite, key, value)
 
   defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
     timeout = Keyword.get(opts, :timeout, 1_000)
@@ -800,6 +1392,28 @@ defmodule Starcite.RuntimeTest do
     result.num_rows > 0
   end
 
+  defp wait_for_process_restart(name, previous_pid, timeout_ms)
+       when is_atom(name) and is_pid(previous_pid) and is_integer(timeout_ms) and timeout_ms > 0 do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_process_restart(name, previous_pid, deadline_ms)
+  end
+
+  defp do_wait_for_process_restart(name, previous_pid, deadline_ms)
+       when is_atom(name) and is_pid(previous_pid) and is_integer(deadline_ms) do
+    case Process.whereis(name) do
+      pid when is_pid(pid) and pid != previous_pid ->
+        pid
+
+      _other ->
+        if System.monotonic_time(:millisecond) >= deadline_ms do
+          flunk("timed out waiting for #{inspect(name)} to restart")
+        else
+          Process.sleep(50)
+          do_wait_for_process_restart(name, previous_pid, deadline_ms)
+        end
+    end
+  end
+
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
 
@@ -809,18 +1423,12 @@ defmodule Starcite.RuntimeTest do
       :ok
     end
 
-    checked_out? =
-      case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-        :ok -> true
-        {:already, _owner} -> false
-      end
-
-    if checked_out? do
-      on_exit(fn ->
-        Ecto.Adapters.SQL.Sandbox.checkin(Repo)
-      end)
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
     end
 
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
 end

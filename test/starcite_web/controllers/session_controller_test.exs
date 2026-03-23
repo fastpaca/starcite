@@ -4,7 +4,6 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Conn
   import Plug.Test
 
-  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.AuthTestSupport
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -18,8 +17,6 @@ defmodule StarciteWeb.SessionControllerTest do
   setup do
     Starcite.Runtime.TestHelper.reset()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
-    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
-    previous_archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-#{System.unique_integer([:positive, :monotonic])}"
@@ -41,11 +38,6 @@ defmodule StarciteWeb.SessionControllerTest do
       jwks_refresh_ms: 1_000
     )
 
-    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
-    Application.put_env(:starcite, :archive_adapter_opts, [])
-    start_supervised!({IdempotentTestAdapter, []})
-    :ok = IdempotentTestAdapter.clear_writes()
-
     token = token_for(private_key, kid, %{"sub" => "user:user-test", "tenant_id" => "acme"})
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
 
@@ -54,18 +46,6 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.delete_env(:starcite, @auth_env_key)
       else
         Application.put_env(:starcite, @auth_env_key, previous_auth)
-      end
-
-      if is_nil(previous_archive_adapter) do
-        Application.delete_env(:starcite, :archive_adapter)
-      else
-        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
-      end
-
-      if is_nil(previous_archive_adapter_opts) do
-        Application.delete_env(:starcite, :archive_adapter_opts)
-      else
-        Application.put_env(:starcite, :archive_adapter_opts, previous_archive_adapter_opts)
       end
 
       :ok = JWKS.clear_cache()
@@ -115,52 +95,6 @@ defmodule StarciteWeb.SessionControllerTest do
     Enum.reduce(headers, conn, fn {name, value}, acc ->
       put_req_header(acc, name, value)
     end)
-  end
-
-  defp attach_request_telemetry do
-    handler_id = "session-request-#{System.unique_integer([:positive, :monotonic])}"
-    test_pid = self()
-
-    :ok =
-      :telemetry.attach(
-        handler_id,
-        [:starcite, :request],
-        fn _event, measurements, metadata, pid ->
-          send(pid, {:request_event, measurements, metadata})
-        end,
-        test_pid
-      )
-
-    on_exit(fn ->
-      :telemetry.detach(handler_id)
-    end)
-
-    :ok
-  end
-
-  defp assert_receive_request_event(operation, phase, outcome) do
-    deadline = System.monotonic_time(:millisecond) + 1_000
-    do_assert_receive_request_event(operation, phase, outcome, deadline)
-  end
-
-  defp do_assert_receive_request_event(operation, phase, outcome, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-    node_name = Atom.to_string(Node.self())
-
-    receive do
-      {:request_event, %{count: 1, duration_ms: duration_ms},
-       %{node: ^node_name, operation: ^operation, phase: ^phase, outcome: ^outcome}}
-      when is_integer(duration_ms) and duration_ms >= 0 ->
-        duration_ms
-
-      {:request_event, _measurements, _metadata} ->
-        do_assert_receive_request_event(operation, phase, outcome, deadline)
-    after
-      remaining ->
-        flunk(
-          "timed out waiting for request telemetry operation=#{inspect(operation)} phase=#{inspect(phase)} outcome=#{inspect(outcome)}"
-        )
-    end
   end
 
   describe "POST /v1/sessions" do
@@ -247,6 +181,34 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
+    test "returns 503 when in-memory replication quorum cannot be reached" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+      end)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions",
+          service_create_body(%{
+            "id" => unique_id("ses"),
+            "metadata" => %{"workflow" => "replication-failure"}
+          })
+        )
+
+      assert conn.status == 503
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] in ["owner_unavailable", "replication_unavailable"]
+      assert is_binary(body["message"])
+    end
+
     test "supports explicit no-auth mode for local runs" do
       Application.put_env(:starcite, @auth_env_key, mode: :none)
       Process.delete(:default_auth_header)
@@ -317,10 +279,6 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert ids == [id1]
       assert body["next_cursor"] in [nil, id1]
-
-      Enum.each(body["sessions"], fn session ->
-        refute Map.has_key?(session["metadata"], "__starcite_runtime_v1")
-      end)
     end
 
     test "supports cursor pagination" do
@@ -382,47 +340,6 @@ defmodule StarciteWeb.SessionControllerTest do
   end
 
   describe "POST /v1/sessions/:id/append" do
-    test "emits total write request telemetry at the web edge for success" do
-      :ok = attach_request_telemetry()
-
-      id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
-
-      conn =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "content",
-          "payload" => %{"text" => "hello"},
-          "actor" => "user:user-test",
-          "producer_id" => "writer-1",
-          "producer_seq" => 1
-        })
-
-      assert conn.status == 201
-
-      duration_ms = assert_receive_request_event(:append_event, :total, :ok)
-      assert is_integer(duration_ms) and duration_ms >= 0
-    end
-
-    test "emits total write request telemetry at the web edge for errors" do
-      :ok = attach_request_telemetry()
-
-      id = unique_id("missing")
-
-      conn =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "content",
-          "payload" => %{"text" => "hello"},
-          "actor" => "user:user-test",
-          "producer_id" => "writer-1",
-          "producer_seq" => 1
-        })
-
-      assert conn.status == 404
-
-      duration_ms = assert_receive_request_event(:append_event, :total, :error)
-      assert is_integer(duration_ms) and duration_ms >= 0
-    end
-
     test "appends an event" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
@@ -441,6 +358,9 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["seq"] == 1
       assert body["last_seq"] == 1
       assert body["deduped"] == false
+      assert is_integer(body["epoch"]) and body["epoch"] >= 0
+      assert body["cursor"] == %{"epoch" => body["epoch"], "seq" => 1}
+      assert body["committed_cursor"] == %{"epoch" => body["epoch"], "seq" => 0}
     end
 
     test "expected_seq conflict returns 409" do
@@ -528,36 +448,6 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body2["deduped"] == true
     end
 
-    test "producer sequence conflict returns 409 after first seen producer sequence" do
-      id = unique_id("ses")
-      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
-
-      first =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "state",
-          "payload" => %{"state" => "running"},
-          "actor" => "user:user-test",
-          "producer_id" => "writer-1",
-          "producer_seq" => 2
-        })
-
-      assert first.status == 201
-
-      conn =
-        json_conn(:post, "/v1/sessions/#{id}/append", %{
-          "type" => "state",
-          "payload" => %{"state" => "running"},
-          "actor" => "user:user-test",
-          "producer_id" => "writer-1",
-          "producer_seq" => 4
-        })
-
-      assert conn.status == 409
-      body = Jason.decode!(conn.resp_body)
-      assert body["error"] == "producer_seq_conflict"
-      assert is_binary(body["message"])
-    end
-
     test "missing required fields returns 400" do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
@@ -635,6 +525,104 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
+  describe "request telemetry" do
+    test "successful append emits request telemetry with error_reason none" do
+      attach_request_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+
+      assert_receive_requests(:append_event, [
+        {:route, :ok, :none},
+        {:dispatch, :ok, :none},
+        {:ack, :ok, :none},
+        {:total, :ok, :none}
+      ])
+    end
+
+    test "append expected_seq conflict emits request telemetry with conflict reason" do
+      attach_request_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      {:ok, _} =
+        WritePath.append_event(id, %{
+          type: "content",
+          payload: %{text: "one"},
+          actor: "agent:test",
+          producer_id: "writer-1",
+          producer_seq: 1
+        })
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "two"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 2,
+          "expected_seq" => 0
+        })
+
+      assert conn.status == 409
+
+      assert_receive_requests(:append_event, [
+        {:route, :ok, :none},
+        {:dispatch, :error, :expected_seq_conflict},
+        {:ack, :error, :expected_seq_conflict},
+        {:total, :error, :expected_seq_conflict}
+      ])
+    end
+  end
+
+  describe "endpoint telemetry" do
+    test "append emits Phoenix endpoint stop telemetry" do
+      attach_endpoint_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+      assert_receive_endpoint_stop("POST", 201)
+    end
+
+    test "append emits edge-stage telemetry before controller timing starts" do
+      attach_edge_stage_handler()
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn =
+        json_conn(:post, "/v1/sessions/#{id}/append", %{
+          "type" => "content",
+          "payload" => %{"text" => "hello"},
+          "actor" => "user:user-test",
+          "producer_id" => "writer-1",
+          "producer_seq" => 1
+        })
+
+      assert conn.status == 201
+      assert_receive_edge_stage(:controller_entry, "POST")
+    end
+  end
+
   defp token_for(private_key, kid, overrides)
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
     claims =
@@ -672,6 +660,63 @@ defmodule StarciteWeb.SessionControllerTest do
     end)
   end
 
+  defp attach_request_handler do
+    handler_id = "request-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :request],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:request_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_endpoint_handler do
+    handler_id = "endpoint-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:phoenix, :endpoint, :stop],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:endpoint_stop_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
+  defp attach_edge_stage_handler do
+    handler_id = "edge-stage-#{System.unique_integer([:positive, :monotonic])}"
+    test_pid = self()
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :edge, :stage],
+        fn _event, measurements, metadata, pid ->
+          send(pid, {:edge_stage_event, measurements, metadata})
+        end,
+        test_pid
+      )
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+    end)
+  end
+
   defp assert_receive_ingest_edge(operation, outcome, error_reason, tenant_id) do
     deadline = System.monotonic_time(:millisecond) + 1_000
     do_assert_receive_ingest_edge(operation, outcome, error_reason, tenant_id, deadline)
@@ -696,6 +741,94 @@ defmodule StarciteWeb.SessionControllerTest do
       remaining ->
         flunk(
           "timed out waiting for ingest edge telemetry operation=#{inspect(operation)} outcome=#{inspect(outcome)} reason=#{inspect(error_reason)}"
+        )
+    end
+  end
+
+  defp assert_receive_requests(operation, expectations)
+       when operation in [:append_event, :append_events] and is_list(expectations) do
+    expected = MapSet.new(expectations)
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_requests(operation, expected, deadline)
+  end
+
+  defp do_assert_receive_requests(_operation, expected, _deadline)
+       when is_struct(expected, MapSet) and map_size(expected.map) == 0 do
+    :ok
+  end
+
+  defp do_assert_receive_requests(operation, expected, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:request_event, %{count: 1, duration_ms: duration_ms},
+       %{operation: ^operation, phase: phase, outcome: outcome, error_reason: error_reason}} ->
+        assert is_integer(duration_ms)
+        assert duration_ms >= 0
+
+        do_assert_receive_requests(
+          operation,
+          MapSet.delete(expected, {phase, outcome, error_reason}),
+          deadline
+        )
+
+      {:request_event, _measurements, _metadata} ->
+        do_assert_receive_requests(operation, expected, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for request telemetry operation=#{inspect(operation)} expectations=#{inspect(MapSet.to_list(expected))}"
+        )
+    end
+  end
+
+  defp assert_receive_endpoint_stop(method, status)
+       when is_binary(method) and is_integer(status) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_endpoint_stop(method, status, deadline)
+  end
+
+  defp assert_receive_edge_stage(stage, method)
+       when stage in [:controller_entry] and is_binary(method) do
+    deadline = System.monotonic_time(:millisecond) + 1_000
+    do_assert_receive_edge_stage(stage, method, deadline)
+  end
+
+  defp do_assert_receive_edge_stage(stage, method, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:edge_stage_event, %{count: 1, duration_ms: duration_ms},
+       %{stage: ^stage, method: ^method}} ->
+        assert is_integer(duration_ms)
+        assert duration_ms >= 0
+        :ok
+
+      {:edge_stage_event, _measurements, _metadata} ->
+        do_assert_receive_edge_stage(stage, method, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for edge-stage telemetry stage=#{inspect(stage)} method=#{inspect(method)}"
+        )
+    end
+  end
+
+  defp do_assert_receive_endpoint_stop(method, status, deadline) do
+    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {:endpoint_stop_event, %{duration: duration}, %{conn: %{method: ^method, status: ^status}}} ->
+        assert is_integer(duration)
+        assert duration >= 0
+        :ok
+
+      {:endpoint_stop_event, _measurements, _metadata} ->
+        do_assert_receive_endpoint_stop(method, status, deadline)
+    after
+      remaining ->
+        flunk(
+          "timed out waiting for Phoenix endpoint stop telemetry method=#{inspect(method)} status=#{inspect(status)}"
         )
     end
   end

@@ -8,6 +8,12 @@ Starcite exposes `tail` as a WebSocket endpoint.
 ws://HOST/v1/sessions/:id/tail?cursor=41
 ```
 
+Epoch-aware resume:
+
+```
+ws://HOST/v1/sessions/:id/tail?cursor=12:41
+```
+
 Optional query params:
 
 - `batch_size` (`1..1000`, default `1`) controls how many events are included per text frame.
@@ -45,9 +51,9 @@ Auth behavior:
 
 On connect:
 
-1. Replay committed events where `seq > cursor`, in ascending order.
+1. Replay events where cursor ordering is greater than the provided cursor, in ascending order.
 2. Continue streaming newly committed events on the same socket.
-3. On reconnect, use the last processed `seq` as the next `cursor`.
+3. On reconnect, use the last processed cursor.
 
 ## Server frames
 
@@ -55,7 +61,9 @@ When `batch_size=1` (default), Starcite emits one JSON event object per WebSocke
 
 ```json
 {
+  "epoch": 12,
   "seq": 42,
+  "cursor": { "epoch": 12, "seq": 42 },
   "type": "state",
   "payload": { "state": "running" },
   "actor": "agent:researcher",
@@ -74,7 +82,9 @@ When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batc
 ```json
 [
   {
+    "epoch": 12,
     "seq": 42,
+    "cursor": { "epoch": 12, "seq": 42 },
     "type": "state",
     "payload": { "state": "running" },
     "actor": "agent:researcher",
@@ -91,7 +101,28 @@ When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batc
 
 Notes:
 
-- no `gap` event in the primary contract
+- server may emit explicit `gap` frames when resume cursor is unavailable or stale
 - no `tombstone` event in the primary contract
 - no `tail_synced` event
 - tail is server-to-client only; inbound client frames are ignored
+
+## Gap frame
+
+When the requested cursor is outside active replay continuity, server emits:
+
+```json
+{
+  "type": "gap",
+  "reason": "cursor_expired",
+  "from_cursor": { "epoch": 11, "seq": 120 },
+  "next_cursor": { "epoch": 12, "seq": 300 },
+  "committed_cursor": { "epoch": 12, "seq": 298 },
+  "earliest_available_cursor": { "epoch": 12, "seq": 301 }
+}
+```
+
+`reason` values:
+
+- `cursor_expired`
+- `epoch_stale`
+- `rollback`

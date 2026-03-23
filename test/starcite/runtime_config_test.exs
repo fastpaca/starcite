@@ -1,17 +1,19 @@
 defmodule Starcite.RuntimeConfigTest do
   use ExUnit.Case, async: false
 
-  @raft_data_dir_env "STARCITE_RAFT_DATA_DIR"
-  @ra_wal_data_dir_env "STARCITE_RA_WAL_DATA_DIR"
-  @ra_wal_write_strategy_env "STARCITE_RA_WAL_WRITE_STRATEGY"
-  @ra_wal_sync_method_env "STARCITE_RA_WAL_SYNC_METHOD"
+  @routing_store_dir_env "STARCITE_ROUTING_STORE_DIR"
+  @cluster_nodes_env "CLUSTER_NODES"
+  @routing_replication_factor_env "STARCITE_ROUTING_REPLICATION_FACTOR"
   @enable_telemetry_env "STARCITE_ENABLE_TELEMETRY"
+  @shutdown_drain_timeout_env "STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS"
+  @jwks_hard_expiry_env "STARCITE_AUTH_JWKS_HARD_EXPIRY_MS"
   @runtime_envs [
-    @raft_data_dir_env,
-    @ra_wal_data_dir_env,
-    @ra_wal_write_strategy_env,
-    @ra_wal_sync_method_env,
-    @enable_telemetry_env
+    @routing_store_dir_env,
+    @cluster_nodes_env,
+    @routing_replication_factor_env,
+    @enable_telemetry_env,
+    @shutdown_drain_timeout_env,
+    @jwks_hard_expiry_env
   ]
 
   setup do
@@ -26,56 +28,54 @@ defmodule Starcite.RuntimeConfigTest do
     :ok
   end
 
-  test "runtime config pins :ra data and wal dirs to STARCITE_RAFT_DATA_DIR" do
-    raft_data_dir = "tmp/runtime_config_raft"
-    System.put_env(@raft_data_dir_env, raft_data_dir)
+  test "runtime config applies STARCITE_ROUTING_STORE_DIR" do
+    routing_store_dir = "tmp/runtime_config_routing_store"
+    System.put_env(@routing_store_dir_env, routing_store_dir)
 
     config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
     starcite_config = Keyword.fetch!(config, :starcite)
 
-    assert Keyword.fetch!(starcite_config, :raft_data_dir) == raft_data_dir
-
-    ra_config = Keyword.fetch!(config, :ra)
-    expected_ra_system_dir = String.to_charlist(Path.join(raft_data_dir, "ra_system"))
-
-    assert Keyword.fetch!(ra_config, :data_dir) == expected_ra_system_dir
-    assert Keyword.fetch!(ra_config, :wal_data_dir) == expected_ra_system_dir
+    assert Keyword.fetch!(starcite_config, :routing_store_dir) == routing_store_dir
   end
 
-  test "runtime config applies explicit Ra WAL overrides" do
-    raft_data_dir = "tmp/runtime_config_raft"
-    wal_data_dir = "tmp/runtime_config_wal"
-
-    System.put_env(@raft_data_dir_env, raft_data_dir)
-    System.put_env(@ra_wal_data_dir_env, wal_data_dir)
-    System.put_env(@ra_wal_write_strategy_env, "sync_after_notify")
-    System.put_env(@ra_wal_sync_method_env, "none")
+  test "runtime config applies CLUSTER_NODES and replication factor overrides" do
+    System.put_env(@cluster_nodes_env, "node-a@host,node-b@host,node-c@host")
+    System.put_env(@routing_replication_factor_env, "2")
 
     config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    ra_config = Keyword.fetch!(config, :ra)
+    starcite_config = Keyword.fetch!(config, :starcite)
 
-    assert Keyword.fetch!(ra_config, :data_dir) ==
-             String.to_charlist(Path.join(raft_data_dir, "ra_system"))
+    assert Keyword.fetch!(starcite_config, :cluster_node_ids) == [
+             :"node-a@host",
+             :"node-b@host",
+             :"node-c@host"
+           ]
 
-    assert Keyword.fetch!(ra_config, :wal_data_dir) == String.to_charlist(wal_data_dir)
-    assert Keyword.fetch!(ra_config, :wal_write_strategy) == :sync_after_notify
-    assert Keyword.fetch!(ra_config, :wal_sync_method) == :none
+    assert Keyword.fetch!(starcite_config, :routing_replication_factor) == 2
   end
 
-  test "runtime config rejects invalid Ra WAL write strategy" do
-    System.put_env(@ra_wal_write_strategy_env, "bad")
+  test "runtime config ignores blank CLUSTER_NODES" do
+    System.put_env(@cluster_nodes_env, "   ")
+    System.put_env(@routing_replication_factor_env, "3")
 
-    assert_raise ArgumentError, ~r/invalid wal write strategy/, fn ->
-      Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    end
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    refute Keyword.has_key?(starcite_config, :cluster_node_ids)
   end
 
-  test "runtime config rejects invalid Ra WAL sync method" do
-    System.put_env(@ra_wal_sync_method_env, "bad")
+  test "runtime config loads cluster node ids from CLUSTER_NODES" do
+    System.put_env(@cluster_nodes_env, "node-a@host,node-b@host,node-c@host")
+    System.put_env(@routing_replication_factor_env, "3")
 
-    assert_raise ArgumentError, ~r/invalid wal sync method/, fn ->
-      Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
-    end
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    assert Keyword.fetch!(starcite_config, :cluster_node_ids) == [
+             :"node-a@host",
+             :"node-b@host",
+             :"node-c@host"
+           ]
   end
 
   test "telemetry flag enables PromEx and telemetry emission" do
@@ -109,6 +109,25 @@ defmodule Starcite.RuntimeConfigTest do
 
     prom_ex_config = Keyword.fetch!(starcite_config, Starcite.Observability.PromEx)
     assert Keyword.fetch!(prom_ex_config, :enabled) == false
+  end
+
+  test "runtime config applies shutdown drain timeout override" do
+    System.put_env(@shutdown_drain_timeout_env, "45000")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    assert Keyword.fetch!(starcite_config, :shutdown_drain_timeout_ms) == 45_000
+  end
+
+  test "runtime config applies jwks hard expiry override" do
+    System.put_env(@jwks_hard_expiry_env, "15000")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+    auth_config = Keyword.fetch!(starcite_config, StarciteWeb.Auth)
+
+    assert Keyword.fetch!(auth_config, :jwks_hard_expiry_ms) == 15_000
   end
 
   defp restore_env(env_name, nil), do: System.delete_env(env_name)

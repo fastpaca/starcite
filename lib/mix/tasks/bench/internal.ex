@@ -5,7 +5,6 @@ defmodule Mix.Tasks.Bench.Internal do
   alias Starcite.DataPlane.EventStore
   alias Starcite.Session
   alias Starcite.WritePath
-  alias Starcite.DataPlane.RaftFSM
 
   def run do
     ensure_apps_stopped()
@@ -23,7 +22,6 @@ defmodule Mix.Tasks.Bench.Internal do
     archived_cached_events_template = archived_cached_events_template(config.archived_read_window)
 
     runtime_sessions = prepare_runtime_sessions(sessions)
-    fsm_initial_state = build_fsm_state(runtime_sessions)
     archived_session_id = "internal-cache-benchee-#{System.system_time(:millisecond)}"
     :ok = EventStore.cache_archived_events(archived_session_id, archived_cached_events_template)
 
@@ -35,9 +33,6 @@ defmodule Mix.Tasks.Bench.Internal do
 
     runtime_counter = :atomics.new(1, [])
     :atomics.put(runtime_counter, 1, 0)
-
-    fsm_counter = :atomics.new(1, [])
-    :atomics.put(fsm_counter, 1, 0)
 
     session_counter = :atomics.new(1, [])
     :atomics.put(session_counter, 1, 0)
@@ -86,28 +81,6 @@ defmodule Mix.Tasks.Bench.Internal do
       :ok
     end
 
-    fsm_apply_append = fn ->
-      seq = :atomics.add_get(fsm_counter, 1, 1)
-      session_id = elem(runtime_sessions, rem(seq - 1, session_count))
-      producer_id = "bench-fsm-#{session_id}-#{seq}"
-      event_with_producer = with_bench_producer(input_event_template, producer_id, 1)
-      fsm_state = Process.get(:bench_fsm_state) || fsm_initial_state
-      meta = %{index: seq}
-
-      case RaftFSM.apply(meta, {:append_event, session_id, event_with_producer, nil}, fsm_state) do
-        {updated_state, {:reply, {:ok, _reply}}, _effects} ->
-          Process.put(:bench_fsm_state, updated_state)
-          :ok
-
-        {updated_state, {:reply, {:ok, _reply}}} ->
-          Process.put(:bench_fsm_state, updated_state)
-          :ok
-
-        {_updated_state, {:reply, {:error, reason}}} ->
-          raise "raft_fsm.apply append failed: #{inspect(reason)}"
-      end
-    end
-
     runtime_append = fn ->
       seq = :atomics.add_get(runtime_counter, 1, 1)
       session_id = elem(runtime_sessions, rem(seq - 1, session_count))
@@ -152,7 +125,6 @@ defmodule Mix.Tasks.Bench.Internal do
         "event_store.read_archived_events_cached" => cached_archived_read,
         "event_store.cache_archived_events" => cache_promote_archived,
         "event_store.raw_ets_insert" => raw_ets_insert,
-        "raft_fsm.apply_append" => fsm_apply_append,
         "runtime.append_event" => runtime_append
       },
       parallel: config.parallel,
@@ -175,24 +147,20 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp ensure_apps_stopped do
     _ = Application.stop(:starcite)
-    _ = Application.stop(:ra)
+    _ = Application.stop(:khepri)
     :ok
   end
 
   defp configure_runtime(config) do
     Application.put_env(:logger, :level, config.log_level)
     Logger.configure(level: config.log_level)
-    Application.put_env(:starcite, :raft_data_dir, config.raft_data_dir)
+    Application.put_env(:starcite, :routing_store_dir, config.routing_store_dir)
 
-    if config.clean_raft_data_dir do
-      File.rm_rf!(config.raft_data_dir)
+    if config.clean_routing_store_dir do
+      File.rm_rf!(config.routing_store_dir)
     end
 
-    File.mkdir_p!(config.raft_data_dir)
-    ra_system_dir = Path.join(config.raft_data_dir, "ra_system")
-    File.mkdir_p!(ra_system_dir)
-    Application.put_env(:ra, :data_dir, to_charlist(ra_system_dir))
-    Application.delete_env(:ra, :wal_data_dir)
+    File.mkdir_p!(config.routing_store_dir)
 
     archive_flush_interval_ms = env_integer("BENCH_ARCHIVE_FLUSH_INTERVAL_MS", 60_000)
     Application.put_env(:starcite, :archive_flush_interval_ms, archive_flush_interval_ms)
@@ -210,8 +178,8 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp benchmark_config do
     %{
-      raft_data_dir: System.get_env("BENCH_RAFT_DATA_DIR", "tmp/bench_raft_internal"),
-      clean_raft_data_dir: env_boolean("BENCH_CLEAN_RAFT_DATA_DIR", true),
+      routing_store_dir: System.get_env("BENCH_ROUTING_STORE_DIR", "tmp/bench_routing_store"),
+      clean_routing_store_dir: env_boolean("BENCH_CLEAN_ROUTING_STORE_DIR", true),
       log_level: env_log_level("BENCH_LOG_LEVEL", :error),
       session_count: env_integer("BENCH_SESSION_COUNT", 256),
       payload_bytes: env_integer("BENCH_PAYLOAD_BYTES", 256),
@@ -224,8 +192,8 @@ defmodule Mix.Tasks.Bench.Internal do
 
   defp print_config(config) do
     IO.puts("Internal attribution config:")
-    IO.puts("  raft_data_dir: #{config.raft_data_dir}")
-    IO.puts("  clean_raft_data_dir: #{config.clean_raft_data_dir}")
+    IO.puts("  routing_store_dir: #{config.routing_store_dir}")
+    IO.puts("  clean_routing_store_dir: #{config.clean_routing_store_dir}")
     IO.puts("  log_level: #{config.log_level}")
     IO.puts("  sessions: #{config.session_count}")
     IO.puts("  payload_bytes: #{config.payload_bytes}")
@@ -266,21 +234,6 @@ defmodule Mix.Tasks.Bench.Internal do
       end
     end)
     |> List.to_tuple()
-  end
-
-  defp build_fsm_state(session_ids) when is_tuple(session_ids) do
-    sessions =
-      session_ids
-      |> Tuple.to_list()
-      |> Enum.reduce(%{}, fn id, acc ->
-        Map.put(
-          acc,
-          id,
-          Session.new(id, metadata: %{bench: true, scenario: "internal_attribution_fsm"})
-        )
-      end)
-
-    %RaftFSM{group_id: 0, sessions: sessions}
   end
 
   defp input_event_template(payload_bytes) do
