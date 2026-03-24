@@ -1,5 +1,12 @@
 defmodule StarciteWeb.TailStream do
-  @moduledoc false
+  @moduledoc """
+  Shared tail replay and live-delivery state machine.
+
+  This module owns the transport-independent tail flow: subscribe to cursor
+  updates, replay from a resume cursor, buffer live updates while replay drains,
+  emit explicit gaps, and stop delivery when auth expires. The raw WebSocket and
+  Phoenix channel transports adapt its responses into their wire formats.
+  """
 
   alias Phoenix.PubSub
   alias Starcite.Auth.Principal

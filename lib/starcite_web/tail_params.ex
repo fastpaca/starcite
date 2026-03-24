@@ -1,5 +1,11 @@
 defmodule StarciteWeb.TailParams do
-  @moduledoc false
+  @moduledoc """
+  Parses shared tail transport parameters.
+
+  Both the legacy raw tail WebSocket and Phoenix channel transport accept the
+  same resume cursor and replay batch size options. This module keeps that
+  boundary parsing in one place.
+  """
 
   alias Starcite.Cursor
 

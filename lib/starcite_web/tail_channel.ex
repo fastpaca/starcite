@@ -1,4 +1,13 @@
 defmodule StarciteWeb.TailChannel do
+  @moduledoc """
+  Phoenix channel for a single tailed session topic.
+
+  Clients join `tail:<session_id>` with a resume cursor and optional replay
+  batch size. The channel replays committed events after that cursor, streams
+  new commits as `events`, emits `gap` when continuity is unavailable, and
+  terminates with `token_expired` when JWT lifetime is exhausted.
+  """
+
   use StarciteWeb, :channel
 
   alias Starcite.ReadPath
