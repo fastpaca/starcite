@@ -3,12 +3,12 @@ defmodule Starcite.WritePath do
   Write path for session creation and append/ack operations.
   """
 
+  alias Phoenix.PubSub
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{SessionQuorum, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
-  alias Starcite.SessionLifecycle
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -121,7 +121,22 @@ defmodule Starcite.WritePath do
             :ok ->
               :ok = SessionStore.put_session(session)
               session_map = Session.to_map(session)
-              :ok = SessionLifecycle.broadcast_created(session)
+
+              :ok =
+                PubSub.broadcast(
+                  Starcite.PubSub,
+                  "lifecycle:" <> session.tenant_id,
+                  {:session_lifecycle,
+                   %{
+                     kind: "session.created",
+                     session_id: session.id,
+                     tenant_id: session.tenant_id,
+                     title: session_map.title,
+                     metadata: session_map.metadata,
+                     created_at: session_map.created_at
+                   }}
+                )
+
               _ = maybe_index_session(session_map, creator_principal, tenant_id)
               {:ok, session_map}
 

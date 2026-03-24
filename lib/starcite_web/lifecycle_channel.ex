@@ -10,7 +10,6 @@ defmodule StarciteWeb.LifecycleChannel do
   use StarciteWeb, :channel
 
   alias Phoenix.PubSub
-  alias Starcite.SessionLifecycle
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
@@ -18,8 +17,7 @@ defmodule StarciteWeb.LifecycleChannel do
   def join("lifecycle", _params, %{assigns: %{auth: %Context{} = auth}} = socket) do
     with :ok <- ensure_auth_current(auth),
          :ok <- Policy.can_subscribe_lifecycle(auth),
-         :ok <-
-           PubSub.subscribe(Starcite.PubSub, SessionLifecycle.topic(auth.principal.tenant_id)) do
+         :ok <- PubSub.subscribe(Starcite.PubSub, topic(auth.principal.tenant_id)) do
       {:ok, schedule_auth_expiry(socket, auth)}
     else
       {:error, reason} -> {:error, %{reason: to_string(reason)}}
@@ -59,4 +57,8 @@ defmodule StarciteWeb.LifecycleChannel do
   end
 
   defp schedule_auth_expiry(socket, %Context{}), do: socket
+
+  defp topic(tenant_id) when is_binary(tenant_id) and tenant_id != "" do
+    "lifecycle:" <> tenant_id
+  end
 end
