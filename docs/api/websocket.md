@@ -56,7 +56,8 @@ pass tenant identifiers in the topic or payload.
 
 Lifecycle join behavior:
 
-- requires `session:read`
+- requires a backend/service JWT with `session:read`
+- rejects non-service JWT principals
 - rejects JWTs locked to one `session_id`
 - emits live-only notifications; there is no replay cursor
 

@@ -59,6 +59,41 @@ defmodule StarciteWeb.Auth.PolicyTest do
              Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:append"]}))
   end
 
+  test "can_subscribe_lifecycle requires a service principal with read scope" do
+    assert :ok =
+             Policy.can_subscribe_lifecycle(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
+                 scopes: ["session:read"]
+               })
+             )
+
+    assert {:error, :forbidden} =
+             Policy.can_subscribe_lifecycle(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "acme", id: "user-1", type: :user},
+                 scopes: ["session:read"]
+               })
+             )
+
+    assert {:error, :forbidden_scope} =
+             Policy.can_subscribe_lifecycle(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
+                 scopes: ["session:append"]
+               })
+             )
+
+    assert {:error, :forbidden_session} =
+             Policy.can_subscribe_lifecycle(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
+                 scopes: ["session:read"],
+                 session_id: "ses-42"
+               })
+             )
+  end
+
   test "allowed_to_access_session enforces session_id claim lock" do
     assert :ok = Policy.allowed_to_access_session(jwt_ctx(%{session_id: nil}), "ses-1")
     assert :ok = Policy.allowed_to_access_session(jwt_ctx(%{session_id: "ses-1"}), "ses-1")

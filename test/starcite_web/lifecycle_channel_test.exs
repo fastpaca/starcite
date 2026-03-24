@@ -17,7 +17,7 @@ defmodule StarciteWeb.LifecycleChannelTest do
 
   test "pushes created sessions for the authenticated tenant" do
     {:ok, _, _socket} =
-      socket(StarciteWeb.UserSocket, "client-1", %{auth: auth_context()})
+      socket(StarciteWeb.UserSocket, "client-1", %{auth: service_auth_context()})
       |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
 
     session_id = unique_id("ses")
@@ -54,10 +54,18 @@ defmodule StarciteWeb.LifecycleChannelTest do
     refute_received %Phoenix.Socket.Message{event: "lifecycle"}
   end
 
+  test "rejects lifecycle joins for non-service jwt principals" do
+    assert {:error, %{reason: "forbidden"}} =
+             socket(StarciteWeb.UserSocket, "client-user", %{
+               auth: user_auth_context()
+             })
+             |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
+  end
+
   test "rejects lifecycle joins for session-scoped tokens" do
     assert {:error, %{reason: "forbidden_session"}} =
              socket(StarciteWeb.UserSocket, "client-2", %{
-               auth: auth_context(session_id: "ses-locked")
+               auth: service_auth_context(session_id: "ses-locked")
              })
              |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
   end
@@ -67,7 +75,7 @@ defmodule StarciteWeb.LifecycleChannelTest do
 
     {:ok, _, _socket} =
       socket(StarciteWeb.UserSocket, "client-3", %{
-        auth: auth_context(expires_at: System.system_time(:second) + 1)
+        auth: service_auth_context(expires_at: System.system_time(:second) + 1)
       })
       |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
 
@@ -81,7 +89,19 @@ defmodule StarciteWeb.LifecycleChannelTest do
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
   end
 
-  defp auth_context(overrides \\ []) do
+  defp service_auth_context(overrides \\ []) do
+    base = %Context{
+      kind: :jwt,
+      principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
+      scopes: ["session:read"],
+      session_id: nil,
+      expires_at: nil
+    }
+
+    struct!(base, overrides)
+  end
+
+  defp user_auth_context(overrides \\ []) do
     base = %Context{
       kind: :jwt,
       principal: %Principal{tenant_id: "acme", id: "user-1", type: :user},

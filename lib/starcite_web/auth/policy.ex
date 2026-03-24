@@ -55,7 +55,13 @@ defmodule StarciteWeb.Auth.Policy do
   @spec can_subscribe_lifecycle(auth()) :: :ok | {:error, atom()}
   def can_subscribe_lifecycle(%Context{kind: :none}), do: :ok
 
-  def can_subscribe_lifecycle(%Context{kind: :jwt, session_id: nil} = auth) do
+  def can_subscribe_lifecycle(
+        %Context{
+          kind: :jwt,
+          session_id: nil,
+          principal: %Principal{type: :service}
+        } = auth
+      ) do
     has_scope(auth, "session:read")
   end
 
@@ -63,6 +69,9 @@ defmodule StarciteWeb.Auth.Policy do
       when is_binary(session_id) and session_id != "" do
     {:error, :forbidden_session}
   end
+
+  def can_subscribe_lifecycle(%Context{kind: :jwt, principal: %Principal{}}),
+    do: {:error, :forbidden}
 
   def can_subscribe_lifecycle(_auth), do: {:error, :forbidden}
 
