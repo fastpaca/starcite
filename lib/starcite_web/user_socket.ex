@@ -1,9 +1,10 @@
 defmodule StarciteWeb.UserSocket do
   @moduledoc """
-  Phoenix socket for multiplexed session tail subscriptions.
+  Phoenix socket for multiplexed session event subscriptions.
 
   The socket authenticates once per physical WebSocket connection, then lets
-  clients join one `tail:<session_id>` channel per subscribed session.
+  clients join one `tail:<session_id>` channel per subscribed session and a
+  tenant-scoped `lifecycle` channel for live session lifecycle notifications.
   """
 
   use Phoenix.Socket
@@ -11,6 +12,7 @@ defmodule StarciteWeb.UserSocket do
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Plugs.ServiceAuth
 
+  channel "lifecycle", StarciteWeb.LifecycleChannel
   channel "tail:*", StarciteWeb.TailChannel
 
   @impl true
