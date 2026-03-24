@@ -36,7 +36,7 @@ Optional JWT claim:
 Scopes:
 
 - `session:create` for `POST /v1/sessions`
-- `session:read` for `GET /v1/sessions` and `GET /v1/sessions/:id/tail`
+- `session:read` for `GET /v1/sessions` and tail subscriptions over `/v1/socket`
 - `session:append` for `POST /v1/sessions/:id/append`
 
 Unauthorized requests fail with `401`.
@@ -78,8 +78,9 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
 
 ### `GET /v1/sessions/:id/tail?cursor=C[&batch_size=M]`
 
-WebSocket upgrade for replay + live stream. See the
-[WebSocket API](websocket.md) for frame format and reconnection semantics.
+Legacy raw WebSocket upgrade for replay + live stream. New clients should
+prefer the Phoenix channel transport documented in the
+[WebSocket API](websocket.md).
 
 - Optional `cursor` values:
   - `N` (legacy sequence-only cursor)

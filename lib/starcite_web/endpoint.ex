@@ -1,6 +1,10 @@
 defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
+  socket "/v1/socket", StarciteWeb.UserSocket,
+    websocket: true,
+    longpoll: false
+
   plug StarciteWeb.Plugs.EdgeStage, :start
   plug Plug.Telemetry, event_prefix: [:phoenix, :endpoint], log: false
 
