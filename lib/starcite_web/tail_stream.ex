@@ -14,6 +14,7 @@ defmodule StarciteWeb.TailStream do
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.ReadPath
+  alias Starcite.Time
   alias StarciteWeb.Auth.Context
 
   @replay_batch_size 1_000
@@ -418,17 +419,8 @@ defmodule StarciteWeb.TailStream do
     event
     |> Map.put_new(:epoch, epoch)
     |> Map.put_new(:cursor, Cursor.new(epoch, seq))
-    |> Map.update(:inserted_at, nil, &iso8601_utc/1)
+    |> Map.update(:inserted_at, nil, &Time.iso8601_utc/1)
   end
-
-  defp iso8601_utc(%NaiveDateTime{} = datetime) do
-    datetime
-    |> DateTime.from_naive!("Etc/UTC")
-    |> DateTime.to_iso8601()
-  end
-
-  defp iso8601_utc(%DateTime{} = datetime), do: DateTime.to_iso8601(datetime)
-  defp iso8601_utc(other), do: other
 
   defp measure_read(operation, fun)
        when operation in [:tail_catchup, :tail_live] and is_function(fun, 0) do

@@ -10,6 +10,7 @@ defmodule Starcite.Session do
   alias __MODULE__, as: Session
   alias Starcite.Auth.Principal
   alias Starcite.Session.{Event, ProducerIndex}
+  alias Starcite.Time
 
   @type event_input :: Event.input()
   @type event :: Event.t()
@@ -268,7 +269,7 @@ defmodule Starcite.Session do
 
   @spec to_map(t()) :: map()
   def to_map(%Session{} = session) do
-    created_at = iso8601_utc(session.inserted_at)
+    created_at = Time.iso8601_utc!(session.inserted_at)
 
     %{
       id: session.id,
@@ -330,12 +331,6 @@ defmodule Starcite.Session do
     }
 
     <<:erlang.phash2(fingerprint_term)::32, :erlang.phash2({:v2, fingerprint_term})::32>>
-  end
-
-  defp iso8601_utc(%NaiveDateTime{} = datetime) do
-    datetime
-    |> DateTime.from_naive!("Etc/UTC")
-    |> DateTime.to_iso8601()
   end
 
   defp optional_principal!(nil, _field), do: nil

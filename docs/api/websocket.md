@@ -43,6 +43,54 @@ Socket auth behavior:
 
 ## Channel Topics
 
+### `lifecycle`
+
+Join the tenant-scoped lifecycle topic:
+
+```
+lifecycle
+```
+
+The server derives tenant scope from the authenticated socket. Clients do not
+pass tenant identifiers in the topic or payload.
+
+Lifecycle join behavior:
+
+- requires `session:read`
+- rejects JWTs locked to one `session_id`
+- emits live-only notifications; there is no replay cursor
+
+Example:
+
+```js
+const lifecycle = socket.channel("lifecycle", {})
+
+lifecycle.join()
+  .receive("ok", () => console.log("joined lifecycle"))
+  .receive("error", (resp) => console.log("join failed", resp))
+```
+
+The channel emits `lifecycle` payloads:
+
+```json
+{
+  "event": {
+    "kind": "session.created",
+    "session_id": "ses_123",
+    "tenant_id": "acme",
+    "title": "Draft",
+    "metadata": { "workflow": "contract" },
+    "created_at": "2026-03-24T10:00:00Z"
+  }
+}
+```
+
+Today, Starcite emits only lifecycle events it owns directly. Appended session
+events are available on `tail:<session_id>` and are not reinterpreted as
+lifecycle notifications.
+
+### `tail:<session_id>`
+
 Join one topic per tailed session:
 
 ```
@@ -70,8 +118,8 @@ channel.join()
   .receive("error", (resp) => console.log("join failed", resp))
 ```
 
-One socket can join many `tail:*` topics without opening more WebSocket
-connections.
+One socket can join the shared `lifecycle` topic and many `tail:*` topics
+without opening more WebSocket connections.
 
 ## Semantics
 

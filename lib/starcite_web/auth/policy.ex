@@ -52,6 +52,20 @@ defmodule StarciteWeb.Auth.Policy do
 
   def can_list_sessions(_auth), do: {:error, :forbidden}
 
+  @spec can_subscribe_lifecycle(auth()) :: :ok | {:error, atom()}
+  def can_subscribe_lifecycle(%Context{kind: :none}), do: :ok
+
+  def can_subscribe_lifecycle(%Context{kind: :jwt, session_id: nil} = auth) do
+    has_scope(auth, "session:read")
+  end
+
+  def can_subscribe_lifecycle(%Context{kind: :jwt, session_id: session_id})
+      when is_binary(session_id) and session_id != "" do
+    {:error, :forbidden_session}
+  end
+
+  def can_subscribe_lifecycle(_auth), do: {:error, :forbidden}
+
   @spec allowed_to_append_session(auth(), Session.t()) :: :ok | {:error, atom()}
   def allowed_to_append_session(%Context{} = auth, %Session{} = session) do
     session_permission(auth, session, "session:append")

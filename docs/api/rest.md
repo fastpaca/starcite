@@ -36,7 +36,7 @@ Optional JWT claim:
 Scopes:
 
 - `session:create` for `POST /v1/sessions`
-- `session:read` for `GET /v1/sessions` and tail subscriptions over `/v1/socket`
+- `session:read` for `GET /v1/sessions` and socket subscriptions over `/v1/socket`
 - `session:append` for `POST /v1/sessions/:id/append`
 
 Unauthorized requests fail with `401`.
