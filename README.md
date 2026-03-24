@@ -111,8 +111,9 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
 
 # Response: {"seq":1,"last_seq":1,"deduped":false}
 
-# 3) Tail from a cursor (WebSocket)
-ws://localhost:4000/v1/sessions/ses_demo/tail?cursor=0
+# 3) Tail from a cursor (Phoenix Channel over one shared WebSocket)
+# connect to ws://localhost:4000/v1/socket with your JWT in params
+# then join topic "tail:ses_demo" with payload {"cursor": 0}
 ```
 
 </details>

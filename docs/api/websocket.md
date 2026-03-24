@@ -1,114 +1,122 @@
 # WebSocket API
 
-Starcite exposes `tail` as a WebSocket endpoint.
+Starcite exposes session tails over Phoenix Channels so one client WebSocket can
+join many session streams at once.
 
-## Endpoint
+## Socket
 
-```
-ws://HOST/v1/sessions/:id/tail?cursor=41
-```
-
-Epoch-aware resume:
+Connect a Phoenix client socket to:
 
 ```
-ws://HOST/v1/sessions/:id/tail?cursor=12:41
+ws://HOST/v1/socket
 ```
 
-Optional query params:
+Pass the JWT as a socket param:
 
-- `batch_size` (`1..1000`, default `1`) controls how many events are included per text frame.
+- preferred: `token`
+- accepted for compatibility: `access_token`
 
-Token transport during WebSocket upgrade:
-
-- non-browser clients: `Authorization: Bearer <jwt>` header
-- browser clients: include `access_token=<jwt>` query param
-
-Example (browser):
+Example:
 
 ```js
-const ws = new WebSocket(
-  `wss://HOST/v1/sessions/${sessionId}/tail?cursor=0&access_token=${encodeURIComponent(token)}`
-)
+import { Socket } from "phoenix"
+
+const socket = new Socket("wss://HOST/v1/socket", {
+  params: { token }
+})
+
+socket.connect()
 ```
 
-Starcite redacts `access_token` from application-level logs/telemetry metadata. If you run a reverse proxy or load balancer, redact query strings there too.
-
-JWT requirements for tail:
+JWT requirements for tail subscriptions:
 
 - valid JWT signature via JWKS
 - `session:read` scope
-- JWT `tenant_id` must match session tenant
-- if JWT has `session_id`, it must match `:id`
+- JWT `tenant_id` must match the session tenant
+- if JWT has `session_id`, it must match the subscribed session
 
-Auth behavior:
+Socket auth behavior:
 
-- missing/invalid/expired token: HTTP `401` during upgrade
-- valid token but forbidden by scope/session/tenant policy: HTTP `403` during upgrade
-- after successful upgrade, socket lifetime is bounded by token `exp`
-- on expiry, server closes with code `4001` and reason `token_expired`
+- missing/invalid/expired token: socket connect is rejected
+- after a successful connect, joined channels are bounded by token `exp`
+- on expiry, a joined channel pushes `token_expired` and terminates
+
+## Channel Topics
+
+Join one topic per tailed session:
+
+```
+tail:<session_id>
+```
+
+Join payload:
+
+- `cursor`
+  - `N` for sequence-only resume
+  - `E:N` for epoch-aware resume
+  - omitted or `null` to start from zero
+- `batch_size` (`1..1000`, default `1`) controls how many replay events are delivered per push
+
+Example:
+
+```js
+const channel = socket.channel(`tail:${sessionId}`, {
+  cursor: "12:41",
+  batch_size: 128
+})
+
+channel.join()
+  .receive("ok", () => console.log("joined"))
+  .receive("error", (resp) => console.log("join failed", resp))
+```
+
+One socket can join many `tail:*` topics without opening more WebSocket
+connections.
 
 ## Semantics
 
-On connect:
+On join:
 
 1. Replay events where cursor ordering is greater than the provided cursor, in ascending order.
-2. Continue streaming newly committed events on the same socket.
-3. On reconnect, use the last processed cursor.
+2. Continue streaming newly committed events on the same channel.
+3. On reconnect, reuse the last processed cursor per session topic.
 
-## Server frames
+## Server Events
 
-When `batch_size=1` (default), Starcite emits one JSON event object per WebSocket text frame:
+The channel emits `events` payloads:
 
 ```json
 {
-  "epoch": 12,
-  "seq": 42,
-  "cursor": { "epoch": 12, "seq": 42 },
-  "type": "state",
-  "payload": { "state": "running" },
-  "actor": "agent:researcher",
-  "producer_id": "writer_123",
-  "producer_seq": 8,
-  "source": "agent",
-  "metadata": { "role": "worker", "identity": { "provider": "codex" } },
-  "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
-  "idempotency_key": "run_123-step_8",
-  "inserted_at": "2026-02-08T15:00:01Z"
+  "events": [
+    {
+      "epoch": 12,
+      "seq": 42,
+      "cursor": { "epoch": 12, "seq": 42 },
+      "type": "state",
+      "payload": { "state": "running" },
+      "actor": "agent:researcher",
+      "producer_id": "writer_123",
+      "producer_seq": 8,
+      "source": "agent",
+      "metadata": { "role": "worker", "identity": { "provider": "codex" } },
+      "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
+      "idempotency_key": "run_123-step_8",
+      "inserted_at": "2026-02-08T15:00:01Z"
+    }
+  ]
 }
-```
-
-When `batch_size>1`, Starcite emits a JSON array per text frame with up to `batch_size` event objects:
-
-```json
-[
-  {
-    "epoch": 12,
-    "seq": 42,
-    "cursor": { "epoch": 12, "seq": 42 },
-    "type": "state",
-    "payload": { "state": "running" },
-    "actor": "agent:researcher",
-    "producer_id": "writer_123",
-    "producer_seq": 8,
-    "source": "agent",
-    "metadata": { "role": "worker", "identity": { "provider": "codex" } },
-    "refs": { "to_seq": 41, "request_id": "req_123", "sequence_id": "seq_alpha", "step": 1 },
-    "idempotency_key": "run_123-step_8",
-    "inserted_at": "2026-02-08T15:00:01Z"
-  }
-]
 ```
 
 Notes:
 
-- server may emit explicit `gap` frames when resume cursor is unavailable or stale
+- `events` always contains a list, including live single-event pushes
+- replay is chunked according to `batch_size`
 - no `tombstone` event in the primary contract
 - no `tail_synced` event
-- tail is server-to-client only; inbound client frames are ignored
 
-## Gap frame
+## Gap Event
 
-When the requested cursor is outside active replay continuity, server emits:
+When the requested cursor is outside active replay continuity, the channel emits `gap`:
 
 ```json
 {
@@ -126,3 +134,14 @@ When the requested cursor is outside active replay continuity, server emits:
 - `cursor_expired`
 - `epoch_stale`
 - `rollback`
+
+## Legacy Raw WebSocket
+
+The legacy raw WebSocket endpoint remains available for compatibility:
+
+```
+ws://HOST/v1/sessions/:id/tail?cursor=41
+```
+
+That endpoint uses one WebSocket per tailed session. New clients should prefer
+the Phoenix socket/channel transport above.
