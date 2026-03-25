@@ -129,8 +129,12 @@ defmodule StarciteWeb.TailChannelTest do
              socket(StarciteWeb.UserSocket, "client-6", %{auth: auth_context()})
              |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"cursor" => 0})
 
-    assert {:error, %{reason: "invalid_tail_batch_size"}} =
+    assert {:error, %{reason: "invalid_cursor"}} =
              socket(StarciteWeb.UserSocket, "client-7", %{auth: auth_context()})
+             |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"cursor" => nil})
+
+    assert {:error, %{reason: "invalid_tail_batch_size"}} =
+             socket(StarciteWeb.UserSocket, "client-8", %{auth: auth_context()})
              |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"batch_size" => "2"})
   end
 
