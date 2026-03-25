@@ -32,6 +32,8 @@ defmodule Starcite.Routing.Store do
 
   @join_timeout_ms 15_000
   @cas_retry_limit 8
+  @claim_retry_limit 3
+  @claim_retry_backoff_ms 10
   @store_reset_retry_limit 1
   @default_store_id :starcite_routing
   @default_store_dir "priv/khepri"
@@ -562,9 +564,9 @@ defmodule Starcite.Routing.Store do
 
   defp assignments_from_khepri(other), do: {:error, {:invalid_assignments, other}}
 
-  defp claim_new_assignment(session_id, claimed_at_ms)
+  defp claim_new_assignment(session_id, claimed_at_ms, attempt \\ 0)
        when is_binary(session_id) and session_id != "" and is_integer(claimed_at_ms) and
-              claimed_at_ms >= 0 do
+              claimed_at_ms >= 0 and is_integer(attempt) and attempt >= 0 do
     with {:ok, assignments} <- assignments_from_khepri(do_all_assignments_local(:consistency)),
          {:ok, node_records} <- node_records_from_khepri(do_all_node_records_local(:consistency)),
          {:ok, [owner | _rest] = replicas} <-
@@ -583,6 +585,13 @@ defmodule Starcite.Routing.Store do
           updated_at_ms: claimed_at_ms
         }
       )
+    else
+      {:error, :no_ready_cluster_nodes} when attempt < @claim_retry_limit ->
+        Process.sleep(@claim_retry_backoff_ms)
+        claim_new_assignment(session_id, now_ms(), attempt + 1)
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

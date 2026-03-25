@@ -2,7 +2,6 @@ defmodule Starcite.Archive.Adapter.S3Test do
   use ExUnit.Case, async: false
 
   alias Starcite.Archive.Adapter.S3
-  alias Starcite.Archive.Adapter.S3.Config
   alias Starcite.Archive.Adapter.S3.Schema
   alias Starcite.Auth.Principal
 
@@ -109,9 +108,8 @@ defmodule Starcite.Archive.Adapter.S3Test do
     config_key = {S3, :config}
     previous_config = :persistent_term.get(config_key, :undefined)
 
-    :persistent_term.put(
-      config_key,
-      Config.build!([], bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient)
+    start_supervised!(
+      {S3, bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient}
     )
 
     on_exit(fn ->
@@ -186,6 +184,33 @@ defmodule Starcite.Archive.Adapter.S3Test do
 
     assert {:ok, keys} = FakeClient.list_keys(%{bucket: bucket}, "#{prefix}/session-tenants/")
     assert tenant_index_key in keys
+  end
+
+  test "keeps the session tenant cache available across concurrent upserts" do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
+
+    results =
+      1..50
+      |> Task.async_stream(
+        fn n ->
+          session_id = "ses-s3-concurrent-#{System.unique_integer([:positive, :monotonic])}-#{n}"
+
+          S3.upsert_session(%{
+            id: session_id,
+            title: "Concurrent",
+            tenant_id: "acme",
+            creator_principal: principal_for_tenant("acme"),
+            metadata: %{},
+            archived_seq: 0,
+            created_at: created_at
+          })
+        end,
+        ordered: false,
+        timeout: 5_000
+      )
+      |> Enum.to_list()
+
+    assert Enum.all?(results, &match?({:ok, :ok}, &1))
   end
 
   test "fails loudly on cached tenant mismatch", %{prefix: prefix} do
