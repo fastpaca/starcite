@@ -38,7 +38,8 @@ defmodule Starcite.Archive.SessionCatalog do
     with {:ok, %{sessions: sessions}} when is_list(sessions) <-
            Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
          {:ok, row} <- select_row(session_id, sessions),
-         {:ok, session} <- row_to_session(session_id, row) do
+         {:ok, archived_seq} <- archived_seq_for_row(session_id, row),
+         {:ok, session} <- row_to_session(session_id, row, archived_seq) do
       {:ok, session}
     end
   end
@@ -62,9 +63,9 @@ defmodule Starcite.Archive.SessionCatalog do
            tenant_id: tenant_id,
            creator_principal: creator_principal,
            metadata: metadata,
-           archived_seq: archived_seq,
            created_at: created_at
-         }
+         },
+         archived_seq
        )
        when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
               is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 do
@@ -86,7 +87,26 @@ defmodule Starcite.Archive.SessionCatalog do
     end
   end
 
-  defp row_to_session(_session_id, _row), do: {:error, :archive_read_unavailable}
+  defp row_to_session(_session_id, _row, _archived_seq), do: {:error, :archive_read_unavailable}
+
+  defp archived_seq_for_row(
+         session_id,
+         %{tenant_id: tenant_id} = row
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    with {:ok, derived_archived_seq} <- Store.archived_seq(session_id, tenant_id) do
+      row_archived_seq =
+        case Map.get(row, :archived_seq) do
+          value when is_integer(value) and value >= 0 -> value
+          _other -> 0
+        end
+
+      {:ok, max(derived_archived_seq, row_archived_seq)}
+    end
+  end
+
+  defp archived_seq_for_row(_session_id, _row), do: {:error, :archive_read_unavailable}
 
   defp session_created_at(%DateTime{} = created_at), do: {:ok, DateTime.to_naive(created_at)}
   defp session_created_at(%NaiveDateTime{} = created_at), do: {:ok, created_at}

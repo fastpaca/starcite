@@ -93,28 +93,15 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   @impl true
-  def update_session_archived_seq(session_id, tenant_id, archived_seq)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+  def archived_seq(session_id, tenant_id)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
     config = config!()
 
-    with {:ok, key, session} <- load_session_for_update(config, session_id, tenant_id),
-         updated_session <-
-           session
-           |> Map.put(:tenant_id, tenant_id)
-           |> Map.put(:archived_seq, archived_seq),
-         result <- put_session_by_key(config, key, updated_session) do
-      case result do
-        :ok -> :ok
-        {:error, :unavailable} -> {:error, :archive_write_unavailable}
-        {:error, _reason} -> {:error, :archive_write_unavailable}
-      end
+    with {:ok, chunk_starts} <- list_session_chunk_starts(config, session_id, tenant_id) do
+      archived_seq_for_chunk_starts(chunk_starts, session_id, tenant_id, config)
     else
-      {:error, :unavailable} ->
-        {:error, :archive_write_unavailable}
-
       {:error, _reason} ->
-        {:error, :archive_write_unavailable}
+        {:error, :archive_read_unavailable}
     end
   end
 
@@ -295,6 +282,70 @@ defmodule Starcite.Archive.Adapter.S3 do
     end
   end
 
+  defp list_session_chunk_starts(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    with {:ok, tenant_keys} <-
+           client(config).list_keys(
+             config,
+             Layout.event_session_prefix(config, tenant_id, session_id)
+           ),
+         {:ok, legacy_keys} <-
+           client(config).list_keys(
+             config,
+             Layout.legacy_event_session_prefix(config, session_id)
+           ) do
+      chunk_starts =
+        (tenant_keys ++ legacy_keys)
+        |> Enum.map(&chunk_start_from_key/1)
+        |> Enum.reject(&is_nil/1)
+        |> Enum.uniq()
+
+      {:ok, chunk_starts}
+    else
+      {:error, :unavailable} ->
+        {:error, :archive_read_unavailable}
+
+      {:error, _reason} ->
+        {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp archived_seq_for_chunk_starts([], _session_id, _tenant_id, _config), do: {:ok, 0}
+
+  defp archived_seq_for_chunk_starts(chunk_starts, session_id, tenant_id, config)
+       when is_list(chunk_starts) and is_binary(session_id) and session_id != "" and
+              is_binary(tenant_id) and tenant_id != "" do
+    highest_chunk_start = Enum.max(chunk_starts)
+
+    case fetch_chunk(session_id, tenant_id, highest_chunk_start, config) do
+      {:ok, events, _etag} ->
+        {:ok, highest_archived_seq(events)}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp highest_archived_seq([]), do: 0
+
+  defp highest_archived_seq(events) when is_list(events) do
+    Enum.reduce(events, 0, fn
+      %{seq: seq}, max_seq when is_integer(seq) and seq > max_seq -> seq
+      _event, max_seq -> max_seq
+    end)
+  end
+
+  defp chunk_start_from_key(key) when is_binary(key) and key != "" do
+    key
+    |> Path.basename(".ndjson")
+    |> Integer.parse()
+    |> case do
+      {chunk_start, ""} when chunk_start > 0 -> chunk_start
+      _ -> nil
+    end
+  end
+
   defp put_session(config, tenant_id, session_id, session) do
     key = Layout.session_key(config, tenant_id, session_id)
     body = Schema.encode_session(session)
@@ -303,42 +354,6 @@ defmodule Starcite.Archive.Adapter.S3 do
       content_type: "application/json",
       if_none_match: "*"
     )
-  end
-
-  defp put_session_by_key(config, key, session)
-       when is_binary(key) and key != "" and is_map(session) do
-    body = Schema.encode_session(session)
-
-    client(config).put_object(config, key, body, content_type: "application/json")
-  end
-
-  defp load_session_for_update(config, session_id, tenant_id)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" do
-    config
-    |> session_keys_for_id(tenant_id, session_id)
-    |> Enum.reduce_while({:ok, nil, nil}, fn key, _acc ->
-      case load_session(key, config) do
-        {:ok, nil} ->
-          {:cont, {:ok, nil, nil}}
-
-        {:ok, session} ->
-          {:halt, {:ok, key, session}}
-
-        {:error, _reason} = error ->
-          {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, key, session} when is_binary(key) and is_map(session) ->
-        {:ok, key, session}
-
-      {:error, _reason} = error ->
-        error
-
-      _ ->
-        {:error, :session_not_found}
-    end
   end
 
   defp put_session_tenant_index(config, session_id, tenant_id)
