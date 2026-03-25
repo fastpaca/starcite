@@ -110,24 +110,18 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def archived_seq(session_id, tenant_id)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
-    sql =
-      "SELECT COALESCE(MAX(seq), 0) AS archived_seq FROM events WHERE session_id = $1 AND tenant_id = $2"
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    sql = "UPDATE sessions SET archived_seq = $3 WHERE id = $1 AND tenant_id = $2"
 
-    case Repo.query(sql, [session_id, tenant_id]) do
-      {:ok, %{rows: [[archived_seq]]}}
-      when is_integer(archived_seq) and archived_seq >= 0 ->
-        {:ok, archived_seq}
-
-      {:error, _reason} ->
-        {:error, :archive_read_unavailable}
-
-      _other ->
-        {:error, :archive_read_unavailable}
+    case Repo.query(sql, [session_id, tenant_id, archived_seq]) do
+      {:ok, %{num_rows: 1}} -> :ok
+      {:ok, %{num_rows: 0}} -> {:error, :session_not_found}
+      {:error, _reason} -> {:error, :archive_write_unavailable}
     end
   rescue
-    _ -> {:error, :archive_read_unavailable}
+    _ -> {:error, :archive_write_unavailable}
   end
 
   @impl true
