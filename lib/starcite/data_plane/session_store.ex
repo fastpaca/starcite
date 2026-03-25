@@ -10,7 +10,7 @@ defmodule Starcite.DataPlane.SessionStore do
   Cache misses hydrate from archive and populate cache for follow-up reads.
   """
 
-  alias Starcite.Archive.Store
+  alias Starcite.Archive.SessionCatalog
   alias Starcite.Session
   import Cachex.Spec, only: [expiration: 1]
 
@@ -234,44 +234,13 @@ defmodule Starcite.DataPlane.SessionStore do
 
   defp load_session_from_archive(session_id)
        when is_binary(session_id) and session_id != "" do
-    with {:ok, %{sessions: sessions}} when is_list(sessions) <-
-           Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
-         {:ok, %Session{} = session} <- session_from_archive_rows(session_id, sessions) do
+    with {:ok, %Session{} = session} <- SessionCatalog.get_session(session_id) do
       :ok = cache_put(session_id, session)
       {:ok, session}
     else
       {:error, reason} -> {:error, reason}
     end
   end
-
-  defp session_from_archive_rows(_session_id, []), do: {:error, :session_not_found}
-
-  defp session_from_archive_rows(session_id, [row | _rest]),
-    do: session_from_archive_row(session_id, row)
-
-  defp session_from_archive_row(
-         session_id,
-         %{
-           id: session_id,
-           title: title,
-           tenant_id: tenant_id,
-           creator_principal: creator_principal,
-           metadata: metadata
-         }
-       )
-       when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
-              is_map(metadata) and
-              (is_map(creator_principal) or is_nil(creator_principal)) do
-    {:ok,
-     Session.new(session_id,
-       title: title,
-       tenant_id: tenant_id,
-       creator_principal: creator_principal,
-       metadata: metadata
-     )}
-  end
-
-  defp session_from_archive_row(_session_id, _row), do: {:error, :archive_read_unavailable}
 
   defp session_entries do
     case Cachex.keys(@cache) do

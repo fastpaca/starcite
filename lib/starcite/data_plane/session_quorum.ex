@@ -61,7 +61,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
         {:error, :session_exists}
 
       :error ->
-        case start_log(session) do
+        case start_log(session, :created) do
           {:ok, _pid} -> :ok
           {:error, :session_exists} -> {:error, :session_exists}
           {:error, reason} -> {:error, reason}
@@ -360,6 +360,10 @@ defmodule Starcite.DataPlane.SessionQuorum do
       {:ok, {:local, %Session{} = session}} ->
         start_log_from_bootstrap(session_id, session)
 
+      {:ok, {:archive, %Session{} = session}} ->
+        :ok = SessionStore.put_session(session)
+        start_log_from_bootstrap(session_id, session)
+
       {:ok, {:peer, %Session{} = session, events}} ->
         with :ok <- prime_local_bootstrap(session, events) do
           start_log_from_bootstrap(session_id, session)
@@ -377,7 +381,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
         {:ok, pid}
 
       :error ->
-        case start_log(session) do
+        case start_log(session, :replication) do
           {:ok, pid} -> {:ok, pid}
           {:error, :session_exists} -> lookup_log(session_id)
           {:error, reason} -> {:error, reason}
@@ -395,8 +399,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
-  defp start_log(%Session{} = session) do
-    case DynamicSupervisor.start_child(@supervisor, {SessionLog, session: session}) do
+  defp start_log(%Session{} = session, start_reason) when is_atom(start_reason) do
+    case DynamicSupervisor.start_child(
+           @supervisor,
+           {SessionLog, session: session, start_reason: start_reason}
+         ) do
       {:ok, pid} when is_pid(pid) ->
         {:ok, pid}
 
@@ -416,7 +423,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp start_log_from_bootstrap(session_id, %Session{} = session)
        when is_binary(session_id) and session_id != "" do
-    with {:ok, _pid} <- start_log(session) do
+    with {:ok, _pid} <- start_log(session, :hydrate) do
       lookup_log(session_id)
     else
       {:error, :session_exists} -> lookup_log(session_id)
@@ -585,7 +592,10 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
     cond do
       freshest_peer == nil and local_session == nil ->
-        {:error, :session_not_found}
+        case SessionCatalog.get_session(session_id) do
+          {:ok, %Session{} = session} -> {:ok, {:archive, session}}
+          {:error, reason} -> {:error, reason}
+        end
 
       freshest_peer == nil ->
         {:ok, {:local, local_session}}

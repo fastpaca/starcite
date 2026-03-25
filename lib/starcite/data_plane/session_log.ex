@@ -16,21 +16,27 @@ defmodule Starcite.DataPlane.SessionLog do
   @registry Starcite.DataPlane.SessionLogRegistry
   @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
   @max_batch_size Application.compile_env(:starcite, :session_log_batch_max_size, 256)
+  @default_idle_timeout_ms 300_000
+  @default_idle_check_interval_ms 30_000
 
   @type role :: :owner | :follower
   @type data :: %{
           required(:session) => Session.t(),
-          required(:role) => role()
+          required(:role) => role(),
+          required(:idle_timeout_ms) => pos_integer() | :infinity,
+          required(:idle_check_interval_ms) => pos_integer(),
+          required(:last_activity_mono_ms) => integer()
         }
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
+    start_reason = Keyword.get(opts, :start_reason, :startup)
 
     :gen_batch_server.start_link(
       via(session.id),
       __MODULE__,
-      session,
+      %{session: session, start_reason: start_reason},
       min_batch_size: @min_batch_size,
       max_batch_size: @max_batch_size
     )
@@ -43,7 +49,7 @@ defmodule Starcite.DataPlane.SessionLog do
     %{
       id: {__MODULE__, session.id},
       start: {__MODULE__, :start_link, [opts]},
-      restart: :permanent,
+      restart: :transient,
       shutdown: 500,
       type: :worker
     }
@@ -55,7 +61,7 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   @impl true
-  def init(%Session{} = session) do
+  def init(%{session: %Session{} = session, start_reason: start_reason}) do
     Process.flag(:message_queue_data, :off_heap)
 
     resolved_session =
@@ -69,13 +75,37 @@ defmodule Starcite.DataPlane.SessionLog do
       |> normalize_session_epoch()
       |> apply_routing_epoch()
 
-    {:ok, %{session: log_session, role: role_for_session(log_session.id)}}
+    role = role_for_session(log_session.id)
+
+    if start_reason == :hydrate do
+      :ok = emit_lifecycle(log_session, role, "session.hydrating", :hydrate)
+      :ok = Telemetry.session_hydrate(log_session.id, log_session.tenant_id, :ok, :hydrate)
+    end
+
+    :ok = emit_lifecycle(log_session, role, "session.activated", start_reason)
+    schedule_idle_tick(idle_timeout_ms(), idle_check_interval_ms())
+
+    {:ok,
+     %{
+       session: log_session,
+       role: role,
+       idle_timeout_ms: idle_timeout_ms(),
+       idle_check_interval_ms: idle_check_interval_ms(),
+       last_activity_mono_ms: now_monotonic_ms()
+     }}
   end
 
   @impl true
   def handle_batch(batch, data) when is_list(batch) do
-    {data, actions} = process_batch(batch, data, [])
-    {:ok, actions, data}
+    data = if activity_batch?(batch), do: touch_activity(data), else: data
+
+    case process_batch(batch, data, []) do
+      {:stop, reason} ->
+        {:stop, reason}
+
+      {next_data, actions} ->
+        {:ok, actions, next_data}
+    end
   end
 
   defp process_batch([], data, actions), do: {data, actions}
@@ -84,8 +114,11 @@ defmodule Starcite.DataPlane.SessionLog do
     case collect_append_group(batch) do
       {[], _rest} ->
         [op | rest] = batch
-        {next_data, next_actions} = process_single(op, data, actions)
-        process_batch(rest, next_data, next_actions)
+
+        case process_single(op, data, actions) do
+          {:stop, reason} -> {:stop, reason}
+          {next_data, next_actions} -> process_batch(rest, next_data, next_actions)
+        end
 
       {group, rest} ->
         {next_data, next_actions} = process_append_group(group, data, actions)
@@ -94,8 +127,10 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp process_batch([op | rest], data, actions) do
-    {next_data, next_actions} = process_single(op, data, actions)
-    process_batch(rest, next_data, next_actions)
+    case process_single(op, data, actions) do
+      {:stop, reason} -> {:stop, reason}
+      {next_data, next_actions} -> process_batch(rest, next_data, next_actions)
+    end
   end
 
   defp collect_append_group(batch), do: collect_append_group(batch, nil, [])
@@ -150,6 +185,17 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp collect_append_group(rest, _replicas, []), do: {[], rest}
   defp collect_append_group(rest, _replicas, acc), do: {Enum.reverse(acc), rest}
+
+  defp process_single({:info, :idle_tick}, data, actions) do
+    if should_freeze?(data) do
+      freeze_session(data)
+    else
+      schedule_idle_tick(data.idle_timeout_ms, data.idle_check_interval_ms)
+      {data, actions}
+    end
+  end
+
+  defp process_single({:info, _message}, data, actions), do: {data, actions}
 
   defp process_single({:call, from, :get_role}, %{role: role} = data, actions) do
     {data, actions ++ [{:reply, from, role}]}
@@ -796,4 +842,107 @@ defmodule Starcite.DataPlane.SessionLog do
        do: tenant_id
 
   defp event_principal_tenant_id(_metadata), do: nil
+
+  defp activity_batch?(batch) when is_list(batch) do
+    Enum.any?(batch, &match?({:call, _from, _message}, &1))
+  end
+
+  defp touch_activity(%{last_activity_mono_ms: _last} = data) do
+    %{data | last_activity_mono_ms: now_monotonic_ms()}
+  end
+
+  defp should_freeze?(%{
+         role: :owner,
+         session: %Session{id: session_id, last_seq: last_seq, archived_seq: archived_seq},
+         idle_timeout_ms: idle_timeout_ms,
+         last_activity_mono_ms: last_activity_mono_ms
+       })
+       when is_binary(session_id) and session_id != "" and is_integer(last_seq) and
+              is_integer(archived_seq) do
+    idle_timeout_ms != :infinity and last_seq == archived_seq and
+      idle_elapsed_ms(last_activity_mono_ms) >= idle_timeout_ms and
+      SessionRouter.ensure_local_owner(session_id) == :ok
+  end
+
+  defp should_freeze?(_data), do: false
+
+  defp freeze_session(%{session: %Session{} = session, role: role}) when role == :owner do
+    :ok = emit_lifecycle(session, role, "session.freezing", :idle_timeout)
+    :ok = Telemetry.session_freeze(session.id, session.tenant_id, :ok, :idle_timeout)
+    :ok = emit_lifecycle(session, role, "session.frozen", :idle_timeout)
+    :ok = SessionQuorum.stop_session(session.id)
+    {:stop, :normal}
+  end
+
+  defp now_monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp idle_elapsed_ms(last_activity_mono_ms)
+       when is_integer(last_activity_mono_ms) do
+    max(now_monotonic_ms() - last_activity_mono_ms, 0)
+  end
+
+  defp schedule_idle_tick(:infinity, _check_interval_ms), do: :ok
+
+  defp schedule_idle_tick(idle_timeout_ms, check_interval_ms)
+       when is_integer(idle_timeout_ms) and idle_timeout_ms > 0 and is_integer(check_interval_ms) and
+              check_interval_ms > 0 do
+    Process.send_after(self(), :idle_tick, min(idle_timeout_ms, check_interval_ms))
+    :ok
+  end
+
+  defp idle_timeout_ms do
+    case Application.get_env(:starcite, :session_log_idle_timeout_ms, @default_idle_timeout_ms) do
+      :infinity ->
+        :infinity
+
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_timeout_ms: #{inspect(value)} " <>
+                "(expected positive integer or :infinity)"
+    end
+  end
+
+  defp idle_check_interval_ms do
+    case Application.get_env(
+           :starcite,
+           :session_log_idle_check_interval_ms,
+           @default_idle_check_interval_ms
+         ) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_check_interval_ms: #{inspect(value)} " <>
+                "(expected positive integer)"
+    end
+  end
+
+  defp emit_lifecycle(%Session{} = session, role, kind, reason)
+       when role in [:owner, :follower] do
+    Phoenix.PubSub.broadcast(
+      Starcite.PubSub,
+      "lifecycle:" <> session.tenant_id,
+      {:session_lifecycle,
+       %{
+         kind: kind,
+         session_id: session.id,
+         tenant_id: session.tenant_id,
+         node: Atom.to_string(Node.self()),
+         role: Atom.to_string(role),
+         epoch: session.epoch,
+         last_seq: session.last_seq,
+         archived_seq: session.archived_seq,
+         reason: lifecycle_reason(reason),
+         occurred_at: DateTime.utc_now() |> DateTime.to_iso8601()
+       }}
+    )
+  end
+
+  defp lifecycle_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp lifecycle_reason(reason) when is_binary(reason) and reason != "", do: reason
+  defp lifecycle_reason(_reason), do: "unknown"
 end
