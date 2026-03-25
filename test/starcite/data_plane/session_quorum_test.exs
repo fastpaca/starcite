@@ -1,9 +1,10 @@
 defmodule Starcite.DataPlane.SessionQuorumTest do
   use ExUnit.Case, async: false
 
+  alias Starcite.Archive.IdempotentTestAdapter
   alias Starcite.Archive.SessionCatalog
   alias Starcite.Auth.Principal
-  alias Starcite.DataPlane.SessionQuorum
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Routing.Store
   alias Starcite.Session
 
@@ -99,6 +100,98 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
     assert metadata.outcome == :quorum_not_met
     assert metadata.failure_reason in [:badrpc, :timeout, :error]
   end
+
+  test "bootstraps from the durable session catalog when local cache and peers miss" do
+    original_archive_adapter = Application.get_env(:starcite, :archive_adapter)
+
+    on_exit(fn ->
+      restore_archive_adapter(original_archive_adapter)
+      SessionQuorum.clear()
+      SessionStore.clear()
+      EventStore.clear()
+      clear_idempotent_archive_adapter()
+    end)
+
+    Application.put_env(:starcite, :archive_adapter, IdempotentTestAdapter)
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self()])
+    Application.put_env(:starcite, :routing_replication_factor, 1)
+    ensure_idempotent_archive_adapter_started()
+    clear_idempotent_archive_adapter()
+
+    session_id = "ses-archive-bootstrap-unit"
+    creator = %Principal{tenant_id: "acme", id: "svc-backend", type: :service}
+    created_at = DateTime.utc_now()
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               %{
+                 owner: Node.self(),
+                 epoch: 7,
+                 replicas: [Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               },
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    assert :ok =
+             Starcite.Archive.Store.upsert_session(%{
+               id: session_id,
+               title: "Archived only",
+               creator_principal: creator,
+               tenant_id: "acme",
+               metadata: %{source: "archive"},
+               archived_seq: 3,
+               created_at: created_at
+             })
+
+    SessionQuorum.clear()
+    SessionStore.clear()
+    EventStore.clear()
+
+    assert :error == SessionStore.get_session_cached(session_id)
+
+    assert {:ok, %Session{} = session} = SessionQuorum.get_session(session_id)
+    assert session.id == session_id
+    assert session.tenant_id == "acme"
+    assert session.metadata == %{source: "archive"}
+    assert session.epoch == 7
+    assert session.last_seq == 3
+    assert session.archived_seq == 3
+
+    assert {:ok, snapshot} = SessionQuorum.fetch_cursor_snapshot(session_id)
+    assert snapshot.epoch == 7
+    assert snapshot.last_seq == 3
+    assert snapshot.committed_seq == 3
+
+    assert {:ok, %Session{id: ^session_id, archived_seq: 3}} =
+             SessionCatalog.get_session(session_id)
+  end
+
+  defp ensure_idempotent_archive_adapter_started do
+    case Process.whereis(IdempotentTestAdapter) do
+      nil ->
+        _pid = start_supervised!(IdempotentTestAdapter)
+        :ok
+
+      _pid ->
+        :ok
+    end
+  end
+
+  defp clear_idempotent_archive_adapter do
+    case Process.whereis(IdempotentTestAdapter) do
+      nil -> :ok
+      _pid -> :ok = IdempotentTestAdapter.clear_writes()
+    end
+  end
+
+  defp restore_archive_adapter(nil), do: Application.delete_env(:starcite, :archive_adapter)
+
+  defp restore_archive_adapter(adapter),
+    do: Application.put_env(:starcite, :archive_adapter, adapter)
 end
 
 defmodule Starcite.DataPlane.SessionQuorumDistributedTest do

@@ -6,7 +6,7 @@ defmodule Starcite.RuntimeTest do
   alias Starcite.Auth.Principal
   alias Starcite.Operations
   alias Starcite.{ReadPath, WritePath}
-  alias Starcite.Archive.Store
+  alias Starcite.Archive.{SessionCatalog, Store}
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Routing.Store, as: RoutingStore
   alias Starcite.Routing.Watcher
@@ -68,6 +68,23 @@ defmodule Starcite.RuntimeTest do
       {:ok, session} = ReadPath.get_session_routed(id, true)
       assert session.id == id
       assert session.last_seq == 0
+    end
+
+    test "cold session reads restore archived cursors from the durable catalog" do
+      id = unique_id("ses-cold-read")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      assert {:ok, %{seq: 1}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "cold read"},
+                 actor: "agent:test"
+               })
+
+      flush_archive_until(id, 1)
+      :ok = SessionStore.delete_session(id)
+
+      assert {:ok, %Session{id: ^id, last_seq: 1, archived_seq: 1}} = ReadPath.get_session(id)
     end
 
     test "returns not found for missing session" do
@@ -939,6 +956,240 @@ defmodule Starcite.RuntimeTest do
   end
 
   describe "session log recovery" do
+    test "bootstraps an archived owner session when hot state is gone everywhere local" do
+      id = unique_id("ses-archive-bootstrap")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      assert {:ok, %{seq: 1}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "archived"},
+                 actor: "agent:test"
+               })
+
+      flush_archive_until(id, 1)
+
+      assert {:ok, %Session{id: ^id, last_seq: 1, archived_seq: 1}} =
+               SessionCatalog.get_session(id)
+
+      :ok = SessionQuorum.stop_session(id)
+      :ok = SessionStore.delete_session(id)
+
+      eventually(
+        fn ->
+          assert [] == Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+        end,
+        timeout: 1_000
+      )
+
+      assert {:ok, %Session{id: ^id, last_seq: 1, archived_seq: 1}} =
+               SessionQuorum.get_session(id)
+    end
+
+    test "freezes idle owner logs and hydrates them on the next access" do
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      on_exit(fn ->
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      id = unique_id("ses-idle-freeze")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+      ref = Process.monitor(pid)
+
+      flush_lifecycle_events()
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.freezing", session_id: ^id, reason: "idle_timeout"}},
+                     2_000
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.frozen", session_id: ^id, reason: "idle_timeout"}},
+                     2_000
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
+      assert reason in [:normal, :shutdown]
+
+      eventually(
+        fn ->
+          assert [] == Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+        end,
+        timeout: 1_000
+      )
+
+      assert {:ok, %Session{id: ^id}} = SessionQuorum.get_session(id)
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.hydrating", session_id: ^id, reason: "hydrate"}},
+                     1_000
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.activated", session_id: ^id, reason: "hydrate"}},
+                     1_000
+
+      [{new_pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+      assert is_pid(new_pid)
+      refute new_pid == pid
+    end
+
+    test "freezes once the archive cursor catches up after a dirty interval" do
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      on_exit(fn ->
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      id = unique_id("ses-idle-ack")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+      flush_lifecycle_events()
+
+      assert {:ok, %{seq: 1, last_seq: 1}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "makes session dirty"},
+                 actor: "agent:test"
+               })
+
+      Process.sleep(250)
+
+      refute_receive {:session_lifecycle, %{kind: "session.freezing", session_id: ^id}},
+                     200
+
+      assert {:ok, %{archived_seq: 1}} = WritePath.ack_archived(id, 1)
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.freezing", session_id: ^id, reason: "idle_timeout"}},
+                     2_000
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.frozen", session_id: ^id, reason: "idle_timeout"}},
+                     2_000
+    end
+
+    test "does not freeze dirty owner logs while unarchived events remain" do
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      on_exit(fn ->
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      id = unique_id("ses-idle-dirty")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+      flush_lifecycle_events()
+
+      assert {:ok, %{seq: 1, last_seq: 1}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "keeps hot tail dirty"},
+                 actor: "agent:test"
+               })
+
+      Process.sleep(250)
+
+      refute_receive {:session_lifecycle, %{kind: "session.freezing", session_id: ^id}},
+                     200
+
+      refute_receive {:session_lifecycle, %{kind: "session.frozen", session_id: ^id}},
+                     50
+
+      assert match?(
+               [{pid, _value}] when is_pid(pid),
+               Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+             )
+
+      assert {:ok, %Session{last_seq: 1, archived_seq: 0}} = SessionQuorum.get_session(id)
+    end
+
+    test "does not freeze follower logs on idle" do
+      original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+      original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      peer = :"runtime-lifecycle-peer@127.0.0.1"
+      id = unique_id("ses-follower-idle")
+
+      on_exit(fn ->
+        Application.put_env(:starcite, :cluster_node_ids, original_cluster_node_ids)
+        Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), peer])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+      Starcite.Runtime.TestHelper.reset()
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: peer,
+                 epoch: 1,
+                 replicas: [peer, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      session = %Session{Session.new(id, tenant_id: "acme") | epoch: 1}
+      assert :ok = SessionStore.put_session(session)
+      assert {:ok, %Session{id: ^id}} = SessionQuorum.get_session(id)
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.hydrating", session_id: ^id, role: "follower"}},
+                     1_000
+
+      assert_receive {:session_lifecycle,
+                      %{kind: "session.activated", session_id: ^id, role: "follower"}},
+                     1_000
+
+      Process.sleep(250)
+
+      refute_receive {:session_lifecycle, %{kind: "session.freezing", session_id: ^id}},
+                     200
+
+      refute_receive {:session_lifecycle, %{kind: "session.frozen", session_id: ^id}},
+                     50
+
+      assert match?(
+               [{pid, _value}] when is_pid(pid),
+               Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+             )
+    end
+
     test "recovers state after owner crash and restart" do
       id = unique_id("ses-failover")
 
@@ -1372,6 +1623,25 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
+  defp flush_archive_until(session_id, archived_seq)
+       when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
+              archived_seq >= 0 do
+    eventually(
+      fn ->
+        send(archive_process_name(), :flush_tick)
+
+        assert {:ok,
+                %Session{id: ^session_id, archived_seq: ^archived_seq, last_seq: ^archived_seq}} =
+                 SessionCatalog.get_session(session_id)
+      end,
+      timeout: 3_000
+    )
+  end
+
+  defp archive_process_name do
+    Application.get_env(:starcite, :archive_name, Starcite.Archive)
+  end
+
   defp event_tenant_id!(%{tenant_id: tenant_id})
        when is_binary(tenant_id) and tenant_id != "",
        do: tenant_id
@@ -1431,4 +1701,15 @@ defmodule Starcite.RuntimeTest do
     Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
     :ok
   end
+
+  defp flush_lifecycle_events do
+    receive do
+      {:session_lifecycle, _event} -> flush_lifecycle_events()
+    after
+      0 -> :ok
+    end
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:starcite, key)
+  defp restore_app_env(key, value), do: Application.put_env(:starcite, key, value)
 end
