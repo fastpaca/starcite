@@ -14,7 +14,6 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
   alias Plug.Conn
   alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.{Config, Context, Identity, JWT}
-  alias StarciteWeb.Plugs.RedactSensitiveQuery
 
   @impl true
   def init(_opts), do: []
@@ -89,24 +88,15 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
 
   @spec bearer_token(Conn.t()) :: {:ok, String.t()} | {:error, atom()}
   def bearer_token(%Conn{} = conn) do
-    case {authorization_token(conn), websocket_query_token(conn)} do
-      {{:ok, token}, :missing} ->
+    case authorization_token(conn) do
+      {:ok, token} ->
         {:ok, token}
 
-      {:missing, {:ok, token}} ->
-        {:ok, token}
-
-      {{:ok, _header_token}, {:ok, _query_token}} ->
-        {:error, :invalid_bearer_token}
-
-      {{:error, reason}, _query_result} ->
-        {:error, reason}
-
-      {_header_result, {:error, reason}} ->
-        {:error, reason}
-
-      {:missing, :missing} ->
+      :missing ->
         {:error, :missing_bearer_token}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -141,56 +131,6 @@ defmodule StarciteWeb.Plugs.ServiceAuth do
       _many ->
         {:error, :invalid_bearer_token}
     end
-  end
-
-  defp websocket_query_token(%Conn{} = conn) do
-    if websocket_upgrade_request?(conn) do
-      case access_token_from_private(conn) do
-        {:ok, token} ->
-          {:ok, token}
-
-        :missing ->
-          parse_access_token_param(conn.query_string)
-
-        {:error, reason} ->
-          {:error, reason}
-      end
-    else
-      :missing
-    end
-  end
-
-  defp access_token_from_private(%Conn{private: private}) when is_map(private) do
-    case Map.get(private, RedactSensitiveQuery.ws_access_token_private_key()) do
-      nil ->
-        :missing
-
-      token when is_binary(token) ->
-        parse_raw_token(token)
-
-      _other ->
-        {:error, :invalid_bearer_token}
-    end
-  end
-
-  defp websocket_upgrade_request?(%Conn{} = conn) do
-    conn
-    |> Conn.get_req_header("upgrade")
-    |> Enum.flat_map(&Plug.Conn.Utils.list/1)
-    |> Enum.any?(fn value -> String.downcase(value) == "websocket" end)
-  end
-
-  defp parse_access_token_param(query_string) when is_binary(query_string) do
-    case URI.decode_query(query_string) do
-      %{"access_token" => token} when is_binary(token) ->
-        parse_raw_token(token)
-
-      _params ->
-        :missing
-    end
-  rescue
-    _error ->
-      {:error, :invalid_bearer_token}
   end
 
   defp parse_bearer_token(header) when is_binary(header) do

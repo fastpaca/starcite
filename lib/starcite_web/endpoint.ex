@@ -15,7 +15,6 @@ defmodule StarciteWeb.Endpoint do
     expose: ["*"]
 
   plug Plug.Head
-  plug StarciteWeb.Plugs.RedactSensitiveQuery
   plug StarciteWeb.Plugs.ServiceAuth
 
   plug Plug.Parsers,

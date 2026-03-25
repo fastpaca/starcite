@@ -11,6 +11,5 @@ defmodule StarciteWeb.Router do
     post "/sessions", SessionController, :create
     get "/sessions", SessionController, :index
     post "/sessions/:id/append", SessionController, :append
-    get "/sessions/:id/tail", TailController, :tail
   end
 end

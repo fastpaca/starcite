@@ -76,6 +76,15 @@ defmodule StarciteWeb.UserSocketTest do
     assert :error = UserSocket.connect(%{}, socket(UserSocket, "client-2", %{}), %{})
   end
 
+  test "connect rejects access_token param" do
+    assert :error =
+             UserSocket.connect(
+               %{"access_token" => "abc.def"},
+               socket(UserSocket, "client-3", %{}),
+               %{}
+             )
+  end
+
   defp token_for(private_key, kid, claims) do
     now = System.system_time(:second)
 

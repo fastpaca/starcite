@@ -1,12 +1,15 @@
 defmodule StarciteWeb.ApiAuthJwtTest do
   use ExUnit.Case, async: false
 
+  import Phoenix.ChannelTest
   import Plug.Conn
   import Plug.Test
 
   alias Starcite.AuthTestSupport
   alias Starcite.{ReadPath, WritePath}
   alias StarciteWeb.Auth.JWKS
+  alias StarciteWeb.TailChannel
+  alias StarciteWeb.UserSocket
 
   @endpoint StarciteWeb.Endpoint
   @issuer "https://issuer.example"
@@ -202,7 +205,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(list_conn.resp_body)["error"] == "forbidden_scope"
   end
 
-  test "enforces tenant boundary for append, list, and tail" do
+  test "enforces tenant boundary for append, list, and tail channel join" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tenant-boundary"
@@ -248,14 +251,11 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     ids = Jason.decode!(list_conn.resp_body)["sessions"] |> Enum.map(& &1["id"])
     refute beta_session_id in ids
 
-    tail_conn =
-      conn_get("/v1/sessions/#{beta_session_id}/tail?cursor=0", [
-        auth_header
-        | websocket_headers()
-      ])
+    assert {:ok, socket} =
+             UserSocket.connect(%{"token" => token}, socket(UserSocket, "tenant-1", %{}), %{})
 
-    assert tail_conn.status == 403
-    assert Jason.decode!(tail_conn.resp_body)["error"] == "forbidden_tenant"
+    assert {:error, %{reason: "forbidden_tenant"}} =
+             subscribe_and_join(socket, TailChannel, "tail:#{beta_session_id}", %{})
   end
 
   test "session_id claim locks list and append to one session" do
@@ -331,7 +331,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(blocked_append.resp_body)["error"] == "forbidden_session"
   end
 
-  test "protects tail websocket upgrade with JWT auth and session lock" do
+  test "protects Phoenix tail channel join with JWT auth and session lock" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tail-auth"
@@ -348,8 +348,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
-    without_auth = conn_get("/v1/sessions/#{session_id}/tail?cursor=0", websocket_headers())
-    assert without_auth.status == 401
+    assert :error = UserSocket.connect(%{}, socket(UserSocket, "tail-auth-1", %{}), %{})
 
     scoped_token =
       token_for(private_key, kid, %{
@@ -358,14 +357,15 @@ defmodule StarciteWeb.ApiAuthJwtTest do
         "session_id" => unique_id("ses")
       })
 
-    denied_tail =
-      conn_get(
-        "/v1/sessions/#{session_id}/tail?cursor=0&access_token=#{URI.encode_www_form(scoped_token)}",
-        websocket_headers()
-      )
+    assert {:ok, socket} =
+             UserSocket.connect(
+               %{"token" => scoped_token},
+               socket(UserSocket, "tail-auth-2", %{}),
+               %{}
+             )
 
-    assert denied_tail.status == 403
-    assert Jason.decode!(denied_tail.resp_body)["error"] == "forbidden_session"
+    assert {:error, %{reason: "forbidden_session"}} =
+             subscribe_and_join(socket, TailChannel, "tail:#{session_id}", %{})
   end
 
   defp configure_jwt_auth!(bypass) do
@@ -398,23 +398,6 @@ defmodule StarciteWeb.ApiAuthJwtTest do
        when is_tuple(private_key) and is_binary(kid) and is_map(overrides) do
     claims = valid_claims(overrides)
     AuthTestSupport.sign_rs256(private_key, claims, kid)
-  end
-
-  defp websocket_headers do
-    [
-      {"connection", "upgrade"},
-      {"upgrade", "websocket"},
-      {"sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ=="},
-      {"sec-websocket-version", "13"}
-    ]
-  end
-
-  defp conn_get(path, headers) do
-    conn =
-      conn(:get, path)
-      |> put_headers(headers)
-
-    @endpoint.call(conn, @endpoint.init([]))
   end
 
   defp json_conn(method, path, body, headers \\ []) do

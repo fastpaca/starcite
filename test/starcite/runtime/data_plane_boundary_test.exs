@@ -8,8 +8,8 @@ defmodule Starcite.Runtime.DataPlaneBoundaryTest do
     "lib/starcite/data_plane/session_log.ex",
     "lib/starcite/data_plane/session_quorum.ex",
     "lib/starcite_web/controllers/session_controller.ex",
-    "lib/starcite_web/controllers/tail_controller.ex",
-    "lib/starcite_web/tail_socket.ex"
+    "lib/starcite_web/tail_channel.ex",
+    "lib/starcite_web/tail_stream.ex"
   ]
 
   @forbidden_references [
