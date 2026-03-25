@@ -108,8 +108,14 @@ defmodule Starcite.Archive.Adapter.S3Test do
     config_key = {S3, :config}
     previous_config = :persistent_term.get(config_key, :undefined)
 
-    start_supervised!(
-      {S3, bucket: "archive-test", prefix: session_prefix, client_mod: FakeClient}
+    :persistent_term.put(
+      config_key,
+      Starcite.Archive.Adapter.S3.Config.build!(
+        [],
+        bucket: "archive-test",
+        prefix: session_prefix,
+        client_mod: FakeClient
+      )
     )
 
     on_exit(fn ->

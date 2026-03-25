@@ -34,7 +34,6 @@ defmodule Starcite.Archive.Adapter.S3 do
 
     case SchemaControl.ensure_startup_compatibility(config) do
       :ok ->
-        tenant_cache_table()
         :persistent_term.put(@config_key, config)
         {:ok, config}
 
@@ -422,7 +421,9 @@ defmodule Starcite.Archive.Adapter.S3 do
 
   defp cached_session_tenant(config, session_id)
        when is_binary(session_id) and session_id != "" do
-    case :ets.lookup(@tenant_cache_table, tenant_cache_key(config, session_id)) do
+    tenant_cache_table()
+
+    case tenant_cache_lookup(tenant_cache_key(config, session_id)) do
       [{_key, tenant_id}] -> tenant_id
       [] -> nil
     end
@@ -431,7 +432,7 @@ defmodule Starcite.Archive.Adapter.S3 do
   defp cache_session_tenant(config, session_id, tenant_id)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" do
-    true = :ets.insert(@tenant_cache_table, {tenant_cache_key(config, session_id), tenant_id})
+    tenant_cache_insert({tenant_cache_key(config, session_id), tenant_id})
     :ok
   end
 
@@ -443,17 +444,47 @@ defmodule Starcite.Archive.Adapter.S3 do
   defp tenant_cache_table do
     case :ets.whereis(@tenant_cache_table) do
       :undefined ->
-        :ets.new(@tenant_cache_table, [
-          :named_table,
-          :set,
-          :public,
-          read_concurrency: true,
-          write_concurrency: true
-        ])
+        try do
+          :ets.new(@tenant_cache_table, [
+            :named_table,
+            :set,
+            :public,
+            read_concurrency: true,
+            write_concurrency: true
+          ])
+        rescue
+          ArgumentError -> @tenant_cache_table
+        end
 
       tid ->
         tid
     end
+  end
+
+  defp tenant_cache_lookup(key, attempt \\ 0)
+       when is_tuple(key) and is_integer(attempt) and attempt >= 0 do
+    :ets.lookup(@tenant_cache_table, key)
+  rescue
+    ArgumentError ->
+      if attempt == 0 do
+        tenant_cache_table()
+        tenant_cache_lookup(key, attempt + 1)
+      else
+        []
+      end
+  end
+
+  defp tenant_cache_insert(entry, attempt \\ 0)
+       when is_tuple(entry) and tuple_size(entry) == 2 and is_integer(attempt) and attempt >= 0 do
+    tenant_cache_table()
+    true = :ets.insert(@tenant_cache_table, entry)
+  rescue
+    ArgumentError ->
+      if attempt == 0 do
+        tenant_cache_insert(entry, attempt + 1)
+      else
+        true
+      end
   end
 
   defp event_chunk_keys(config, session_id, tenant_id, chunk_start)
