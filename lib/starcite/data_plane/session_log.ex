@@ -63,6 +63,8 @@ defmodule Starcite.DataPlane.SessionLog do
   @impl true
   def init(%{session: %Session{} = session, start_reason: start_reason}) do
     Process.flag(:message_queue_data, :off_heap)
+    idle_timeout_ms = idle_timeout_ms()
+    idle_check_interval_ms = idle_check_interval_ms()
 
     resolved_session =
       case SessionStore.get_session_cached(session.id) do
@@ -83,14 +85,14 @@ defmodule Starcite.DataPlane.SessionLog do
     end
 
     :ok = emit_lifecycle(log_session, role, "session.activated", start_reason)
-    schedule_idle_tick(idle_timeout_ms(), idle_check_interval_ms())
+    schedule_idle_tick(idle_timeout_ms, idle_check_interval_ms)
 
     {:ok,
      %{
        session: log_session,
        role: role,
-       idle_timeout_ms: idle_timeout_ms(),
-       idle_check_interval_ms: idle_check_interval_ms(),
+       idle_timeout_ms: idle_timeout_ms,
+       idle_check_interval_ms: idle_check_interval_ms,
        last_activity_mono_ms: now_monotonic_ms()
      }}
   end

@@ -237,8 +237,6 @@ defmodule Starcite.DataPlane.SessionStore do
     with {:ok, %Session{} = session} <- SessionCatalog.get_session(session_id) do
       :ok = cache_put(session_id, session)
       {:ok, session}
-    else
-      {:error, reason} -> {:error, reason}
     end
   end
 
