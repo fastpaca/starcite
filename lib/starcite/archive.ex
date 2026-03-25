@@ -173,6 +173,17 @@ defmodule Starcite.Archive do
 
         case WritePath.ack_archived_local(session_id, upto_seq) do
           {:ok, %{archived_seq: acked_seq}} ->
+            case Store.update_session_archived_seq(adapter, session_id, tenant_id, acked_seq) do
+              :ok ->
+                :ok
+
+              {:error, :session_not_found} ->
+                :ok
+
+              {:error, reason} ->
+                raise "archive session update failed for #{session_id}: #{inspect(reason)}"
+            end
+
             pending_after = max(max_seq - acked_seq, 0)
             avg_event_bytes = if attempted > 0, do: div(bytes_attempted, attempted), else: 0
 

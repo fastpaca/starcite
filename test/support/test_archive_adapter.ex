@@ -20,7 +20,7 @@ defmodule Starcite.Archive.TestAdapter do
   def upsert_session(_session), do: :ok
 
   @impl true
-  def archived_seq(_session_id, _tenant_id), do: {:ok, 0}
+  def update_session_archived_seq(_session_id, _tenant_id, _archived_seq), do: :ok
 
   @impl true
   def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}

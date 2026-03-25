@@ -100,10 +100,6 @@ After a successful flush, it calls archive ack on the local session log, which a
 
 Archive writes are idempotent. Archiver failures do not block append/tail hot paths.
 
-Archive session rows are treated as immutable session headers. Cold hydrate derives
-`archived_seq` from archived event storage rather than rewriting the session header
-object on every archive flush.
-
 ## Control plane
 
 The control plane manages routing, ownership, fencing, and operator workflows.

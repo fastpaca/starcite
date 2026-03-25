@@ -404,12 +404,30 @@ defmodule Starcite.Archive.Adapter.S3Test do
     assert by_ids_tenant_scoped.sessions |> Enum.map(& &1.id) == ["ses-a"]
   end
 
-  test "archived_seq derives progress from archived event chunks" do
+  test "update_session_archived_seq updates the stored session row" do
+    created_at = DateTime.utc_now() |> DateTime.truncate(:second)
     session_id = "ses-s3-archived-#{System.unique_integer([:positive, :monotonic])}"
-    inserted_at = NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second)
 
-    assert {:ok, 7} = S3.write_events(event_rows(session_id, inserted_at, 1..7))
-    assert {:ok, 7} = S3.archived_seq(session_id, "acme")
+    assert :ok =
+             S3.upsert_session(%{
+               id: session_id,
+               title: "Cursor",
+               tenant_id: "acme",
+               creator_principal: principal_for_tenant("acme"),
+               metadata: %{"tag" => "x"},
+               archived_seq: 0,
+               created_at: created_at
+             })
+
+    assert :ok = S3.update_session_archived_seq(session_id, "acme", 7)
+
+    assert {:ok, page} =
+             S3.list_sessions_by_ids(
+               [session_id],
+               %{limit: 10, cursor: nil, metadata: %{}, tenant_id: "acme"}
+             )
+
+    assert [%{id: ^session_id, archived_seq: 7, metadata: %{"tag" => "x"}}] = page.sessions
   end
 
   defp event_rows(session_id, inserted_at, seqs) do

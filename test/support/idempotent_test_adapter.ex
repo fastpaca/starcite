@@ -37,9 +37,13 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def archived_seq(session_id, tenant_id)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" do
-    GenServer.call(__MODULE__, {:archived_seq, session_id, tenant_id})
+  def update_session_archived_seq(session_id, tenant_id, archived_seq)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+    GenServer.call(
+      __MODULE__,
+      {:update_session_archived_seq, session_id, tenant_id, archived_seq}
+    )
   end
 
   @impl true
@@ -107,19 +111,20 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def handle_call({:archived_seq, session_id, tenant_id}, _from, state) do
-    archived_seq =
-      state.writes
-      |> Enum.reduce(0, fn
-        %{session_id: ^session_id, tenant_id: ^tenant_id, seq: seq}, max_seq
-        when is_integer(seq) and seq > max_seq ->
-          seq
+  def handle_call(
+        {:update_session_archived_seq, session_id, tenant_id, archived_seq},
+        _from,
+        state
+      )
+      when is_binary(session_id) and is_binary(tenant_id) and is_integer(archived_seq) do
+    case Map.get(state.sessions, session_id) do
+      %{tenant_id: ^tenant_id} = session ->
+        updated = Map.put(session, :archived_seq, archived_seq)
+        {:reply, :ok, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
 
-        _row, max_seq ->
-          max_seq
-      end)
-
-    {:reply, {:ok, archived_seq}, state}
+      _ ->
+        {:reply, {:error, :session_not_found}, state}
+    end
   end
 
   @impl true

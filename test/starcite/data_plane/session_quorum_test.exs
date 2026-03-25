@@ -143,58 +143,9 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
                creator_principal: creator,
                tenant_id: "acme",
                metadata: %{source: "archive"},
-               archived_seq: 0,
+               archived_seq: 3,
                created_at: created_at
              })
-
-    assert {:ok, 3} =
-             IdempotentTestAdapter.write_events([
-               %{
-                 session_id: session_id,
-                 seq: 1,
-                 type: "content",
-                 payload: %{n: 1},
-                 actor: "agent:test",
-                 producer_id: "writer:test",
-                 producer_seq: 1,
-                 tenant_id: "acme",
-                 source: nil,
-                 metadata: %{},
-                 refs: %{},
-                 idempotency_key: nil,
-                 inserted_at: NaiveDateTime.utc_now()
-               },
-               %{
-                 session_id: session_id,
-                 seq: 2,
-                 type: "content",
-                 payload: %{n: 2},
-                 actor: "agent:test",
-                 producer_id: "writer:test",
-                 producer_seq: 2,
-                 tenant_id: "acme",
-                 source: nil,
-                 metadata: %{},
-                 refs: %{},
-                 idempotency_key: nil,
-                 inserted_at: NaiveDateTime.utc_now()
-               },
-               %{
-                 session_id: session_id,
-                 seq: 3,
-                 type: "content",
-                 payload: %{n: 3},
-                 actor: "agent:test",
-                 producer_id: "writer:test",
-                 producer_seq: 3,
-                 tenant_id: "acme",
-                 source: nil,
-                 metadata: %{},
-                 refs: %{},
-                 idempotency_key: nil,
-                 inserted_at: NaiveDateTime.utc_now()
-               }
-             ])
 
     SessionQuorum.clear()
     SessionStore.clear()
