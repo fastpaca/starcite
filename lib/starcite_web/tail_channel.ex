@@ -2,8 +2,8 @@ defmodule StarciteWeb.TailChannel do
   @moduledoc """
   Phoenix channel for a single tailed session topic.
 
-  Clients join `tail:<session_id>` with a resume cursor and optional replay
-  batch size. The channel replays committed events after that cursor, streams
+  Clients join `tail:<session_id>` with an optional canonical resume cursor and
+  optional replay batch size. The channel replays committed events after that cursor, streams
   new commits as `events`, emits `gap` when continuity is unavailable, and
   terminates with `token_expired` when JWT lifetime is exhausted.
   """
@@ -58,8 +58,8 @@ defmodule StarciteWeb.TailChannel do
         :ok = push(socket, "gap", gap)
         {:noreply, assign(socket, :tail_state, next_state)}
 
-      {:close, _code, "token_expired" = reason, next_state} ->
-        :ok = push(socket, "token_expired", %{reason: reason})
+      {:token_expired, next_state} ->
+        :ok = push(socket, "token_expired", %{reason: "token_expired"})
         {:stop, {:shutdown, :token_expired}, assign(socket, :tail_state, next_state)}
 
       {:stop, _reason, next_state} ->

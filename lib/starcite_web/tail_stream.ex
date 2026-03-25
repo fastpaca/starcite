@@ -36,7 +36,7 @@ defmodule StarciteWeb.TailStream do
   @type response ::
           {:ok, state()}
           | {:emit, {:events, [map()]} | {:gap, map()}, state()}
-          | {:close, pos_integer(), String.t(), state()}
+          | {:token_expired, state()}
           | {:stop, term(), state()}
 
   @spec init(map()) :: {:ok, state()}
@@ -82,7 +82,7 @@ defmodule StarciteWeb.TailStream do
     drain_replay(state)
   end
 
-  def handle_info(:auth_expired, state), do: {:close, 4001, "token_expired", state}
+  def handle_info(:auth_expired, state), do: {:token_expired, state}
 
   def handle_info({:cursor_update, update}, state) when is_map(update) do
     observe_cursor_update(update, state)

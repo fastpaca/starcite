@@ -1,10 +1,6 @@
 defmodule StarciteWeb.TailParams do
   @moduledoc """
-  Parses shared tail transport parameters.
-
-  Both the legacy raw tail WebSocket and Phoenix channel transport accept the
-  same resume cursor and replay batch size options. This module keeps that
-  boundary parsing in one place.
+  Parses canonical Phoenix tail channel parameters.
   """
 
   alias Starcite.Cursor
@@ -25,9 +21,15 @@ defmodule StarciteWeb.TailParams do
     end
   end
 
-  defp parse_cursor(%{"cursor" => nil}), do: {:ok, Cursor.new(nil, 0)}
-  defp parse_cursor(%{"cursor" => cursor}), do: Cursor.normalize(cursor)
-  defp parse_cursor(%{}), do: {:ok, Cursor.new(nil, 0)}
+  defp parse_cursor(%{"cursor" => cursor}) when is_map(cursor), do: Cursor.normalize(cursor)
+
+  defp parse_cursor(params) when is_map(params) do
+    if Map.has_key?(params, "cursor") do
+      {:error, :invalid_cursor}
+    else
+      {:ok, Cursor.new(nil, 0)}
+    end
+  end
 
   defp parse_frame_batch_size_param(%{"batch_size" => batch_size}),
     do: parse_frame_batch_size(batch_size)
@@ -38,17 +40,6 @@ defmodule StarciteWeb.TailParams do
        when is_integer(batch_size) and batch_size >= @default_frame_batch_size and
               batch_size <= @max_frame_batch_size,
        do: {:ok, batch_size}
-
-  defp parse_frame_batch_size(batch_size) when is_binary(batch_size) do
-    case Integer.parse(batch_size) do
-      {parsed, ""}
-      when parsed >= @default_frame_batch_size and parsed <= @max_frame_batch_size ->
-        {:ok, parsed}
-
-      _ ->
-        {:error, :invalid_tail_batch_size}
-    end
-  end
 
   defp parse_frame_batch_size(_batch_size), do: {:error, :invalid_tail_batch_size}
 end

@@ -35,16 +35,11 @@ defmodule StarciteWeb.UserSocket do
   def id(%Phoenix.Socket{assigns: %{disconnect_topic: disconnect_topic}}), do: disconnect_topic
   def id(_socket), do: nil
 
-  defp authenticate(%{"token" => token, "access_token" => access_token})
-       when is_binary(token) and is_binary(access_token) do
+  defp authenticate(%{"access_token" => _token}) do
     {:error, :invalid_bearer_token}
   end
 
   defp authenticate(%{"token" => token}) when is_binary(token) and token != "" do
-    ServiceAuth.authenticate_token(token)
-  end
-
-  defp authenticate(%{"access_token" => token}) when is_binary(token) and token != "" do
     ServiceAuth.authenticate_token(token)
   end
 

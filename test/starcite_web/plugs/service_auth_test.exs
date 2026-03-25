@@ -37,45 +37,6 @@ defmodule StarciteWeb.Plugs.ServiceAuthTest do
     assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
   end
 
-  test "bearer_token accepts websocket access_token query param" do
-    conn =
-      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
-      |> put_req_header("upgrade", "websocket")
-
-    assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
-  end
-
-  test "bearer_token uses raw access_token preserved in conn.private by redaction plug" do
-    conn =
-      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=%5BREDACTED%5D")
-      |> put_req_header("upgrade", "websocket")
-      |> put_private(:starcite_ws_access_token, "abc.def")
-
-    assert {:ok, "abc.def"} = ServiceAuth.bearer_token(conn)
-  end
-
-  test "bearer_token ignores access_token query param for non-websocket requests" do
-    conn = conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
-    assert {:error, :missing_bearer_token} = ServiceAuth.bearer_token(conn)
-  end
-
-  test "bearer_token rejects websocket requests that provide both auth header and access_token" do
-    conn =
-      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=abc.def")
-      |> put_req_header("upgrade", "websocket")
-      |> put_req_header("authorization", "Bearer ghi.jkl")
-
-    assert {:error, :invalid_bearer_token} = ServiceAuth.bearer_token(conn)
-  end
-
-  test "bearer_token rejects blank websocket access_token query param" do
-    conn =
-      conn(:get, "/v1/sessions/ses-1/tail?cursor=0&access_token=   ")
-      |> put_req_header("upgrade", "websocket")
-
-    assert {:error, :invalid_bearer_token} = ServiceAuth.bearer_token(conn)
-  end
-
   test "bearer_token rejects missing authorization header" do
     conn = conn(:get, "/")
     assert {:error, :missing_bearer_token} = ServiceAuth.bearer_token(conn)

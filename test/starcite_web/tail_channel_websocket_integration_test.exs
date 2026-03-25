@@ -103,7 +103,7 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
     {:ok, socket, response_headers, buffer} = connect_socket_ws(port, %{"token" => token})
     assert String.starts_with?(response_headers, "HTTP/1.1 101")
 
-    :ok = send_channel_join(socket, "1", topic_a, %{"cursor" => 0})
+    :ok = send_channel_join(socket, "1", topic_a, %{})
 
     {%{event: "phx_reply", topic: ^topic_a, payload: %{"status" => "ok"}}, buffer} =
       recv_channel_message(socket, buffer)
@@ -114,7 +114,7 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
     assert replay_a["seq"] == 1
     assert replay_a["payload"]["text"] == "replay-a"
 
-    :ok = send_channel_join(socket, "2", topic_b, %{"cursor" => 0})
+    :ok = send_channel_join(socket, "2", topic_b, %{})
 
     {%{event: "phx_reply", topic: ^topic_b, payload: %{"status" => "ok"}}, buffer} =
       recv_channel_message(socket, buffer)

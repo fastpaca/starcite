@@ -13,8 +13,7 @@ ws://HOST/v1/socket
 
 Pass the JWT as a socket param:
 
-- preferred: `token`
-- accepted for compatibility: `access_token`
+- `token`
 
 Example:
 
@@ -101,16 +100,15 @@ tail:<session_id>
 Join payload:
 
 - `cursor`
-  - `N` for sequence-only resume
-  - `E:N` for epoch-aware resume
-  - omitted or `null` to start from zero
-- `batch_size` (`1..1000`, default `1`) controls how many replay events are delivered per push
+  - omit to start from the beginning of the retained stream
+  - otherwise provide the canonical cursor object `{ epoch, seq }`
+- `batch_size` (`1..1000`, default `1`) is an integer controlling how many replay events are delivered per push
 
 Example:
 
 ```js
 const channel = socket.channel(`tail:${sessionId}`, {
-  cursor: "12:41",
+  cursor: { epoch: 12, seq: 41 },
   batch_size: 128
 })
 
@@ -183,14 +181,3 @@ When the requested cursor is outside active replay continuity, the channel emits
 - `cursor_expired`
 - `epoch_stale`
 - `rollback`
-
-## Legacy Raw WebSocket
-
-The legacy raw WebSocket endpoint remains available for compatibility:
-
-```
-ws://HOST/v1/sessions/:id/tail?cursor=41
-```
-
-That endpoint uses one WebSocket per tailed session. New clients should prefer
-the Phoenix socket/channel transport above.

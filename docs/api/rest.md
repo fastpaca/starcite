@@ -76,21 +76,6 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
   - `cursor` (`{epoch, seq}` of the appended event)
   - `committed_cursor` (current durable frontier for the session)
 
-### `GET /v1/sessions/:id/tail?cursor=C[&batch_size=M]`
-
-Legacy raw WebSocket upgrade for replay + live stream. New clients should
-prefer the Phoenix channel transport documented in the
-[WebSocket API](websocket.md).
-
-- Optional `cursor` values:
-  - `N` (legacy sequence-only cursor)
-  - `E:N` (epoch-aware cursor, recommended)
-- Optional `batch_size` (`1..1000`): when `M > 1`, server emits JSON array frames
-  with up to `M` events per frame
-- Requires `session:read`
-- Session must match JWT `tenant_id`
-- If JWT has `session_id`, `:id` must match it
-
 ## Behavioral rules
 
 - Append is sequenced per-session; response includes monotonic `seq` and lineage `epoch`.
