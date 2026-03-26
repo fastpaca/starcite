@@ -158,6 +158,27 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
     :ok = :gen_tcp.close(socket)
   end
 
+  test "websocket upgrades accept browser origin headers under the shared permissive CORS policy",
+       %{
+         port: port,
+         private_key: private_key,
+         kid: kid
+       } do
+    token =
+      token_for(
+        private_key,
+        kid,
+        %{"sub" => "user:user-42", "scopes" => ["session:read"], "tenant_id" => "acme"}
+      )
+
+    {:ok, socket, response_headers, _buffer} =
+      connect_socket_ws(port, %{"token" => token}, [{"Origin", "https://ui.example"}])
+
+    assert String.starts_with?(response_headers, "HTTP/1.1 101")
+
+    :ok = :gen_tcp.close(socket)
+  end
+
   defp unique_id(prefix) do
     suffix = Base.url_encode64(:crypto.strong_rand_bytes(6), padding: false)
     "#{prefix}-#{System.unique_integer([:positive, :monotonic])}-#{suffix}"
@@ -184,8 +205,8 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
     seq
   end
 
-  defp connect_socket_ws(port, query_params)
-       when is_integer(port) and port > 0 and is_map(query_params) do
+  defp connect_socket_ws(port, query_params, headers \\ [])
+       when is_integer(port) and port > 0 and is_map(query_params) and is_list(headers) do
     {:ok, socket} =
       :gen_tcp.connect(@host, port, [:binary, active: false, packet: :raw], @ws_timeout)
 
@@ -196,15 +217,20 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
       |> Map.put("vsn", "2.0.0")
       |> URI.encode_query()
 
-    request = [
-      "GET /v1/socket/websocket?#{query} HTTP/1.1\r\n",
-      "Host: localhost:#{port}\r\n",
-      "Connection: Upgrade\r\n",
-      "Upgrade: websocket\r\n",
-      "Sec-WebSocket-Version: 13\r\n",
-      "Sec-WebSocket-Key: #{key}\r\n",
-      "\r\n"
-    ]
+    request_headers =
+      Enum.map(headers, fn {name, value} when is_binary(name) and is_binary(value) ->
+        "#{name}: #{value}\r\n"
+      end)
+
+    request =
+      [
+        "GET /v1/socket/websocket?#{query} HTTP/1.1\r\n",
+        "Host: localhost:#{port}\r\n",
+        "Connection: Upgrade\r\n",
+        "Upgrade: websocket\r\n",
+        "Sec-WebSocket-Version: 13\r\n",
+        "Sec-WebSocket-Key: #{key}\r\n"
+      ] ++ request_headers ++ ["\r\n"]
 
     :ok = :gen_tcp.send(socket, request)
 
