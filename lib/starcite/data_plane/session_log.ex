@@ -16,21 +16,28 @@ defmodule Starcite.DataPlane.SessionLog do
   @registry Starcite.DataPlane.SessionLogRegistry
   @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
   @max_batch_size Application.compile_env(:starcite, :session_log_batch_max_size, 256)
+  @default_idle_timeout_ms 300_000
+  @default_idle_check_interval_ms 30_000
 
   @type role :: :owner | :follower
   @type data :: %{
           required(:session) => Session.t(),
-          required(:role) => role()
+          required(:producer_cursors) => map(),
+          required(:role) => role(),
+          required(:idle_timeout_ms) => pos_integer() | :infinity,
+          required(:idle_check_interval_ms) => pos_integer(),
+          required(:last_activity_mono_ms) => integer()
         }
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
+    start_reason = Keyword.get(opts, :start_reason, :startup)
 
     :gen_batch_server.start_link(
       via(session.id),
       __MODULE__,
-      session,
+      %{session: session, start_reason: start_reason},
       min_batch_size: @min_batch_size,
       max_batch_size: @max_batch_size
     )
@@ -43,7 +50,7 @@ defmodule Starcite.DataPlane.SessionLog do
     %{
       id: {__MODULE__, session.id},
       start: {__MODULE__, :start_link, [opts]},
-      restart: :permanent,
+      restart: :transient,
       shutdown: 500,
       type: :worker
     }
@@ -55,8 +62,10 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   @impl true
-  def init(%Session{} = session) do
+  def init(%{session: %Session{} = session, start_reason: start_reason}) do
     Process.flag(:message_queue_data, :off_heap)
+    idle_timeout_ms = idle_timeout_ms()
+    idle_check_interval_ms = idle_check_interval_ms()
 
     resolved_session =
       case SessionStore.get_session_cached(session.id) do
@@ -69,13 +78,38 @@ defmodule Starcite.DataPlane.SessionLog do
       |> normalize_session_epoch()
       |> apply_routing_epoch()
 
-    {:ok, %{session: log_session, role: role_for_session(log_session.id)}}
+    role = role_for_session(log_session.id)
+
+    if start_reason == :hydrate do
+      :ok = emit_lifecycle(log_session, role, "session.hydrating")
+      :ok = Telemetry.session_hydrate(log_session.id, log_session.tenant_id, :ok, :hydrate)
+    end
+
+    :ok = emit_lifecycle(log_session, role, "session.activated")
+    schedule_idle_tick(idle_timeout_ms, idle_check_interval_ms)
+
+    {:ok,
+     %{
+       session: log_session,
+       producer_cursors: %{},
+       role: role,
+       idle_timeout_ms: idle_timeout_ms,
+       idle_check_interval_ms: idle_check_interval_ms,
+       last_activity_mono_ms: now_monotonic_ms()
+     }}
   end
 
   @impl true
   def handle_batch(batch, data) when is_list(batch) do
-    {data, actions} = process_batch(batch, data, [])
-    {:ok, actions, data}
+    data = if activity_batch?(batch), do: touch_activity(data), else: data
+
+    case process_batch(batch, data, []) do
+      {:stop, reason} ->
+        {:stop, reason}
+
+      {next_data, actions} ->
+        {:ok, actions, next_data}
+    end
   end
 
   defp process_batch([], data, actions), do: {data, actions}
@@ -84,8 +118,11 @@ defmodule Starcite.DataPlane.SessionLog do
     case collect_append_group(batch) do
       {[], _rest} ->
         [op | rest] = batch
-        {next_data, next_actions} = process_single(op, data, actions)
-        process_batch(rest, next_data, next_actions)
+
+        case process_single(op, data, actions) do
+          {:stop, reason} -> {:stop, reason}
+          {next_data, next_actions} -> process_batch(rest, next_data, next_actions)
+        end
 
       {group, rest} ->
         {next_data, next_actions} = process_append_group(group, data, actions)
@@ -94,8 +131,10 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp process_batch([op | rest], data, actions) do
-    {next_data, next_actions} = process_single(op, data, actions)
-    process_batch(rest, next_data, next_actions)
+    case process_single(op, data, actions) do
+      {:stop, reason} -> {:stop, reason}
+      {next_data, next_actions} -> process_batch(rest, next_data, next_actions)
+    end
   end
 
   defp collect_append_group(batch), do: collect_append_group(batch, nil, [])
@@ -150,6 +189,17 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp collect_append_group(rest, _replicas, []), do: {[], rest}
   defp collect_append_group(rest, _replicas, acc), do: {Enum.reverse(acc), rest}
+
+  defp process_single({:info, :idle_tick}, data, actions) do
+    if should_freeze?(data) do
+      freeze_session(data)
+    else
+      schedule_idle_tick(data.idle_timeout_ms, data.idle_check_interval_ms)
+      {data, actions}
+    end
+  end
+
+  defp process_single({:info, _message}, data, actions), do: {data, actions}
 
   defp process_single({:call, from, :get_role}, %{role: role} = data, actions) do
     {data, actions ++ [{:reply, from, role}]}
@@ -266,7 +316,7 @@ defmodule Starcite.DataPlane.SessionLog do
           next_session.last_seq,
           next_session.archived_seq,
           evicted,
-          next_session.retention.tail_keep,
+          Session.tail_keep(),
           tail_size
         )
 
@@ -347,9 +397,14 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp process_single(_other, data, actions), do: {data, actions}
 
-  defp process_single_append(request, %{session: session} = data, actions) do
+  defp process_single_append(
+         request,
+         %{session: session, producer_cursors: producer_cursors} = data,
+         actions
+       ) do
     with :ok <- guard_expected_seq(session, request.expected_seq),
-         {:ok, next_session, next_events, outcome} <- execute_append_request(session, request) do
+         {:ok, next_session, next_cursors, next_events, outcome} <-
+           execute_append_request(session, producer_cursors, request) do
       next_session = normalize_session_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
 
@@ -358,6 +413,7 @@ defmodule Starcite.DataPlane.SessionLog do
         actions,
         request.from,
         next_session,
+        next_cursors,
         events,
         outcome,
         request.replicas
@@ -368,28 +424,45 @@ defmodule Starcite.DataPlane.SessionLog do
     end
   end
 
-  defp process_append_group(requests, %{session: session} = data, actions) do
+  defp process_append_group(
+         requests,
+         %{session: session, producer_cursors: producer_cursors} = data,
+         actions
+       ) do
     replicas = hd(requests).replicas
 
-    {next_session, events_acc, outcomes} =
-      Enum.reduce(requests, {session, [], []}, fn request, {current_session, events, outcomes} ->
-        case execute_append_request(current_session, request) do
-          {:ok, updated_session, request_events, outcome} ->
+    {next_session, next_cursors, events_acc, outcomes} =
+      Enum.reduce(requests, {session, producer_cursors, [], []}, fn request,
+                                                                    {current_session,
+                                                                     current_cursors, events,
+                                                                     outcomes} ->
+        case execute_append_request(current_session, current_cursors, request) do
+          {:ok, updated_session, updated_cursors, request_events, outcome} ->
             {
               normalize_session_epoch(updated_session),
+              updated_cursors,
               events ++ request_events,
               outcomes ++ [outcome]
             }
 
           {:error, reason} ->
-            {current_session, events, outcomes ++ [{:error, request.from, reason}]}
+            {current_session, current_cursors, events,
+             outcomes ++ [{:error, request.from, reason}]}
         end
       end)
 
     if successful_outcomes?(outcomes) do
       committed_events = put_events_epoch(events_acc, next_session.epoch)
 
-      commit_append_group(data, actions, next_session, committed_events, outcomes, replicas)
+      commit_append_group(
+        data,
+        actions,
+        next_session,
+        next_cursors,
+        committed_events,
+        outcomes,
+        replicas
+      )
     else
       reply_actions =
         Enum.map(outcomes, fn outcome ->
@@ -407,16 +480,27 @@ defmodule Starcite.DataPlane.SessionLog do
     )
   end
 
-  defp execute_append_request(session, %{kind: :append_event, from: from, inputs: [input]}) do
-    with {:ok, updated_session, reply, event_to_store} <- append_one_to_session(session, input) do
-      {:ok, updated_session, event_list(event_to_store), {:single_success, from, reply}}
+  defp execute_append_request(
+         session,
+         producer_cursors,
+         %{kind: :append_event, from: from, inputs: [input]}
+       ) do
+    with {:ok, updated_session, updated_cursors, reply, event_to_store} <-
+           append_one_to_session(session, producer_cursors, input) do
+      {:ok, updated_session, updated_cursors, event_list(event_to_store),
+       {:single_success, from, reply}}
     end
   end
 
-  defp execute_append_request(session, %{kind: :append_events, from: from, inputs: inputs}) do
-    with {:ok, updated_session, replies, events_to_store} <- append_to_session(session, inputs) do
+  defp execute_append_request(
+         session,
+         producer_cursors,
+         %{kind: :append_events, from: from, inputs: inputs}
+       ) do
+    with {:ok, updated_session, updated_cursors, replies, events_to_store} <-
+           append_to_session(session, producer_cursors, inputs) do
       response = %{results: replies, last_seq: updated_session.last_seq}
-      {:ok, updated_session, events_to_store, {:multi_success, from, response}}
+      {:ok, updated_session, updated_cursors, events_to_store, {:multi_success, from, response}}
     end
   end
 
@@ -465,13 +549,16 @@ defmodule Starcite.DataPlane.SessionLog do
          actions,
          from,
          next_session,
+         next_cursors,
          [],
          outcome,
          _replicas
        ) do
     {:ok, publish_session} = commit_session(next_session, [])
     reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
-    {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+
+    {%{data | session: publish_session, producer_cursors: next_cursors},
+     actions ++ [{:reply, from, {:ok, reply}}]}
   end
 
   defp commit_single_append(
@@ -479,6 +566,7 @@ defmodule Starcite.DataPlane.SessionLog do
          actions,
          from,
          next_session,
+         next_cursors,
          events,
          outcome,
          replicas
@@ -489,14 +577,15 @@ defmodule Starcite.DataPlane.SessionLog do
         reply =
           finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
-        {%{data | session: publish_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+        {%{data | session: publish_session, producer_cursors: next_cursors},
+         actions ++ [{:reply, from, {:ok, reply}}]}
 
       {:error, _reason} = error ->
         {data, actions ++ [{:reply, from, error}]}
     end
   end
 
-  defp commit_append_group(data, actions, next_session, [], outcomes, _replicas) do
+  defp commit_append_group(data, actions, next_session, next_cursors, [], outcomes, _replicas) do
     {:ok, publish_session} = commit_session(next_session, [])
 
     reply_actions =
@@ -504,10 +593,18 @@ defmodule Starcite.DataPlane.SessionLog do
         {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
       end)
 
-    {%{data | session: publish_session}, actions ++ reply_actions}
+    {%{data | session: publish_session, producer_cursors: next_cursors}, actions ++ reply_actions}
   end
 
-  defp commit_append_group(data, actions, next_session, committed_events, outcomes, replicas)
+  defp commit_append_group(
+         data,
+         actions,
+         next_session,
+         next_cursors,
+         committed_events,
+         outcomes,
+         replicas
+       )
        when is_list(committed_events) do
     case replicate_and_commit(next_session, committed_events, replicas) do
       {:ok, publish_session} ->
@@ -516,7 +613,8 @@ defmodule Starcite.DataPlane.SessionLog do
             {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
           end)
 
-        {%{data | session: publish_session}, actions ++ reply_actions}
+        {%{data | session: publish_session, producer_cursors: next_cursors},
+         actions ++ reply_actions}
 
       {:error, _reason} = error ->
         reply_actions =
@@ -589,23 +687,24 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp guard_expected_seq(_session, _expected_seq), do: {:error, :invalid_event}
 
-  defp append_to_session(%Session{} = session, inputs)
-       when is_list(inputs) and inputs != [] do
-    do_append_to_session(session, inputs, [], [])
+  defp append_to_session(%Session{} = session, producer_cursors, inputs)
+       when is_map(producer_cursors) and is_list(inputs) and inputs != [] do
+    do_append_to_session(session, producer_cursors, inputs, [], [])
   end
 
-  defp append_to_session(%Session{}, []), do: {:error, :invalid_event}
+  defp append_to_session(%Session{}, _producer_cursors, []), do: {:error, :invalid_event}
 
-  defp append_one_to_session(%Session{} = session, input) when is_map(input) do
+  defp append_one_to_session(%Session{} = session, producer_cursors, input)
+       when is_map(producer_cursors) and is_map(input) do
     with :ok <- guard_event_tenant(session, input) do
-      case Session.append_event(session, input) do
-        {:appended, updated_session, event} ->
+      case Session.append_event(session, producer_cursors, input) do
+        {:appended, updated_session, updated_cursors, event} ->
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          {:ok, updated_session, reply, event}
+          {:ok, updated_session, updated_cursors, reply, event}
 
-        {:deduped, updated_session, seq} ->
+        {:deduped, updated_session, updated_cursors, seq} ->
           reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-          {:ok, updated_session, reply, nil}
+          {:ok, updated_session, updated_cursors, reply, nil}
 
         {:error, reason} ->
           {:error, reason}
@@ -613,18 +712,31 @@ defmodule Starcite.DataPlane.SessionLog do
     end
   end
 
-  defp append_one_to_session(%Session{}, _input), do: {:error, :invalid_event}
+  defp append_one_to_session(%Session{}, _producer_cursors, _input), do: {:error, :invalid_event}
 
-  defp do_append_to_session(%Session{} = session, [input | rest], replies, events) do
+  defp do_append_to_session(
+         %Session{} = session,
+         producer_cursors,
+         [input | rest],
+         replies,
+         events
+       ) do
     with :ok <- guard_event_tenant(session, input) do
-      case Session.append_event(session, input) do
-        {:appended, updated_session, event} ->
+      case Session.append_event(session, producer_cursors, input) do
+        {:appended, updated_session, updated_cursors, event} ->
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
-          do_append_to_session(updated_session, rest, [reply | replies], [event | events])
 
-        {:deduped, updated_session, seq} ->
+          do_append_to_session(
+            updated_session,
+            updated_cursors,
+            rest,
+            [reply | replies],
+            [event | events]
+          )
+
+        {:deduped, updated_session, updated_cursors, seq} ->
           reply = %{seq: seq, last_seq: updated_session.last_seq, deduped: true}
-          do_append_to_session(updated_session, rest, [reply | replies], events)
+          do_append_to_session(updated_session, updated_cursors, rest, [reply | replies], events)
 
         {:error, reason} ->
           {:error, reason}
@@ -632,8 +744,8 @@ defmodule Starcite.DataPlane.SessionLog do
     end
   end
 
-  defp do_append_to_session(%Session{} = session, [], replies, events) do
-    {:ok, session, Enum.reverse(replies), Enum.reverse(events)}
+  defp do_append_to_session(%Session{} = session, producer_cursors, [], replies, events) do
+    {:ok, session, producer_cursors, Enum.reverse(replies), Enum.reverse(events)}
   end
 
   defp normalize_session_epoch(%Session{epoch: epoch} = session)
@@ -796,4 +908,99 @@ defmodule Starcite.DataPlane.SessionLog do
        do: tenant_id
 
   defp event_principal_tenant_id(_metadata), do: nil
+
+  defp activity_batch?(batch) when is_list(batch) do
+    Enum.any?(batch, &match?({:call, _from, _message}, &1))
+  end
+
+  # Idle detection is based on elapsed time, not `{epoch, seq}`. Read activity
+  # can keep a session hot without advancing the session cursor.
+  defp touch_activity(%{last_activity_mono_ms: _last} = data) do
+    %{data | last_activity_mono_ms: now_monotonic_ms()}
+  end
+
+  defp should_freeze?(%{
+         role: :owner,
+         session: %Session{id: session_id, last_seq: last_seq, archived_seq: archived_seq},
+         idle_timeout_ms: idle_timeout_ms,
+         last_activity_mono_ms: last_activity_mono_ms
+       })
+       when is_binary(session_id) and session_id != "" and is_integer(last_seq) and
+              is_integer(archived_seq) do
+    idle_timeout_ms != :infinity and last_seq == archived_seq and
+      idle_elapsed_ms(last_activity_mono_ms) >= idle_timeout_ms and
+      SessionRouter.ensure_local_owner(session_id) == :ok
+  end
+
+  defp should_freeze?(_data), do: false
+
+  defp freeze_session(%{session: %Session{} = session, role: role}) when role == :owner do
+    :ok = emit_lifecycle(session, role, "session.freezing")
+    :ok = Telemetry.session_freeze(session.id, session.tenant_id, :ok, :idle_timeout)
+    :ok = emit_lifecycle(session, role, "session.frozen")
+    :ok = SessionQuorum.stop_session(session.id)
+    {:stop, :normal}
+  end
+
+  defp now_monotonic_ms, do: System.monotonic_time(:millisecond)
+
+  defp idle_elapsed_ms(last_activity_mono_ms)
+       when is_integer(last_activity_mono_ms) do
+    max(now_monotonic_ms() - last_activity_mono_ms, 0)
+  end
+
+  defp schedule_idle_tick(:infinity, _check_interval_ms), do: :ok
+
+  defp schedule_idle_tick(idle_timeout_ms, check_interval_ms)
+       when is_integer(idle_timeout_ms) and idle_timeout_ms > 0 and is_integer(check_interval_ms) and
+              check_interval_ms > 0 do
+    Process.send_after(self(), :idle_tick, min(idle_timeout_ms, check_interval_ms))
+    :ok
+  end
+
+  defp idle_timeout_ms do
+    case Application.get_env(:starcite, :session_log_idle_timeout_ms, @default_idle_timeout_ms) do
+      :infinity ->
+        :infinity
+
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_timeout_ms: #{inspect(value)} " <>
+                "(expected positive integer or :infinity)"
+    end
+  end
+
+  defp idle_check_interval_ms do
+    case Application.get_env(
+           :starcite,
+           :session_log_idle_check_interval_ms,
+           @default_idle_check_interval_ms
+         ) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_check_interval_ms: #{inspect(value)} " <>
+                "(expected positive integer)"
+    end
+  end
+
+  defp emit_lifecycle(%Session{} = session, :owner, kind) when is_binary(kind) and kind != "" do
+    Phoenix.PubSub.broadcast(
+      Starcite.PubSub,
+      "lifecycle:" <> session.tenant_id,
+      {:session_lifecycle,
+       %{
+         kind: kind,
+         session_id: session.id,
+         tenant_id: session.tenant_id
+       }}
+    )
+  end
+
+  defp emit_lifecycle(%Session{}, _role, _kind), do: :ok
 end

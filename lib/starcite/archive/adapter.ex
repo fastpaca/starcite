@@ -29,7 +29,6 @@ defmodule Starcite.Archive.Adapter do
           required(:title) => String.t() | nil,
           required(:creator_principal) => Principal.t() | map(),
           required(:metadata) => map(),
-          required(:archived_seq) => non_neg_integer(),
           required(:created_at) => DateTime.t() | String.t()
         }
 
@@ -50,9 +49,8 @@ defmodule Starcite.Archive.Adapter do
   @callback write_events([event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
   @callback read_events(String.t(), pos_integer(), pos_integer()) ::
               {:ok, [map()]} | {:error, term()}
+  @callback archived_seq(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   @callback upsert_session(session_row()) :: :ok | {:error, term()}
-  @callback update_session_archived_seq(String.t(), String.t(), non_neg_integer()) ::
-              :ok | {:error, term()}
   @callback list_sessions(session_query()) :: {:ok, session_page()} | {:error, term()}
   @callback list_sessions_by_ids([String.t()], session_query()) ::
               {:ok, session_page()} | {:error, term()}

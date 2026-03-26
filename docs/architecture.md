@@ -79,8 +79,14 @@ Cursor contract:
 **Event store** - in-memory hot storage for unarchived events plus archived-read
 cache for replay acceleration.
 
-**Session store** - cache of session metadata/state used by API/auth/read paths and
-owner rehydration after owner restarts.
+**Session store** - cache of dynamic session state (`epoch`, `last_seq`,
+`archived_seq`) used by API/auth/read paths and owner rehydration after owner
+restarts.
+
+**Session catalog** - immutable archive header persisted once at create time
+(`id`, `tenant_id`, `title`, `creator_principal`, `metadata`, `created_at`).
+Cold hydrate rebuilds session state from this header plus the archived event
+head; it does not rewrite session metadata on every archive flush.
 
 ### Archiver
 

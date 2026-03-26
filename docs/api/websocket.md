@@ -85,9 +85,19 @@ The channel emits `lifecycle` payloads:
 }
 ```
 
-Today, Starcite emits only lifecycle events it owns directly. Appended session
-events are available on `tail:<session_id>` and are not reinterpreted as
-lifecycle notifications.
+Current lifecycle kinds include:
+
+- `session.created`
+- `session.activated`
+- `session.hydrating`
+- `session.freezing`
+- `session.frozen`
+
+Runtime lifecycle events are tenant-scoped and intentionally minimal:
+`kind`, `session_id`, and `tenant_id`.
+
+Appended session events are available on `tail:<session_id>` and are not
+reinterpreted as lifecycle notifications.
 
 ### `tail:<session_id>`
 

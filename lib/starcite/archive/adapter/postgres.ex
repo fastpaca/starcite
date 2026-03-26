@@ -76,13 +76,12 @@ defmodule Starcite.Archive.Adapter.Postgres do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
-        archived_seq: archived_seq,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
+             is_map(metadata) and
              (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     created_at = normalize_session_created_at(created_at)
 
@@ -96,7 +95,7 @@ defmodule Starcite.Archive.Adapter.Postgres do
             tenant_id: tenant_id,
             creator_principal: creator_principal,
             metadata: metadata,
-            archived_seq: archived_seq,
+            archived_seq: 0,
             created_at: created_at
           }
         ],
@@ -110,18 +109,21 @@ defmodule Starcite.Archive.Adapter.Postgres do
   end
 
   @impl true
-  def update_session_archived_seq(session_id, tenant_id, archived_seq)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
-    sql = "UPDATE sessions SET archived_seq = $3 WHERE id = $1 AND tenant_id = $2"
+  def archived_seq(session_id) when is_binary(session_id) and session_id != "" do
+    sql = "SELECT COALESCE(MAX(seq), 0) AS archived_seq FROM events WHERE session_id = $1"
 
-    case Repo.query(sql, [session_id, tenant_id, archived_seq]) do
-      {:ok, %{num_rows: 1}} -> :ok
-      {:ok, %{num_rows: 0}} -> {:error, :session_not_found}
-      {:error, _reason} -> {:error, :archive_write_unavailable}
+    case Repo.query(sql, [session_id]) do
+      {:ok, %{rows: [[archived_seq]]}} when is_integer(archived_seq) and archived_seq >= 0 ->
+        {:ok, archived_seq}
+
+      {:error, _reason} ->
+        {:error, :archive_read_unavailable}
+
+      _other ->
+        {:error, :archive_read_unavailable}
     end
   rescue
-    _ -> {:error, :archive_write_unavailable}
+    _ -> {:error, :archive_read_unavailable}
   end
 
   @impl true
@@ -298,7 +300,6 @@ defmodule Starcite.Archive.Adapter.Postgres do
       tenant_id: session.tenant_id,
       creator_principal: session.creator_principal,
       metadata: session.metadata || %{},
-      archived_seq: session.archived_seq || 0,
       created_at: DateTime.to_iso8601(session.created_at)
     }
   end

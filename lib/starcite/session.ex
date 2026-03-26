@@ -1,119 +1,56 @@
 defmodule Starcite.Session do
   @moduledoc """
-  Core session entity for Starcite.
-
-  A session is an append-only sequence of events with deterministic ordering.
-  Starcite stores event streams and replay semantics; it does not impose an
-  application protocol on event payloads.
+  Dynamic session state replicated across the data plane.
   """
 
   alias __MODULE__, as: Session
-  alias Starcite.Auth.Principal
-  alias Starcite.Session.{Event, ProducerIndex}
+  alias Starcite.Session.{Event, Header, ProducerIndex}
 
   @type event_input :: Event.input()
   @type event :: Event.t()
 
-  @enforce_keys [
-    :id,
-    :tenant_id,
-    :epoch,
-    :last_seq,
-    :archived_seq,
-    :inserted_at,
-    :retention,
-    :producer_cursors
-  ]
-  defstruct [
-    :id,
-    :tenant_id,
-    :title,
-    :creator_principal,
-    :metadata,
-    :epoch,
-    :last_seq,
-    :archived_seq,
-    :inserted_at,
-    :retention,
-    :producer_cursors
-  ]
+  @enforce_keys [:id, :tenant_id, :epoch, :last_seq, :archived_seq]
+  defstruct [:id, :tenant_id, :epoch, :last_seq, :archived_seq]
 
   @type t :: %Session{
           id: String.t(),
           tenant_id: String.t(),
-          title: String.t() | nil,
-          creator_principal: Principal.t() | nil,
-          metadata: map(),
           epoch: non_neg_integer(),
           last_seq: non_neg_integer(),
-          archived_seq: non_neg_integer(),
-          inserted_at: NaiveDateTime.t(),
-          retention: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()},
-          producer_cursors: ProducerIndex.t()
+          archived_seq: non_neg_integer()
         }
 
   @default_tail_keep 1_000
   @default_producer_max_entries 10_000
+  @retention_defaults_cache_key {__MODULE__, :retention_defaults}
 
-  @doc """
-  Create a new session.
-  """
   @spec new(String.t(), keyword()) :: t()
-  def new(id, opts \\ []) when is_binary(id) do
-    now = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
-
-    creator_principal =
-      optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal)
-
-    tenant_id = resolve_tenant_id!(Keyword.get(opts, :tenant_id), creator_principal)
-
-    tail_keep =
-      Keyword.get(
-        opts,
-        :tail_keep,
-        Application.get_env(:starcite, :tail_keep, @default_tail_keep)
-      )
-
-    producer_max_entries =
-      Keyword.get(
-        opts,
-        :producer_max_entries,
-        Application.get_env(:starcite, :producer_max_entries, @default_producer_max_entries)
-      )
-
-    %Session{
-      id: id,
-      tenant_id: tenant_id,
-      title: Keyword.get(opts, :title),
-      creator_principal: creator_principal,
-      metadata: Keyword.get(opts, :metadata, %{}),
-      epoch: 0,
-      last_seq: 0,
-      archived_seq: 0,
-      inserted_at: now,
-      retention: %{tail_keep: tail_keep, producer_max_entries: producer_max_entries},
-      producer_cursors: %{}
-    }
+  def new(id, opts \\ []) when is_binary(id) and is_list(opts) do
+    id
+    |> Header.new(opts)
+    |> new_from_header()
   end
 
-  @doc """
-  Append one event to the session.
+  @spec new_from_header(Header.t()) :: t()
+  def new_from_header(%Header{id: id, tenant_id: tenant_id}) do
+    %Session{id: id, tenant_id: tenant_id, epoch: 0, last_seq: 0, archived_seq: 0}
+  end
 
-  Returns one of:
+  @spec hydrate(Header.t(), non_neg_integer()) :: t()
+  def hydrate(%Header{} = header, archived_seq)
+      when is_integer(archived_seq) and archived_seq >= 0 do
+    %Session{new_from_header(header) | last_seq: archived_seq, archived_seq: archived_seq}
+  end
 
-    - `{:appended, updated_session, event}`
-    - `{:deduped, updated_session, existing_seq}`
-    - `{:error, :producer_replay_conflict}`
-    - `{:error, {:producer_seq_conflict, producer_id, expected_seq, producer_seq}}`
-  """
-  @spec append_event(t(), event_input()) ::
-          {:appended, t(), event()}
-          | {:deduped, t(), non_neg_integer()}
+  @spec append_event(t(), ProducerIndex.t(), event_input()) ::
+          {:appended, t(), ProducerIndex.t(), event()}
+          | {:deduped, t(), ProducerIndex.t(), non_neg_integer()}
           | {:error, :producer_replay_conflict}
           | {:error, {:producer_seq_conflict, String.t(), pos_integer(), pos_integer()}}
           | {:error, :invalid_event}
   def append_event(
         %Session{} = session,
+        producer_cursors,
         %{
           type: type,
           payload: payload,
@@ -124,15 +61,16 @@ defmodule Starcite.Session do
           idempotency_key: idempotency_key,
           producer_id: producer_id,
           producer_seq: producer_seq
-        } = input
+        }
       )
       when is_binary(type) and type != "" and is_map(payload) and is_binary(actor) and actor != "" and
              (is_binary(source) or is_nil(source)) and is_map(metadata) and is_map(refs) and
              (is_binary(idempotency_key) or is_nil(idempotency_key)) and is_binary(producer_id) and
-             producer_id != "" and is_integer(producer_seq) and producer_seq > 0 do
+             producer_id != "" and is_integer(producer_seq) and producer_seq > 0 and
+             is_map(producer_cursors) do
     do_append_event(
       session,
-      input,
+      producer_cursors,
       producer_id,
       producer_seq,
       type,
@@ -147,13 +85,14 @@ defmodule Starcite.Session do
 
   def append_event(
         %Session{} = session,
+        producer_cursors,
         %{producer_id: producer_id, producer_seq: producer_seq} = input
       )
       when is_binary(producer_id) and producer_id != "" and is_integer(producer_seq) and
-             producer_seq > 0 do
+             producer_seq > 0 and is_map(producer_cursors) do
     do_append_event(
       session,
-      input,
+      producer_cursors,
       producer_id,
       producer_seq,
       input.type,
@@ -166,11 +105,11 @@ defmodule Starcite.Session do
     )
   end
 
-  def append_event(%Session{}, _input), do: {:error, :invalid_event}
+  def append_event(%Session{}, _producer_cursors, _input), do: {:error, :invalid_event}
 
   defp do_append_event(
          %Session{} = session,
-         _input,
+         producer_cursors,
          producer_id,
          producer_seq,
          type,
@@ -197,18 +136,15 @@ defmodule Starcite.Session do
     next_seq = session.last_seq + 1
 
     case ProducerIndex.decide(
-           session.producer_cursors,
+           producer_cursors,
            producer_id,
            producer_seq,
            fingerprint,
            next_seq,
-           session.retention.producer_max_entries
+           producer_max_entries()
          ) do
       {:deduped, seq, updated_index} ->
-        updated =
-          maybe_update_cursors(session, updated_index)
-
-        {:deduped, updated, seq}
+        {:deduped, session, updated_index, seq}
 
       {:append, updated_index} ->
         now = NaiveDateTime.utc_now()
@@ -231,25 +167,25 @@ defmodule Starcite.Session do
 
         updated = %Session{
           session
-          | last_seq: next_seq,
-            producer_cursors: updated_index
+          | last_seq: next_seq
         }
 
-        {:appended, updated, event}
+        {:appended, updated, updated_index, event}
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  @doc """
-  Apply an archive acknowledgement up to `upto_seq` and update retention
-  metadata used for telemetry and tail accounting.
-  """
   @spec persist_ack(t(), non_neg_integer()) :: {t(), non_neg_integer()}
   def persist_ack(%Session{} = session, upto_seq)
       when is_integer(upto_seq) and upto_seq >= 0 do
-    tail_keep = session.retention.tail_keep
+    persist_ack(session, upto_seq, tail_keep())
+  end
+
+  @spec persist_ack(t(), non_neg_integer(), pos_integer()) :: {t(), non_neg_integer()}
+  def persist_ack(%Session{} = session, upto_seq, tail_keep)
+      when is_integer(upto_seq) and upto_seq >= 0 and is_integer(tail_keep) and tail_keep > 0 do
     archived_seq = max(session.archived_seq, min(upto_seq, session.last_seq))
     old_floor = retained_floor(session.archived_seq, session.last_seq, tail_keep)
     new_floor = retained_floor(archived_seq, session.last_seq, tail_keep)
@@ -266,29 +202,34 @@ defmodule Starcite.Session do
     max(last_seq - archived_seq, 0)
   end
 
-  @spec to_map(t()) :: map()
-  def to_map(%Session{} = session) do
-    created_at = iso8601_utc(session.inserted_at)
-
-    %{
-      id: session.id,
-      title: session.title,
-      creator_principal: session.creator_principal,
-      metadata: session.metadata,
-      last_seq: session.last_seq,
-      created_at: created_at,
-      updated_at: created_at
-    }
+  @spec tail_keep() :: pos_integer()
+  def tail_keep do
+    retention_defaults().tail_keep
   end
 
-  defp maybe_update_cursors(%Session{} = session, updated_index)
-       when updated_index == session.producer_cursors do
-    session
+  @spec producer_max_entries() :: pos_integer()
+  def producer_max_entries do
+    retention_defaults().producer_max_entries
   end
 
-  defp maybe_update_cursors(%Session{} = session, updated_index) when is_map(updated_index) do
-    %Session{session | producer_cursors: updated_index}
+  @spec retention_defaults() :: %{tail_keep: pos_integer(), producer_max_entries: pos_integer()}
+  def retention_defaults do
+    raw = {default_tail_keep(), default_producer_max_entries()}
+
+    case :persistent_term.get(@retention_defaults_cache_key, :undefined) do
+      {^raw, defaults} ->
+        defaults
+
+      _ ->
+        defaults = %{tail_keep: elem(raw, 0), producer_max_entries: elem(raw, 1)}
+        :persistent_term.put(@retention_defaults_cache_key, {raw, defaults})
+        defaults
+    end
   end
+
+  @spec to_map(t(), Header.t()) :: map()
+  def to_map(%Session{} = session, %Header{} = header),
+    do: Header.to_map(header, session.last_seq)
 
   defp retained_floor(archived_seq, last_seq, tail_keep)
        when is_integer(archived_seq) and archived_seq >= 0 and is_integer(last_seq) and
@@ -332,53 +273,11 @@ defmodule Starcite.Session do
     <<:erlang.phash2(fingerprint_term)::32, :erlang.phash2({:v2, fingerprint_term})::32>>
   end
 
-  defp iso8601_utc(%NaiveDateTime{} = datetime) do
-    datetime
-    |> DateTime.from_naive!("Etc/UTC")
-    |> DateTime.to_iso8601()
+  defp default_tail_keep do
+    Application.get_env(:starcite, :tail_keep, @default_tail_keep)
   end
 
-  defp optional_principal!(nil, _field), do: nil
-  defp optional_principal!(%Principal{} = principal, _field), do: principal
-
-  defp optional_principal!(
-         %{"tenant_id" => tenant_id, "id" => id, "type" => type},
-         field
-       )
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(id) and id != "" and
-              is_binary(type) and type != "" do
-    type = principal_type!(type, field)
-
-    case Principal.new(tenant_id, id, type) do
-      {:ok, principal} -> principal
-      {:error, :invalid_principal} -> raise ArgumentError, "invalid session #{field}"
-    end
-  end
-
-  defp optional_principal!(value, field) do
-    raise ArgumentError, "invalid session #{field}: #{inspect(value)}"
-  end
-
-  defp principal_type!("user", _field), do: :user
-  defp principal_type!("agent", _field), do: :agent
-  defp principal_type!("service", _field), do: :service
-  defp principal_type!("svc", _field), do: :service
-
-  defp principal_type!(value, field) do
-    raise ArgumentError, "invalid session #{field} type: #{inspect(value)}"
-  end
-
-  defp resolve_tenant_id!(tenant_id, _creator_principal)
-       when is_binary(tenant_id) and tenant_id != "",
-       do: tenant_id
-
-  defp resolve_tenant_id!(nil, %Principal{tenant_id: tenant_id})
-       when is_binary(tenant_id) and tenant_id != "",
-       do: tenant_id
-
-  defp resolve_tenant_id!(nil, nil), do: "service"
-
-  defp resolve_tenant_id!(value, _creator_principal) do
-    raise ArgumentError, "invalid session tenant_id: #{inspect(value)}"
+  defp default_producer_max_entries do
+    Application.get_env(:starcite, :producer_max_entries, @default_producer_max_entries)
   end
 end
