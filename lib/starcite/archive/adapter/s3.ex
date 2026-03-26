@@ -62,13 +62,12 @@ defmodule Starcite.Archive.Adapter.S3 do
         tenant_id: tenant_id,
         creator_principal: creator_principal,
         metadata: metadata,
-        archived_seq: archived_seq,
         created_at: created_at
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and
              (is_struct(creator_principal, Principal) or is_map(creator_principal)) and
-             is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
+             is_map(metadata) and
              (is_struct(created_at, DateTime) or (is_binary(created_at) and created_at != "")) do
     config = config!()
 
@@ -78,7 +77,6 @@ defmodule Starcite.Archive.Adapter.S3 do
       tenant_id: tenant_id,
       creator_principal: creator_principal,
       metadata: metadata,
-      archived_seq: archived_seq,
       created_at: created_at
     }
 
@@ -93,28 +91,18 @@ defmodule Starcite.Archive.Adapter.S3 do
   end
 
   @impl true
-  def update_session_archived_seq(session_id, tenant_id, archived_seq)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
+  def archived_seq(session_id) when is_binary(session_id) and session_id != "" do
     config = config!()
 
-    with {:ok, key, session} <- load_session_for_update(config, session_id, tenant_id),
-         updated_session <-
-           session
-           |> Map.put(:tenant_id, tenant_id)
-           |> Map.put(:archived_seq, archived_seq),
-         result <- put_session_by_key(config, key, updated_session) do
-      case result do
-        :ok -> :ok
-        {:error, :unavailable} -> {:error, :archive_write_unavailable}
-        {:error, _reason} -> {:error, :archive_write_unavailable}
-      end
+    with {:ok, tenant_id} when is_binary(tenant_id) and tenant_id != "" <-
+           resolve_session_tenant(config, session_id) do
+      latest_archived_seq(config, session_id, tenant_id)
     else
-      {:error, :unavailable} ->
-        {:error, :archive_write_unavailable}
+      {:ok, nil} ->
+        {:error, :session_not_found}
 
-      {:error, _reason} ->
-        {:error, :archive_write_unavailable}
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -305,42 +293,6 @@ defmodule Starcite.Archive.Adapter.S3 do
     )
   end
 
-  defp put_session_by_key(config, key, session)
-       when is_binary(key) and key != "" and is_map(session) do
-    body = Schema.encode_session(session)
-
-    client(config).put_object(config, key, body, content_type: "application/json")
-  end
-
-  defp load_session_for_update(config, session_id, tenant_id)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" do
-    config
-    |> session_keys_for_id(tenant_id, session_id)
-    |> Enum.reduce_while({:ok, nil, nil}, fn key, _acc ->
-      case load_session(key, config) do
-        {:ok, nil} ->
-          {:cont, {:ok, nil, nil}}
-
-        {:ok, session} ->
-          {:halt, {:ok, key, session}}
-
-        {:error, _reason} = error ->
-          {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, key, session} when is_binary(key) and is_map(session) ->
-        {:ok, key, session}
-
-      {:error, _reason} = error ->
-        error
-
-      _ ->
-        {:error, :session_not_found}
-    end
-  end
-
   defp put_session_tenant_index(config, session_id, tenant_id)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" do
@@ -471,6 +423,71 @@ defmodule Starcite.Archive.Adapter.S3 do
 
       _ ->
         [Layout.legacy_event_chunk_key(config, session_id, chunk_start)]
+    end
+  end
+
+  defp latest_archived_seq(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    with {:ok, chunk_starts} <- chunk_starts_for_session(config, session_id, tenant_id) do
+      case chunk_starts do
+        [] ->
+          {:ok, 0}
+
+        _other ->
+          latest_chunk_start = Enum.max(chunk_starts)
+
+          with {:ok, events, _etag} <-
+                 fetch_chunk(session_id, tenant_id, latest_chunk_start, config),
+               %{seq: seq} when is_integer(seq) and seq >= 0 <- List.last(events) do
+            {:ok, seq}
+          else
+            [] -> {:ok, 0}
+            {:error, _reason} = error -> error
+            _other -> {:error, :archive_read_unavailable}
+          end
+      end
+    end
+  end
+
+  defp chunk_starts_for_session(config, session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    prefixes = [
+      Layout.event_session_prefix(config, tenant_id, session_id),
+      Layout.legacy_event_session_prefix(config, session_id)
+    ]
+
+    prefixes
+    |> Enum.reduce_while({:ok, []}, fn prefix, {:ok, acc} ->
+      case client(config).list_keys(config, prefix) do
+        {:ok, keys} ->
+          {:cont, {:ok, keys ++ acc}}
+
+        {:error, :unavailable} ->
+          {:halt, {:error, :archive_read_unavailable}}
+      end
+    end)
+    |> case do
+      {:ok, keys} ->
+        {:ok,
+         keys
+         |> Enum.map(&chunk_start_from_key/1)
+         |> Enum.reject(&is_nil/1)
+         |> Enum.uniq()}
+
+      {:error, _reason} = error ->
+        error
+    end
+  end
+
+  defp chunk_start_from_key(key) when is_binary(key) do
+    key
+    |> Path.basename(".ndjson")
+    |> Integer.parse()
+    |> case do
+      {chunk_start, ""} when chunk_start > 0 -> chunk_start
+      _ -> nil
     end
   end
 

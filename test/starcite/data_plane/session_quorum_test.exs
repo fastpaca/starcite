@@ -143,9 +143,29 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
                creator_principal: creator,
                tenant_id: "acme",
                metadata: %{source: "archive"},
-               archived_seq: 3,
                created_at: created_at
              })
+
+    archived_rows =
+      for seq <- 1..3 do
+        %{
+          session_id: session_id,
+          seq: seq,
+          type: "content",
+          payload: %{n: seq},
+          actor: "svc-backend",
+          producer_id: "svc-backend",
+          producer_seq: seq,
+          tenant_id: "acme",
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: NaiveDateTime.utc_now()
+        }
+      end
+
+    assert {:ok, 3} = Starcite.Archive.Store.write_events(archived_rows)
 
     SessionQuorum.clear()
     SessionStore.clear()
@@ -156,7 +176,6 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
     assert {:ok, %Session{} = session} = SessionQuorum.get_session(session_id)
     assert session.id == session_id
     assert session.tenant_id == "acme"
-    assert session.metadata == %{source: "archive"}
     assert session.epoch == 7
     assert session.last_seq == 3
     assert session.archived_seq == 3
@@ -168,6 +187,9 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
 
     assert {:ok, %Session{id: ^session_id, archived_seq: 3}} =
              SessionCatalog.get_session(session_id)
+
+    assert {:ok, header} = SessionCatalog.get_header(session_id)
+    assert header.metadata == %{source: "archive"}
   end
 
   defp ensure_idempotent_archive_adapter_started do
@@ -204,6 +226,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   alias Starcite.Operations
   alias Starcite.Routing.Store
   alias Starcite.Session
+  alias Starcite.Session.Header
   alias Starcite.WritePath
   alias Starcite.TestSupport.DistributedPeerDataPlane
 
@@ -286,7 +309,9 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
     assert :ok = SessionQuorum.replicate_state(seed_session, [])
-    assert {:appended, updated_session, event} = Session.append_event(seed_session, input)
+
+    assert {:appended, updated_session, _producer_cursors, event} =
+             Session.append_event(seed_session, %{}, input)
 
     replicated_session = %Session{updated_session | epoch: 7}
     assert :ok = SessionQuorum.replicate_state(replicated_session, [event])
@@ -389,7 +414,11 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a])
     assert :ok = seed_peer_cache(peer_a, session, [])
-    assert :ok = SessionCatalog.persist_created(Session.to_map(session), principal, "acme", %{})
+
+    header =
+      Header.new(session_id, creator_principal: principal, tenant_id: "acme", metadata: %{})
+
+    assert :ok = SessionCatalog.persist_created(header)
 
     assert {:ok, bootstrapped} = SessionQuorum.get_session(session_id)
     assert bootstrapped.id == session_id

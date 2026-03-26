@@ -7,16 +7,18 @@ defmodule Starcite.Archive.SessionCatalog do
   """
 
   alias Starcite.Archive.Store
-  alias Starcite.Auth.Principal
   alias Starcite.Session
+  alias Starcite.Session.Header
 
-  @spec persist_created(map(), Principal.t(), String.t(), map()) :: :ok | {:error, term()}
-  def persist_created(
-        %{id: id, title: title, created_at: created_at},
-        %Principal{} = creator_principal,
-        tenant_id,
-        metadata
-      )
+  @spec persist_created(Header.t()) :: :ok | {:error, term()}
+  def persist_created(%Header{
+        id: id,
+        title: title,
+        creator_principal: creator_principal,
+        tenant_id: tenant_id,
+        metadata: metadata,
+        created_at: created_at
+      })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
     Store.upsert_session(%{
@@ -25,12 +27,11 @@ defmodule Starcite.Archive.SessionCatalog do
       creator_principal: creator_principal,
       tenant_id: tenant_id,
       metadata: metadata,
-      archived_seq: 0,
-      created_at: created_at
+      created_at: DateTime.from_naive!(created_at, "Etc/UTC")
     })
   end
 
-  def persist_created(_session, _creator_principal, _tenant_id, _metadata),
+  def persist_created(_header),
     do: {:error, :invalid_session}
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
@@ -38,12 +39,28 @@ defmodule Starcite.Archive.SessionCatalog do
     with {:ok, %{sessions: sessions}} when is_list(sessions) <-
            Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
          {:ok, row} <- select_row(session_id, sessions),
-         {:ok, session} <- row_to_session(session_id, row) do
-      {:ok, session}
+         {:ok, header} <- row_to_header(session_id, row),
+         {:ok, archived_seq} <- Store.archived_seq(session_id) do
+      {:ok, Session.hydrate(header, archived_seq)}
+    else
+      {:error, _reason} = error ->
+        error
     end
   end
 
   def get_session(_session_id), do: {:error, :invalid_session_id}
+
+  @spec get_header(String.t()) :: {:ok, Header.t()} | {:error, term()}
+  def get_header(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, %{sessions: sessions}} when is_list(sessions) <-
+           Store.list_sessions_by_ids([session_id], %{limit: 1, cursor: nil, metadata: %{}}),
+         {:ok, row} <- select_row(session_id, sessions),
+         {:ok, header} <- row_to_header(session_id, row) do
+      {:ok, header}
+    end
+  end
+
+  def get_header(_session_id), do: {:error, :invalid_session_id}
 
   defp select_row(_session_id, []), do: {:error, :session_not_found}
 
@@ -54,7 +71,7 @@ defmodule Starcite.Archive.SessionCatalog do
 
   defp select_row(_session_id, _rows), do: {:error, :archive_read_unavailable}
 
-  defp row_to_session(
+  defp row_to_header(
          session_id,
          %{
            id: session_id,
@@ -62,16 +79,15 @@ defmodule Starcite.Archive.SessionCatalog do
            tenant_id: tenant_id,
            creator_principal: creator_principal,
            metadata: metadata,
-           archived_seq: archived_seq,
            created_at: created_at
          }
        )
        when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
-              is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 do
+              is_map(metadata) do
     with {:ok, timestamp} <- session_created_at(created_at) do
       try do
-        session =
-          Session.new(session_id,
+        header =
+          Header.new(session_id,
             title: title,
             tenant_id: tenant_id,
             creator_principal: creator_principal,
@@ -79,14 +95,14 @@ defmodule Starcite.Archive.SessionCatalog do
             timestamp: timestamp
           )
 
-        {:ok, %Session{session | last_seq: archived_seq, archived_seq: archived_seq}}
+        {:ok, header}
       rescue
         ArgumentError -> {:error, :archive_read_unavailable}
       end
     end
   end
 
-  defp row_to_session(_session_id, _row), do: {:error, :archive_read_unavailable}
+  defp row_to_header(_session_id, _row), do: {:error, :archive_read_unavailable}
 
   defp session_created_at(%DateTime{} = created_at), do: {:ok, DateTime.to_naive(created_at)}
   defp session_created_at(%NaiveDateTime{} = created_at), do: {:ok, created_at}

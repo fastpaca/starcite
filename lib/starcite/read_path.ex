@@ -12,6 +12,8 @@ defmodule Starcite.ReadPath do
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(id) when is_binary(id) and id != "" do
+    # Cold misses fall back to archive header + archived-head lookup, so this
+    # should not be treated as a cheap hot-path read for cold sessions.
     SessionStore.get_session(id)
   end
 

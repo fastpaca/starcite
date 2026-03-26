@@ -32,18 +32,13 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def upsert_session(session) when is_map(session) do
-    GenServer.call(__MODULE__, {:upsert_session, session})
+  def archived_seq(session_id) when is_binary(session_id) and session_id != "" do
+    GenServer.call(__MODULE__, {:archived_seq, session_id})
   end
 
   @impl true
-  def update_session_archived_seq(session_id, tenant_id, archived_seq)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
-    GenServer.call(
-      __MODULE__,
-      {:update_session_archived_seq, session_id, tenant_id, archived_seq}
-    )
+  def upsert_session(session) when is_map(session) do
+    GenServer.call(__MODULE__, {:upsert_session, session})
   end
 
   @impl true
@@ -111,20 +106,23 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
   end
 
   @impl true
-  def handle_call(
-        {:update_session_archived_seq, session_id, tenant_id, archived_seq},
-        _from,
-        state
-      )
-      when is_binary(session_id) and is_binary(tenant_id) and is_integer(archived_seq) do
-    case Map.get(state.sessions, session_id) do
-      %{tenant_id: ^tenant_id} = session ->
-        updated = Map.put(session, :archived_seq, archived_seq)
-        {:reply, :ok, %{state | sessions: Map.put(state.sessions, session_id, updated)}}
+  def handle_call({:archived_seq, session_id}, _from, state) do
+    reply =
+      case Map.has_key?(state.sessions, session_id) do
+        true ->
+          session_archived_seq =
+            state.writes
+            |> Enum.filter(&(&1.session_id == session_id))
+            |> Enum.map(& &1.seq)
+            |> Enum.max(fn -> 0 end)
 
-      _ ->
-        {:reply, {:error, :session_not_found}, state}
-    end
+          {:ok, session_archived_seq}
+
+        false ->
+          {:error, :session_not_found}
+      end
+
+    {:reply, reply, state}
   end
 
   @impl true
@@ -207,7 +205,6 @@ defmodule Starcite.Archive.IdempotentTestAdapter do
       tenant_id: tenant_id,
       creator_principal: Map.get(session, :creator_principal),
       metadata: metadata,
-      archived_seq: Map.get(session, :archived_seq, 0),
       created_at: created_at
     }
   end

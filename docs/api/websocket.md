@@ -94,8 +94,8 @@ Current lifecycle kinds include:
 - `session.freezing`
 - `session.frozen`
 
-Activation and freeze events include runtime fields such as `node`, `role`,
-`epoch`, `last_seq`, `archived_seq`, `reason`, and `occurred_at`.
+Runtime lifecycle events are tenant-scoped and intentionally minimal:
+`kind`, `session_id`, and `tenant_id`.
 
 Appended session events are available on `tail:<session_id>` and are not
 reinterpreted as lifecycle notifications.
