@@ -2,7 +2,7 @@ defmodule StarciteWeb.Endpoint do
   use Phoenix.Endpoint, otp_app: :starcite
 
   socket "/v1/socket", StarciteWeb.UserSocket,
-    websocket: true,
+    websocket: [check_origin: StarciteWeb.CORS.websocket_check_origin(origin: "*")],
     longpoll: false
 
   plug StarciteWeb.Plugs.EdgeStage, :start
