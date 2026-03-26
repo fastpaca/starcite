@@ -45,7 +45,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaTest do
     assert {:error, :archive_read_unavailable} = Schema.decode_event_chunk(body, "acme")
   end
 
-  test "decode_session rejects payloads without archived_seq" do
+  test "decode_session accepts legacy payloads without archived_seq" do
     legacy_body =
       Jason.encode!(%{
         id: "ses-1",
@@ -56,7 +56,9 @@ defmodule Starcite.Archive.Adapter.S3.SchemaTest do
         created_at: "2026-01-01T00:00:00Z"
       })
 
-    assert {:error, :archive_read_unavailable} = Schema.decode_session(legacy_body)
+    assert {:ok, session, true} = Schema.decode_session(legacy_body)
+    assert session.id == "ses-1"
+    assert session.metadata == %{}
   end
 
   test "decode_session_tenant_index rejects unsupported future schema versions" do

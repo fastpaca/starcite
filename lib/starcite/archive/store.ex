@@ -193,27 +193,21 @@ defmodule Starcite.Archive.Store do
     adapter_mod.upsert_session(session)
   end
 
-  @spec update_session_archived_seq(String.t(), String.t(), non_neg_integer()) ::
-          :ok | {:error, term()}
+  @spec archived_seq(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   @doc """
-  Persist archived progress for one session without querying live routing state.
+  Read archived progress for one session from the configured adapter.
   """
-  def update_session_archived_seq(session_id, tenant_id, archived_seq)
-      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-             tenant_id != "" and is_integer(archived_seq) and archived_seq >= 0 do
-    update_session_archived_seq(adapter(), session_id, tenant_id, archived_seq)
+  def archived_seq(session_id) when is_binary(session_id) and session_id != "" do
+    archived_seq(adapter(), session_id)
   end
 
-  @spec update_session_archived_seq(module(), String.t(), String.t(), non_neg_integer()) ::
-          :ok | {:error, term()}
+  @spec archived_seq(module(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   @doc """
-  Persist archived progress for one session with an explicit adapter.
+  Read archived progress for one session with an explicit adapter.
   """
-  def update_session_archived_seq(adapter_mod, session_id, tenant_id, archived_seq)
-      when is_atom(adapter_mod) and is_binary(session_id) and session_id != "" and
-             is_binary(tenant_id) and tenant_id != "" and is_integer(archived_seq) and
-             archived_seq >= 0 do
-    adapter_mod.update_session_archived_seq(session_id, tenant_id, archived_seq)
+  def archived_seq(adapter_mod, session_id)
+      when is_atom(adapter_mod) and is_binary(session_id) and session_id != "" do
+    adapter_mod.archived_seq(session_id)
   end
 
   @spec list_sessions(Adapter.session_query()) :: {:ok, Adapter.session_page()} | {:error, term()}

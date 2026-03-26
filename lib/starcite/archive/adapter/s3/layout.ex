@@ -37,6 +37,14 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
   @spec event_prefix(map()) :: String.t()
   def event_prefix(%{prefix: prefix}), do: "#{prefix}/#{@events_prefix}/"
 
+  @spec event_session_prefix(map(), String.t(), String.t()) :: String.t()
+  def event_session_prefix(%{prefix: prefix}, tenant_id, session_id),
+    do: "#{prefix}/#{@events_prefix}/#{encode(tenant_id)}/#{encode(session_id)}/"
+
+  @spec legacy_event_session_prefix(map(), String.t()) :: String.t()
+  def legacy_event_session_prefix(%{prefix: prefix}, session_id),
+    do: "#{prefix}/#{@events_prefix}/#{encode(session_id)}/"
+
   @spec session_prefix(map()) :: String.t()
   def session_prefix(%{prefix: prefix}), do: "#{prefix}/#{@sessions_prefix}/"
 

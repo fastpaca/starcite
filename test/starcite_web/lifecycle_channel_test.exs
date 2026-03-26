@@ -31,14 +31,8 @@ defmodule StarciteWeb.LifecycleChannelTest do
                metadata: %{workflow: "contract"}
              )
 
-    assert_push "lifecycle", %{
-      event: %{
-        kind: "session.activated",
-        session_id: ^session_id,
-        tenant_id: "acme",
-        reason: "created"
-      }
-    }
+    assert_push "lifecycle", %{event: event}
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
 
     assert_push "lifecycle", %{
       event: %{
@@ -90,14 +84,8 @@ defmodule StarciteWeb.LifecycleChannelTest do
                tenant_id: "acme"
              )
 
-    assert_push "lifecycle", %{
-      event: %{
-        kind: "session.activated",
-        session_id: ^session_id,
-        tenant_id: "acme",
-        reason: "created"
-      }
-    }
+    assert_push "lifecycle", %{event: event}
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
 
     assert_push "lifecycle", %{
       event: %{
@@ -110,29 +98,11 @@ defmodule StarciteWeb.LifecycleChannelTest do
     [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, session_id)
     ref = Process.monitor(pid)
 
-    assert_push "lifecycle",
-                %{
-                  event: %{
-                    kind: "session.freezing",
-                    session_id: ^session_id,
-                    tenant_id: "acme",
-                    role: "owner",
-                    reason: "idle_timeout"
-                  }
-                },
-                2_000
+    assert_push "lifecycle", %{event: event}, 2_000
+    assert event == %{kind: "session.freezing", session_id: session_id, tenant_id: "acme"}
 
-    assert_push "lifecycle",
-                %{
-                  event: %{
-                    kind: "session.frozen",
-                    session_id: ^session_id,
-                    tenant_id: "acme",
-                    role: "owner",
-                    reason: "idle_timeout"
-                  }
-                },
-                2_000
+    assert_push "lifecycle", %{event: event}, 2_000
+    assert event == %{kind: "session.frozen", session_id: session_id, tenant_id: "acme"}
 
     assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
     assert reason in [:normal, :shutdown]
@@ -146,29 +116,11 @@ defmodule StarciteWeb.LifecycleChannelTest do
 
     assert {:ok, _session} = SessionQuorum.get_session(session_id)
 
-    assert_push "lifecycle",
-                %{
-                  event: %{
-                    kind: "session.hydrating",
-                    session_id: ^session_id,
-                    tenant_id: "acme",
-                    role: "owner",
-                    reason: "hydrate"
-                  }
-                },
-                1_000
+    assert_push "lifecycle", %{event: event}, 1_000
+    assert event == %{kind: "session.hydrating", session_id: session_id, tenant_id: "acme"}
 
-    assert_push "lifecycle",
-                %{
-                  event: %{
-                    kind: "session.activated",
-                    session_id: ^session_id,
-                    tenant_id: "acme",
-                    role: "owner",
-                    reason: "hydrate"
-                  }
-                },
-                1_000
+    assert_push "lifecycle", %{event: event}, 1_000
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
   end
 
   test "does not push lifecycle events for another tenant" do

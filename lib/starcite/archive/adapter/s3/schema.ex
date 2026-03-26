@@ -265,13 +265,11 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
          "tenant_id" => tenant_id,
          "creator_principal" => creator_principal,
          "metadata" => metadata,
-         "archived_seq" => archived_seq,
          "created_at" => created_at
        })
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_binary(tenant_id) and tenant_id != "" and is_map(creator_principal) and
-              is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
-              is_binary(created_at) do
+              is_map(metadata) and is_binary(created_at) do
     {:ok,
      %{
        id: id,
@@ -279,7 +277,6 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
        tenant_id: tenant_id,
        creator_principal: creator_principal,
        metadata: metadata,
-       archived_seq: archived_seq,
        created_at: created_at
      }}
   end

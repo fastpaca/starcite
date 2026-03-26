@@ -31,8 +31,8 @@ defmodule Starcite.DataPlane.SessionStoreTest do
     session = Session.new("ses-store-2", creator_principal: principal())
     assert :ok = SessionStore.put_session(session)
 
-    {:appended, updated, _event} =
-      Session.append_event(session, %{
+    {:appended, updated, _producer_cursors, _event} =
+      Session.append_event(session, %{}, %{
         type: "content",
         payload: %{text: "one"},
         actor: "agent:test",

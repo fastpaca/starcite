@@ -4,11 +4,13 @@ defmodule Starcite.WritePath do
   """
 
   alias Phoenix.PubSub
+  alias Starcite.Archive.SessionCatalog
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{SessionQuorum, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
+  alias Starcite.Session.Header
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do
@@ -106,13 +108,17 @@ defmodule Starcite.WritePath do
               is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
               is_map(metadata) do
     with :ok <- SessionRouter.ensure_local_owner(id) do
-      session =
-        Session.new(id,
+      header =
+        Header.new(id,
           title: title,
           creator_principal: creator_principal,
           tenant_id: tenant_id,
           metadata: metadata
         )
+
+      session =
+        header
+        |> Session.new_from_header()
         |> assign_routing_epoch()
 
       case SessionQuorum.start_session(session) do
@@ -120,7 +126,7 @@ defmodule Starcite.WritePath do
           case SessionQuorum.replicate_state(session, []) do
             :ok ->
               :ok = SessionStore.put_session(session)
-              session_map = Session.to_map(session)
+              session_map = Session.to_map(session, header)
 
               :ok =
                 PubSub.broadcast(
@@ -304,17 +310,16 @@ defmodule Starcite.WritePath do
        when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
               is_struct(creator_principal, Principal) and is_binary(tenant_id) and tenant_id != "" and
               is_map(metadata) do
-    row = %{
-      id: id,
-      title: title,
-      creator_principal: creator_principal,
-      tenant_id: tenant_id,
-      metadata: metadata,
-      archived_seq: 0,
-      created_at: parse_utc_datetime!(created_at)
-    }
+    header =
+      Header.new(id,
+        title: title,
+        creator_principal: creator_principal,
+        tenant_id: tenant_id,
+        metadata: metadata,
+        timestamp: parse_naive_datetime!(created_at)
+      )
 
-    case Starcite.Archive.Store.upsert_session(row) do
+    case SessionCatalog.persist_created(header) do
       :ok -> :ok
       {:error, _reason} -> :ok
     end
@@ -326,9 +331,9 @@ defmodule Starcite.WritePath do
     Keyword.get(opts, :expected_seq)
   end
 
-  defp parse_utc_datetime!(value) when is_binary(value) do
+  defp parse_naive_datetime!(value) when is_binary(value) do
     case DateTime.from_iso8601(value) do
-      {:ok, datetime, _offset} -> datetime
+      {:ok, datetime, _offset} -> DateTime.to_naive(datetime)
       {:error, reason} -> raise ArgumentError, "invalid datetime: #{inspect(reason)}"
     end
   end

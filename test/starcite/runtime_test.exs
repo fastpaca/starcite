@@ -100,7 +100,6 @@ defmodule Starcite.RuntimeTest do
       {:ok, _session} = WritePath.create_session(id: id, creator_principal: principal)
       assert {:ok, loaded} = SessionStore.get_session(id)
       assert loaded.id == id
-      assert loaded.creator_principal == principal
     end
 
     test "auth lookup returns session store hit without raft/archive read-through" do
@@ -111,8 +110,6 @@ defmodule Starcite.RuntimeTest do
 
       assert {:ok, loaded} = ReadPath.get_session(id)
       assert loaded.id == id
-      assert loaded.creator_principal == principal
-      assert loaded.metadata["source"] == "cache"
     end
 
     test "create_session rolls back local owner/session cache when replication quorum fails" do
@@ -1010,13 +1007,11 @@ defmodule Starcite.RuntimeTest do
 
       flush_lifecycle_events()
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.freezing", session_id: ^id, reason: "idle_timeout"}},
-                     2_000
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.freezing", session_id: id, tenant_id: "acme"}
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.frozen", session_id: ^id, reason: "idle_timeout"}},
-                     2_000
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.frozen", session_id: id, tenant_id: "acme"}
 
       assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
       assert reason in [:normal, :shutdown]
@@ -1030,13 +1025,11 @@ defmodule Starcite.RuntimeTest do
 
       assert {:ok, %Session{id: ^id}} = SessionQuorum.get_session(id)
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.hydrating", session_id: ^id, reason: "hydrate"}},
-                     1_000
+      assert_receive {:session_lifecycle, event}, 1_000
+      assert event == %{kind: "session.hydrating", session_id: id, tenant_id: "acme"}
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.activated", session_id: ^id, reason: "hydrate"}},
-                     1_000
+      assert_receive {:session_lifecycle, event}, 1_000
+      assert event == %{kind: "session.activated", session_id: id, tenant_id: "acme"}
 
       [{new_pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
       assert is_pid(new_pid)
@@ -1077,13 +1070,11 @@ defmodule Starcite.RuntimeTest do
 
       assert {:ok, %{archived_seq: 1}} = WritePath.ack_archived(id, 1)
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.freezing", session_id: ^id, reason: "idle_timeout"}},
-                     2_000
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.freezing", session_id: id, tenant_id: "acme"}
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.frozen", session_id: ^id, reason: "idle_timeout"}},
-                     2_000
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.frozen", session_id: id, tenant_id: "acme"}
     end
 
     test "does not freeze dirty owner logs while unarchived events remain" do
@@ -1168,13 +1159,7 @@ defmodule Starcite.RuntimeTest do
       assert :ok = SessionStore.put_session(session)
       assert {:ok, %Session{id: ^id}} = SessionQuorum.get_session(id)
 
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.hydrating", session_id: ^id, role: "follower"}},
-                     1_000
-
-      assert_receive {:session_lifecycle,
-                      %{kind: "session.activated", session_id: ^id, role: "follower"}},
-                     1_000
+      refute_receive {:session_lifecycle, _event}, 200
 
       Process.sleep(250)
 
@@ -1292,7 +1277,6 @@ defmodule Starcite.RuntimeTest do
 
       assert {:ok, session} = ReadPath.get_session(id)
       assert session.id == id
-      assert session.title == "Race"
       assert session.last_seq == 0
       assert {:error, :session_exists} = WritePath.create_session(id: id, tenant_id: "acme")
     end

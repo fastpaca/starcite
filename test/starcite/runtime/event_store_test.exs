@@ -19,10 +19,10 @@ defmodule Starcite.DataPlane.EventStoreTest do
     def read_events(_session_id, _from_seq, _to_seq), do: {:error, :db_down}
 
     @impl true
-    def upsert_session(_session), do: :ok
+    def archived_seq(_session_id), do: {:ok, 0}
 
     @impl true
-    def update_session_archived_seq(_session_id, _tenant_id, _archived_seq), do: :ok
+    def upsert_session(_session), do: :ok
 
     @impl true
     def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
