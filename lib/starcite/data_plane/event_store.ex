@@ -5,7 +5,7 @@ defmodule Starcite.DataPlane.EventStore do
   `EventStore` composes two focused submodules:
 
   - `Starcite.DataPlane.EventQueue` for unarchived in-memory events
-  - `Starcite.Archive.Store` for archived reads and archived-read cache
+  - `Starcite.Storage.EventArchive` for archived reads and archived-read cache
 
   Memory pressure is enforced across both tiers. When local memory exceeds
   `event_store_max_bytes`, cached archived reads are reclaimed and pressure is
@@ -14,10 +14,10 @@ defmodule Starcite.DataPlane.EventStore do
 
   use GenServer
 
-  alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
   alias Starcite.DataPlane.EventQueue
   alias Starcite.Session.Event
+  alias Starcite.Storage.EventArchive
 
   @default_max_memory_bytes 2_147_483_648
   @default_capacity_check_interval 4
@@ -38,7 +38,7 @@ defmodule Starcite.DataPlane.EventStore do
   @doc false
   def init(_opts) do
     :ok = EventQueue.ensure_tables()
-    :ok = cache_archive_memory_bytes(Store.cache_memory_bytes_or_zero())
+    :ok = cache_archive_memory_bytes(EventArchive.cache_memory_bytes_or_zero())
     {:ok, %{capacity_check_pending?: false, capacity_check_context: nil}}
   end
 
@@ -126,7 +126,7 @@ defmodule Starcite.DataPlane.EventStore do
       when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 do
     case EventQueue.get_event(session_id, seq) do
       {:ok, event} -> {:ok, event}
-      :error -> Store.get_cached_event(session_id, seq)
+      :error -> EventArchive.get_cached_event(session_id, seq)
     end
   end
 
@@ -148,7 +148,7 @@ defmodule Starcite.DataPlane.EventStore do
   def read_archived_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    case Store.read_events(session_id, from_seq, to_seq) do
+    case EventArchive.read_events(session_id, from_seq, to_seq) do
       {:ok, _events} = ok ->
         :ok = refresh_archive_cache_memory_bytes()
         ok
@@ -164,7 +164,7 @@ defmodule Starcite.DataPlane.EventStore do
   @spec cache_archived_events(String.t(), [map()]) :: :ok
   def cache_archived_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
-    :ok = Store.cache_events(session_id, events)
+    :ok = EventArchive.cache_events(session_id, events)
     :ok = maybe_enforce_capacity()
     :ok = refresh_archive_cache_memory_bytes()
     :ok
@@ -223,7 +223,7 @@ defmodule Starcite.DataPlane.EventStore do
   @spec clear() :: :ok
   def clear do
     EventQueue.clear()
-    _ = Store.clear_cache()
+    _ = EventArchive.clear_cache()
     :ok = cache_archive_memory_bytes(0)
     _ = clear_runtime_state()
     :ok
@@ -365,7 +365,7 @@ defmodule Starcite.DataPlane.EventStore do
     pending_bytes = EventQueue.memory_bytes()
     target_total_bytes = reclaim_target_total_bytes(max_memory_bytes)
     target_cache_bytes = max(target_total_bytes - pending_bytes, 0)
-    :ok = Store.evict_cache_to_target_memory(target_cache_bytes)
+    :ok = EventArchive.evict_cache_to_target_memory(target_cache_bytes)
     :ok = refresh_archive_cache_memory_bytes()
     :ok
   end
@@ -397,14 +397,14 @@ defmodule Starcite.DataPlane.EventStore do
         bytes
 
       _ ->
-        bytes = Store.cache_memory_bytes_or_zero()
+        bytes = EventArchive.cache_memory_bytes_or_zero()
         :ok = cache_archive_memory_bytes(bytes)
         bytes
     end
   end
 
   defp refresh_archive_cache_memory_bytes do
-    Store.cache_memory_bytes_or_zero()
+    EventArchive.cache_memory_bytes_or_zero()
     |> cache_archive_memory_bytes()
   end
 

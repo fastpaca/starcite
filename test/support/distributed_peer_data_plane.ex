@@ -3,6 +3,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
 
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Routing.{Store, Watcher}
+  alias Starcite.Storage.EventArchive
 
   @registry Starcite.DataPlane.SessionLogRegistry
   @supervisor Starcite.DataPlane.SessionLogSupervisor
@@ -55,9 +56,12 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   end
 
   def ready? do
-    Enum.all?([@registry, @supervisor, Starcite.PubSub, Store, Watcher, EventStore], fn name ->
-      is_pid(Process.whereis(name))
-    end) and is_pid(Process.whereis(:starcite_session_store))
+    Enum.all?(
+      [@registry, @supervisor, Starcite.PubSub, Store, Watcher, EventArchive, EventStore],
+      fn name ->
+        is_pid(Process.whereis(name))
+      end
+    ) and is_pid(Process.whereis(:starcite_session_store))
   end
 
   defp run(caller, ref) when is_pid(caller) do
@@ -92,6 +96,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     :ok = start_process({Store, []})
     :ok = start_process({Watcher, []})
     :ok = start_process({SessionStore, []})
+    :ok = start_process({EventArchive, event_archive_opts()})
     :ok = start_process({EventStore, []})
     :ok
   end
@@ -99,6 +104,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   defp stop_runtime do
     reset_store_membership()
     :ok = stop_process(EventStore)
+    :ok = stop_process(EventArchive)
     :ok = stop_process(:starcite_session_store)
     :ok = stop_process(Watcher)
     :ok = stop_process(Store)
@@ -123,7 +129,12 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   defp start_child({Store, opts}), do: Store.start_link(opts)
   defp start_child({Watcher, opts}), do: Watcher.start_link(opts)
   defp start_child({SessionStore, opts}), do: SessionStore.start_link(opts)
+  defp start_child({EventArchive, opts}), do: EventArchive.start_link(opts)
   defp start_child({EventStore, opts}), do: EventStore.start_link(opts)
+
+  defp event_archive_opts do
+    Application.get_env(:starcite, :event_archive_opts, [])
+  end
 
   defp stop_process(name) when is_atom(name) do
     case Process.whereis(name) do

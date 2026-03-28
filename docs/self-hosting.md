@@ -9,11 +9,11 @@
 Starcite runs as a cluster of Starcite nodes (typically 3 or 5). When a client appends
 an event, the event is replicated to an in-memory group before the client gets an
 acknowledgment. That improves failover safety, but only durability comes from your
-configured archive backend.
+configured persistent stores.
 
-A background archiver flushes committed events to your chosen storage backend (S3 or
-Postgres) every few seconds. This is fully asynchronous — it never touches the hot
-path, so archive performance doesn't affect append latency.
+A background archiver flushes committed events to S3 every few seconds and advances
+`archived_seq` in the Postgres session catalog. This is fully asynchronous — it never
+touches the hot path, so storage performance doesn't affect append latency.
 
 Sessions are distributed across the cluster automatically. Clients don't need to know
 which node owns a session — any node can route the request to the active owner.
@@ -21,44 +21,46 @@ which node owns a session — any node can route the request to the active owner
 For the full picture of how sharding, replication, and recovery work internally, see
 [Architecture](architecture.md).
 
-## Choosing an archive backend
+## Persistent storage
 
-The archive backend stores committed events for long-term durability and historical
-replay. Appends never touch the archive on the hot path — they commit to replicated
-in-memory state and return immediately. Tail replay reads from a two-tier store: recent
-events come from memory (hot), older evicted events are fetched from the archive (cold).
+Starcite now has an opinionated split:
 
-In practice, most tail connections replay recent history and never hit the archive.
-But if a client reconnects with a very old cursor, archive read latency matters. Pick
-your backend based on operational simplicity and query needs.
+- Postgres stores the durable session catalog
+- S3 stores archived event payloads
 
-### S3 (recommended)
+The session catalog is one row per session. It stores static metadata plus the mutable
+`archived_seq` frontier used for cold hydrate. S3 stores immutable archived event
+chunks only.
+
+This split matters because:
+
+- cold hydrate reads metadata in `O(1)` from Postgres
+- archived event storage stays blob-friendly
+- we do not scan S3 prefixes to discover archive progress
+- we do not rewrite session metadata blobs on every archive flush
+
+### S3 event archive
 
 Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, Google Cloud
 Storage (via interop), etc.
 
-S3 is the right default because:
-- Archive writes are async — S3's write latency doesn't affect appends
-- Cold reads (old cursor replay) are rare and tolerate S3's read latency
-- No HA infrastructure to manage — the provider handles it
-- Scales to any data volume without schema migrations or connection pool tuning
-- Cheapest option at every scale
+S3 is used only for archived event chunks:
 
-Use this unless you have a specific reason not to.
+- archive writes are async, so S3 latency does not affect append ack latency
+- cold reads for old history tolerate blob-store latency
+- the storage layout is append-friendly and operationally simple
 
-### Postgres
+### Postgres session catalog
 
-Supported, but think carefully before choosing it.
+Postgres is required for durable session metadata and archive progress:
 
-Postgres makes sense if you need direct SQL access to archived event data — analytics
-dashboards, ad-hoc queries across sessions, that kind of thing. It also makes sense
-if you already operate a Postgres cluster and want to avoid adding another dependency.
+- session headers
+- tenant lookup
+- `archived_seq`
+- session listing/filtering
 
-The trade-offs are real though. You're now operating two distributed systems (Starcite
-+ Postgres). Postgres gives you faster cold reads when clients replay old history, but
-for most workloads the hot tier serves everything. And under write-heavy workloads,
-you'll need to tune connection pools and potentially deal with Postgres replication
-lag separately from Starcite's own replication.
+This is not the archived event store. It is the metadata store that makes cold
+rehydrate and queryable session listing cheap.
 
 ## Configuration
 

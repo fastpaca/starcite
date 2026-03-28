@@ -1,4 +1,4 @@
-defmodule Starcite.Archive.Adapter.S3.SchemaControl do
+defmodule Starcite.Storage.EventArchive.S3.SchemaControl do
   @moduledoc """
   Control-plane for S3 archive schema compatibility and manual migrations.
 
@@ -6,7 +6,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
   `SchemaControl.migrate/2` and the corresponding Mix task.
   """
 
-  alias Starcite.Archive.Adapter.S3.{Layout, Migrator, Schema}
+  alias Starcite.Storage.EventArchive.S3.{Layout, Migrator, Schema}
 
   @manifest_version 1
   @migration_status_running "running"
@@ -286,11 +286,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
   end
 
   defp archive_data_prefixes(config) when is_map(config) do
-    [
-      Layout.event_prefix(config),
-      Layout.session_prefix(config),
-      Layout.session_tenant_index_prefix(config)
-    ]
+    [Layout.event_prefix(config)]
   end
 
   defp bootstrap_manifest(config) when is_map(config) do
@@ -407,29 +403,16 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
   defp normalize_manifest_versions(%{"current_versions" => versions}) when is_map(versions) do
     baseline_versions = Schema.baseline_versions()
 
-    versions
-    |> Enum.reduce_while({:ok, %{}}, fn {kind, _value}, {:ok, acc} ->
-      case normalize_version_key(kind) do
-        {:ok, key} -> {:cont, {:ok, Map.put_new(acc, key, Map.get(versions, kind))}}
-        {:error, _reason} -> {:halt, {:error, :archive_schema_manifest_invalid}}
+    baseline_versions
+    |> Enum.reduce_while({:ok, %{}}, fn {kind, baseline_version}, {:ok, acc} ->
+      case Map.get(versions, Atom.to_string(kind), Map.get(versions, kind, baseline_version)) do
+        version when is_integer(version) and version > 0 ->
+          {:cont, {:ok, Map.put(acc, kind, version)}}
+
+        _invalid_version ->
+          {:halt, {:error, :archive_schema_manifest_invalid}}
       end
     end)
-    |> case do
-      {:ok, normalized} ->
-        baseline_versions
-        |> Enum.reduce_while({:ok, %{}}, fn {kind, baseline_version}, {:ok, acc} ->
-          case Map.get(normalized, kind, baseline_version) do
-            version when is_integer(version) and version > 0 ->
-              {:cont, {:ok, Map.put(acc, kind, version)}}
-
-            _invalid_version ->
-              {:halt, {:error, :archive_schema_manifest_invalid}}
-          end
-        end)
-
-      {:error, _reason} = error ->
-        error
-    end
   end
 
   defp normalize_manifest_versions(%{}), do: {:ok, Schema.baseline_versions()}
@@ -478,24 +461,6 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
 
   defp normalize_version_map(_raw), do: Schema.baseline_versions()
 
-  defp normalize_version_key(kind) when is_binary(kind) do
-    case kind do
-      "event_chunk" -> {:ok, :event_chunk}
-      "session" -> {:ok, :session}
-      "session_tenant_index" -> {:ok, :session_tenant_index}
-      _ -> {:error, :archive_schema_manifest_invalid}
-    end
-  end
-
-  defp normalize_version_key(kind) when is_atom(kind) do
-    case kind do
-      :event_chunk -> {:ok, :event_chunk}
-      :session -> {:ok, :session}
-      :session_tenant_index -> {:ok, :session_tenant_index}
-      _ -> {:error, :archive_schema_manifest_invalid}
-    end
-  end
-
   defp encode_manifest(manifest) when is_map(manifest) do
     Jason.encode!(%{
       manifest_version: @manifest_version,
@@ -529,11 +494,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
   end
 
   defp encode_versions(versions) when is_map(versions) do
-    %{
-      "event_chunk" => Map.fetch!(versions, :event_chunk),
-      "session" => Map.fetch!(versions, :session),
-      "session_tenant_index" => Map.fetch!(versions, :session_tenant_index)
-    }
+    %{"event_chunk" => Map.fetch!(versions, :event_chunk)}
   end
 
   defp maybe_put(map, _key, nil), do: map
@@ -542,12 +503,6 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControl do
   defp zero_stats(dry_run) when is_boolean(dry_run) do
     %{
       dry_run: dry_run,
-      index_scanned: 0,
-      index_migrations_needed: 0,
-      index_rewritten: 0,
-      session_scanned: 0,
-      session_migrations_needed: 0,
-      session_rewritten: 0,
       event_scanned: 0,
       event_migrations_needed: 0,
       event_rewritten: 0

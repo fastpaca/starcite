@@ -1,7 +1,7 @@
-defmodule Starcite.Archive.Adapter.S3.MigratorTest do
+defmodule Starcite.Storage.EventArchive.S3.MigratorTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Archive.Adapter.S3.{Migrator, Schema}
+  alias Starcite.Storage.EventArchive.S3.{Migrator, Schema}
 
   defmodule FakeClient do
     @store __MODULE__.Store
@@ -86,45 +86,14 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
     {:ok, config: config, bucket: bucket, prefix: prefix}
   end
 
-  test "rewrites legacy index and event chunk payloads", %{
+  test "rewrites legacy event chunk payloads", %{
     config: config,
     bucket: bucket,
     prefix: prefix
   } do
     session_id = "ses-migrator-1"
-    tenant_id = "acme"
     session_segment = encode_segment(session_id)
-    tenant_segment = encode_segment(tenant_id)
-
-    index_key = "#{prefix}/session-tenants/v1/#{session_segment}.json"
-    session_key = "#{prefix}/sessions/v1/#{tenant_segment}/#{session_segment}.json"
     legacy_event_key = "#{prefix}/events/v1/#{session_segment}/1.ndjson"
-
-    assert :ok =
-             FakeClient.put_object(
-               %{bucket: bucket},
-               index_key,
-               Jason.encode!(%{tenant_id: tenant_id})
-             )
-
-    assert :ok =
-             FakeClient.put_object(
-               %{bucket: bucket},
-               session_key,
-               Schema.encode_session(%{
-                 id: session_id,
-                 title: "Legacy",
-                 tenant_id: tenant_id,
-                 creator_principal: %{
-                   "id" => "svc",
-                   "type" => "service",
-                   "tenant_id" => tenant_id
-                 },
-                 metadata: %{},
-                 archived_seq: 0,
-                 created_at: "2026-01-01T00:00:00Z"
-               })
-             )
 
     assert :ok =
              FakeClient.put_object(
@@ -146,30 +115,14 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
              )
 
     assert {:ok, stats} = Migrator.run(config)
-    assert stats.index_migrations_needed == 1
-    assert stats.index_rewritten == 1
-    assert stats.session_migrations_needed == 0
-    assert stats.session_rewritten == 0
     assert stats.event_migrations_needed == 1
     assert stats.event_rewritten == 1
-
-    assert {:ok, {index_body, _etag}} = FakeClient.get_object(%{bucket: bucket}, index_key)
-    assert %{"schema_version" => version} = Jason.decode!(index_body)
-    assert version == Schema.session_tenant_index_schema_version()
-
-    assert {:ok, {session_body, _etag}} = FakeClient.get_object(%{bucket: bucket}, session_key)
-
-    assert %{"schema_version" => session_version, "session" => session_payload} =
-             Jason.decode!(session_body)
-
-    assert session_version == Schema.session_schema_version()
-    assert session_payload["id"] == session_id
 
     assert {:ok, {event_body, _etag}} = FakeClient.get_object(%{bucket: bucket}, legacy_event_key)
     [event_line] = String.split(event_body, "\n", trim: true)
     decoded_event = Jason.decode!(event_line)
     assert decoded_event["schema_version"] == Schema.event_schema_version()
-    assert decoded_event["tenant_id"] == tenant_id
+    refute Map.has_key?(decoded_event, "tenant_id")
   end
 
   test "fails migration on unsupported future schema", %{
@@ -178,15 +131,25 @@ defmodule Starcite.Archive.Adapter.S3.MigratorTest do
     prefix: prefix
   } do
     session_id = "ses-migrator-unsupported"
-    index_key = "#{prefix}/session-tenants/v1/#{encode_segment(session_id)}.json"
+    event_key = "#{prefix}/events/v1/#{encode_segment(session_id)}/1.ndjson"
 
     assert :ok =
              FakeClient.put_object(
                %{bucket: bucket},
-               index_key,
+               event_key,
                Jason.encode!(%{
-                 schema_version: Schema.session_tenant_index_schema_version() + 1,
-                 tenant_id: "acme"
+                 schema_version: Schema.event_schema_version() + 1,
+                 seq: 1,
+                 type: "content",
+                 payload: %{"n" => 1},
+                 actor: "agent:test",
+                 producer_id: "writer:test",
+                 producer_seq: 1,
+                 source: nil,
+                 metadata: %{},
+                 refs: %{},
+                 idempotency_key: nil,
+                 inserted_at: "2026-01-01T00:00:00"
                })
              )
 

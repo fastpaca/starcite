@@ -86,22 +86,25 @@ cache for replay acceleration.
 `archived_seq`) used by API/auth/read paths and owner rehydration after owner
 restarts.
 
-**Session catalog** - immutable archive header persisted once at create time
-(`id`, `tenant_id`, `title`, `creator_principal`, `metadata`, `created_at`).
-Cold hydrate rebuilds session state from this header plus the archived event
-head; it does not rewrite session metadata on every archive flush.
+**Session catalog** - one durable Postgres row per session. It stores static
+session metadata (`id`, `tenant_id`, `title`, optional creator columns,
+`metadata`, `created_at`) plus the mutable archival frontier (`archived_seq`).
+Cold hydrate reads this row, sets `last_seq = archived_seq`, and gets `epoch`
+from routing.
 
 ### Archiver
 
 ```mermaid
 graph LR
     E["Event Store (hot)"] -- "pull pending events" --> AR["Archiver"]
-    AR -- "write batch" --> S["S3 / Postgres"]
+    AR -- "write archived events" --> S["S3 Event Archive"]
+    AR -- "bulk update archived_seq" --> C["Postgres Session Catalog"]
     AR -- "ack_archived" --> O["Session Owner"]
 ```
 
-A background worker periodically flushes committed hot events to archive storage.
-After a successful flush, it calls archive ack on the local session log, which advances
+A background worker periodically flushes committed hot events to the S3 event archive
+and then bulk-updates `archived_seq` in the Postgres session catalog. After a
+successful flush, it calls archive ack on the local session log, which advances
 `archived_seq` and evicts archived hot entries.
 
 Archive writes are idempotent. Archiver failures do not block append/tail hot paths.

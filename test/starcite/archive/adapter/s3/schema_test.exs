@@ -1,7 +1,7 @@
-defmodule Starcite.Archive.Adapter.S3.SchemaTest do
+defmodule Starcite.Storage.EventArchive.S3.SchemaTest do
   use ExUnit.Case, async: true
 
-  alias Starcite.Archive.Adapter.S3.Schema
+  alias Starcite.Storage.EventArchive.S3.Schema
 
   test "decode_event_chunk migrates legacy unversioned rows with expected tenant" do
     body =
@@ -43,31 +43,5 @@ defmodule Starcite.Archive.Adapter.S3.SchemaTest do
       })
 
     assert {:error, :archive_read_unavailable} = Schema.decode_event_chunk(body, "acme")
-  end
-
-  test "decode_session accepts legacy payloads without archived_seq" do
-    legacy_body =
-      Jason.encode!(%{
-        id: "ses-1",
-        title: "Legacy",
-        tenant_id: "acme",
-        creator_principal: %{"id" => "svc", "type" => "service", "tenant_id" => "acme"},
-        metadata: %{},
-        created_at: "2026-01-01T00:00:00Z"
-      })
-
-    assert {:ok, session, true} = Schema.decode_session(legacy_body)
-    assert session.id == "ses-1"
-    assert session.metadata == %{}
-  end
-
-  test "decode_session_tenant_index rejects unsupported future schema versions" do
-    body =
-      Jason.encode!(%{
-        schema_version: Schema.session_tenant_index_schema_version() + 1,
-        tenant_id: "acme"
-      })
-
-    assert {:error, :archive_read_unavailable} = Schema.decode_session_tenant_index(body)
   end
 end

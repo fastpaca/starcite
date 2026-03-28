@@ -1,6 +1,6 @@
 import Config
 
-# Configure database for archive storage.
+# Configure Postgres for the durable session catalog.
 config :starcite, Starcite.Repo,
   url: System.get_env("DATABASE_URL") || "ecto://postgres:postgres@localhost:5432/starcite_dev",
   pool_size: 10,

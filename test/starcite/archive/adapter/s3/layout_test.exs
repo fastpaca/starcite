@@ -1,7 +1,7 @@
-defmodule Starcite.Archive.Adapter.S3.LayoutTest do
+defmodule Starcite.Storage.EventArchive.S3.LayoutTest do
   use ExUnit.Case, async: true
 
-  alias Starcite.Archive.Adapter.S3.Layout
+  alias Starcite.Storage.EventArchive.S3.Layout
 
   test "chunk boundaries follow cache-line aligned chunk size" do
     assert Layout.chunk_start_for(1, 256) == 1
@@ -49,18 +49,6 @@ defmodule Starcite.Archive.Adapter.S3.LayoutTest do
              "starcite/events/v1/#{session}/257.ndjson"
 
     assert Layout.event_prefix(config) == "starcite/events/v1/"
-
-    assert Layout.session_prefix(config) == "starcite/sessions/v1/"
-
-    assert Layout.session_key(config, "acme", "ses-1") ==
-             "starcite/sessions/v1/#{tenant}/#{session}.json"
-
-    assert Layout.legacy_session_key(config, "ses-1") == "starcite/sessions/v1/#{session}.json"
-
-    assert Layout.session_tenant_index_key(config, "ses-1") ==
-             "starcite/session-tenants/v1/#{session}.json"
-
-    assert Layout.session_tenant_index_prefix(config) == "starcite/session-tenants/v1/"
 
     assert Layout.schema_prefix(config) == "starcite/schema/"
     assert Layout.schema_meta_key(config) == "starcite/schema/meta.json"

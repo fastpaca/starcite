@@ -1,54 +1,20 @@
 defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
-  defmodule FailingWriteAdapter do
-    @behaviour Starcite.Archive.Adapter
-
-    use GenServer
-
-    @impl true
-    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{})
-
-    @impl true
-    def init(state), do: {:ok, state}
-
-    @impl true
-    def write_events(_rows), do: {:error, :db_down}
-
-    @impl true
-    def read_events(_session_id, _from_seq, _to_seq), do: {:ok, []}
-
-    @impl true
-    def archived_seq(_session_id), do: {:ok, 0}
-
-    @impl true
-    def upsert_session(_session), do: :ok
-
-    @impl true
-    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
-
-    @impl true
-    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
-  end
-
   alias Starcite.{ReadPath, WritePath}
   alias Starcite.DataPlane.EventStore
-  alias Starcite.Archive.IdempotentTestAdapter
+  alias Starcite.TestSupport.EventArchiveClient
 
   setup do
     # Ensure clean raft data for isolation
     Starcite.Runtime.TestHelper.reset()
+    :ok = EventArchiveClient.reset()
     Process.put(:producer_seq_counters, %{})
     :ok
   end
 
   test "flush archives and advances cursor via ack" do
-    # Start Archive with the test adapter (no Postgres)
-    {:ok, _pid} =
-      start_supervised(
-        {Starcite.Archive,
-         flush_interval_ms: 100, adapter: Starcite.Archive.TestAdapter, adapter_opts: []}
-      )
+    {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 100})
 
     session_id = "ses-arch-#{System.unique_integer([:positive, :monotonic])}"
     {:ok, _} = WritePath.create_session(id: session_id)
@@ -74,11 +40,7 @@ defmodule Starcite.ArchiveTest do
   end
 
   test "archive process fails loud on persistence write errors" do
-    {:ok, pid} =
-      start_supervised(
-        {Starcite.Archive,
-         flush_interval_ms: 10_000, adapter: FailingWriteAdapter, adapter_opts: []}
-      )
+    {:ok, pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
     ref = Process.monitor(pid)
 
@@ -92,6 +54,7 @@ defmodule Starcite.ArchiveTest do
         actor: "agent:test"
       })
 
+    :ok = EventArchiveClient.set_write_mode(:unavailable)
     send(pid, :flush_tick)
 
     assert_receive {:DOWN, ^ref, :process, ^pid, {%RuntimeError{}, _}}, 2_000
@@ -99,14 +62,7 @@ defmodule Starcite.ArchiveTest do
 
   describe "archive idempotency" do
     test "duplicate writes are idempotent" do
-      # Start Archive with test adapter that tracks writes
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 50})
 
       session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -123,13 +79,13 @@ defmodule Starcite.ArchiveTest do
       # Wait for first flush
       eventually(
         fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+          writes = EventArchiveClient.writes()
           assert length(writes) >= 3
         end,
         timeout: 2_000
       )
 
-      _first_count = length(Starcite.Archive.IdempotentTestAdapter.get_writes())
+      _first_count = length(EventArchiveClient.writes())
 
       # Trigger another flush cycle by waiting
       Process.sleep(100)
@@ -137,7 +93,7 @@ defmodule Starcite.ArchiveTest do
       # The adapter should have the same unique events (idempotent)
       eventually(
         fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+          writes = EventArchiveClient.writes()
 
           unique_keys =
             writes
@@ -152,13 +108,7 @@ defmodule Starcite.ArchiveTest do
     end
 
     test "retried writes succeed without duplicates" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 50})
 
       session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -173,7 +123,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+          writes = EventArchiveClient.writes()
 
           matching =
             Enum.filter(writes, fn row ->
@@ -189,13 +139,7 @@ defmodule Starcite.ArchiveTest do
     end
 
     test "archive respects sequence ordering" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 50,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 50})
 
       session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -212,7 +156,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          writes = Starcite.Archive.IdempotentTestAdapter.get_writes()
+          writes = EventArchiveClient.writes()
 
           session_writes =
             writes
@@ -230,15 +174,9 @@ defmodule Starcite.ArchiveTest do
 
   describe "pull-mode behavior" do
     test "interleaves flush order across tenants within a tick" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
-      :ok = IdempotentTestAdapter.clear_writes()
+      :ok = EventArchiveClient.reset()
 
       acme_a = "ses-acme-a-#{System.unique_integer([:positive, :monotonic])}"
       acme_b = "ses-acme-b-#{System.unique_integer([:positive, :monotonic])}"
@@ -268,7 +206,7 @@ defmodule Starcite.ArchiveTest do
       eventually(
         fn ->
           first_batches =
-            IdempotentTestAdapter.get_write_batches()
+            EventArchiveClient.write_batches()
             |> Enum.take(4)
 
           assert length(first_batches) == 4
@@ -285,15 +223,9 @@ defmodule Starcite.ArchiveTest do
     end
 
     test "archives pending work across multiple sessions in one scan loop" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
-      :ok = IdempotentTestAdapter.clear_writes()
+      :ok = EventArchiveClient.reset()
 
       session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
       session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
@@ -327,7 +259,7 @@ defmodule Starcite.ArchiveTest do
           assert session_a_state.archived_seq == session_a_state.last_seq
           assert session_b_state.archived_seq == session_b_state.last_seq
 
-          writes = IdempotentTestAdapter.get_writes()
+          writes = EventArchiveClient.writes()
           written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
 
           assert written_sessions == Enum.sort([session_a, session_b])
@@ -348,15 +280,9 @@ defmodule Starcite.ArchiveTest do
         end
       end)
 
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
-      :ok = IdempotentTestAdapter.clear_writes()
+      :ok = EventArchiveClient.reset()
 
       session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -374,7 +300,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          [first_batch | _] = IdempotentTestAdapter.get_write_batches()
+          [first_batch | _] = EventArchiveClient.write_batches()
           assert length(first_batch) == 2
         end,
         timeout: 1_500
@@ -389,7 +315,7 @@ defmodule Starcite.ArchiveTest do
           assert session.archived_seq == session.last_seq
 
           batch_sizes =
-            IdempotentTestAdapter.get_write_batches()
+            EventArchiveClient.write_batches()
             |> Enum.map(&length/1)
 
           assert batch_sizes == [2, 2, 1]
@@ -399,15 +325,9 @@ defmodule Starcite.ArchiveTest do
     end
 
     test "continues archiving new writes after a full ETS compaction" do
-      {:ok, _pid} =
-        start_supervised(
-          {Starcite.Archive,
-           flush_interval_ms: 10_000,
-           adapter: Starcite.Archive.IdempotentTestAdapter,
-           adapter_opts: []}
-        )
+      {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
-      :ok = IdempotentTestAdapter.clear_writes()
+      :ok = EventArchiveClient.reset()
 
       session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -448,7 +368,7 @@ defmodule Starcite.ArchiveTest do
           assert EventStore.session_size(session_id) == 0
 
           seqs =
-            IdempotentTestAdapter.get_writes()
+            EventArchiveClient.writes()
             |> Enum.filter(fn row -> row.session_id == session_id end)
             |> Enum.map(& &1.seq)
             |> Enum.uniq()

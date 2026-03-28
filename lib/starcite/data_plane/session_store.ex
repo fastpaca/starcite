@@ -5,13 +5,14 @@ defmodule Starcite.DataPlane.SessionStore do
   `SessionStore` serves session reads as hot/cold tiers:
 
   - hot: Cachex in-memory session cache
-  - cold: archive adapter lookup via `Starcite.Archive.Store`
+  - cold: durable session catalog lookup via `Starcite.Storage.SessionCatalog`
 
-  Cache misses hydrate from archive and populate cache for follow-up reads.
+  Cache misses hydrate from the durable session catalog and populate cache for
+  follow-up reads.
   """
 
-  alias Starcite.Archive.SessionCatalog
   alias Starcite.Session
+  alias Starcite.Storage.SessionCatalog
   import Cachex.Spec, only: [expiration: 1]
 
   @cache :starcite_session_store
@@ -63,7 +64,7 @@ defmodule Starcite.DataPlane.SessionStore do
   Resolution order:
 
   - local Cachex (hot)
-  - archive adapter (cold) with cache write-back on hit
+  - durable session catalog (cold) with cache write-back on hit
   """
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(session_id) when is_binary(session_id) and session_id != "" do

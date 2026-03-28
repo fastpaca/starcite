@@ -54,27 +54,27 @@ defmodule Mix.Tasks.Bench do
   end
 
   defp run_scenario(:hot_path) do
-    configure_local_archive_adapter()
+    configure_local_event_archive()
     Mix.Tasks.Bench.HotPath.run()
   end
 
   defp run_scenario(:single_session) do
-    configure_local_archive_adapter()
+    configure_local_event_archive()
     Mix.Tasks.Bench.SingleSession.run()
   end
 
   defp run_scenario(:routing) do
-    configure_local_archive_adapter()
+    configure_local_event_archive()
     Mix.Tasks.Bench.Routing.run()
   end
 
   defp run_scenario(:internal) do
-    configure_local_archive_adapter()
+    configure_local_event_archive()
     Mix.Tasks.Bench.Internal.run()
   end
 
   defp run_scenario(:k6) do
-    configure_local_archive_adapter()
+    configure_local_event_archive()
 
     case System.find_executable("k6") do
       nil ->
@@ -104,7 +104,7 @@ defmodule Mix.Tasks.Bench do
     |> Enum.join(", ")
   end
 
-  defp configure_local_archive_adapter do
+  defp configure_local_event_archive do
     default_opts = [
       bucket: System.get_env("BENCH_S3_BUCKET", "starcite-archive"),
       region: System.get_env("BENCH_S3_REGION", "us-east-1"),
@@ -114,12 +114,10 @@ defmodule Mix.Tasks.Bench do
       path_style: env_bool("BENCH_S3_PATH_STYLE", true)
     ]
 
-    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3)
-
     Application.put_env(
       :starcite,
-      :archive_adapter_opts,
-      Keyword.merge(default_opts, Application.get_env(:starcite, :archive_adapter_opts, []))
+      :event_archive_opts,
+      Keyword.merge(default_opts, Application.get_env(:starcite, :event_archive_opts, []))
     )
 
     ensure_bench_s3_schema_compatibility!()
@@ -129,10 +127,10 @@ defmodule Mix.Tasks.Bench do
     if env_bool("BENCH_S3_AUTO_MIGRATE_SCHEMA", true) do
       ensure_s3_client_apps_started!()
 
-      runtime_opts = Application.get_env(:starcite, :archive_adapter_opts, [])
-      config = Starcite.Archive.Adapter.S3.Config.build!(runtime_opts, [])
+      runtime_opts = Application.get_env(:starcite, :event_archive_opts, [])
+      config = Starcite.Storage.EventArchive.S3.Config.build!(runtime_opts, [])
 
-      case Starcite.Archive.Adapter.S3.SchemaControl.migrate(config, actor: "bench") do
+      case Starcite.Storage.EventArchive.S3.SchemaControl.migrate(config, actor: "bench") do
         {:ok, _stats} ->
           :ok
 

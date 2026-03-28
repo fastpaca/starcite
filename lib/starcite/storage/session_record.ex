@@ -1,6 +1,6 @@
-defmodule Starcite.Archive.SessionRecord do
+defmodule Starcite.Storage.SessionRecord do
   @moduledoc """
-  Ecto schema for archived session catalog entries.
+  Ecto schema for durable session catalog entries.
   """
 
   use Ecto.Schema
@@ -9,7 +9,8 @@ defmodule Starcite.Archive.SessionRecord do
   schema "sessions" do
     field(:title, :string)
     field(:tenant_id, :string)
-    field(:creator_principal, :map)
+    field(:creator_id, :string)
+    field(:creator_type, :string)
     field(:metadata, :map)
     field(:archived_seq, :integer)
     field(:created_at, :utc_datetime)

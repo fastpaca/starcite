@@ -6,12 +6,11 @@ defmodule Starcite.RuntimeTest do
   alias Starcite.Auth.Principal
   alias Starcite.Operations
   alias Starcite.{ReadPath, WritePath}
-  alias Starcite.Archive.{SessionCatalog, Store}
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Routing.Store, as: RoutingStore
   alias Starcite.Routing.Watcher
   alias Starcite.Session
-  alias Starcite.Repo
+  alias Starcite.Storage.{EventArchive, SessionCatalog}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -1575,36 +1574,12 @@ defmodule Starcite.RuntimeTest do
         }
       end)
 
-    case Store.adapter() do
-      Starcite.Archive.Adapter.Postgres ->
-        ensure_repo_sandbox()
+    rows =
+      Enum.zip(base_rows, events)
+      |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
 
-        rows =
-          if events_table_has_tenant_id?() do
-            Enum.zip(base_rows, events)
-            |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
-          else
-            base_rows
-          end
-
-        {count, _} =
-          Repo.insert_all(
-            "events",
-            rows,
-            on_conflict: :nothing,
-            conflict_target: [:session_id, :seq]
-          )
-
-        assert count == length(rows)
-
-      _other ->
-        rows =
-          Enum.zip(base_rows, events)
-          |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
-
-        assert {:ok, inserted} = Store.write_events(rows)
-        assert inserted == length(rows)
-    end
+    assert {:ok, inserted} = EventArchive.write_events(rows)
+    assert inserted == length(rows)
   end
 
   defp flush_archive_until(session_id, archived_seq)
@@ -1635,17 +1610,6 @@ defmodule Starcite.RuntimeTest do
           "event row missing tenant_id: #{inspect(Map.take(event, [:seq, :producer_id, :producer_seq]))}"
   end
 
-  defp events_table_has_tenant_id? do
-    result =
-      Ecto.Adapters.SQL.query!(
-        Repo,
-        "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'tenant_id' LIMIT 1",
-        []
-      )
-
-    result.num_rows > 0
-  end
-
   defp wait_for_process_restart(name, previous_pid, timeout_ms)
        when is_atom(name) and is_pid(previous_pid) and is_integer(timeout_ms) and timeout_ms > 0 do
     deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
@@ -1670,21 +1634,6 @@ defmodule Starcite.RuntimeTest do
 
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
-
-  defp ensure_repo_sandbox do
-    if Process.whereis(Repo) == nil do
-      _pid = start_supervised!(Repo)
-      :ok
-    end
-
-    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-      :ok -> :ok
-      {:already, _owner} -> :ok
-    end
-
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-    :ok
-  end
 
   defp flush_lifecycle_events do
     receive do
