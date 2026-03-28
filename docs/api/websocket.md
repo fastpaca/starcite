@@ -101,14 +101,14 @@ Join payload:
 
 - `cursor`
   - omit to start from the beginning of the retained stream
-  - otherwise provide the canonical cursor object `{ epoch, seq }`
+  - otherwise provide the last processed `seq`
 - `batch_size` (`1..1000`, default `1`) is an integer controlling how many replay events are delivered per push
 
 Example:
 
 ```js
 const channel = socket.channel(`tail:${sessionId}`, {
-  cursor: { epoch: 12, seq: 41 },
+  cursor: 41,
   batch_size: 128
 })
 
@@ -136,9 +136,8 @@ The channel emits `events` payloads:
 {
   "events": [
     {
-      "epoch": 12,
       "seq": 42,
-      "cursor": { "epoch": 12, "seq": 42 },
+      "cursor": 42,
       "type": "state",
       "payload": { "state": "running" },
       "actor": "agent:researcher",
@@ -169,15 +168,14 @@ When the requested cursor is outside active replay continuity, the channel emits
 {
   "type": "gap",
   "reason": "cursor_expired",
-  "from_cursor": { "epoch": 11, "seq": 120 },
-  "next_cursor": { "epoch": 12, "seq": 300 },
-  "committed_cursor": { "epoch": 12, "seq": 298 },
-  "earliest_available_cursor": { "epoch": 12, "seq": 301 }
+  "from_cursor": 120,
+  "next_cursor": 300,
+  "committed_cursor": 298,
+  "earliest_available_cursor": 301
 }
 ```
 
 `reason` values:
 
 - `cursor_expired`
-- `epoch_stale`
-- `rollback`
+- `resume_invalidated`

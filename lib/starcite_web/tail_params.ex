@@ -21,7 +21,8 @@ defmodule StarciteWeb.TailParams do
     end
   end
 
-  defp parse_cursor(%{"cursor" => cursor}) when is_map(cursor), do: Cursor.normalize(cursor)
+  defp parse_cursor(%{"cursor" => cursor}) when is_integer(cursor) and cursor >= 0,
+    do: Cursor.normalize(cursor)
 
   defp parse_cursor(params) when is_map(params) do
     if Map.has_key?(params, "cursor") do

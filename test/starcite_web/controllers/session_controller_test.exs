@@ -358,9 +358,9 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["seq"] == 1
       assert body["last_seq"] == 1
       assert body["deduped"] == false
-      assert is_integer(body["epoch"]) and body["epoch"] >= 0
-      assert body["cursor"] == %{"epoch" => body["epoch"], "seq" => 1}
-      assert body["committed_cursor"] == %{"epoch" => body["epoch"], "seq" => 0}
+      refute Map.has_key?(body, "epoch")
+      assert body["cursor"] == 1
+      assert body["committed_cursor"] == 0
     end
 
     test "expected_seq conflict returns 409" do

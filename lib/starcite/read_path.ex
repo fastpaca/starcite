@@ -213,7 +213,7 @@ defmodule Starcite.ReadPath do
        )
        when is_map(snapshot) and is_integer(cursor_seq) and cursor_seq >= 0 do
     cond do
-      cursor_epoch_mismatch?(cursor_epoch, snapshot.epoch) and cursor_seq > snapshot.last_seq ->
+      cursor_seq > snapshot.last_seq ->
         :rollback
 
       cursor_epoch_mismatch?(cursor_epoch, snapshot.epoch) ->

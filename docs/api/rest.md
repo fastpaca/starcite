@@ -72,19 +72,18 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
 - `actor` is derived from JWT `sub` when omitted; if provided, it must equal JWT `sub`
 - Response includes:
   - `seq`, `last_seq`, `deduped`
-  - `epoch`
-  - `cursor` (`{epoch, seq}` of the appended event)
-  - `committed_cursor` (current durable frontier for the session)
+  - `cursor` (`seq` of the appended event)
+  - `committed_cursor` (current durable frontier as `seq`)
 
 ## Behavioral rules
 
-- Append is sequenced per-session; response includes monotonic `seq` and lineage `epoch`.
+- Append is sequenced per-session; response includes monotonic `seq`.
 - On retry with same `(producer_id, producer_seq)`:
   - same payload content → dedupe response with `deduped: true`
   - same IDs + different payload → conflict error
 - `expected_seq` enables optimistic concurrency — if the session's current `seq`
   doesn't match, the append is rejected with `409`.
-- `tail` replay is ordered by active lineage (`epoch`, `seq`) and continues with live commits after replay.
+- `tail` replay is ordered by `seq` and continues with live commits after replay.
 - Resume discontinuities are explicit via WebSocket `gap` frames (never silent).
 
 ## Error shape

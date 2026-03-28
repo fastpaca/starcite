@@ -69,7 +69,7 @@ merges, deduplicates, and verifies gap-free order.
 **Live** - subscribes to cursor-update PubSub and pushes new events as they arrive.
 
 Cursor contract:
-- Cursor includes `(epoch, seq)`.
+- Public cursors are `seq` values.
 - Reconnects are resumable by cursor.
 - If replay continuity cannot be guaranteed, server emits explicit `gap` frames
   with `reason`, `from_cursor`, and `next_cursor`.
