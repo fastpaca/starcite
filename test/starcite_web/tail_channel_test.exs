@@ -33,6 +33,8 @@ defmodule StarciteWeb.TailChannelTest do
     assert_push "events", %{events: [%{seq: 1} = replay_event]}
     assert replay_event.type == "content"
     assert replay_event.payload == %{text: "replay"}
+    assert replay_event.cursor == 1
+    refute Map.has_key?(replay_event, :epoch)
     assert String.ends_with?(replay_event.inserted_at, "Z")
 
     {:ok, _} =
@@ -45,6 +47,8 @@ defmodule StarciteWeb.TailChannelTest do
     assert_push "events", %{events: [%{seq: 2} = live_event]}
     assert live_event.type == "state"
     assert live_event.payload == %{state: "running"}
+    assert live_event.cursor == 2
+    refute Map.has_key?(live_event, :epoch)
     assert String.ends_with?(live_event.inserted_at, "Z")
     assert socket.topic == "tail:#{session_id}"
   end
@@ -99,7 +103,7 @@ defmodule StarciteWeb.TailChannelTest do
              |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{})
   end
 
-  test "accepts canonical cursor object for resume" do
+  test "accepts seq cursor for resume" do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
@@ -115,23 +119,25 @@ defmodule StarciteWeb.TailChannelTest do
     {:ok, _, _socket} =
       socket(StarciteWeb.UserSocket, "client-5", %{auth: auth_context()})
       |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{
-        "cursor" => %{"epoch" => 0, "seq" => 1}
+        "cursor" => 1
       })
 
-    assert_push "events", %{events: [%{seq: 2, payload: %{text: "two"}}]}
+    assert_push "events", %{events: [%{seq: 2, cursor: 2, payload: %{text: "two"}}]}
   end
 
-  test "rejects legacy cursor and batch size shapes" do
+  test "rejects non-seq cursor and invalid batch size shapes" do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
     assert {:error, %{reason: "invalid_cursor"}} =
-             socket(StarciteWeb.UserSocket, "client-6", %{auth: auth_context()})
-             |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"cursor" => 0})
-
-    assert {:error, %{reason: "invalid_cursor"}} =
              socket(StarciteWeb.UserSocket, "client-7", %{auth: auth_context()})
              |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"cursor" => nil})
+
+    assert {:error, %{reason: "invalid_cursor"}} =
+             socket(StarciteWeb.UserSocket, "client-6", %{auth: auth_context()})
+             |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{
+               "cursor" => %{"epoch" => 0, "seq" => 0}
+             })
 
     assert {:error, %{reason: "invalid_tail_batch_size"}} =
              socket(StarciteWeb.UserSocket, "client-8", %{auth: auth_context()})

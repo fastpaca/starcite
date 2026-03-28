@@ -15,6 +15,7 @@ defmodule StarciteWeb.TailStream do
   alias Starcite.Observability.Telemetry
   alias Starcite.ReadPath
   alias StarciteWeb.Auth.Context
+  alias StarciteWeb.PublicPayload
 
   @replay_batch_size 1_000
   @catchup_interval_ms 5_000
@@ -393,32 +394,19 @@ defmodule StarciteWeb.TailStream do
     end
   end
 
-  defp emit_events(events, %{cursor_epoch: cursor_epoch} = state)
-       when is_list(events) and events != [] do
-    rendered_events = Enum.map(events, &render_event(&1, cursor_epoch))
+  defp emit_events(events, state) when is_list(events) and events != [] do
+    rendered_events = Enum.map(events, &render_event/1)
     {:emit, {:events, rendered_events}, state}
   end
 
   defp gap_payload(gap) when is_map(gap) do
-    %{
-      type: "gap",
-      reason: to_string(gap.reason),
-      from_cursor: gap.from_cursor,
-      next_cursor: gap.next_cursor,
-      committed_cursor: gap.committed_cursor,
-      earliest_available_cursor: gap.earliest_available_cursor
-    }
+    PublicPayload.gap(gap)
   end
 
-  defp render_event(event, fallback_epoch)
-       when is_map(event) and (is_integer(fallback_epoch) or is_nil(fallback_epoch)) do
-    epoch = event_epoch(event, fallback_epoch || 0)
-    seq = Map.get(event, :seq)
-
+  defp render_event(event) when is_map(event) do
     event
-    |> Map.put_new(:epoch, epoch)
-    |> Map.put_new(:cursor, Cursor.new(epoch, seq))
     |> Map.update(:inserted_at, nil, &iso8601_utc/1)
+    |> PublicPayload.event()
   end
 
   defp iso8601_utc(%NaiveDateTime{} = datetime) do

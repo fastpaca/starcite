@@ -129,10 +129,10 @@ Current coverage:
 
 ### Gap semantics
 - Resume discontinuity must be explicit via a `gap` frame.
-- Gap reasons are:
+- Public gap reasons are:
   - `cursor_expired`
-  - `rollback`
-  - `epoch_stale`
+  - `resume_invalidated`
+- Internal causes currently include stale-epoch resumes and rollback-style invalidation.
 - Gap metadata must include:
   - `from_cursor`
   - `next_cursor`

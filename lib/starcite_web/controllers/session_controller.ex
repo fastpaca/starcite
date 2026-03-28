@@ -13,6 +13,7 @@ defmodule StarciteWeb.SessionController do
   alias Starcite.Observability.Telemetry
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
+  alias StarciteWeb.PublicPayload
 
   action_fallback StarciteWeb.FallbackController
 
@@ -73,7 +74,7 @@ defmodule StarciteWeb.SessionController do
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_reply(id, event, expected_seq) do
       :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
-      {:ok, reply}
+      {:ok, PublicPayload.append_reply(reply)}
     else
       error ->
         :ok =

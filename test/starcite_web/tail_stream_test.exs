@@ -117,6 +117,8 @@ defmodule StarciteWeb.TailStreamTest do
              TailStream.handle_info({:cursor_update, update}, drained_state)
 
     assert event.payload == %{state: "running"}
+    assert event.cursor == 1
+    refute Map.has_key?(event, :epoch)
     assert String.ends_with?(event.inserted_at, "Z")
     assert next_state.cursor == 1
   end
@@ -159,7 +161,7 @@ defmodule StarciteWeb.TailStreamTest do
     assert next_state.cursor == 1
   end
 
-  test "emits rollback gap when stale epoch cursor points beyond active lineage head" do
+  test "maps stale epoch replay gaps to a public resume_invalidated reason" do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id)
 
@@ -175,11 +177,32 @@ defmodule StarciteWeb.TailStreamTest do
     assert {:emit, {:gap, gap}, next_state} =
              TailStream.handle_info(:drain_replay, stale_epoch_state)
 
-    assert gap.reason == "rollback"
-    assert gap.from_cursor == %{epoch: 99, seq: 10}
-    assert gap.next_cursor.seq == 1
+    assert gap.reason == "resume_invalidated"
+    assert gap.from_cursor == 10
+    assert gap.next_cursor == 1
     assert next_state.cursor == 1
-    assert next_state.cursor_epoch == gap.next_cursor.epoch
+    assert is_integer(next_state.cursor_epoch)
+    assert next_state.cursor_epoch >= 0
+  end
+
+  test "emits resume_invalidated when a public seq cursor is ahead of the active head" do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id)
+
+    {:ok, _} =
+      append_event(session_id, %{
+        type: "content",
+        payload: %{text: "one"},
+        actor: "agent:test"
+      })
+
+    assert {:emit, {:gap, gap}, next_state} =
+             TailStream.handle_info(:drain_replay, base_state(session_id, 10))
+
+    assert gap.reason == "resume_invalidated"
+    assert gap.from_cursor == 10
+    assert gap.next_cursor == 1
+    assert next_state.cursor == 1
   end
 
   test "emits cursor_expired gap when cursor falls below available floor" do
@@ -201,8 +224,8 @@ defmodule StarciteWeb.TailStreamTest do
              TailStream.handle_info(:drain_replay, base_state(session_id, 0))
 
     assert gap.reason == "cursor_expired"
-    assert gap.from_cursor == %{epoch: nil, seq: 0}
-    assert gap.next_cursor.seq == 2
+    assert gap.from_cursor == 0
+    assert gap.next_cursor == 2
     assert next_state.cursor == 2
   end
 
