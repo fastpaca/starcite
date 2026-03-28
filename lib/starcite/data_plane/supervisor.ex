@@ -18,12 +18,11 @@ defmodule Starcite.DataPlane.Supervisor do
         {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table
         {Starcite.DataPlane.EventStore, []},
+        {Starcite.Storage.EventArchive, event_archive_opts()},
         {Starcite.Archive,
          [
            name: archive_name(),
-           flush_interval_ms: archive_interval(),
-           adapter: Starcite.Archive.Store.adapter(),
-           adapter_opts: archive_adapter_opts()
+           flush_interval_ms: archive_interval()
          ]}
       ]
 
@@ -41,7 +40,7 @@ defmodule Starcite.DataPlane.Supervisor do
     end
   end
 
-  defp archive_adapter_opts, do: Application.get_env(:starcite, :archive_adapter_opts, [])
+  defp event_archive_opts, do: Application.get_env(:starcite, :event_archive_opts, [])
 
   defp archive_name, do: Application.get_env(:starcite, :archive_name, Starcite.Archive)
 end

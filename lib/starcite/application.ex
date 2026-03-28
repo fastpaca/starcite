@@ -18,7 +18,7 @@ defmodule Starcite.Application do
         prom_ex_spec(),
         # Cache used by DataPlane.EventStore for flushed event reads
         archive_read_cache_spec(),
-        # Ecto Repo for Postgres archive mode
+        # Ecto Repo for durable session catalog metadata
         repo_spec(),
         # PubSub before runtime
         pubsub_spec(),
@@ -59,11 +59,7 @@ defmodule Starcite.Application do
   end
 
   defp repo_spec do
-    if Starcite.Archive.Store.adapter() == Starcite.Archive.Adapter.Postgres do
-      Starcite.Repo
-    else
-      nil
-    end
+    Starcite.Repo
   end
 
   defp archive_read_cache_spec do

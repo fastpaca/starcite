@@ -191,7 +191,7 @@ for dedup. Tail replays ordered history, then continues live on the same connect
 1. You create a session. Starcite assigns it to a replicated cluster that holds the log in memory.
 2. Any producer appends an event. Starcite assigns the next `seq`, persists it across replicas, and acknowledges.
 3. Any consumer calls `tail(cursor=N)`. Starcite replays everything after `N`, then keeps streaming live events on the same connection.
-4. A background process archives committed events to S3 or Postgres — writes are never blocked by archival.
+4. A background process archives committed events to S3 and advances archive progress in Postgres — writes are never blocked by archival.
 
 The result:
 

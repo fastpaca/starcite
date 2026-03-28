@@ -4,13 +4,13 @@ defmodule Starcite.WritePath do
   """
 
   alias Phoenix.PubSub
-  alias Starcite.Archive.SessionCatalog
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{SessionQuorum, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
   alias Starcite.Session.Header
+  alias Starcite.Storage.SessionCatalog
 
   @spec create_session(keyword()) :: {:ok, map()} | {:error, term()}
   def create_session(opts \\ []) when is_list(opts) do

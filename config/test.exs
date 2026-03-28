@@ -25,6 +25,9 @@ config :starcite,
   cluster_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
   archive_name: Starcite.Runtime.Archive,
-  archive_adapter: Starcite.Archive.Adapter.Postgres,
-  archive_adapter_opts: [],
+  event_archive_opts: [
+    bucket: "starcite-test-archive",
+    prefix: "starcite-test",
+    client_mod: Starcite.TestSupport.EventArchiveClient
+  ],
   archive_flush_interval_ms: 3_600_000

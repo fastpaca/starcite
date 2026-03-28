@@ -9,8 +9,9 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.WritePath
   alias Starcite.Observability.Telemetry
+  alias Starcite.Storage.SessionCatalog
+  alias Starcite.WritePath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
@@ -161,7 +162,7 @@ defmodule StarciteWeb.SessionController do
   defp authorize_append(%Context{} = auth, _id), do: Policy.has_scope(auth, "session:append")
 
   @doc """
-  List known sessions from the configured archive adapter.
+  List known sessions from the durable session catalog.
   """
   def index(conn, params) do
     with {:ok, auth} <- fetch_auth(conn),
@@ -294,7 +295,7 @@ defmodule StarciteWeb.SessionController do
   defp validate_list(_params), do: {:error, :invalid_list_query}
 
   defp list_sessions(%Context{kind: :none}, opts) when is_map(opts) do
-    Starcite.Archive.Store.list_sessions(opts)
+    SessionCatalog.list_sessions(opts)
   end
 
   defp list_sessions(
@@ -306,7 +307,7 @@ defmodule StarciteWeb.SessionController do
          opts
        )
        when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
-    Starcite.Archive.Store.list_sessions(
+    SessionCatalog.list_sessions(
       opts
       |> Map.put(:tenant_id, tenant_id)
     )
@@ -322,7 +323,7 @@ defmodule StarciteWeb.SessionController do
        )
        when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
               session_id != "" and is_map(opts) do
-    Starcite.Archive.Store.list_sessions_by_ids(
+    SessionCatalog.list_sessions_by_ids(
       [session_id],
       opts
       |> Map.put(:tenant_id, tenant_id)

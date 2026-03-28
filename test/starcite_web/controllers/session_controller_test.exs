@@ -5,6 +5,7 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
+  alias Starcite.Repo
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
 
@@ -16,6 +17,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
   setup do
     Starcite.Runtime.TestHelper.reset()
+    ensure_repo_sandbox()
     previous_auth = Application.get_env(:starcite, @auth_env_key)
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
@@ -89,6 +91,21 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
     @endpoint.call(conn, @endpoint.init([]))
+  end
+
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
   end
 
   defp put_headers(conn, headers) when is_list(headers) do
@@ -328,6 +345,28 @@ defmodule StarciteWeb.SessionControllerTest do
 
       ids = [hd(body1["sessions"])["id"], hd(body2["sessions"])["id"]] |> Enum.sort()
       assert ids == Enum.sort([id1, id2])
+    end
+
+    test "lists sessions from the durable catalog without touching event archive reads" do
+      marker = unique_id("catalog-only")
+
+      id = unique_id("ses-catalog-http")
+
+      assert 201 ==
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => id,
+                   "metadata" => %{"marker" => marker}
+                 })
+               ).status
+
+      conn = json_conn(:get, "/v1/sessions?metadata[marker]=#{marker}", nil)
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert Enum.map(body["sessions"], & &1["id"]) == [id]
     end
 
     test "invalid limit returns 400" do

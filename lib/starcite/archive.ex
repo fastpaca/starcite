@@ -4,7 +4,7 @@ defmodule Starcite.Archive do
 
   - periodically scans local `EventStore` session cursors
   - archives local in-memory session-log buffers
-  - persists batches through `Starcite.Archive.Store`
+  - persists batches through `Starcite.Storage.EventArchive`
   - acknowledges archived progress via the local session log (`WritePath.ack_archived_local/2`)
 
   Archive persistence failures are treated as fatal for this worker: the process
@@ -13,13 +13,13 @@ defmodule Starcite.Archive do
 
   use GenServer
 
-  @dialyzer {:nowarn_function, [persist_rows: 5, put_archived_seq: 3]}
+  @dialyzer {:nowarn_function, [persist_rows: 4, put_archived_seq: 3, flush_session: 3]}
 
-  alias Starcite.Archive.Store
   alias Starcite.Observability.Telemetry
-  alias Starcite.{WritePath}
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Routing.Store, as: RoutingStore
+  alias Starcite.Storage.{EventArchive, SessionCatalog}
+  alias Starcite.WritePath
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -30,17 +30,12 @@ defmodule Starcite.Archive do
   @impl true
   def init(opts) do
     interval = Keyword.get(opts, :flush_interval_ms, 5_000)
-    adapter_mod = Keyword.get(opts, :adapter, Store.adapter())
-    adapter_opts = Keyword.get(opts, :adapter_opts, [])
-
-    {:ok, _} = adapter_mod.start_link(adapter_opts)
 
     schedule_flush(interval)
 
     {:ok,
      %{
        interval: interval,
-       adapter: adapter_mod,
        archived_seq_cache: %{},
        tenant_cache: %{}
      }}
@@ -56,22 +51,27 @@ defmodule Starcite.Archive do
 
     ordered_session_ids = fair_session_order(session_ids, state.tenant_cache)
 
-    {stats, archived_seq_cache, tenant_cache} =
+    {stats, archived_seq_cache, tenant_cache, progress_updates} =
       Enum.reduce(
         ordered_session_ids,
-        {zero_stats(), state.archived_seq_cache, state.tenant_cache},
-        fn session_id, {stats_acc, archived_seq_cache_acc, tenant_cache_acc} ->
-          {session_stats, archived_seq_cache_next, tenant_cache_next} =
-            flush_session(
-              session_id,
-              state.adapter,
-              archived_seq_cache_acc,
-              tenant_cache_acc
-            )
+        {zero_stats(), state.archived_seq_cache, state.tenant_cache, []},
+        fn session_id, {stats_acc, archived_seq_cache_acc, tenant_cache_acc, progress_acc} ->
+          {session_stats, archived_seq_cache_next, tenant_cache_next, progress_update} =
+            flush_session(session_id, archived_seq_cache_acc, tenant_cache_acc)
 
-          {merge_stats(stats_acc, session_stats), archived_seq_cache_next, tenant_cache_next}
+          progress_acc =
+            if is_map(progress_update), do: [progress_update | progress_acc], else: progress_acc
+
+          {
+            merge_stats(stats_acc, session_stats),
+            archived_seq_cache_next,
+            tenant_cache_next,
+            progress_acc
+          }
         end
       )
+
+    :ok = persist_progress_batch(progress_updates)
 
     archived_seq_cache = Map.take(archived_seq_cache, session_ids)
     tenant_cache = Map.take(tenant_cache, session_ids)
@@ -97,7 +97,6 @@ defmodule Starcite.Archive do
 
   defp flush_session(
          session_id,
-         adapter,
          archived_seq_cache,
          tenant_cache
        )
@@ -110,7 +109,7 @@ defmodule Starcite.Archive do
 
       cond do
         pending_before == 0 ->
-          {zero_stats(), archived_seq_cache, tenant_cache}
+          {zero_stats(), archived_seq_cache, tenant_cache, nil}
 
         true ->
           rows =
@@ -122,20 +121,29 @@ defmodule Starcite.Archive do
               rows,
               session_id,
               max_seq,
-              pending_before,
-              adapter
+              pending_before
             )
+
+          progress_update =
+            case next_archived_seq do
+              archived_seq when is_integer(archived_seq) and archived_seq >= 0 ->
+                %{session_id: session_id, archived_seq: archived_seq}
+
+              _other ->
+                nil
+            end
 
           {
             session_stats,
             put_archived_seq(archived_seq_cache, session_id, next_archived_seq),
-            put_session_tenant(tenant_cache, session_id, tenant_id)
+            put_session_tenant(tenant_cache, session_id, tenant_id),
+            progress_update
           }
       end
     else
       _ ->
         {zero_stats(), Map.delete(archived_seq_cache, session_id),
-         Map.delete(tenant_cache, session_id)}
+         Map.delete(tenant_cache, session_id), nil}
     end
   end
 
@@ -143,8 +151,7 @@ defmodule Starcite.Archive do
          [],
          _session_id,
          _max_seq,
-         pending_before,
-         _adapter
+         pending_before
        )
        when is_integer(pending_before) and pending_before > 0 do
     {%{zero_stats() | pending_after: pending_before, pending_sessions: 1}, nil, nil}
@@ -154,14 +161,13 @@ defmodule Starcite.Archive do
          rows,
          session_id,
          max_seq,
-         pending_before,
-         adapter
+         pending_before
        ) do
     tenant_id = archive_batch_tenant_id!(session_id, rows)
     attempted = length(rows)
     bytes_attempted = Enum.reduce(rows, 0, fn row, acc -> acc + approx_bytes(row) end)
 
-    case Store.write_events(adapter, rows) do
+    case EventArchive.write_events(rows) do
       {:ok, inserted} when is_integer(inserted) and inserted >= 0 ->
         :ok =
           EventStore.cache_archived_events(
@@ -221,7 +227,7 @@ defmodule Starcite.Archive do
         end
 
       {:ok, other} ->
-        raise "archive adapter returned invalid insert count for #{session_id}: #{inspect(other)}"
+        raise "event archive returned invalid insert count for #{session_id}: #{inspect(other)}"
 
       {:error, reason} ->
         raise "archive write failed for #{session_id}: #{inspect(reason)}"
@@ -328,6 +334,15 @@ defmodule Starcite.Archive do
   end
 
   defp put_session_tenant(cache, _session_id, _tenant_id), do: cache
+
+  defp persist_progress_batch([]), do: :ok
+
+  defp persist_progress_batch(progress_updates) when is_list(progress_updates) do
+    case SessionCatalog.put_progress_batch(progress_updates) do
+      :ok -> :ok
+      {:error, reason} -> raise "session progress update failed: #{inspect(reason)}"
+    end
+  end
 
   defp fair_session_order(session_ids, tenant_cache)
        when is_list(session_ids) and is_map(tenant_cache) do

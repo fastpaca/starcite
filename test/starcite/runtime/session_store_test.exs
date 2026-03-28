@@ -6,13 +6,10 @@ defmodule Starcite.DataPlane.SessionStoreTest do
   alias Starcite.Session
 
   setup do
-    original_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, Starcite.Archive.TestAdapter)
     SessionStore.clear()
 
     on_exit(fn ->
       SessionStore.clear()
-      Application.put_env(:starcite, :archive_adapter, original_adapter)
     end)
 
     :ok

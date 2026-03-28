@@ -10,11 +10,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
   - replicating committed session state to standby logs and waiting for quorum
   """
 
-  alias Starcite.Archive.SessionCatalog
   alias Starcite.DataPlane.{EventStore, SessionLog, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.{SessionRouter, Store}
   alias Starcite.Session
+  alias Starcite.Storage.SessionCatalog
 
   @dialyzer {:nowarn_function,
              [

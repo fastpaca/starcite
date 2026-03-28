@@ -5,7 +5,6 @@ defmodule StarciteWeb.TailControllerTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
-  alias Starcite.Archive.TestAdapter
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
 
@@ -16,9 +15,6 @@ defmodule StarciteWeb.TailControllerTest do
   @jwks_path "/.well-known/jwks.json"
 
   setup do
-    previous_archive_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, TestAdapter)
-
     Starcite.Runtime.TestHelper.reset()
 
     previous_auth = Application.get_env(:starcite, @auth_env_key)
@@ -47,12 +43,6 @@ defmodule StarciteWeb.TailControllerTest do
     Process.put(:default_auth_header, {"authorization", "Bearer #{token}"})
 
     on_exit(fn ->
-      if is_nil(previous_archive_adapter) do
-        Application.delete_env(:starcite, :archive_adapter)
-      else
-        Application.put_env(:starcite, :archive_adapter, previous_archive_adapter)
-      end
-
       if is_nil(previous_auth) do
         Application.delete_env(:starcite, @auth_env_key)
       else

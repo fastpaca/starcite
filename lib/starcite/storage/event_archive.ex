@@ -1,44 +1,57 @@
-defmodule Starcite.Archive.Store do
+defmodule Starcite.Storage.EventArchive do
   @moduledoc """
-  Archive persistence and archived-read cache abstraction.
+  Concrete archived event persistence and archived-read cache boundary.
 
-  Responsibilities:
-
-  - resolve the configured archive adapter
-  - persist archived event rows and session catalog rows
-  - serve archived reads with local cache-first behavior and persistence fallback
-  - manage archived-read cache memory/eviction primitives
+  Archived events are stored in S3 through `Starcite.Storage.EventArchive.S3`.
+  This module owns archived-read caching and tenant-aware reads on top of that
+  concrete storage.
   """
 
-  alias Starcite.Archive.Adapter
+  alias Starcite.DataPlane.SessionStore
+  alias Starcite.Storage.{EventArchive.S3, SessionCatalog}
 
-  @default_adapter Starcite.Archive.Adapter.S3
   @cache :starcite_archive_read_cache
   @default_cache_chunk_size 256
 
-  @spec adapter() :: module()
-  @doc """
-  Return the configured archive adapter module.
-  """
-  def adapter do
-    Application.get_env(:starcite, :archive_adapter, @default_adapter)
+  @spec child_spec(keyword()) :: Supervisor.child_spec()
+  def child_spec(opts) when is_list(opts) do
+    %{
+      id: __MODULE__,
+      start: {__MODULE__, :start_link, [opts]},
+      type: :worker
+    }
   end
 
-  @spec write_events([Adapter.event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @type event_row :: %{
+          required(:session_id) => String.t(),
+          required(:seq) => non_neg_integer(),
+          required(:type) => String.t(),
+          required(:payload) => map(),
+          required(:actor) => String.t(),
+          required(:producer_id) => String.t(),
+          required(:producer_seq) => pos_integer(),
+          required(:tenant_id) => String.t(),
+          optional(:source) => String.t() | nil,
+          required(:metadata) => map(),
+          required(:refs) => map(),
+          optional(:idempotency_key) => String.t() | nil,
+          required(:inserted_at) => NaiveDateTime.t()
+        }
+
+  @spec start_link(keyword()) :: GenServer.on_start()
   @doc """
-  Persist archive event rows using the configured adapter.
+  Start the concrete archived event storage runtime.
+  """
+  def start_link(opts \\ []) when is_list(opts) do
+    S3.start_link(opts)
+  end
+
+  @spec write_events([event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
+  @doc """
+  Persist archive event rows to the concrete event archive.
   """
   def write_events(rows) when is_list(rows) do
-    write_events(adapter(), rows)
-  end
-
-  @spec write_events(module(), [Adapter.event_row()]) ::
-          {:ok, non_neg_integer()} | {:error, term()}
-  @doc """
-  Persist archive event rows using an explicit adapter.
-  """
-  def write_events(adapter_mod, rows) when is_atom(adapter_mod) and is_list(rows) do
-    adapter_mod.write_events(rows)
+    S3.write_events(rows)
   end
 
   @spec read_events(String.t(), pos_integer(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
@@ -48,29 +61,28 @@ defmodule Starcite.Archive.Store do
   def read_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    read_events(adapter(), session_id, from_seq, to_seq)
-  end
+    case tenant_id_for(session_id) do
+      {:ok, tenant_id} ->
+        with {:ok, cached_by_seq, missing_ranges} <-
+               cached_events_and_missing_ranges(session_id, from_seq, to_seq),
+             {:ok, fetched_events} <-
+               fetch_missing_ranges(session_id, tenant_id, missing_ranges) do
+          :ok = cache_events(session_id, fetched_events)
 
-  @spec read_events(module(), String.t(), pos_integer(), pos_integer()) ::
-          {:ok, [map()]} | {:error, term()}
-  @doc """
-  Read archived events with an explicit adapter.
-  """
-  def read_events(adapter_mod, session_id, from_seq, to_seq)
-      when is_atom(adapter_mod) and is_binary(session_id) and session_id != "" and
-             is_integer(from_seq) and from_seq > 0 and is_integer(to_seq) and to_seq >= from_seq do
-    with {:ok, cached_by_seq, missing_ranges} <-
-           cached_events_and_missing_ranges(session_id, from_seq, to_seq),
-         {:ok, fetched_events} <- fetch_missing_ranges(adapter_mod, session_id, missing_ranges) do
-      :ok = cache_events(session_id, fetched_events)
+          merged =
+            cached_by_seq
+            |> Map.merge(Map.new(fetched_events, fn %{seq: seq} = event -> {seq, event} end))
+            |> Map.values()
+            |> Enum.sort_by(& &1.seq)
 
-      merged =
-        cached_by_seq
-        |> Map.merge(Map.new(fetched_events, fn %{seq: seq} = event -> {seq, event} end))
-        |> Map.values()
-        |> Enum.sort_by(& &1.seq)
+          {:ok, merged}
+        end
 
-      {:ok, merged}
+      {:error, :session_not_found} ->
+        {:ok, []}
+
+      {:error, _reason} = error ->
+        error
     end
   end
 
@@ -177,83 +189,34 @@ defmodule Starcite.Archive.Store do
     :ok
   end
 
-  @spec upsert_session(Adapter.session_row()) :: :ok | {:error, term()}
-  @doc """
-  Persist one session catalog row using the configured adapter.
-  """
-  def upsert_session(session) when is_map(session) do
-    upsert_session(adapter(), session)
-  end
+  defp fetch_missing_ranges(_session_id, _tenant_id, []), do: {:ok, []}
 
-  @spec upsert_session(module(), Adapter.session_row()) :: :ok | {:error, term()}
-  @doc """
-  Persist one session catalog row using an explicit adapter.
-  """
-  def upsert_session(adapter_mod, session) when is_atom(adapter_mod) and is_map(session) do
-    adapter_mod.upsert_session(session)
-  end
-
-  @spec archived_seq(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  @doc """
-  Read archived progress for one session from the configured adapter.
-  """
-  def archived_seq(session_id) when is_binary(session_id) and session_id != "" do
-    archived_seq(adapter(), session_id)
-  end
-
-  @spec archived_seq(module(), String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
-  @doc """
-  Read archived progress for one session with an explicit adapter.
-  """
-  def archived_seq(adapter_mod, session_id)
-      when is_atom(adapter_mod) and is_binary(session_id) and session_id != "" do
-    adapter_mod.archived_seq(session_id)
-  end
-
-  @spec list_sessions(Adapter.session_query()) :: {:ok, Adapter.session_page()} | {:error, term()}
-  @doc """
-  List sessions using the configured adapter.
-  """
-  def list_sessions(query_opts) when is_map(query_opts) do
-    list_sessions(adapter(), query_opts)
-  end
-
-  @spec list_sessions(module(), Adapter.session_query()) ::
-          {:ok, Adapter.session_page()} | {:error, term()}
-  @doc """
-  List sessions using an explicit adapter.
-  """
-  def list_sessions(adapter_mod, query_opts) when is_atom(adapter_mod) and is_map(query_opts) do
-    adapter_mod.list_sessions(query_opts)
-  end
-
-  @spec list_sessions_by_ids([String.t()], Adapter.session_query()) ::
-          {:ok, Adapter.session_page()} | {:error, term()}
-  @doc """
-  List sessions for an explicit set of IDs using the configured adapter.
-  """
-  def list_sessions_by_ids(ids, query_opts) when is_list(ids) and is_map(query_opts) do
-    list_sessions_by_ids(adapter(), ids, query_opts)
-  end
-
-  @spec list_sessions_by_ids(module(), [String.t()], Adapter.session_query()) ::
-          {:ok, Adapter.session_page()} | {:error, term()}
-  @doc """
-  List sessions for an explicit set of IDs using an explicit adapter.
-  """
-  def list_sessions_by_ids(adapter_mod, ids, query_opts)
-      when is_atom(adapter_mod) and is_list(ids) and is_map(query_opts) do
-    adapter_mod.list_sessions_by_ids(ids, query_opts)
-  end
-
-  defp fetch_missing_ranges(_adapter_mod, _session_id, []), do: {:ok, []}
-
-  defp fetch_missing_ranges(adapter_mod, session_id, [{from_seq, to_seq} | rest])
-       when is_atom(adapter_mod) and is_binary(session_id) and session_id != "" and
+  defp fetch_missing_ranges(session_id, tenant_id, [{from_seq, to_seq} | rest])
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and
               is_integer(from_seq) and from_seq > 0 and is_integer(to_seq) and to_seq >= from_seq do
-    with {:ok, events} <- adapter_mod.read_events(session_id, from_seq, to_seq),
-         {:ok, tail} <- fetch_missing_ranges(adapter_mod, session_id, rest) do
+    with {:ok, events} <- S3.read_events(session_id, tenant_id, from_seq, to_seq),
+         {:ok, tail} <- fetch_missing_ranges(session_id, tenant_id, rest) do
       {:ok, events ++ tail}
+    end
+  end
+
+  defp tenant_id_for(session_id) when is_binary(session_id) and session_id != "" do
+    case SessionStore.get_session_cached(session_id) do
+      {:ok, %{tenant_id: tenant_id}} when is_binary(tenant_id) and tenant_id != "" ->
+        {:ok, tenant_id}
+
+      :error ->
+        case SessionCatalog.get_tenant_id(session_id) do
+          {:ok, tenant_id} when is_binary(tenant_id) and tenant_id != "" ->
+            {:ok, tenant_id}
+
+          {:error, _reason} = error ->
+            error
+
+          _other ->
+            {:error, :session_not_found}
+        end
     end
   end
 
