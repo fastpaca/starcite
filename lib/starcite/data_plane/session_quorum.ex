@@ -27,6 +27,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
   @registry Starcite.DataPlane.SessionLogRegistry
   @supervisor Starcite.DataPlane.SessionLogSupervisor
   @call_timeout Application.compile_env(:starcite, :session_log_call_timeout_ms, 2_000)
+  @default_idle_timeout_ms 300_000
+  @default_idle_check_interval_ms 30_000
   @peer_bootstrap_rpc_timeout_ms Application.compile_env(
                                    :starcite,
                                    :session_log_peer_bootstrap_rpc_timeout_ms,
@@ -400,9 +402,17 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp start_log(%Session{} = session, start_reason) when is_atom(start_reason) do
+    opts = [
+      session: session,
+      start_reason: start_reason,
+      replicate_fun: &__MODULE__.replicate_state/3,
+      idle_timeout_ms: session_log_idle_timeout_ms(),
+      idle_check_interval_ms: session_log_idle_check_interval_ms()
+    ]
+
     case DynamicSupervisor.start_child(
            @supervisor,
-           {SessionLog, session: session, start_reason: start_reason}
+           {SessionLog, opts}
          ) do
       {:ok, pid} when is_pid(pid) ->
         {:ok, pid}
@@ -973,6 +983,37 @@ defmodule Starcite.DataPlane.SessionQuorum do
   defp primary_failure_reason([{_node, {:badrpc, _reason}} | _]), do: :badrpc
   defp primary_failure_reason([{_node, reason} | _]) when is_atom(reason), do: reason
   defp primary_failure_reason([_ | _]), do: :error
+
+  defp session_log_idle_timeout_ms do
+    case Application.get_env(:starcite, :session_log_idle_timeout_ms, @default_idle_timeout_ms) do
+      :infinity ->
+        :infinity
+
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_timeout_ms: #{inspect(value)} " <>
+                "(expected positive integer or :infinity)"
+    end
+  end
+
+  defp session_log_idle_check_interval_ms do
+    case Application.get_env(
+           :starcite,
+           :session_log_idle_check_interval_ms,
+           @default_idle_check_interval_ms
+         ) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for :session_log_idle_check_interval_ms: #{inspect(value)} " <>
+                "(expected positive integer)"
+    end
+  end
 
   defp replicas_for_replication(_session_id, %{replicas: replicas})
        when is_list(replicas) and replicas != [] do

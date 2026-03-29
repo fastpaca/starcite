@@ -8,7 +8,7 @@ defmodule Starcite.DataPlane.SessionLog do
 
   @behaviour :gen_batch_server
 
-  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
+  alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
@@ -16,28 +16,39 @@ defmodule Starcite.DataPlane.SessionLog do
   @registry Starcite.DataPlane.SessionLogRegistry
   @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
   @max_batch_size Application.compile_env(:starcite, :session_log_batch_max_size, 256)
-  @default_idle_timeout_ms 300_000
-  @default_idle_check_interval_ms 30_000
 
   @type role :: :owner | :follower
   @type data :: %{
           required(:session) => Session.t(),
           required(:producer_cursors) => map(),
+          required(:replicate_fun) => (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
           required(:role) => role(),
           required(:idle_timeout_ms) => pos_integer() | :infinity,
           required(:idle_check_interval_ms) => pos_integer(),
-          required(:last_activity_mono_ms) => integer()
+          required(:last_activity_mono_ms) => integer(),
+          required(:idle_timer_ref) => reference() | nil
         }
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
     start_reason = Keyword.get(opts, :start_reason, :startup)
+    replicate_fun = Keyword.fetch!(opts, :replicate_fun)
+    idle_timeout_ms = validate_idle_timeout_ms!(Keyword.fetch!(opts, :idle_timeout_ms))
+
+    idle_check_interval_ms =
+      validate_idle_check_interval_ms!(Keyword.fetch!(opts, :idle_check_interval_ms))
 
     :gen_batch_server.start_link(
       via(session.id),
       __MODULE__,
-      %{session: session, start_reason: start_reason},
+      %{
+        session: session,
+        start_reason: start_reason,
+        replicate_fun: replicate_fun,
+        idle_timeout_ms: idle_timeout_ms,
+        idle_check_interval_ms: idle_check_interval_ms
+      },
       min_batch_size: @min_batch_size,
       max_batch_size: @max_batch_size
     )
@@ -62,10 +73,15 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   @impl true
-  def init(%{session: %Session{} = session, start_reason: start_reason}) do
+  def init(%{
+        session: %Session{} = session,
+        start_reason: start_reason,
+        replicate_fun: replicate_fun,
+        idle_timeout_ms: idle_timeout_ms,
+        idle_check_interval_ms: idle_check_interval_ms
+      })
+      when is_function(replicate_fun, 3) do
     Process.flag(:message_queue_data, :off_heap)
-    idle_timeout_ms = idle_timeout_ms()
-    idle_check_interval_ms = idle_check_interval_ms()
 
     resolved_session =
       case SessionStore.get_session_cached(session.id) do
@@ -86,17 +102,22 @@ defmodule Starcite.DataPlane.SessionLog do
     end
 
     :ok = emit_lifecycle(log_session, role, "session.activated")
-    schedule_idle_tick(idle_timeout_ms, idle_check_interval_ms)
+    now = now_monotonic_ms()
 
-    {:ok,
-     %{
-       session: log_session,
-       producer_cursors: %{},
-       role: role,
-       idle_timeout_ms: idle_timeout_ms,
-       idle_check_interval_ms: idle_check_interval_ms,
-       last_activity_mono_ms: now_monotonic_ms()
-     }}
+    data =
+      %{
+        session: log_session,
+        producer_cursors: %{},
+        replicate_fun: replicate_fun,
+        role: role,
+        idle_timeout_ms: idle_timeout_ms,
+        idle_check_interval_ms: idle_check_interval_ms,
+        last_activity_mono_ms: now,
+        idle_timer_ref: nil
+      }
+      |> schedule_idle_tick()
+
+    {:ok, data}
   end
 
   @impl true
@@ -190,12 +211,18 @@ defmodule Starcite.DataPlane.SessionLog do
   defp collect_append_group(rest, _replicas, []), do: {[], rest}
   defp collect_append_group(rest, _replicas, acc), do: {Enum.reverse(acc), rest}
 
-  defp process_single({:info, :idle_tick}, data, actions) do
+  defp process_single(
+         {:info, {:timeout, idle_timer_ref, :idle_tick}},
+         %{idle_timer_ref: idle_timer_ref} = data,
+         actions
+       )
+       when is_reference(idle_timer_ref) do
+    data = %{data | idle_timer_ref: nil}
+
     if should_freeze?(data) do
       freeze_session(data)
     else
-      schedule_idle_tick(data.idle_timeout_ms, data.idle_check_interval_ms)
-      {data, actions}
+      {schedule_idle_tick(data), actions}
     end
   end
 
@@ -303,7 +330,7 @@ defmodule Starcite.DataPlane.SessionLog do
     {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
     next_session = normalize_session_epoch(updated_session)
 
-    case SessionQuorum.replicate_state(next_session, [], replicas) do
+    case replicate_state(data, next_session, [], replicas) do
       :ok ->
         evicted =
           evict_archived_events(next_session.id, previous_archived_seq, next_session.archived_seq)
@@ -572,7 +599,7 @@ defmodule Starcite.DataPlane.SessionLog do
          replicas
        )
        when is_list(events) do
-    case replicate_and_commit(next_session, events, replicas) do
+    case replicate_and_commit(data, next_session, events, replicas) do
       {:ok, publish_session} ->
         reply =
           finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
@@ -606,7 +633,7 @@ defmodule Starcite.DataPlane.SessionLog do
          replicas
        )
        when is_list(committed_events) do
-    case replicate_and_commit(next_session, committed_events, replicas) do
+    case replicate_and_commit(data, next_session, committed_events, replicas) do
       {:ok, publish_session} ->
         reply_actions =
           Enum.map(outcomes, fn outcome ->
@@ -626,8 +653,8 @@ defmodule Starcite.DataPlane.SessionLog do
     end
   end
 
-  defp replicate_and_commit(next_session, events, replicas)
-       when is_struct(next_session, Session) and is_list(events) do
+  defp replicate_and_commit(data, next_session, events, replicas)
+       when is_map(data) and is_struct(next_session, Session) and is_list(events) do
     :ok =
       Telemetry.append_boundary(
         next_session.id,
@@ -636,7 +663,7 @@ defmodule Starcite.DataPlane.SessionLog do
         length(events)
       )
 
-    with :ok <- SessionQuorum.replicate_state(next_session, events, replicas) do
+    with :ok <- replicate_state(data, next_session, events, replicas) do
       commit_session(next_session, events)
     end
   end
@@ -910,7 +937,10 @@ defmodule Starcite.DataPlane.SessionLog do
   defp event_principal_tenant_id(_metadata), do: nil
 
   defp activity_batch?(batch) when is_list(batch) do
-    Enum.any?(batch, &match?({:call, _from, _message}, &1))
+    Enum.any?(batch, fn
+      {:call, _from, message} -> activity_message?(message)
+      _other -> false
+    end)
   end
 
   # Idle detection is based on elapsed time, not `{epoch, seq}`. Read activity
@@ -918,6 +948,14 @@ defmodule Starcite.DataPlane.SessionLog do
   defp touch_activity(%{last_activity_mono_ms: _last} = data) do
     %{data | last_activity_mono_ms: now_monotonic_ms()}
   end
+
+  # Only user-facing reads/writes keep a session resident. Internal quorum and
+  # archiver calls must not pin a log in memory by accident.
+  defp activity_message?(:get_session), do: true
+  defp activity_message?(:fetch_cursor_snapshot), do: true
+  defp activity_message?({:append_event, _input, _expected_seq, _replicas}), do: true
+  defp activity_message?({:append_events, _inputs, _expected_seq, _replicas}), do: true
+  defp activity_message?(_message), do: false
 
   defp should_freeze?(%{
          role: :owner,
@@ -938,7 +976,6 @@ defmodule Starcite.DataPlane.SessionLog do
     :ok = emit_lifecycle(session, role, "session.freezing")
     :ok = Telemetry.session_freeze(session.id, session.tenant_id, :ok, :idle_timeout)
     :ok = emit_lifecycle(session, role, "session.frozen")
-    :ok = SessionQuorum.stop_session(session.id)
     {:stop, :normal}
   end
 
@@ -949,44 +986,62 @@ defmodule Starcite.DataPlane.SessionLog do
     max(now_monotonic_ms() - last_activity_mono_ms, 0)
   end
 
-  defp schedule_idle_tick(:infinity, _check_interval_ms), do: :ok
+  defp schedule_idle_tick(%{idle_timeout_ms: :infinity} = data) do
+    cancel_idle_tick(data.idle_timer_ref)
+    %{data | idle_timer_ref: nil}
+  end
 
-  defp schedule_idle_tick(idle_timeout_ms, check_interval_ms)
-       when is_integer(idle_timeout_ms) and idle_timeout_ms > 0 and is_integer(check_interval_ms) and
-              check_interval_ms > 0 do
-    Process.send_after(self(), :idle_tick, min(idle_timeout_ms, check_interval_ms))
+  defp schedule_idle_tick(
+         %{idle_timeout_ms: idle_timeout_ms, idle_check_interval_ms: check_interval_ms} = data
+       )
+       when is_integer(idle_timeout_ms) and idle_timeout_ms > 0 and
+              is_integer(check_interval_ms) and check_interval_ms > 0 do
+    cancel_idle_tick(data.idle_timer_ref)
+
+    idle_timer_ref =
+      :erlang.start_timer(min(idle_timeout_ms, check_interval_ms), self(), :idle_tick)
+
+    %{data | idle_timer_ref: idle_timer_ref}
+  end
+
+  defp cancel_idle_tick(idle_timer_ref) do
+    if is_reference(idle_timer_ref) do
+      _ = :erlang.cancel_timer(idle_timer_ref, [{:async, false}, {:info, false}])
+    end
+
     :ok
   end
 
-  defp idle_timeout_ms do
-    case Application.get_env(:starcite, :session_log_idle_timeout_ms, @default_idle_timeout_ms) do
-      :infinity ->
-        :infinity
+  defp validate_idle_timeout_ms!(:infinity), do: :infinity
 
-      value when is_integer(value) and value > 0 ->
-        value
-
-      value ->
-        raise ArgumentError,
-              "invalid value for :session_log_idle_timeout_ms: #{inspect(value)} " <>
-                "(expected positive integer or :infinity)"
-    end
+  defp validate_idle_timeout_ms!(value) when is_integer(value) and value > 0 do
+    value
   end
 
-  defp idle_check_interval_ms do
-    case Application.get_env(
-           :starcite,
-           :session_log_idle_check_interval_ms,
-           @default_idle_check_interval_ms
-         ) do
-      value when is_integer(value) and value > 0 ->
-        value
+  defp validate_idle_timeout_ms!(value) do
+    raise ArgumentError,
+          "invalid value for :idle_timeout_ms: #{inspect(value)} " <>
+            "(expected positive integer or :infinity)"
+  end
 
-      value ->
-        raise ArgumentError,
-              "invalid value for :session_log_idle_check_interval_ms: #{inspect(value)} " <>
-                "(expected positive integer)"
-    end
+  defp validate_idle_check_interval_ms!(value) when is_integer(value) and value > 0 do
+    value
+  end
+
+  defp validate_idle_check_interval_ms!(value) do
+    raise ArgumentError,
+          "invalid value for :idle_check_interval_ms: #{inspect(value)} " <>
+            "(expected positive integer)"
+  end
+
+  defp replicate_state(
+         %{replicate_fun: replicate_fun},
+         %Session{} = session,
+         events,
+         replicas
+       )
+       when is_function(replicate_fun, 3) and is_list(events) and is_list(replicas) do
+    replicate_fun.(session, events, replicas)
   end
 
   defp emit_lifecycle(%Session{} = session, :owner, kind) when is_binary(kind) and kind != "" do

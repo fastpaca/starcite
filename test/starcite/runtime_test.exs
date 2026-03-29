@@ -1035,6 +1035,42 @@ defmodule Starcite.RuntimeTest do
       refute new_pid == pid
     end
 
+    test "does not treat archive cursor reads as session activity" do
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      on_exit(fn ->
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 180)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      id = unique_id("ses-idle-archive-read")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+      flush_lifecycle_events()
+
+      Process.sleep(40)
+      assert {:ok, 0} = SessionQuorum.fetch_archived_seq(id)
+
+      Process.sleep(40)
+      assert {:ok, 0} = SessionQuorum.fetch_archived_seq(id)
+
+      Process.sleep(40)
+      assert {:ok, 0} = SessionQuorum.fetch_archived_seq(id)
+
+      assert_receive {:session_lifecycle, event}, 120
+      assert event == %{kind: "session.freezing", session_id: id, tenant_id: "acme"}
+
+      assert_receive {:session_lifecycle, event}, 120
+      assert event == %{kind: "session.frozen", session_id: id, tenant_id: "acme"}
+    end
+
     test "freezes once the archive cursor catches up after a dirty interval" do
       original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
 
