@@ -9,11 +9,13 @@ defmodule Starcite.DataPlane.Supervisor do
   def init(_arg) do
     children =
       [
-        # Session log registry (one log process per session replica)
-        {Registry, keys: :unique, name: Starcite.DataPlane.SessionLogRegistry},
-        # Dynamic supervisor for session log processes
+        # Session runtime registry (one runtime process per loaded session replica)
+        {Registry, keys: :unique, name: Starcite.DataPlane.SessionRuntimeRegistry},
+        # Dynamic supervisor for session runtime processes
         {DynamicSupervisor,
-         strategy: :one_for_one, name: Starcite.DataPlane.SessionLogSupervisor},
+         strategy: :one_for_one, name: Starcite.DataPlane.SessionRuntimeSupervisor},
+        # Session log registry (one loaded log process per session replica)
+        {Registry, keys: :unique, name: Starcite.DataPlane.SessionLogRegistry},
         # Stable owner for Cachex-backed session store (control-plane/lifecycle use)
         {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table

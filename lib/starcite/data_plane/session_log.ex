@@ -10,7 +10,6 @@ defmodule Starcite.DataPlane.SessionLog do
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
   alias Starcite.Observability.Telemetry
-  alias Starcite.Routing.SessionRouter
   alias Starcite.Session
 
   @registry Starcite.DataPlane.SessionLogRegistry
@@ -22,36 +21,17 @@ defmodule Starcite.DataPlane.SessionLog do
           required(:session) => Session.t(),
           required(:producer_cursors) => map(),
           required(:replicate_fun) => (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
-          required(:role) => role(),
-          required(:idle_timeout_ms) => pos_integer() | :infinity,
-          required(:idle_check_interval_ms) => pos_integer(),
-          required(:last_activity_mono_ms) => integer(),
-          required(:idle_timer_ref) => reference() | nil
+          required(:role) => role()
         }
 
   @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
-    start_reason = Keyword.get(opts, :start_reason, :startup)
+    role = Keyword.fetch!(opts, :role)
     replicate_fun = Keyword.fetch!(opts, :replicate_fun)
-    idle_timeout_ms = validate_idle_timeout_ms!(Keyword.fetch!(opts, :idle_timeout_ms))
+    name = Keyword.get(opts, :name)
 
-    idle_check_interval_ms =
-      validate_idle_check_interval_ms!(Keyword.fetch!(opts, :idle_check_interval_ms))
-
-    :gen_batch_server.start_link(
-      via(session.id),
-      __MODULE__,
-      %{
-        session: session,
-        start_reason: start_reason,
-        replicate_fun: replicate_fun,
-        idle_timeout_ms: idle_timeout_ms,
-        idle_check_interval_ms: idle_check_interval_ms
-      },
-      min_batch_size: @min_batch_size,
-      max_batch_size: @max_batch_size
-    )
+    start_batch_server(name, %{session: session, role: role, replicate_fun: replicate_fun})
   end
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -75,55 +55,23 @@ defmodule Starcite.DataPlane.SessionLog do
   @impl true
   def init(%{
         session: %Session{} = session,
-        start_reason: start_reason,
-        replicate_fun: replicate_fun,
-        idle_timeout_ms: idle_timeout_ms,
-        idle_check_interval_ms: idle_check_interval_ms
+        role: role,
+        replicate_fun: replicate_fun
       })
-      when is_function(replicate_fun, 3) do
+      when is_function(replicate_fun, 3) and role in [:owner, :follower] do
     Process.flag(:message_queue_data, :off_heap)
 
-    resolved_session =
-      case SessionStore.get_session_cached(session.id) do
-        {:ok, %Session{} = loaded} -> loaded
-        :error -> session
-      end
-
-    log_session =
-      resolved_session
-      |> normalize_session_epoch()
-      |> apply_routing_epoch()
-
-    role = role_for_session(log_session.id)
-
-    if start_reason == :hydrate do
-      :ok = emit_lifecycle(log_session, role, "session.hydrating")
-      :ok = Telemetry.session_hydrate(log_session.id, log_session.tenant_id, :ok, :hydrate)
-    end
-
-    :ok = emit_lifecycle(log_session, role, "session.activated")
-    now = now_monotonic_ms()
-
-    data =
-      %{
-        session: log_session,
-        producer_cursors: %{},
-        replicate_fun: replicate_fun,
-        role: role,
-        idle_timeout_ms: idle_timeout_ms,
-        idle_check_interval_ms: idle_check_interval_ms,
-        last_activity_mono_ms: now,
-        idle_timer_ref: nil
-      }
-      |> schedule_idle_tick()
-
-    {:ok, data}
+    {:ok,
+     %{
+       session: normalize_session_epoch(session),
+       producer_cursors: %{},
+       replicate_fun: replicate_fun,
+       role: role
+     }}
   end
 
   @impl true
   def handle_batch(batch, data) when is_list(batch) do
-    data = if activity_batch?(batch), do: touch_activity(data), else: data
-
     case process_batch(batch, data, []) do
       {:stop, reason} ->
         {:stop, reason}
@@ -210,21 +158,6 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp collect_append_group(rest, _replicas, []), do: {[], rest}
   defp collect_append_group(rest, _replicas, acc), do: {Enum.reverse(acc), rest}
-
-  defp process_single(
-         {:info, {:timeout, idle_timer_ref, :idle_tick}},
-         %{idle_timer_ref: idle_timer_ref} = data,
-         actions
-       )
-       when is_reference(idle_timer_ref) do
-    data = %{data | idle_timer_ref: nil}
-
-    if should_freeze?(data) do
-      freeze_session(data)
-    else
-      {schedule_idle_tick(data), actions}
-    end
-  end
 
   defp process_single({:info, _message}, data, actions), do: {data, actions}
 
@@ -687,13 +620,6 @@ defmodule Starcite.DataPlane.SessionLog do
     {:ok, publish_session}
   end
 
-  defp role_for_session(session_id) when is_binary(session_id) and session_id != "" do
-    case SessionRouter.ensure_local_owner(session_id) do
-      :ok -> :owner
-      _other -> :follower
-    end
-  end
-
   defp cursor_snapshot(%Session{} = session) do
     %{
       epoch: session.epoch,
@@ -781,14 +707,6 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp normalize_session_epoch(%Session{} = session), do: %Session{session | epoch: 0}
-
-  defp apply_routing_epoch(%Session{id: session_id} = session)
-       when is_binary(session_id) and session_id != "" do
-    normalized_session = normalize_session_epoch(session)
-    fallback_epoch = normalize_epoch(normalized_session.epoch)
-    routing_epoch = SessionRouter.local_owner_epoch(session_id, fallback_epoch)
-    %Session{normalized_session | epoch: routing_epoch}
-  end
 
   defp put_event_epoch(nil, _epoch), do: nil
 
@@ -936,104 +854,6 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp event_principal_tenant_id(_metadata), do: nil
 
-  defp activity_batch?(batch) when is_list(batch) do
-    Enum.any?(batch, fn
-      {:call, _from, message} -> activity_message?(message)
-      _other -> false
-    end)
-  end
-
-  # Idle detection is based on elapsed time, not `{epoch, seq}`. Read activity
-  # can keep a session hot without advancing the session cursor.
-  defp touch_activity(%{last_activity_mono_ms: _last} = data) do
-    %{data | last_activity_mono_ms: now_monotonic_ms()}
-  end
-
-  # Only user-facing reads/writes keep a session resident. Internal quorum and
-  # archiver calls must not pin a log in memory by accident.
-  defp activity_message?(:get_session), do: true
-  defp activity_message?(:fetch_cursor_snapshot), do: true
-  defp activity_message?({:append_event, _input, _expected_seq, _replicas}), do: true
-  defp activity_message?({:append_events, _inputs, _expected_seq, _replicas}), do: true
-  defp activity_message?(_message), do: false
-
-  defp should_freeze?(%{
-         role: :owner,
-         session: %Session{id: session_id, last_seq: last_seq, archived_seq: archived_seq},
-         idle_timeout_ms: idle_timeout_ms,
-         last_activity_mono_ms: last_activity_mono_ms
-       })
-       when is_binary(session_id) and session_id != "" and is_integer(last_seq) and
-              is_integer(archived_seq) do
-    idle_timeout_ms != :infinity and last_seq == archived_seq and
-      idle_elapsed_ms(last_activity_mono_ms) >= idle_timeout_ms and
-      SessionRouter.ensure_local_owner(session_id) == :ok
-  end
-
-  defp should_freeze?(_data), do: false
-
-  defp freeze_session(%{session: %Session{} = session, role: role}) when role == :owner do
-    :ok = emit_lifecycle(session, role, "session.freezing")
-    :ok = Telemetry.session_freeze(session.id, session.tenant_id, :ok, :idle_timeout)
-    :ok = emit_lifecycle(session, role, "session.frozen")
-    {:stop, :normal}
-  end
-
-  defp now_monotonic_ms, do: System.monotonic_time(:millisecond)
-
-  defp idle_elapsed_ms(last_activity_mono_ms)
-       when is_integer(last_activity_mono_ms) do
-    max(now_monotonic_ms() - last_activity_mono_ms, 0)
-  end
-
-  defp schedule_idle_tick(%{idle_timeout_ms: :infinity} = data) do
-    cancel_idle_tick(data.idle_timer_ref)
-    %{data | idle_timer_ref: nil}
-  end
-
-  defp schedule_idle_tick(
-         %{idle_timeout_ms: idle_timeout_ms, idle_check_interval_ms: check_interval_ms} = data
-       )
-       when is_integer(idle_timeout_ms) and idle_timeout_ms > 0 and
-              is_integer(check_interval_ms) and check_interval_ms > 0 do
-    cancel_idle_tick(data.idle_timer_ref)
-
-    idle_timer_ref =
-      :erlang.start_timer(min(idle_timeout_ms, check_interval_ms), self(), :idle_tick)
-
-    %{data | idle_timer_ref: idle_timer_ref}
-  end
-
-  defp cancel_idle_tick(idle_timer_ref) do
-    if is_reference(idle_timer_ref) do
-      _ = :erlang.cancel_timer(idle_timer_ref, [{:async, false}, {:info, false}])
-    end
-
-    :ok
-  end
-
-  defp validate_idle_timeout_ms!(:infinity), do: :infinity
-
-  defp validate_idle_timeout_ms!(value) when is_integer(value) and value > 0 do
-    value
-  end
-
-  defp validate_idle_timeout_ms!(value) do
-    raise ArgumentError,
-          "invalid value for :idle_timeout_ms: #{inspect(value)} " <>
-            "(expected positive integer or :infinity)"
-  end
-
-  defp validate_idle_check_interval_ms!(value) when is_integer(value) and value > 0 do
-    value
-  end
-
-  defp validate_idle_check_interval_ms!(value) do
-    raise ArgumentError,
-          "invalid value for :idle_check_interval_ms: #{inspect(value)} " <>
-            "(expected positive integer)"
-  end
-
   defp replicate_state(
          %{replicate_fun: replicate_fun},
          %Session{} = session,
@@ -1044,18 +864,23 @@ defmodule Starcite.DataPlane.SessionLog do
     replicate_fun.(session, events, replicas)
   end
 
-  defp emit_lifecycle(%Session{} = session, :owner, kind) when is_binary(kind) and kind != "" do
-    Phoenix.PubSub.broadcast(
-      Starcite.PubSub,
-      "lifecycle:" <> session.tenant_id,
-      {:session_lifecycle,
-       %{
-         kind: kind,
-         session_id: session.id,
-         tenant_id: session.tenant_id
-       }}
+  defp start_batch_server(nil, init_arg) do
+    :gen_batch_server.start_link(
+      :undefined,
+      __MODULE__,
+      init_arg,
+      min_batch_size: @min_batch_size,
+      max_batch_size: @max_batch_size
     )
   end
 
-  defp emit_lifecycle(%Session{}, _role, _kind), do: :ok
+  defp start_batch_server(name, init_arg) do
+    :gen_batch_server.start_link(
+      name,
+      __MODULE__,
+      init_arg,
+      min_batch_size: @min_batch_size,
+      max_batch_size: @max_batch_size
+    )
+  end
 end

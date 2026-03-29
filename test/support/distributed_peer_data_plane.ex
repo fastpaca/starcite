@@ -5,8 +5,9 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   alias Starcite.Routing.{Store, Watcher}
   alias Starcite.Storage.EventArchive
 
-  @registry Starcite.DataPlane.SessionLogRegistry
-  @supervisor Starcite.DataPlane.SessionLogSupervisor
+  @runtime_registry Starcite.DataPlane.SessionRuntimeRegistry
+  @runtime_supervisor Starcite.DataPlane.SessionRuntimeSupervisor
+  @log_registry Starcite.DataPlane.SessionLogRegistry
 
   def start do
     case Process.whereis(__MODULE__) do
@@ -57,7 +58,16 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
 
   def ready? do
     Enum.all?(
-      [@registry, @supervisor, Starcite.PubSub, Store, Watcher, EventArchive, EventStore],
+      [
+        @runtime_registry,
+        @runtime_supervisor,
+        @log_registry,
+        Starcite.PubSub,
+        Store,
+        Watcher,
+        EventArchive,
+        EventStore
+      ],
       fn name ->
         is_pid(Process.whereis(name))
       end
@@ -90,8 +100,9 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     {:ok, _apps} = Application.ensure_all_started(:cachex)
     {:ok, _apps} = Application.ensure_all_started(:phoenix_pubsub)
     {:ok, _apps} = Application.ensure_all_started(:khepri)
-    :ok = start_process({Registry, keys: :unique, name: @registry})
-    :ok = start_process({DynamicSupervisor, strategy: :one_for_one, name: @supervisor})
+    :ok = start_process({Registry, keys: :unique, name: @runtime_registry})
+    :ok = start_process({DynamicSupervisor, strategy: :one_for_one, name: @runtime_supervisor})
+    :ok = start_process({Registry, keys: :unique, name: @log_registry})
     :ok = start_process({Phoenix.PubSub, name: Starcite.PubSub})
     :ok = start_process({Store, []})
     :ok = start_process({Watcher, []})
@@ -109,8 +120,9 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     :ok = stop_process(Watcher)
     :ok = stop_process(Store)
     :ok = stop_process(Starcite.PubSub)
-    :ok = stop_process(@supervisor)
-    :ok = stop_process(@registry)
+    :ok = stop_process(@log_registry)
+    :ok = stop_process(@runtime_supervisor)
+    :ok = stop_process(@runtime_registry)
     :ok
   end
 

@@ -3,9 +3,11 @@ defmodule Starcite.DataPlane.SessionStoreTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.SessionStore
+  alias Starcite.Repo
   alias Starcite.Session
 
   setup do
+    ensure_repo_sandbox()
     SessionStore.clear()
 
     on_exit(fn ->
@@ -74,5 +76,20 @@ defmodule Starcite.DataPlane.SessionStoreTest do
 
   defp principal do
     %Principal{tenant_id: "acme", id: "user-1", type: :user}
+  end
+
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
   end
 end
