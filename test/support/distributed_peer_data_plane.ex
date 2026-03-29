@@ -7,7 +7,6 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
 
   @runtime_registry Starcite.DataPlane.SessionRuntimeRegistry
   @runtime_supervisor Starcite.DataPlane.SessionRuntimeSupervisor
-  @log_registry Starcite.DataPlane.SessionLogRegistry
 
   def start do
     case Process.whereis(__MODULE__) do
@@ -61,7 +60,6 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
       [
         @runtime_registry,
         @runtime_supervisor,
-        @log_registry,
         Starcite.PubSub,
         Store,
         Watcher,
@@ -102,7 +100,6 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     {:ok, _apps} = Application.ensure_all_started(:khepri)
     :ok = start_process({Registry, keys: :unique, name: @runtime_registry})
     :ok = start_process({DynamicSupervisor, strategy: :one_for_one, name: @runtime_supervisor})
-    :ok = start_process({Registry, keys: :unique, name: @log_registry})
     :ok = start_process({Phoenix.PubSub, name: Starcite.PubSub})
     :ok = start_process({Store, []})
     :ok = start_process({Watcher, []})
@@ -120,7 +117,6 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     :ok = stop_process(Watcher)
     :ok = stop_process(Store)
     :ok = stop_process(Starcite.PubSub)
-    :ok = stop_process(@log_registry)
     :ok = stop_process(@runtime_supervisor)
     :ok = stop_process(@runtime_registry)
     :ok

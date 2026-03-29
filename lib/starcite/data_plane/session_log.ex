@@ -1,84 +1,45 @@
 defmodule Starcite.DataPlane.SessionLog do
   @moduledoc """
-  In-memory session log for one session replica.
+  In-memory session log state and transitions for one session replica.
 
   The owner log sequences and batches local writes. Follower logs only accept
-  replicated state from `SessionQuorum`.
+  replicated state from `SessionQuorum`. `SessionRuntime` owns the mailbox and
+  lifecycle around this state.
   """
-
-  @behaviour :gen_batch_server
 
   alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
 
-  @registry Starcite.DataPlane.SessionLogRegistry
-  @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
-  @max_batch_size Application.compile_env(:starcite, :session_log_batch_max_size, 256)
-
   @type role :: :owner | :follower
-  @type data :: %{
+  @type t :: %{
           required(:session) => Session.t(),
           required(:producer_cursors) => map(),
           required(:replicate_fun) => (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
           required(:role) => role()
         }
 
-  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
-  def start_link(opts) when is_list(opts) do
-    session = Keyword.fetch!(opts, :session)
-    role = Keyword.fetch!(opts, :role)
-    replicate_fun = Keyword.fetch!(opts, :replicate_fun)
-    name = Keyword.get(opts, :name)
-
-    start_batch_server(name, %{session: session, role: role, replicate_fun: replicate_fun})
-  end
-
-  @spec child_spec(keyword()) :: Supervisor.child_spec()
-  def child_spec(opts) when is_list(opts) do
-    session = Keyword.fetch!(opts, :session)
-
+  @spec new(Session.t(), role(), (Session.t(), [map()], [node()] -> :ok | {:error, term()})) ::
+          t()
+  def new(%Session{} = session, role, replicate_fun)
+      when role in [:owner, :follower] and is_function(replicate_fun, 3) do
     %{
-      id: {__MODULE__, session.id},
-      start: {__MODULE__, :start_link, [opts]},
-      restart: :transient,
-      shutdown: 500,
-      type: :worker
+      session: normalize_session_epoch(session),
+      producer_cursors: %{},
+      replicate_fun: replicate_fun,
+      role: role
     }
   end
 
-  @spec via(String.t()) :: {:via, Registry, {module(), String.t()}}
-  def via(session_id) when is_binary(session_id) and session_id != "" do
-    {:via, Registry, {@registry, session_id}}
-  end
+  @spec session(t()) :: Session.t()
+  def session(%{session: %Session{} = session}), do: session
 
-  @impl true
-  def init(%{
-        session: %Session{} = session,
-        role: role,
-        replicate_fun: replicate_fun
-      })
-      when is_function(replicate_fun, 3) and role in [:owner, :follower] do
-    Process.flag(:message_queue_data, :off_heap)
+  @spec role(t()) :: role()
+  def role(%{role: role}) when role in [:owner, :follower], do: role
 
-    {:ok,
-     %{
-       session: normalize_session_epoch(session),
-       producer_cursors: %{},
-       replicate_fun: replicate_fun,
-       role: role
-     }}
-  end
-
-  @impl true
+  @spec handle_batch([term()], t()) :: {t(), [term()]}
   def handle_batch(batch, data) when is_list(batch) do
-    case process_batch(batch, data, []) do
-      {:stop, reason} ->
-        {:stop, reason}
-
-      {next_data, actions} ->
-        {:ok, actions, next_data}
-    end
+    process_batch(batch, data, [])
   end
 
   defp process_batch([], data, actions), do: {data, actions}
@@ -862,25 +823,5 @@ defmodule Starcite.DataPlane.SessionLog do
        )
        when is_function(replicate_fun, 3) and is_list(events) and is_list(replicas) do
     replicate_fun.(session, events, replicas)
-  end
-
-  defp start_batch_server(nil, init_arg) do
-    :gen_batch_server.start_link(
-      :undefined,
-      __MODULE__,
-      init_arg,
-      min_batch_size: @min_batch_size,
-      max_batch_size: @max_batch_size
-    )
-  end
-
-  defp start_batch_server(name, init_arg) do
-    :gen_batch_server.start_link(
-      name,
-      __MODULE__,
-      init_arg,
-      min_batch_size: @min_batch_size,
-      max_batch_size: @max_batch_size
-    )
   end
 end

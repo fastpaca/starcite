@@ -1,12 +1,12 @@
 defmodule Starcite.DataPlane.SessionRuntime do
   @moduledoc """
-  Local lifecycle owner for one loaded session replica.
+  Local lifecycle owner and batching server for one loaded session replica.
 
   `SessionRuntime` owns hydrate/freeze, idle tracking, lifecycle events, and
-  the lifetime of the underlying `SessionLog` process.
+  the batched mailbox around the in-memory `SessionLog` state machine.
   """
 
-  use GenServer
+  @behaviour :gen_batch_server
 
   alias Starcite.DataPlane.SessionLog
   alias Starcite.DataPlane.SessionStore
@@ -15,25 +15,29 @@ defmodule Starcite.DataPlane.SessionRuntime do
   alias Starcite.Session
 
   @registry Starcite.DataPlane.SessionRuntimeRegistry
-  @call_timeout Application.compile_env(:starcite, :session_log_call_timeout_ms, 2_000)
+  @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
+  @max_batch_size Application.compile_env(:starcite, :session_log_batch_max_size, 256)
 
   @type role :: SessionLog.role()
   @type data :: %{
-          required(:session_id) => String.t(),
-          required(:tenant_id) => String.t(),
-          required(:log_pid) => pid(),
-          required(:role) => role(),
+          required(:log) => SessionLog.t(),
           required(:idle_timeout_ms) => pos_integer() | :infinity,
           required(:idle_check_interval_ms) => pos_integer(),
           required(:last_activity_mono_ms) => integer(),
           required(:idle_timer_ref) => reference() | nil
         }
 
-  @spec start_link(keyword()) :: GenServer.on_start()
+  @spec start_link(keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(opts) when is_list(opts) do
     session = Keyword.fetch!(opts, :session)
 
-    GenServer.start_link(__MODULE__, opts, name: via(session.id))
+    :gen_batch_server.start_link(
+      via(session.id),
+      __MODULE__,
+      opts,
+      min_batch_size: @min_batch_size,
+      max_batch_size: @max_batch_size
+    )
   end
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -52,16 +56,6 @@ defmodule Starcite.DataPlane.SessionRuntime do
   @spec via(String.t()) :: {:via, Registry, {module(), String.t()}}
   def via(session_id) when is_binary(session_id) and session_id != "" do
     {:via, Registry, {@registry, session_id}}
-  end
-
-  @spec log_pid(pid()) :: {:ok, pid()} | {:error, :session_runtime_unavailable}
-  def log_pid(pid) when is_pid(pid) do
-    call(pid, :log_pid)
-  end
-
-  @spec checkout(pid(), term()) :: {:ok, pid()} | {:error, :session_runtime_unavailable}
-  def checkout(pid, message) when is_pid(pid) do
-    call(pid, {:checkout, message})
   end
 
   @impl true
@@ -87,14 +81,6 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
     role = role_for_session(runtime_session.id)
 
-    {:ok, log_pid} =
-      SessionLog.start_link(
-        session: runtime_session,
-        role: role,
-        replicate_fun: replicate_fun,
-        name: SessionLog.via(runtime_session.id)
-      )
-
     if start_reason == :hydrate do
       :ok = emit_lifecycle(runtime_session, role, "session.hydrating")
 
@@ -104,57 +90,84 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
     :ok = emit_lifecycle(runtime_session, role, "session.activated")
 
-    now = now_monotonic_ms()
-
     {:ok,
      %{
-       session_id: runtime_session.id,
-       tenant_id: runtime_session.tenant_id,
-       log_pid: log_pid,
-       role: role,
+       log: SessionLog.new(runtime_session, role, replicate_fun),
        idle_timeout_ms: idle_timeout_ms,
        idle_check_interval_ms: idle_check_interval_ms,
-       last_activity_mono_ms: now,
+       last_activity_mono_ms: now_monotonic_ms(),
        idle_timer_ref: nil
      }
      |> schedule_idle_tick()}
   end
 
   @impl true
-  def handle_call(:log_pid, _from, %{log_pid: log_pid} = data) when is_pid(log_pid) do
-    {:reply, {:ok, log_pid}, data}
+  def handle_batch(batch, data) when is_list(batch) do
+    data = if activity_batch?(batch), do: touch_activity(data), else: data
+
+    case process_runtime_batch(batch, data, []) do
+      {:stop, reason} ->
+        {:stop, reason}
+
+      {next_data, actions} ->
+        {:ok, actions, next_data}
+    end
   end
 
-  def handle_call({:checkout, message}, _from, %{log_pid: log_pid} = data) when is_pid(log_pid) do
-    next_data = if activity_message?(message), do: touch_activity(data), else: data
-    {:reply, {:ok, log_pid}, next_data}
-  end
+  defp process_runtime_batch([], data, actions), do: {data, actions}
 
-  @impl true
-  def handle_info(
-        {:timeout, idle_timer_ref, :idle_tick},
-        %{idle_timer_ref: idle_timer_ref} = data
-      )
-      when is_reference(idle_timer_ref) do
+  defp process_runtime_batch(
+         [{:info, {:timeout, idle_timer_ref, :idle_tick}} | rest],
+         %{idle_timer_ref: idle_timer_ref} = data,
+         actions
+       )
+       when is_reference(idle_timer_ref) do
     data = %{data | idle_timer_ref: nil}
 
     if should_freeze?(data) do
       :ok = emit_lifecycle(data, "session.freezing")
-      :ok = Telemetry.session_freeze(data.session_id, data.tenant_id, :ok, :idle_timeout)
+      :ok = Telemetry.session_freeze(session_id(data), tenant_id(data), :ok, :idle_timeout)
       :ok = emit_lifecycle(data, "session.frozen")
-      :ok = stop_log(data.log_pid)
-      {:stop, :normal, data}
+      {:stop, :normal}
     else
-      {:noreply, schedule_idle_tick(data)}
+      process_runtime_batch(rest, schedule_idle_tick(data), actions)
     end
   end
 
-  def handle_info(_message, data), do: {:noreply, data}
+  defp process_runtime_batch(batch, %{log: log} = data, actions) do
+    {log_batch, rest} = collect_log_batch(batch, data.idle_timer_ref, [])
+    {next_log, log_actions} = SessionLog.handle_batch(log_batch, log)
+    next_data = reconcile_idle_tick(data, %{data | log: next_log})
+    process_runtime_batch(rest, next_data, actions ++ log_actions)
+  end
 
-  defp call(pid, message) when is_pid(pid) do
-    GenServer.call(pid, message, @call_timeout)
-  catch
-    :exit, _reason -> {:error, :session_runtime_unavailable}
+  defp collect_log_batch(
+         [{:info, {:timeout, idle_timer_ref, :idle_tick}} | _rest] = batch,
+         idle_timer_ref,
+         acc
+       )
+       when is_reference(idle_timer_ref) do
+    {Enum.reverse(acc), batch}
+  end
+
+  defp collect_log_batch([message | rest], idle_timer_ref, acc) do
+    collect_log_batch(rest, idle_timer_ref, [message | acc])
+  end
+
+  defp collect_log_batch([], _idle_timer_ref, acc), do: {Enum.reverse(acc), []}
+
+  defp reconcile_idle_tick(%{log: previous_log}, %{log: next_log} = data) do
+    case {SessionLog.role(previous_log), SessionLog.role(next_log)} do
+      {same_role, same_role} ->
+        data
+
+      {_old_role, :owner} ->
+        schedule_idle_tick(data)
+
+      {_old_role, _new_role} ->
+        cancel_idle_tick(data.idle_timer_ref)
+        %{data | idle_timer_ref: nil}
+    end
   end
 
   defp normalize_session_epoch(%Session{epoch: epoch} = session)
@@ -182,6 +195,13 @@ defmodule Starcite.DataPlane.SessionRuntime do
     end
   end
 
+  defp activity_batch?(batch) when is_list(batch) do
+    Enum.any?(batch, fn
+      {:call, _from, message} -> activity_message?(message)
+      _other -> false
+    end)
+  end
+
   defp touch_activity(%{last_activity_mono_ms: _last} = data) do
     %{data | last_activity_mono_ms: now_monotonic_ms()}
   end
@@ -193,35 +213,28 @@ defmodule Starcite.DataPlane.SessionRuntime do
   defp activity_message?(_message), do: false
 
   defp should_freeze?(%{
-         role: :owner,
-         session_id: session_id,
-         log_pid: log_pid,
+         log: log,
          idle_timeout_ms: idle_timeout_ms,
          last_activity_mono_ms: last_activity_mono_ms
        })
-       when is_pid(log_pid) and is_binary(session_id) and session_id != "" do
-    idle_timeout_ms != :infinity and
+       when idle_timeout_ms != :infinity do
+    role = SessionLog.role(log)
+    session = SessionLog.session(log)
+
+    role == :owner and
       idle_elapsed_ms(last_activity_mono_ms) >= idle_timeout_ms and
-      SessionRouter.ensure_local_owner(session_id) == :ok and
-      log_fully_archived?(log_pid)
+      SessionRouter.ensure_local_owner(session.id) == :ok and
+      session.last_seq == session.archived_seq
   end
 
   defp should_freeze?(_data), do: false
 
-  defp log_fully_archived?(log_pid) when is_pid(log_pid) do
-    case :gen_batch_server.call(log_pid, :describe, @call_timeout) do
-      {:ok, %{role: :owner, session: %Session{last_seq: last_seq, archived_seq: archived_seq}}} ->
-        last_seq == archived_seq
-
-      _other ->
-        false
-    end
-  catch
-    :exit, _reason -> false
-  end
-
   defp emit_lifecycle(%Session{} = session, role, kind) when is_binary(kind) and kind != "" do
     emit_lifecycle(%{session_id: session.id, tenant_id: session.tenant_id, role: role}, kind)
+  end
+
+  defp emit_lifecycle(%{log: log}, kind) when is_binary(kind) and kind != "" do
+    emit_lifecycle(SessionLog.session(log), SessionLog.role(log), kind)
   end
 
   defp emit_lifecycle(%{role: :owner, session_id: session_id, tenant_id: tenant_id}, kind)
@@ -247,25 +260,31 @@ defmodule Starcite.DataPlane.SessionRuntime do
     max(now_monotonic_ms() - last_activity_mono_ms, 0)
   end
 
-  defp schedule_idle_tick(%{role: :owner, idle_timeout_ms: :infinity} = data) do
-    cancel_idle_tick(data.idle_timer_ref)
-    %{data | idle_timer_ref: nil}
+  defp schedule_idle_tick(%{log: log, idle_timeout_ms: :infinity} = data) do
+    if SessionLog.role(log) == :owner do
+      cancel_idle_tick(data.idle_timer_ref)
+      %{data | idle_timer_ref: nil}
+    else
+      %{data | idle_timer_ref: nil}
+    end
   end
 
-  defp schedule_idle_tick(%{role: :owner} = data) do
-    cancel_idle_tick(data.idle_timer_ref)
+  defp schedule_idle_tick(%{log: log} = data) do
+    if SessionLog.role(log) == :owner do
+      cancel_idle_tick(data.idle_timer_ref)
 
-    idle_timer_ref =
-      :erlang.start_timer(
-        min(data.idle_timeout_ms, data.idle_check_interval_ms),
-        self(),
-        :idle_tick
-      )
+      idle_timer_ref =
+        :erlang.start_timer(
+          min(data.idle_timeout_ms, data.idle_check_interval_ms),
+          self(),
+          :idle_tick
+        )
 
-    %{data | idle_timer_ref: idle_timer_ref}
+      %{data | idle_timer_ref: idle_timer_ref}
+    else
+      %{data | idle_timer_ref: nil}
+    end
   end
-
-  defp schedule_idle_tick(data), do: %{data | idle_timer_ref: nil}
 
   defp cancel_idle_tick(idle_timer_ref) do
     if is_reference(idle_timer_ref) do
@@ -275,10 +294,6 @@ defmodule Starcite.DataPlane.SessionRuntime do
     :ok
   end
 
-  defp stop_log(log_pid) when is_pid(log_pid) do
-    _ = :gen_batch_server.stop(log_pid)
-    :ok
-  catch
-    :exit, _reason -> :ok
-  end
+  defp session_id(%{log: log}), do: SessionLog.session(log).id
+  defp tenant_id(%{log: log}), do: SessionLog.session(log).tenant_id
 end

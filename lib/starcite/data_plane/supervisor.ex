@@ -14,8 +14,6 @@ defmodule Starcite.DataPlane.Supervisor do
         # Dynamic supervisor for session runtime processes
         {DynamicSupervisor,
          strategy: :one_for_one, name: Starcite.DataPlane.SessionRuntimeSupervisor},
-        # Session log registry (one loaded log process per session replica)
-        {Registry, keys: :unique, name: Starcite.DataPlane.SessionLogRegistry},
         # Stable owner for Cachex-backed session store (control-plane/lifecycle use)
         {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table

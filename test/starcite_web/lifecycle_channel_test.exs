@@ -95,7 +95,7 @@ defmodule StarciteWeb.LifecycleChannelTest do
       }
     }
 
-    [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, session_id)
+    [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, session_id)
     ref = Process.monitor(pid)
 
     assert_push "lifecycle", %{event: event}, 2_000
@@ -109,7 +109,7 @@ defmodule StarciteWeb.LifecycleChannelTest do
 
     eventually(
       fn ->
-        assert [] == Registry.lookup(Starcite.DataPlane.SessionLogRegistry, session_id)
+        assert [] == Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, session_id)
       end,
       timeout: 1_000
     )

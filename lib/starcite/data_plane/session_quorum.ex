@@ -1,12 +1,12 @@
 defmodule Starcite.DataPlane.SessionQuorum do
   @moduledoc """
-  Replica-set runtime for one session log.
+  Replica-set boundary for one loaded session runtime.
 
-  `SessionQuorum` is the boundary around per-session `SessionLog` processes.
+  `SessionQuorum` is the boundary around per-session `SessionRuntime` processes.
   It is responsible for:
 
-  - routing client commands to the local owner log
-  - bootstrapping or restarting local logs when routing epochs change
+  - routing client commands to the local owner runtime
+  - bootstrapping or restarting local runtimes when routing epochs change
   - replicating committed session state to standby logs and waiting for quorum
   """
 
@@ -80,10 +80,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
-      call_session_log(
+      call_runtime(
         session_id,
         current_pid,
-        {:append_event, input, expected_seq, assignment.replicas},
         {:append_event, input, expected_seq, assignment.replicas}
       )
     end
@@ -101,10 +100,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
-      call_session_log(
+      call_runtime(
         session_id,
         current_pid,
-        {:append_events, inputs, expected_seq, assignment.replicas},
         {:append_events, inputs, expected_seq, assignment.replicas}
       )
     end
@@ -121,10 +119,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
-      call_session_log(
+      call_runtime(
         session_id,
         current_pid,
-        {:ack_archived, upto_seq, assignment.replicas},
         {:ack_archived, upto_seq, assignment.replicas}
       )
     end
@@ -137,7 +134,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def get_session(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, pid} <- ensure_runtime_loaded(session_id),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid) do
-      call_session_log(session_id, current_pid, :get_session, :get_session)
+      call_runtime(session_id, current_pid, :get_session)
     end
   end
 
@@ -171,12 +168,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
     with {:ok, assignment} <- require_local_owner_assignment(session_id),
          {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
-      call_session_log(
-        session_id,
-        current_pid,
-        :fetch_cursor_snapshot,
-        :fetch_cursor_snapshot
-      )
+      call_runtime(session_id, current_pid, :fetch_cursor_snapshot)
     end
   end
 
@@ -187,7 +179,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def fetch_archived_seq(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, pid} <- ensure_runtime_loaded(session_id),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid) do
-      call_session_log(session_id, current_pid, :fetch_archived_seq, :fetch_archived_seq)
+      call_runtime(session_id, current_pid, :fetch_archived_seq)
     end
   end
 
@@ -197,9 +189,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
   @spec apply_replica(Session.t(), [map()]) :: :ok | {:error, term()} | {:timeout, term()}
   def apply_replica(%Session{id: session_id} = session, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
-    with {:ok, pid} <- ensure_runtime_started(session),
-         {:ok, log_pid} <- checkout_runtime(session_id, pid, {:apply_replica, session, events}) do
-      case safe_call(log_pid, {:apply_replica, session, events}) do
+    with {:ok, pid} <- ensure_runtime_started(session) do
+      case call_runtime(session_id, pid, {:apply_replica, session, events}) do
         :ok -> :ok
         {:error, reason} -> {:error, reason}
         {:timeout, reason} -> {:timeout, reason}
@@ -266,7 +257,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def local_owner?(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, pid} <- ensure_runtime_loaded(session_id),
          {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid),
-         {:ok, %{role: :owner}} <- describe_log(session_id, current_pid) do
+         {:ok, %{role: :owner}} <- describe_runtime(session_id, current_pid) do
       true
     else
       _other -> false
@@ -460,43 +451,18 @@ defmodule Starcite.DataPlane.SessionQuorum do
     :exit, reason -> normalize_call_exit(reason)
   end
 
-  defp call_session_log(session_id, runtime_pid, activity_message, log_message, assignment \\ nil)
+  defp call_runtime(session_id, runtime_pid, message, assignment \\ nil)
        when is_binary(session_id) and session_id != "" and is_pid(runtime_pid) do
-    with {:ok, log_pid} <- checkout_runtime(session_id, runtime_pid, activity_message) do
-      case safe_call(log_pid, log_message) do
-        {:error, :session_log_unavailable} ->
-          with {:ok, replacement_runtime_pid} <- ensure_runtime_loaded(session_id),
-               {:ok, current_runtime_pid} <-
-                 ensure_runtime_epoch_current(session_id, replacement_runtime_pid, assignment),
-               {:ok, replacement_log_pid} <-
-                 checkout_runtime(session_id, current_runtime_pid, activity_message) do
-            safe_call(replacement_log_pid, log_message)
-          end
+    case safe_call(runtime_pid, message) do
+      {:error, :session_log_unavailable} ->
+        with {:ok, replacement_runtime_pid} <- ensure_runtime_loaded(session_id),
+             {:ok, current_runtime_pid} <-
+               ensure_runtime_epoch_current(session_id, replacement_runtime_pid, assignment) do
+          safe_call(current_runtime_pid, message)
+        end
 
-        other ->
-          other
-      end
-    end
-  end
-
-  defp checkout_runtime(session_id, runtime_pid, activity_message)
-       when is_binary(session_id) and session_id != "" and is_pid(runtime_pid) do
-    case SessionRuntime.checkout(runtime_pid, activity_message) do
-      {:ok, log_pid} when is_pid(log_pid) ->
-        {:ok, log_pid}
-
-      {:error, :session_runtime_unavailable} ->
-        ensure_runtime_loaded(session_id)
-        |> then(fn
-          {:ok, replacement_runtime_pid} ->
-            case SessionRuntime.checkout(replacement_runtime_pid, activity_message) do
-              {:ok, log_pid} when is_pid(log_pid) -> {:ok, log_pid}
-              {:error, :session_runtime_unavailable} -> {:error, :session_runtime_unavailable}
-            end
-
-          {:error, reason} ->
-            {:error, reason}
-        end)
+      other ->
+        other
     end
   end
 
@@ -515,7 +481,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp ensure_runtime_epoch_current(session_id, pid, assignment \\ nil)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    with {:ok, %{role: role, session: %Session{} = session}} <- describe_log(session_id, pid) do
+    with {:ok, %{role: role, session: %Session{} = session}} <- describe_runtime(session_id, pid) do
       current_epoch = effective_epoch(session_id, session, assignment)
       desired_role = desired_role(session_id, assignment)
 
@@ -533,7 +499,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
       {:timeout, :session_log_unavailable} ->
         ensure_runtime_loaded(session_id)
 
-      {:error, :session_runtime_unavailable} ->
+      {:error, :session_log_unavailable} ->
         ensure_runtime_loaded(session_id)
 
       other ->
@@ -541,25 +507,20 @@ defmodule Starcite.DataPlane.SessionQuorum do
     end
   end
 
-  defp describe_log(session_id, pid)
+  defp describe_runtime(session_id, pid)
        when is_binary(session_id) and session_id != "" and is_pid(pid) do
-    with {:ok, log_pid} <- SessionRuntime.log_pid(pid) do
-      case safe_call(log_pid, :describe) do
-        {:ok, %{role: role, session: %Session{} = session}}
-        when role in [:owner, :follower] ->
-          {:ok, %{role: role, session: session}}
+    case safe_call(pid, :describe) do
+      {:ok, %{role: role, session: %Session{} = session}} when role in [:owner, :follower] ->
+        {:ok, %{role: role, session: session}}
 
-        {:error, reason} ->
-          {:error, reason}
+      {:error, reason} ->
+        {:error, reason}
 
-        {:timeout, reason} ->
-          {:timeout, reason}
+      {:timeout, reason} ->
+        {:timeout, reason}
 
-        other ->
-          {:error, {:invalid_log_description, other}}
-      end
-    else
-      {:error, reason} -> {:error, reason}
+      other ->
+        {:error, {:invalid_log_description, other}}
     end
   end
 

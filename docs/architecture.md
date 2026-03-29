@@ -32,10 +32,8 @@ async archival.
 ### Session runtime and logs
 
 One session-runtime process exists per loaded session replica on a node. The
-runtime owns local residency: hydrate, freeze on inactivity, lifecycle events,
-and the lifetime of the underlying session log.
-
-One session-log process exists under each loaded runtime.
+runtime owns local residency, batching, hydrate/freeze, lifecycle events, and
+the mailbox around the in-memory session log state.
 
 Log responsibilities:
 - Assign monotonic `seq` per session.
@@ -50,7 +48,7 @@ Runtime responsibilities:
 - Freeze idle owner sessions once `last_seq == archived_seq`.
 - Publish tenant-scoped lifecycle events (`activated`, `hydrating`, `freezing`,
   `frozen`).
-- Keep idle timers and activity accounting out of the append engine.
+- Keep process concerns out of the session log state machine.
 
 The append hot path is owner-based and does not call control-plane consensus.
 

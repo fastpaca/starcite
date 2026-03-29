@@ -174,7 +174,7 @@ defmodule Starcite.RuntimeTest do
       assert SessionQuorum.local_owner?(id)
     end
 
-    test "follower session log emits a routing fence when it receives an append" do
+    test "follower runtime emits a routing fence when it receives an append" do
       original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
       peer = :"runtime-follower-peer@127.0.0.1"
@@ -217,7 +217,7 @@ defmodule Starcite.RuntimeTest do
       refute SessionQuorum.local_owner?(id)
 
       [{pid, _value}] =
-        Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+        Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
 
       assert {:error, :not_owner} =
                :gen_batch_server.call(
@@ -951,7 +951,7 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
-  describe "session log recovery" do
+  describe "session runtime recovery" do
     test "bootstraps an archived owner session when hot state is gone everywhere local" do
       id = unique_id("ses-archive-bootstrap")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
@@ -973,7 +973,7 @@ defmodule Starcite.RuntimeTest do
 
       eventually(
         fn ->
-          assert [] == Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+          assert [] == Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
         end,
         timeout: 1_000
       )
@@ -1001,7 +1001,7 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses-idle-freeze")
       {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
 
-      [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+      [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
       ref = Process.monitor(pid)
 
       flush_lifecycle_events()
@@ -1017,7 +1017,7 @@ defmodule Starcite.RuntimeTest do
 
       eventually(
         fn ->
-          assert [] == Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+          assert [] == Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
         end,
         timeout: 1_000
       )
@@ -1030,7 +1030,7 @@ defmodule Starcite.RuntimeTest do
       assert_receive {:session_lifecycle, event}, 1_000
       assert event == %{kind: "session.activated", session_id: id, tenant_id: "acme"}
 
-      [{new_pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+      [{new_pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
       assert is_pid(new_pid)
       refute new_pid == pid
     end
@@ -1149,7 +1149,7 @@ defmodule Starcite.RuntimeTest do
 
       assert match?(
                [{pid, _value}] when is_pid(pid),
-               Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+               Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
              )
 
       assert {:ok, %Session{last_seq: 1, archived_seq: 0}} = SessionQuorum.get_session(id)
@@ -1206,7 +1206,7 @@ defmodule Starcite.RuntimeTest do
 
       assert match?(
                [{pid, _value}] when is_pid(pid),
-               Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+               Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
              )
     end
 
@@ -1225,7 +1225,7 @@ defmodule Starcite.RuntimeTest do
 
         assert first.seq == 1
 
-        [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+        [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
 
         ref = Process.monitor(pid)
         Process.exit(pid, :kill)
@@ -1233,14 +1233,14 @@ defmodule Starcite.RuntimeTest do
         receive do
           {:DOWN, ^ref, :process, ^pid, _} -> :ok
         after
-          2_000 -> flunk("session log did not die")
+          2_000 -> flunk("session runtime did not die")
         end
 
         eventually(
           fn ->
             assert match?(
                      [{owner_pid, _}] when is_pid(owner_pid),
-                     Registry.lookup(Starcite.DataPlane.SessionLogRegistry, id)
+                     Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
                    )
           end,
           timeout: 3_000
