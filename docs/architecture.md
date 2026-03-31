@@ -14,12 +14,15 @@ The edge handles client protocol, auth, and policy enforcement.
 **Session API** - REST endpoints for create/append/list. Validates payloads,
 enforces tenant/session scope, and delegates to the data plane.
 
-**Tailer** - WebSocket handler for `/tail`. Replays historical events from cursor,
-then streams live updates. Buffers live updates during replay and flushes when
-replay completes.
+**Phoenix Channels** - Clients connect one socket at `/v1/socket`, then join
+`tail:<session_id>` and `lifecycle` topics. Tail channels replay historical
+events from cursor, then stream live updates. Live updates are buffered during
+replay and flushed when replay completes.
 
-**Auth** - Validates JWT bearer tokens against JWKS and derives principal context
-(tenant, scopes, subject/session constraints) for policy checks.
+**Auth** - Default auth mode validates JWT bearer tokens against JWKS and
+derives principal context (tenant, scopes, subject/session constraints) for
+policy checks. `STARCITE_AUTH_MODE=none` is an explicit no-auth mode for local
+or controlled environments.
 
 ## Data plane
 

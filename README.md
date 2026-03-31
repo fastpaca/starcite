@@ -45,10 +45,11 @@ response to a browser. Use [Vercel AI SDK](https://sdk.vercel.ai/docs), SSE, or 
 git clone https://github.com/fastpaca/starcite
 cd starcite
 docker compose up -d
-curl -sS http://localhost:4000/health/live
 ```
 
-This starts a single-node stack for local development.
+This starts a single-node stack for local development. The public API listens on
+`PORT` (default `4000`). Ops endpoints such as `/health/live` and `/health/ready`
+are served only on the separate listener configured by `STARCITE_OPS_PORT`.
 
 Stop and reset:
 
@@ -60,6 +61,9 @@ For production topology and cluster operations, see
 [Self-hosting](docs/self-hosting.md).
 
 ### Use A Hosted Instance
+
+The hosted CLI flow below uses hosted credentials. Self-hosted HTTP and
+WebSocket access in this repo defaults to bearer JWT auth.
 
 ```bash
 # install
@@ -84,35 +88,43 @@ bunx starcite --help
 
 Three operations: **create** a session, **append** an event, **tail** from a cursor.
 
+Self-hosted Starcite defaults to JWT auth. The examples below assume
+`STARCITE_TOKEN` is a bearer JWT with the scopes you need. Omit auth headers only
+when you explicitly run with `STARCITE_AUTH_MODE=none`.
+
 <details>
 <summary>curl</summary>
 
 ```bash
+export STARCITE_TOKEN=<jwt>
+
 # 1) Create a session
 curl -X POST http://localhost:4000/v1/sessions \
+  -H "Authorization: Bearer ${STARCITE_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "id": "ses_demo",
     "title": "Draft contract",
-    "metadata": {"tenant_id": "acme"}
+    "metadata": {"workflow": "contract"}
   }'
 
 # 2) Append an event
 curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
+  -H "Authorization: Bearer ${STARCITE_TOKEN}" \
   -H "Content-Type: application/json" \
   -d '{
     "type": "content",
     "payload": {"text": "Reviewing clause 4.2..."},
-    "actor": "agent:drafter",
     "producer_id": "agent-drafter-1",
     "producer_seq": 1,
-    "expected_seq": 1
+    "expected_seq": 0
   }'
 
 # Response: {"seq":1,"last_seq":1,"deduped":false}
 
 # 3) Tail from a cursor (Phoenix Channel over one shared WebSocket)
-# connect to ws://localhost:4000/v1/socket with your JWT in params
+# connect a Phoenix socket to ws://localhost:4000/v1/socket
+# pass params { token: STARCITE_TOKEN }
 # then join topic "tail:ses_demo" with payload {"cursor": 0}
 ```
 
@@ -122,6 +134,7 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
 <summary>CLI</summary>
 
 ```bash
+# assumes the CLI is already configured with credentials for your Starcite instance
 starcite create --id ses_demo --title "Draft contract"
 starcite append ses_demo --agent drafter --text "Reviewing clause 4.2..."
 starcite tail ses_demo --cursor 0
@@ -190,7 +203,7 @@ for dedup. Tail replays ordered history, then continues live on the same connect
 
 1. You create a session. Starcite assigns it to a replicated cluster that holds the log in memory.
 2. Any producer appends an event. Starcite assigns the next `seq`, persists it across replicas, and acknowledges.
-3. Any consumer calls `tail(cursor=N)`. Starcite replays everything after `N`, then keeps streaming live events on the same connection.
+3. Any consumer joins `tail:<session_id>` on `/v1/socket` with `cursor=N`. Starcite replays everything after `N`, then keeps streaming live events on the same channel.
 4. A background process archives committed events to S3 or Postgres — writes are never blocked by archival.
 
 The result:

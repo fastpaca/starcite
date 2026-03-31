@@ -501,11 +501,6 @@ if config_env() == :prod do
     end
   end
 
-  # Optional: Override slot log directory (for mounting NVMe, etc)
-  if slot_log_dir = System.get_env("SLOT_LOG_DIR") do
-    config :starcite, :slot_log_dir, slot_log_dir
-  end
-
   # The secret key base is used to sign/encrypt cookies and other secrets.
   # A default value is used in config/dev.exs and config/test.exs but you
   # want to use a different value for prod and you most likely don't want

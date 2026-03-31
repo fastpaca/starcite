@@ -1,19 +1,22 @@
 # WebSocket API
 
 Starcite exposes session tails over Phoenix Channels so one client WebSocket can
-join many session streams at once.
+join many session streams at once. There is no standalone raw `/tail` WebSocket
+endpoint.
 
 ## Socket
 
-Connect a Phoenix client socket to:
+Connect a Phoenix client socket to the base socket endpoint:
 
 ```
 ws://HOST/v1/socket
 ```
 
-Pass the JWT as a socket param:
+Pass the JWT as the socket auth param:
 
 - `token`
+
+`access_token` is rejected.
 
 Example:
 
@@ -27,12 +30,15 @@ const socket = new Socket("wss://HOST/v1/socket", {
 socket.connect()
 ```
 
-JWT requirements for tail subscriptions:
+In the default `jwt` auth mode:
 
 - valid JWT signature via JWKS
 - `session:read` scope
 - JWT `tenant_id` must match the session tenant
 - if JWT has `session_id`, it must match the subscribed session
+
+If you explicitly run with `STARCITE_AUTH_MODE=none`, omit `token` and the
+JWT-specific checks below do not apply.
 
 Socket auth behavior:
 
@@ -53,7 +59,7 @@ lifecycle
 The server derives tenant scope from the authenticated socket. Clients do not
 pass tenant identifiers in the topic or payload.
 
-Lifecycle join behavior:
+Lifecycle join behavior in JWT mode:
 
 - requires a backend/service JWT with `session:read`
 - rejects non-service JWT principals
@@ -87,7 +93,7 @@ The channel emits `lifecycle` payloads:
 
 Today, Starcite emits only lifecycle events it owns directly. Appended session
 events are available on `tail:<session_id>` and are not reinterpreted as
-lifecycle notifications.
+lifecycle notifications. The current implementation emits `session.created`.
 
 ### `tail:<session_id>`
 
