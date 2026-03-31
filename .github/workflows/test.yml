@@ -9,6 +9,20 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: starcite_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d starcite_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
 
     env:
       MIX_ENV: test
@@ -71,10 +85,26 @@ jobs:
           mc mb --ignore-existing local/starcite-test >/dev/null
         '
 
-    # - name: Setup test database
-    #   run: mix ecto.setup
-    #   env:
-    #     MIX_ENV: test
+    - name: Wait for Postgres
+      run: |
+        ready=false
+        for _ in $(seq 1 30); do
+          if pg_isready -h localhost -p 5432 -U postgres -d starcite_test >/dev/null; then
+            ready=true
+            break
+          fi
+          sleep 1
+        done
+        if [ "$ready" != "true" ]; then
+          docker ps
+          echo "Postgres did not become healthy in time" >&2
+          exit 1
+        fi
+      env:
+        PGPASSWORD: postgres
+
+    - name: Setup test database
+      run: mix starcite.test_setup
 
     - name: Run tests
       run: |
