@@ -25,17 +25,18 @@ Guidance for Claude Code when collaborating on Starcite.
 Starcite exposes three primitives under `/v1`:
 
 - `POST /v1/sessions` (`create`)
+- `GET /v1/sessions` (`list`)
 - `POST /v1/sessions/:id/append` (`append`)
-- `GET /v1/sessions/:id/tail?cursor=N` (WebSocket `tail`)
+- Phoenix Channels on `/v1/socket` (`tail:<session_id>` and `lifecycle`)
 
 Contract reminders:
 
-- `tail` means catch up from `cursor`, then stream live on one socket.
+- `tail` means join `tail:<session_id>` with an optional `cursor`, then stream live on the same socket.
 - `append` is shared by humans and agents.
-- `actor` is required on append and is an opaque string.
+- `actor` is derived from the authenticated principal when omitted and must match that principal when provided.
 - `type` + `payload` are protocol-agnostic in this iteration.
 - `idempotency_key` and `expected_seq` are optional controls.
-- Auth is upstream; Starcite does not own authn/authz.
+- Default auth mode is JWT via JWKS; `STARCITE_AUTH_MODE=none` is an explicit no-auth mode.
 - Starcite does not push outbound webhooks.
 
 ## Architecture Cheat Sheet

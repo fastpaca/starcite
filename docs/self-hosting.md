@@ -62,40 +62,82 @@ lag separately from Starcite's own replication.
 
 ## Configuration
 
+These are the current runtime and release knobs the implementation actually
+reads. Older docs sometimes mentioned `STARCITE_NUM_GROUPS`,
+`STARCITE_RAFT_DATA_DIR`, and `STARCITE_RA_WAL_*`; the current runtime does not
+read those variables, so they are intentionally omitted here.
+
+### Release and network
+
 | Variable | Purpose |
 | --- | --- |
-| `RELEASE_NODE` | Erlang node identity (`name@host`). Must survive restarts. |
-| `SECRET_KEY_BASE` | Session encryption key. Generate with `mix phx.gen.secret`. |
-| `CLUSTER_NODES` | Comma-separated cluster peers. Same value on every node. This is the cluster membership list. |
-| `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per group — normally `3`. |
-| `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` | How long a node waits for drain completion before shutdown continues. Default `30000`. Increase this if a node can own hundreds of active sessions during rollouts. |
-| `STARCITE_NUM_GROUPS` | Session sharding groups — normally `256`. Don't change this without reading [Architecture](architecture.md). |
-| `STARCITE_RAFT_DATA_DIR` | Persistent state data path. Must be on a persistent volume. |
-| `STARCITE_RA_WAL_DATA_DIR` | Optional separate Ra WAL path. Put this on the lowest-latency persistent volume you have. |
-| `STARCITE_RA_WAL_WRITE_STRATEGY` | Optional Ra WAL write strategy override. Default is `o_sync`; other values are `default` and `sync_after_notify`. |
-| `STARCITE_RA_WAL_SYNC_METHOD` | Optional Ra WAL sync method override. Default is `datasync`; other values are `sync` and `none`. |
+| `PHX_SERVER` | Required for Phoenix to serve HTTP in releases. The official Docker image sets this to `true`. |
+| `SECRET_KEY_BASE` | Required Phoenix secret. Generate with `mix phx.gen.secret`. |
+| `PORT` | Public API listen port. Default `4000`. |
+| `PHX_HOST` | External host used in endpoint URL config. Default `example.com` in prod runtime. |
+| `STARCITE_OPS_PORT` | Separate ops listener for `/health/live`, `/health/ready`, `/metrics`, and `pprof`. These endpoints are not served on `PORT`. |
+| `STARCITE_PPROF_PORT` | Fallback ops port if `STARCITE_OPS_PORT` is unset. |
+| `STARCITE_PPROF_TIMEOUT_MS` | `pprof` profile capture timeout. Default `60000`. |
+| `STARCITE_ENABLE_TELEMETRY` | Enables or disables telemetry/PromEx. Default `true`. |
+
+### Cluster and routing
+
+| Variable | Purpose |
+| --- | --- |
+| `RELEASE_NODE` | Stable Erlang node identity (`name@host`). Must survive restarts. |
+| `RELEASE_COOKIE` | Erlang distribution cookie. Required for multi-node clusters. |
+| `CLUSTER_NODES` | Comma-separated static cluster peers. Use this or `DNS_CLUSTER_QUERY`. |
+| `DNS_CLUSTER_QUERY` | Headless DNS name for `DNSPoll` discovery. Use this or `CLUSTER_NODES`. |
+| `DNS_CLUSTER_NODE_BASENAME` | Node basename used with `DNS_CLUSTER_QUERY`. Default `starcite`. |
+| `DNS_POLL_INTERVAL_MS` | DNS poll interval in milliseconds. Default `5000`. |
+| `STARCITE_ROUTING_REPLICATION_FACTOR` | Replicas per routing group. Default `3`. |
+| `STARCITE_ROUTING_STORE_DIR` | Khepri routing store path. Default `priv/khepri`. |
+| `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` | How long shutdown drain waits before the node stops anyway. Default `30000`. |
+
+### Auth
+
+| Variable | Purpose |
+| --- | --- |
+| `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for explicit no-auth runs. |
+| `STARCITE_AUTH_JWT_ISSUER` | Required when `STARCITE_AUTH_MODE=jwt`. |
+| `STARCITE_AUTH_JWT_AUDIENCE` | Required when `STARCITE_AUTH_MODE=jwt`. |
+| `STARCITE_AUTH_JWKS_URL` | Required when `STARCITE_AUTH_MODE=jwt`. |
+| `STARCITE_AUTH_JWT_LEEWAY_SECONDS` | JWT clock-skew leeway. Default `1`. |
+| `STARCITE_AUTH_JWKS_REFRESH_MS` | Background JWKS refresh cadence. Default `60000`. |
+| `STARCITE_AUTH_JWKS_HARD_EXPIRY_MS` | Maximum age of cached JWKS data without a successful refresh. Defaults to `STARCITE_AUTH_JWKS_REFRESH_MS`. |
+
+### Archive backend
+
+| Variable | Purpose |
+| --- | --- |
 | `STARCITE_ARCHIVE_ADAPTER` | `s3` (default) or `postgres`. |
-| `STARCITE_AUTH_MODE` | `jwt` (default) or `none` for development. |
-| `PORT` | HTTP listen port. Default `4000`. |
+| `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | Archive flush cadence. Default `5000`. |
+| `DATABASE_URL` | Postgres archive URL. Required in `postgres` mode unless you set `STARCITE_POSTGRES_URL` instead. |
+| `STARCITE_POSTGRES_URL` | Alternate Postgres archive URL. |
+| `DB_POOL_SIZE` | Ecto pool size for the Postgres archive adapter. Default `10`. |
+| `STARCITE_S3_BUCKET` | Required in `s3` mode in prod. |
+| `STARCITE_S3_PREFIX` | Optional object prefix. |
+| `STARCITE_S3_REGION` | Optional S3 region override. |
+| `STARCITE_S3_ACCESS_KEY_ID` | Optional S3 credential override. |
+| `STARCITE_S3_SECRET_ACCESS_KEY` | Optional S3 secret override. |
+| `STARCITE_S3_SESSION_TOKEN` | Optional session token for temporary credentials. |
+| `STARCITE_S3_ENDPOINT` | Optional custom S3 endpoint for MinIO/R2/etc. |
+| `STARCITE_S3_PATH_STYLE` | Optional path-style toggle. |
+| `STARCITE_S3_MAX_WRITE_RETRIES` | Optional archive write retry limit. |
 
-**JWT auth** (when `STARCITE_AUTH_MODE=jwt`) additionally requires:
-`STARCITE_AUTH_JWT_ISSUER`, `STARCITE_AUTH_JWT_AUDIENCE`, `STARCITE_AUTH_JWKS_URL`.
+### Runtime storage and cache tuning
 
-Optional JWT cache controls:
-- `STARCITE_AUTH_JWKS_REFRESH_MS` controls background JWKS refresh cadence.
-- `STARCITE_AUTH_JWKS_HARD_EXPIRY_MS` controls how long a cached signing key remains
-  valid without a successful refresh. Default: same as `STARCITE_AUTH_JWKS_REFRESH_MS`.
-
-**S3 backend** additionally requires: `STARCITE_S3_BUCKET`, `STARCITE_S3_REGION`.
-Optional: `STARCITE_S3_ENDPOINT`, `STARCITE_S3_ACCESS_KEY_ID`,
-`STARCITE_S3_SECRET_ACCESS_KEY`, `STARCITE_S3_PATH_STYLE`.
-
-**Postgres backend** additionally requires: `DATABASE_URL`.
-
-**Raft WAL tuning:** `sync_after_notify` lowers observed latency by notifying the
-caller before the local WAL sync completes, and `none` disables the local sync
-entirely. Both trade durability semantics for latency and should be treated as
-explicit operational choices, not transparent optimizations.
+| Variable | Purpose |
+| --- | --- |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | Hot event-store memory budget. Default `2147483648` bytes. Accepts units such as `256MB` or `4G`. |
+| `STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL` | Event-store capacity poll interval. Default `4`. |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | Archive-read cache memory budget. Default `536870912` bytes. Accepts the same size units as `STARCITE_EVENT_STORE_MAX_SIZE`. |
+| `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | Fraction reclaimed when the archive-read cache trims. Default `0.25`. |
+| `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | Enables compressed archive-read cache entries. Default `true`. |
+| `STARCITE_SESSION_STORE_TTL_MS` | Session-store TTL. Default `21600000`. |
+| `STARCITE_SESSION_STORE_PURGE_INTERVAL_MS` | Session-store purge interval. Default `60000`. |
+| `STARCITE_SESSION_STORE_COMPRESSED` | Enables compressed session-store entries. Default `true`. |
+| `STARCITE_SESSION_STORE_TOUCH_ON_READ` | Refreshes session-store TTL on reads. Default `true`. |
 
 ### S3 schema migration
 
@@ -116,19 +158,19 @@ First-time cluster setup:
 
 1. Provision three cluster nodes with persistent volumes.
 2. Set a stable `RELEASE_NODE` on each — this identity must survive restarts.
-3. Set identical `CLUSTER_NODES` on all nodes.
+3. Configure discovery with either identical `CLUSTER_NODES` on all nodes or a shared `DNS_CLUSTER_QUERY` setup.
 4. Start all cluster nodes.
 5. Verify:
 
 ```bash
-curl -sS http://<node>:4001/health/ready
+curl -sS http://<node>:${STARCITE_OPS_PORT}/health/ready
 bin/starcite rpc "Starcite.Operations.status()"
 bin/starcite rpc "Starcite.Operations.ready_nodes()"
 ```
 
 You should see each node report ready, and the ready node set should match your
-configured `CLUSTER_NODES`. If a node isn't ready, check its logs — the most common
-issue is misconfigured `CLUSTER_NODES` or unreachable peers.
+configured discovery mode. If a node isn't ready, check its logs — the most common
+issue is misconfigured cluster discovery or unreachable peers.
 
 Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
 or admin network. `/health/live`, `/health/ready`, `/metrics`, and `pprof` are
@@ -164,7 +206,7 @@ For production rollouts, operate one node at a time:
    restore its local runtime before it can accept fresh ownership:
    ```bash
    bin/starcite rpc "Starcite.Operations.wait_local_ready(60000)"
-   curl -sS http://<node>:4001/health/ready
+   curl -sS http://<node>:${STARCITE_OPS_PORT}/health/ready
    ```
 
 5. **Verify** the cluster looks healthy before moving on:
