@@ -147,7 +147,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def query_session_with_epoch(session_id)
       when is_binary(session_id) and session_id != "" do
     with {:ok, session} <- get_session(session_id) do
-      {:ok, %{session: session, epoch: normalize_epoch(session.epoch)}}
+      {:ok, %{session: session, epoch: Session.normalize_epoch_value(session.epoch)}}
     end
   end
 
@@ -486,7 +486,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
       desired_role = desired_role(session_id, assignment)
 
       cond do
-        current_epoch > normalize_epoch(session.epoch) or desired_role != role ->
+        current_epoch > Session.normalize_epoch_value(session.epoch) or desired_role != role ->
           restart_runtime_for_epoch(session_id, session, current_epoch)
 
         follower_refresh_needed?(session_id, role, desired_role, session) ->
@@ -564,14 +564,14 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp effective_epoch(session_id, %Session{} = session, nil)
        when is_binary(session_id) and session_id != "" do
-    SessionRouter.local_owner_epoch(session_id, normalize_epoch(session.epoch))
+    SessionRouter.local_owner_epoch(session_id, Session.normalize_epoch_value(session.epoch))
   end
 
   defp effective_epoch(session_id, %Session{} = session, assignment)
        when is_binary(session_id) and session_id != "" do
     SessionRouter.local_owner_epoch(
       session_id,
-      normalize_epoch(session.epoch),
+      Session.normalize_epoch_value(session.epoch),
       assignment: assignment
     )
   end
@@ -795,7 +795,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp session_with_epoch(%Session{} = session, epoch)
        when is_integer(epoch) and epoch >= 0 do
-    %Session{session | epoch: max(normalize_epoch(session.epoch), epoch)}
+    %Session{session | epoch: max(Session.normalize_epoch_value(session.epoch), epoch)}
   end
 
   defp restart_runtime_from_local_session(session_id, %Session{} = session, target_epoch)
@@ -1039,8 +1039,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp fresher_session?(%Session{} = incoming, %Session{} = current) do
-    incoming_epoch = normalize_epoch(incoming.epoch)
-    current_epoch = normalize_epoch(current.epoch)
+    incoming_epoch = Session.normalize_epoch_value(incoming.epoch)
+    current_epoch = Session.normalize_epoch_value(current.epoch)
 
     cond do
       incoming_epoch > current_epoch ->
@@ -1062,7 +1062,4 @@ defmodule Starcite.DataPlane.SessionQuorum do
         false
     end
   end
-
-  defp normalize_epoch(epoch) when is_integer(epoch) and epoch >= 0, do: epoch
-  defp normalize_epoch(_epoch), do: 0
 end

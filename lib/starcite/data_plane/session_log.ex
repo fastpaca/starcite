@@ -24,7 +24,7 @@ defmodule Starcite.DataPlane.SessionLog do
   def new(%Session{} = session, role, replicate_fun)
       when role in [:owner, :follower] and is_function(replicate_fun, 3) do
     %{
-      session: normalize_session_epoch(session),
+      session: Session.normalize_epoch(session),
       producer_cursors: %{},
       replicate_fun: replicate_fun,
       role: role
@@ -222,7 +222,7 @@ defmodule Starcite.DataPlane.SessionLog do
        when is_integer(upto_seq) and upto_seq >= 0 and is_list(replicas) do
     previous_archived_seq = session.archived_seq
     {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
-    next_session = normalize_session_epoch(updated_session)
+    next_session = Session.normalize_epoch(updated_session)
 
     case replicate_state(data, next_session, [], replicas) do
       :ok ->
@@ -276,7 +276,7 @@ defmodule Starcite.DataPlane.SessionLog do
          actions
        )
        when is_binary(session_id) and session_id != "" and is_list(incoming_events) do
-    normalized_session = normalize_session_epoch(incoming_session)
+    normalized_session = Session.normalize_epoch(incoming_session)
     normalized_events = put_events_epoch(incoming_events, normalized_session.epoch)
 
     if should_apply_replication?(normalized_session, current_session) do
@@ -326,7 +326,7 @@ defmodule Starcite.DataPlane.SessionLog do
     with :ok <- guard_expected_seq(session, request.expected_seq),
          {:ok, next_session, next_cursors, next_events, outcome} <-
            execute_append_request(session, producer_cursors, request) do
-      next_session = normalize_session_epoch(next_session)
+      next_session = Session.normalize_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
 
       commit_single_append(
@@ -360,7 +360,7 @@ defmodule Starcite.DataPlane.SessionLog do
         case execute_append_request(current_session, current_cursors, request) do
           {:ok, updated_session, updated_cursors, request_events, outcome} ->
             {
-              normalize_session_epoch(updated_session),
+              Session.normalize_epoch(updated_session),
               updated_cursors,
               events ++ request_events,
               outcomes ++ [outcome]
@@ -662,13 +662,6 @@ defmodule Starcite.DataPlane.SessionLog do
     {:ok, session, producer_cursors, Enum.reverse(replies), Enum.reverse(events)}
   end
 
-  defp normalize_session_epoch(%Session{epoch: epoch} = session)
-       when is_integer(epoch) and epoch >= 0 do
-    session
-  end
-
-  defp normalize_session_epoch(%Session{} = session), do: %Session{session | epoch: 0}
-
   defp put_event_epoch(nil, _epoch), do: nil
 
   defp put_event_epoch(%{seq: seq} = event, epoch)
@@ -746,8 +739,8 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp should_apply_replication?(%Session{} = incoming, %Session{} = current) do
-    incoming_epoch = normalize_epoch(incoming.epoch)
-    current_epoch = normalize_epoch(current.epoch)
+    incoming_epoch = Session.normalize_epoch_value(incoming.epoch)
+    current_epoch = Session.normalize_epoch_value(current.epoch)
 
     cond do
       incoming_epoch > current_epoch ->
@@ -772,9 +765,6 @@ defmodule Starcite.DataPlane.SessionLog do
         incoming != current
     end
   end
-
-  defp normalize_epoch(epoch) when is_integer(epoch) and epoch >= 0, do: epoch
-  defp normalize_epoch(_epoch), do: 0
 
   defp decorate_append_reply(%{seq: seq} = reply, epoch, committed_seq)
        when is_integer(seq) and seq >= 0 and is_integer(epoch) and epoch >= 0 and

@@ -76,7 +76,7 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
     runtime_session =
       resolved_session
-      |> normalize_session_epoch()
+      |> Session.normalize_epoch()
       |> apply_routing_epoch()
 
     role = role_for_session(runtime_session.id)
@@ -170,23 +170,13 @@ defmodule Starcite.DataPlane.SessionRuntime do
     end
   end
 
-  defp normalize_session_epoch(%Session{epoch: epoch} = session)
-       when is_integer(epoch) and epoch >= 0 do
-    session
-  end
-
-  defp normalize_session_epoch(%Session{} = session), do: %Session{session | epoch: 0}
-
   defp apply_routing_epoch(%Session{id: session_id} = session)
        when is_binary(session_id) and session_id != "" do
-    normalized_session = normalize_session_epoch(session)
-    fallback_epoch = normalize_epoch(normalized_session.epoch)
+    normalized_session = Session.normalize_epoch(session)
+    fallback_epoch = Session.normalize_epoch_value(normalized_session.epoch)
     routing_epoch = SessionRouter.local_owner_epoch(session_id, fallback_epoch)
     %Session{normalized_session | epoch: routing_epoch}
   end
-
-  defp normalize_epoch(epoch) when is_integer(epoch) and epoch >= 0, do: epoch
-  defp normalize_epoch(_epoch), do: 0
 
   defp role_for_session(session_id) when is_binary(session_id) and session_id != "" do
     case SessionRouter.ensure_local_owner(session_id) do

@@ -227,6 +227,17 @@ defmodule Starcite.Session do
     end
   end
 
+  @spec normalize_epoch(t()) :: t()
+  def normalize_epoch(%Session{epoch: epoch} = session)
+      when is_integer(epoch) and epoch >= 0,
+      do: session
+
+  def normalize_epoch(%Session{} = session), do: %Session{session | epoch: 0}
+
+  @spec normalize_epoch_value(term()) :: non_neg_integer()
+  def normalize_epoch_value(epoch) when is_integer(epoch) and epoch >= 0, do: epoch
+  def normalize_epoch_value(_epoch), do: 0
+
   @spec to_map(t(), Header.t()) :: map()
   def to_map(%Session{} = session, %Header{} = header),
     do: Header.to_map(header, session.last_seq)
