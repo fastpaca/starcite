@@ -1,13 +1,16 @@
 defmodule Starcite.DataPlane.SessionQuorumTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Archive.SessionCatalog
   alias Starcite.Auth.Principal
-  alias Starcite.DataPlane.SessionQuorum
+  alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
+  alias Starcite.Repo
   alias Starcite.Routing.Store
   alias Starcite.Session
+  alias Starcite.Session.Header
+  alias Starcite.Storage.{EventArchive, SessionCatalog}
 
   setup do
+    ensure_repo_sandbox()
     original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
     original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
     handler_id = "session-replication-#{System.unique_integer([:positive, :monotonic])}"
@@ -99,18 +102,122 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
     assert metadata.outcome == :quorum_not_met
     assert metadata.failure_reason in [:badrpc, :timeout, :error]
   end
+
+  test "bootstraps from the durable session catalog when local cache and peers miss" do
+    on_exit(fn ->
+      SessionQuorum.clear()
+      SessionStore.clear()
+      EventStore.clear()
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, [Node.self()])
+    Application.put_env(:starcite, :routing_replication_factor, 1)
+
+    session_id = "ses-archive-bootstrap-unit"
+    creator = %Principal{tenant_id: "acme", id: "svc-backend", type: :service}
+
+    assert :ok =
+             :khepri.put(
+               Store.store_id(),
+               [:sessions, session_id],
+               %{
+                 owner: Node.self(),
+                 epoch: 7,
+                 replicas: [Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               },
+               %{async: false, reply_from: :local, timeout: 5_000}
+             )
+
+    assert :ok =
+             SessionCatalog.persist_created(
+               Header.new(session_id,
+                 title: "Archived only",
+                 creator_principal: creator,
+                 tenant_id: "acme",
+                 metadata: %{source: "archive"}
+               )
+             )
+
+    archived_rows =
+      for seq <- 1..3 do
+        %{
+          session_id: session_id,
+          seq: seq,
+          type: "content",
+          payload: %{n: seq},
+          actor: "svc-backend",
+          producer_id: "svc-backend",
+          producer_seq: seq,
+          tenant_id: "acme",
+          source: nil,
+          metadata: %{},
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: NaiveDateTime.utc_now()
+        }
+      end
+
+    assert {:ok, 3} = EventArchive.write_events(archived_rows)
+
+    assert :ok =
+             SessionCatalog.put_progress_batch([
+               %{session_id: session_id, archived_seq: 3}
+             ])
+
+    SessionQuorum.clear()
+    SessionStore.clear()
+    EventStore.clear()
+
+    assert :error == SessionStore.get_session_cached(session_id)
+
+    assert {:ok, %Session{} = session} = SessionQuorum.get_session(session_id)
+    assert session.id == session_id
+    assert session.tenant_id == "acme"
+    assert session.epoch == 7
+    assert session.last_seq == 3
+    assert session.archived_seq == 3
+
+    assert {:ok, snapshot} = SessionQuorum.fetch_cursor_snapshot(session_id)
+    assert snapshot.epoch == 7
+    assert snapshot.last_seq == 3
+    assert snapshot.committed_seq == 3
+
+    assert {:ok, %Session{id: ^session_id, archived_seq: 3}} =
+             SessionCatalog.get_session(session_id)
+
+    assert {:ok, header} = SessionCatalog.get_header(session_id)
+    assert header.metadata == %{"source" => "archive"}
+  end
+
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
 end
 
 defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   use ExUnit.Case, async: false
 
   alias Phoenix.PubSub
-  alias Starcite.Archive.SessionCatalog
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionQuorum, SessionStore}
   alias Starcite.Operations
   alias Starcite.Routing.Store
   alias Starcite.Session
+  alias Starcite.Session.Header
+  alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
   alias Starcite.TestSupport.DistributedPeerDataPlane
 
@@ -193,7 +300,9 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a, peer_b])
     assert :ok = SessionQuorum.replicate_state(seed_session, [])
-    assert {:appended, updated_session, event} = Session.append_event(seed_session, input)
+
+    assert {:appended, updated_session, _producer_cursors, event} =
+             Session.append_event(seed_session, %{}, input)
 
     replicated_session = %Session{updated_session | epoch: 7}
     assert :ok = SessionQuorum.replicate_state(replicated_session, [event])
@@ -296,7 +405,11 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     put_assignment(session_id, Node.self(), [Node.self(), peer_a])
     assert :ok = seed_peer_cache(peer_a, session, [])
-    assert :ok = SessionCatalog.persist_created(Session.to_map(session), principal, "acme", %{})
+
+    header =
+      Header.new(session_id, creator_principal: principal, tenant_id: "acme", metadata: %{})
+
+    assert :ok = SessionCatalog.persist_created(header)
 
     assert {:ok, bootstrapped} = SessionQuorum.get_session(session_id)
     assert bootstrapped.id == session_id
@@ -1098,6 +1211,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
   defp configure_peer(peer_node, cluster_nodes, routing_store_dir)
        when is_atom(peer_node) and is_list(cluster_nodes) and is_binary(routing_store_dir) do
     routing_lease_ttl_ms = Application.get_env(:starcite, :routing_lease_ttl_ms, 5_000)
+    event_archive_opts = Application.get_env(:starcite, :event_archive_opts, [])
 
     :ok =
       :rpc.call(
@@ -1125,7 +1239,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
         peer_node,
         Application,
         :put_env,
-        [:starcite, :archive_adapter, Starcite.Archive.Adapter.Postgres]
+        [:starcite, :event_archive_opts, event_archive_opts]
       )
 
     :ok

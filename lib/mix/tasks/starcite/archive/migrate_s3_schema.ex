@@ -11,8 +11,7 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
       mix starcite.archive.migrate_s3_schema --dry-run
   """
 
-  alias Starcite.Archive.Adapter.S3
-  alias Starcite.Archive.Adapter.S3.{Config, SchemaControl}
+  alias Starcite.Storage.EventArchive.S3.{Config, SchemaControl}
 
   @impl true
   def run(args) do
@@ -41,16 +40,7 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
     Mix.Task.run("app.config")
     ensure_s3_client_apps_started!()
 
-    archive_adapter = Application.get_env(:starcite, :archive_adapter, S3)
-
-    if archive_adapter != S3 do
-      Mix.raise("""
-      S3 schema migration is only available when :archive_adapter is #{inspect(S3)}.
-      Current adapter: #{inspect(archive_adapter)}
-      """)
-    end
-
-    runtime_opts = Application.get_env(:starcite, :archive_adapter_opts, [])
+    runtime_opts = Application.get_env(:starcite, :event_archive_opts, [])
     config = Config.build!(runtime_opts, [])
 
     case SchemaControl.migrate(config,
@@ -79,12 +69,6 @@ defmodule Mix.Tasks.Starcite.Archive.MigrateS3Schema do
 
   defp print_stats(stats) when is_map(stats) do
     IO.puts("dry_run=#{stats.dry_run}")
-    IO.puts("index_scanned=#{stats.index_scanned}")
-    IO.puts("index_migrations_needed=#{stats.index_migrations_needed}")
-    IO.puts("index_rewritten=#{stats.index_rewritten}")
-    IO.puts("session_scanned=#{stats.session_scanned}")
-    IO.puts("session_migrations_needed=#{stats.session_migrations_needed}")
-    IO.puts("session_rewritten=#{stats.session_rewritten}")
     IO.puts("event_scanned=#{stats.event_scanned}")
     IO.puts("event_migrations_needed=#{stats.event_migrations_needed}")
     IO.puts("event_rewritten=#{stats.event_rewritten}")

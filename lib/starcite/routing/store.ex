@@ -897,11 +897,6 @@ defmodule Starcite.Routing.Store do
   defp missing_node_error?({:node_not_found, _info}), do: true
   defp missing_node_error?(_reason), do: false
 
-  defp mismatching_node_error?({:khepri, :mismatching_node, _info}), do: true
-  defp mismatching_node_error?({:mismatching_node, _info}), do: true
-  defp mismatching_node_error?(:mismatching_node), do: true
-  defp mismatching_node_error?(_reason), do: false
-
   defp lease_ttl_ms do
     case Application.get_env(:starcite, :routing_lease_ttl_ms, 5_000) do
       value when is_integer(value) and value > 0 -> value
@@ -1201,7 +1196,7 @@ defmodule Starcite.Routing.Store do
   end
 
   defp recoverable_store_error?(reason) do
-    mismatching_node_error?(reason) or local_store_missing_error?(reason)
+    local_store_missing_error?(reason)
   end
 
   defp khepri_call(fun) when is_function(fun, 0) do

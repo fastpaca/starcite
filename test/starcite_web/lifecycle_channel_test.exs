@@ -3,6 +3,7 @@ defmodule StarciteWeb.LifecycleChannelTest do
   import Phoenix.ChannelTest
 
   alias Starcite.Auth.Principal
+  alias Starcite.DataPlane.SessionQuorum
   alias Starcite.WritePath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.LifecycleChannel
@@ -30,6 +31,9 @@ defmodule StarciteWeb.LifecycleChannelTest do
                metadata: %{workflow: "contract"}
              )
 
+    assert_push "lifecycle", %{event: event}
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
+
     assert_push "lifecycle", %{
       event: %{
         kind: "session.created",
@@ -51,6 +55,89 @@ defmodule StarciteWeb.LifecycleChannelTest do
              })
 
     Process.sleep(50)
+    refute_received %Phoenix.Socket.Message{event: "lifecycle"}
+  end
+
+  test "pushes freeze and hydrate lifecycle events for the authenticated tenant" do
+    original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+    original_idle_check_interval =
+      Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+    on_exit(fn ->
+      restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+      restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+    end)
+
+    Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+    Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-freeze", %{auth: service_auth_context()})
+      |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
+
+    session_id = unique_id("ses-freeze")
+
+    assert {:ok, _session} =
+             WritePath.create_session(
+               id: session_id,
+               tenant_id: "acme"
+             )
+
+    assert_push "lifecycle", %{event: event}
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
+
+    assert_push "lifecycle", %{
+      event: %{
+        kind: "session.created",
+        session_id: ^session_id,
+        tenant_id: "acme"
+      }
+    }
+
+    [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, session_id)
+    ref = Process.monitor(pid)
+
+    assert_push "lifecycle", %{event: event}, 2_000
+    assert event == %{kind: "session.freezing", session_id: session_id, tenant_id: "acme"}
+
+    assert_push "lifecycle", %{event: event}, 2_000
+    assert event == %{kind: "session.frozen", session_id: session_id, tenant_id: "acme"}
+
+    assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
+    assert reason in [:normal, :shutdown]
+
+    eventually(
+      fn ->
+        assert [] == Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, session_id)
+      end,
+      timeout: 1_000
+    )
+
+    assert {:ok, _session} = SessionQuorum.get_session(session_id)
+
+    assert_push "lifecycle", %{event: event}, 1_000
+    assert event == %{kind: "session.hydrating", session_id: session_id, tenant_id: "acme"}
+
+    assert_push "lifecycle", %{event: event}, 1_000
+    assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
+  end
+
+  test "does not push lifecycle events for another tenant" do
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-tenant-scope", %{auth: service_auth_context()})
+      |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
+
+    other_principal = %Principal{tenant_id: "other", id: "svc-other", type: :service}
+
+    assert {:ok, _session} =
+             WritePath.create_session(
+               id: unique_id("ses-other"),
+               tenant_id: "other",
+               creator_principal: other_principal
+             )
+
+    Process.sleep(100)
     refute_received %Phoenix.Socket.Message{event: "lifecycle"}
   end
 
@@ -133,4 +220,28 @@ defmodule StarciteWeb.LifecycleChannelTest do
     Process.put(:producer_seq_counters, Map.put(counters, key, seq))
     seq
   end
+
+  defp eventually(fun, opts) when is_function(fun, 0) and is_list(opts) do
+    timeout = Keyword.get(opts, :timeout, 1_000)
+    interval = Keyword.get(opts, :interval, 50)
+    deadline = System.monotonic_time(:millisecond) + timeout
+    do_eventually(fun, deadline, interval)
+  end
+
+  defp do_eventually(fun, deadline, interval) do
+    try do
+      fun.()
+    rescue
+      _ ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(interval)
+          do_eventually(fun, deadline, interval)
+        else
+          fun.()
+        end
+    end
+  end
+
+  defp restore_app_env(key, nil), do: Application.delete_env(:starcite, key)
+  defp restore_app_env(key, value), do: Application.put_env(:starcite, key, value)
 end

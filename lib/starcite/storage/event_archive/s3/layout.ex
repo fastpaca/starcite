@@ -1,11 +1,9 @@
-defmodule Starcite.Archive.Adapter.S3.Layout do
+defmodule Starcite.Storage.EventArchive.S3.Layout do
   @moduledoc """
-  Computes S3 keys and chunk boundaries for archive storage.
+  Computes S3 keys and chunk boundaries for event archive storage.
 
   Layout is intentionally simple and fixed:
   - Event chunks: `<prefix>/events/v1/<base64url(tenant_id)>/<base64url(session_id)>/<chunk_start>.ndjson`
-  - Session blobs: `<prefix>/sessions/v1/<base64url(tenant_id)>/<base64url(session_id)>.json`
-  - Session tenant index: `<prefix>/session-tenants/v1/<base64url(session_id)>.json`
   - One object is one cache-line chunk.
 
   Chunk boundaries are sequence-based. For a chunk size of `256`, sequence
@@ -13,8 +11,6 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
   """
 
   @events_prefix "events/v1"
-  @sessions_prefix "sessions/v1"
-  @session_tenants_prefix "session-tenants/v1"
   @schema_prefix "schema"
 
   @spec group_event_rows([map()], pos_integer()) ::
@@ -36,24 +32,6 @@ defmodule Starcite.Archive.Adapter.S3.Layout do
 
   @spec event_prefix(map()) :: String.t()
   def event_prefix(%{prefix: prefix}), do: "#{prefix}/#{@events_prefix}/"
-
-  @spec session_prefix(map()) :: String.t()
-  def session_prefix(%{prefix: prefix}), do: "#{prefix}/#{@sessions_prefix}/"
-
-  @spec session_key(map(), String.t(), String.t()) :: String.t()
-  def session_key(%{prefix: prefix}, tenant_id, session_id),
-    do: "#{prefix}/#{@sessions_prefix}/#{encode(tenant_id)}/#{encode(session_id)}.json"
-
-  @spec legacy_session_key(map(), String.t()) :: String.t()
-  def legacy_session_key(%{prefix: prefix}, session_id),
-    do: "#{prefix}/#{@sessions_prefix}/#{encode(session_id)}.json"
-
-  @spec session_tenant_index_key(map(), String.t()) :: String.t()
-  def session_tenant_index_key(%{prefix: prefix}, session_id),
-    do: "#{prefix}/#{@session_tenants_prefix}/#{encode(session_id)}.json"
-
-  @spec session_tenant_index_prefix(map()) :: String.t()
-  def session_tenant_index_prefix(%{prefix: prefix}), do: "#{prefix}/#{@session_tenants_prefix}/"
 
   @spec schema_prefix(map()) :: String.t()
   def schema_prefix(%{prefix: prefix}), do: "#{prefix}/#{@schema_prefix}/"

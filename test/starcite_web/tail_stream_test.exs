@@ -2,9 +2,8 @@ defmodule StarciteWeb.TailStreamTest do
   use ExUnit.Case, async: false
 
   alias Starcite.Auth.Principal
-  alias Starcite.Archive.Store
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
-  alias Starcite.Repo
+  alias Starcite.Storage.EventArchive
   alias Starcite.WritePath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.TailStream
@@ -269,7 +268,7 @@ defmodule StarciteWeb.TailStreamTest do
   end
 
   defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
-    base_rows =
+    rows =
       Enum.map(events, fn event ->
         %{
           session_id: session_id,
@@ -288,31 +287,8 @@ defmodule StarciteWeb.TailStreamTest do
         }
       end)
 
-    case Store.adapter() do
-      Starcite.Archive.Adapter.Postgres ->
-        ensure_repo_sandbox()
-
-        rows =
-          if events_table_has_tenant_id?() do
-            base_rows
-          else
-            Enum.map(base_rows, &Map.delete(&1, :tenant_id))
-          end
-
-        {count, _} =
-          Repo.insert_all(
-            "events",
-            rows,
-            on_conflict: :nothing,
-            conflict_target: [:session_id, :seq]
-          )
-
-        assert count == length(rows)
-
-      _other ->
-        assert {:ok, inserted} = Store.write_events(base_rows)
-        assert inserted == length(base_rows)
-    end
+    assert {:ok, inserted} = EventArchive.write_events(rows)
+    assert inserted == length(rows)
   end
 
   defp event_tenant_id!(event) when is_map(event) do
@@ -322,32 +298,6 @@ defmodule StarciteWeb.TailStreamTest do
     end
   end
 
-  defp events_table_has_tenant_id? do
-    result =
-      Ecto.Adapters.SQL.query!(
-        Repo,
-        "SELECT 1 FROM information_schema.columns WHERE table_name = 'events' AND column_name = 'tenant_id' LIMIT 1",
-        []
-      )
-
-    result.num_rows > 0
-  end
-
   defp as_datetime(%NaiveDateTime{} = value), do: DateTime.from_naive!(value, "Etc/UTC")
   defp as_datetime(%DateTime{} = value), do: value
-
-  defp ensure_repo_sandbox do
-    if Process.whereis(Repo) == nil do
-      _pid = start_supervised!(Repo)
-      :ok
-    end
-
-    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
-      :ok -> :ok
-      {:already, _owner} -> :ok
-    end
-
-    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
-    :ok
-  end
 end

@@ -160,10 +160,7 @@ defmodule Mix.Tasks.Bench.HotPath do
   end
 
   defp print_config(config) do
-    archive_adapter =
-      Application.get_env(:starcite, :archive_adapter, Starcite.Archive.Adapter.S3)
-
-    archive_adapter_opts = Application.get_env(:starcite, :archive_adapter_opts, [])
+    event_archive_opts = Application.get_env(:starcite, :event_archive_opts, [])
 
     IO.puts("Hot-path Benchee config:")
     IO.puts("  routing_store_dir: #{config.routing_store_dir}")
@@ -177,13 +174,10 @@ defmodule Mix.Tasks.Bench.HotPath do
     IO.puts("  parallel: #{config.parallel}")
     IO.puts("  warmup_seconds: #{config.warmup_seconds}")
     IO.puts("  time_seconds: #{config.time_seconds}")
-    IO.puts("  archive_adapter: #{inspect(archive_adapter)}")
+    IO.puts("  event_archive: #{inspect(Starcite.Storage.EventArchive.S3)}")
     IO.puts("  archive_flush_interval_ms: #{config.archive_flush_interval_ms}")
-
-    if archive_adapter == Starcite.Archive.Adapter.S3 do
-      IO.puts("  archive_s3_endpoint: #{inspect(Keyword.get(archive_adapter_opts, :endpoint))}")
-      IO.puts("  archive_s3_bucket: #{inspect(Keyword.get(archive_adapter_opts, :bucket))}")
-    end
+    IO.puts("  archive_s3_endpoint: #{inspect(Keyword.get(event_archive_opts, :endpoint))}")
+    IO.puts("  archive_s3_bucket: #{inspect(Keyword.get(event_archive_opts, :bucket))}")
 
     if max_bytes = Application.get_env(:starcite, :event_store_max_bytes) do
       IO.puts("  event_store_max_bytes: #{inspect(max_bytes)}")

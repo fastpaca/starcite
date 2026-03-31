@@ -1,44 +1,21 @@
 defmodule Starcite.DataPlane.EventStoreTest do
   use ExUnit.Case, async: false
 
-  defmodule FailingReadAdapter do
-    @behaviour Starcite.Archive.Adapter
-
-    use GenServer
-
-    @impl true
-    def start_link(_opts), do: GenServer.start_link(__MODULE__, %{})
-
-    @impl true
-    def init(state), do: {:ok, state}
-
-    @impl true
-    def write_events(rows) when is_list(rows), do: {:ok, length(rows)}
-
-    @impl true
-    def read_events(_session_id, _from_seq, _to_seq), do: {:error, :db_down}
-
-    @impl true
-    def upsert_session(_session), do: :ok
-
-    @impl true
-    def update_session_archived_seq(_session_id, _tenant_id, _archived_seq), do: :ok
-
-    @impl true
-    def list_sessions(_query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
-
-    @impl true
-    def list_sessions_by_ids(_ids, _query_opts), do: {:ok, %{sessions: [], next_cursor: nil}}
-  end
-
-  alias Starcite.Archive.IdempotentTestAdapter
-  alias Starcite.DataPlane.EventStore
+  alias Starcite.DataPlane.{EventStore, SessionStore}
+  alias Starcite.Session
+  alias Starcite.Storage.EventArchive
+  alias Starcite.Storage.EventArchive.S3.{Config, Layout}
+  alias Starcite.TestSupport.EventArchiveClient
 
   setup do
     EventStore.clear()
+    SessionStore.clear()
+    EventArchiveClient.reset()
 
     on_exit(fn ->
       EventStore.clear()
+      SessionStore.clear()
+      EventArchiveClient.reset()
     end)
 
     :ok
@@ -71,8 +48,6 @@ defmodule Starcite.DataPlane.EventStoreTest do
   end
 
   test "read_archived_events caches persistence reads and avoids repeated adapter calls" do
-    setup_idempotent_archive_adapter()
-
     session_id = "ses-archive-cache-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now()
 
@@ -95,25 +70,29 @@ defmodule Starcite.DataPlane.EventStoreTest do
         }
       end
 
-    assert {:ok, 3} = IdempotentTestAdapter.write_events(rows)
+    assert {:ok, 3} = EventArchive.write_events(rows)
+    :ok = cache_session_tenant(session_id, "acme")
+    :ok = EventArchiveClient.clear_logs()
+    chunk_key = chunk_key_for(session_id, "acme", 1)
 
     assert {:ok, first} = EventStore.read_archived_events(session_id, 1, 3)
     assert Enum.map(first, & &1.seq) == [1, 2, 3]
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 3}]
+    assert EventArchiveClient.call_count(:get, chunk_key) == 1
 
     assert {:ok, second} = EventStore.read_archived_events(session_id, 1, 3)
     assert second == first
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 1, 3}]
+    assert EventArchiveClient.call_count(:get, chunk_key) == 1
   end
 
   test "read_archived_events fills only missing cache gaps from persistence" do
-    setup_idempotent_archive_adapter()
-
     session_id = "ses-archive-gaps-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now()
 
     rows = archived_rows(session_id, inserted_at, 1..6)
-    assert {:ok, 6} = IdempotentTestAdapter.write_events(rows)
+    assert {:ok, 6} = EventArchive.write_events(rows)
+    :ok = cache_session_tenant(session_id, "acme")
+    :ok = EventArchiveClient.clear_logs()
+    chunk_key = chunk_key_for(session_id, "acme", 1)
 
     cached_subset =
       rows
@@ -124,18 +103,19 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     assert {:ok, events} = EventStore.read_archived_events(session_id, 1, 6)
     assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5, 6]
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 3, 4}, {session_id, 6, 6}]
+    assert EventArchiveClient.call_count(:get, chunk_key) == 2
 
     assert {:ok, again} = EventStore.read_archived_events(session_id, 1, 6)
     assert Enum.map(again, & &1.seq) == [1, 2, 3, 4, 5, 6]
-    assert IdempotentTestAdapter.get_reads() == [{session_id, 3, 4}, {session_id, 6, 6}]
+    assert EventArchiveClient.call_count(:get, chunk_key) == 2
   end
 
-  test "read_archived_events returns adapter read failures without normalization" do
-    setup_archive_adapter(FailingReadAdapter)
+  test "read_archived_events returns event archive read failures" do
     session_id = "ses-archive-read-fail-#{System.unique_integer([:positive, :monotonic])}"
+    :ok = cache_session_tenant(session_id, "acme")
+    :ok = EventArchiveClient.set_read_mode(:unavailable)
 
-    assert {:error, :db_down} = EventStore.read_archived_events(session_id, 1, 3)
+    assert {:error, :archive_read_unavailable} = EventStore.read_archived_events(session_id, 1, 3)
   end
 
   test "reclaims archived cache before applying write backpressure" do
@@ -451,30 +431,6 @@ defmodule Starcite.DataPlane.EventStoreTest do
     handler_id
   end
 
-  defp setup_idempotent_archive_adapter do
-    setup_archive_adapter(IdempotentTestAdapter)
-
-    if pid = Process.whereis(IdempotentTestAdapter) do
-      GenServer.stop(pid)
-    end
-
-    start_supervised!({IdempotentTestAdapter, []})
-    :ok = IdempotentTestAdapter.clear_writes()
-  end
-
-  defp setup_archive_adapter(adapter_mod) when is_atom(adapter_mod) do
-    previous_adapter = Application.get_env(:starcite, :archive_adapter)
-    Application.put_env(:starcite, :archive_adapter, adapter_mod)
-
-    on_exit(fn ->
-      if previous_adapter do
-        Application.put_env(:starcite, :archive_adapter, previous_adapter)
-      else
-        Application.delete_env(:starcite, :archive_adapter)
-      end
-    end)
-  end
-
   defp archived_rows(session_id, inserted_at, seqs) do
     Enum.map(seqs, fn seq ->
       %{
@@ -495,6 +451,13 @@ defmodule Starcite.DataPlane.EventStoreTest do
     end)
   end
 
+  defp cache_session_tenant(session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    Session.new(session_id, tenant_id: tenant_id)
+    |> SessionStore.put_session()
+  end
+
   defp archived_events_only(inserted_at, seqs) do
     Enum.map(seqs, fn seq ->
       %{
@@ -512,5 +475,20 @@ defmodule Starcite.DataPlane.EventStoreTest do
         inserted_at: inserted_at
       }
     end)
+  end
+
+  defp chunk_key_for(session_id, tenant_id, seq) do
+    config =
+      Config.build!(
+        Application.get_env(:starcite, :event_archive_opts, []),
+        []
+      )
+
+    Layout.event_chunk_key(
+      config,
+      tenant_id,
+      session_id,
+      Layout.chunk_start_for(seq, config.chunk_size)
+    )
   end
 end

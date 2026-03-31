@@ -46,13 +46,14 @@ defmodule Mix.Tasks.Bench.Internal do
     session_append = fn ->
       seq = :atomics.add_get(session_counter, 1, 1)
       session = %Session{base_session | last_seq: seq - 1}
+      producer_cursors = %{}
       event_with_producer = with_bench_producer(input_event_template, "bench-session", 1)
 
-      case Session.append_event(session, event_with_producer) do
-        {:appended, _updated, _event} ->
+      case Session.append_event(session, producer_cursors, event_with_producer) do
+        {:appended, _updated, _updated_cursors, _event} ->
           :ok
 
-        {:deduped, _session, _seq} ->
+        {:deduped, _session, _updated_cursors, _seq} ->
           :ok
 
         {:error, reason} ->

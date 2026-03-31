@@ -2,6 +2,7 @@ defmodule Starcite.SessionTest do
   use ExUnit.Case, async: true
 
   alias Starcite.Session
+  alias Starcite.Session.Header
 
   describe "Session.new/2" do
     test "creates a session with default values" do
@@ -10,17 +11,17 @@ defmodule Starcite.SessionTest do
       assert session.id == "ses-1"
       assert session.last_seq == 0
       assert session.archived_seq == 0
-      assert session.metadata == %{}
       assert Session.tail_size(session) == 0
     end
   end
 
-  describe "Session.append_event/2" do
+  describe "Session.append_event/3" do
     test "appends events and increments sequence" do
       session = Session.new("ses-1")
+      producer_cursors = %{}
 
-      {:appended, session, event1} =
-        Session.append_event(session, %{
+      {:appended, session, producer_cursors, event1} =
+        Session.append_event(session, producer_cursors, %{
           type: "content",
           payload: %{"text" => "hello"},
           actor: "agent:1",
@@ -28,8 +29,8 @@ defmodule Starcite.SessionTest do
           producer_seq: 1
         })
 
-      {:appended, session, event2} =
-        Session.append_event(session, %{
+      {:appended, session, _producer_cursors, event2} =
+        Session.append_event(session, producer_cursors, %{
           type: "content",
           payload: %{"text" => "world"},
           actor: "agent:1",
@@ -44,6 +45,7 @@ defmodule Starcite.SessionTest do
 
     test "dedupes same producer sequence and payload" do
       session = Session.new("ses-1")
+      producer_cursors = %{}
 
       input = %{
         type: "state",
@@ -53,8 +55,11 @@ defmodule Starcite.SessionTest do
         producer_seq: 1
       }
 
-      {:appended, session, event} = Session.append_event(session, input)
-      {:deduped, session_after_dedupe, seq} = Session.append_event(session, input)
+      {:appended, session, producer_cursors, event} =
+        Session.append_event(session, producer_cursors, input)
+
+      {:deduped, session_after_dedupe, _producer_cursors, seq} =
+        Session.append_event(session, producer_cursors, input)
 
       assert seq == event.seq
       assert session_after_dedupe.last_seq == session.last_seq
@@ -63,8 +68,8 @@ defmodule Starcite.SessionTest do
     test "rejects producer sequence replay with different payload" do
       session = Session.new("ses-1")
 
-      {:appended, session, _event} =
-        Session.append_event(session, %{
+      {:appended, session, producer_cursors, _event} =
+        Session.append_event(session, %{}, %{
           type: "state",
           payload: %{"state" => "running"},
           actor: "agent:1",
@@ -73,7 +78,7 @@ defmodule Starcite.SessionTest do
         })
 
       assert {:error, :producer_replay_conflict} =
-               Session.append_event(session, %{
+               Session.append_event(session, producer_cursors, %{
                  type: "state",
                  payload: %{"state" => "completed"},
                  actor: "agent:1",
@@ -85,8 +90,8 @@ defmodule Starcite.SessionTest do
     test "tracks first seen producer sequence and then enforces continuity" do
       session = Session.new("ses-1")
 
-      {:appended, session, _event} =
-        Session.append_event(session, %{
+      {:appended, session, producer_cursors, _event} =
+        Session.append_event(session, %{}, %{
           type: "state",
           payload: %{"state" => "running"},
           actor: "agent:1",
@@ -95,7 +100,7 @@ defmodule Starcite.SessionTest do
         })
 
       assert {:error, {:producer_seq_conflict, "writer-1", 3, 5}} =
-               Session.append_event(session, %{
+               Session.append_event(session, producer_cursors, %{
                  type: "state",
                  payload: %{"state" => "running"},
                  actor: "agent:1",
@@ -105,10 +110,21 @@ defmodule Starcite.SessionTest do
     end
 
     test "bounds producer cursor index size and allows seq reset after eviction" do
-      session = Session.new("ses-bounded-producers", producer_max_entries: 2)
+      previous = Application.get_env(:starcite, :producer_max_entries)
+      Application.put_env(:starcite, :producer_max_entries, 2)
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
+      on_exit(fn ->
+        if previous == nil do
+          Application.delete_env(:starcite, :producer_max_entries)
+        else
+          Application.put_env(:starcite, :producer_max_entries, previous)
+        end
+      end)
+
+      session = Session.new("ses-bounded-producers")
+
+      {:appended, session, producer_cursors, _} =
+        Session.append_event(session, %{}, %{
           type: "content",
           payload: %{"n" => 1},
           actor: "a",
@@ -116,8 +132,8 @@ defmodule Starcite.SessionTest do
           producer_seq: 1
         })
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
+      {:appended, session, producer_cursors, _} =
+        Session.append_event(session, producer_cursors, %{
           type: "content",
           payload: %{"n" => 2},
           actor: "a",
@@ -125,8 +141,8 @@ defmodule Starcite.SessionTest do
           producer_seq: 1
         })
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
+      {:appended, session, producer_cursors, _} =
+        Session.append_event(session, producer_cursors, %{
           type: "content",
           payload: %{"n" => 3},
           actor: "a",
@@ -134,11 +150,11 @@ defmodule Starcite.SessionTest do
           producer_seq: 1
         })
 
-      retained = session.producer_cursors |> Map.keys() |> Enum.sort()
+      retained = producer_cursors |> Map.keys() |> Enum.sort()
       assert retained == ["p2", "p3"]
 
-      assert {:appended, session, replayed} =
-               Session.append_event(session, %{
+      assert {:appended, session, _producer_cursors, replayed} =
+               Session.append_event(session, producer_cursors, %{
                  type: "content",
                  payload: %{"n" => 4},
                  actor: "a",
@@ -153,52 +169,30 @@ defmodule Starcite.SessionTest do
 
   describe "Session.persist_ack/2" do
     test "advances archived cursor and updates tail retention accounting" do
-      session = Session.new("ses-arch", tail_keep: 2)
+      previous = Application.get_env(:starcite, :tail_keep)
+      Application.put_env(:starcite, :tail_keep, 2)
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 1},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 1
-        })
+      on_exit(fn ->
+        if previous == nil do
+          Application.delete_env(:starcite, :tail_keep)
+        else
+          Application.put_env(:starcite, :tail_keep, previous)
+        end
+      end)
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 2},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 2
-        })
+      session =
+        Enum.reduce(1..5, Session.new("ses-arch"), fn seq, current ->
+          {:appended, updated, _producer_cursors, _event} =
+            Session.append_event(current, %{}, %{
+              type: "content",
+              payload: %{"n" => seq},
+              actor: "a",
+              producer_id: "writer-1",
+              producer_seq: seq
+            })
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 3},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 3
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 4},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 4
-        })
-
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 5},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 5
-        })
+          updated
+        end)
 
       {session, trimmed} = Session.persist_ack(session, 3)
 
@@ -208,25 +202,30 @@ defmodule Starcite.SessionTest do
     end
 
     test "does not advance archived cursor beyond last sequence" do
-      session = Session.new("ses-arch-clamp", tail_keep: 2)
+      previous = Application.get_env(:starcite, :tail_keep)
+      Application.put_env(:starcite, :tail_keep, 2)
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 1},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 1
-        })
+      on_exit(fn ->
+        if previous == nil do
+          Application.delete_env(:starcite, :tail_keep)
+        else
+          Application.put_env(:starcite, :tail_keep, previous)
+        end
+      end)
 
-      {:appended, session, _} =
-        Session.append_event(session, %{
-          type: "content",
-          payload: %{"n" => 2},
-          actor: "a",
-          producer_id: "writer-1",
-          producer_seq: 2
-        })
+      session =
+        Enum.reduce(1..2, Session.new("ses-arch-clamp"), fn seq, current ->
+          {:appended, updated, _producer_cursors, _event} =
+            Session.append_event(current, %{}, %{
+              type: "content",
+              payload: %{"n" => seq},
+              actor: "a",
+              producer_id: "writer-1",
+              producer_seq: seq
+            })
+
+          updated
+        end)
 
       {session, _trimmed} = Session.persist_ack(session, 10)
 
@@ -235,10 +234,11 @@ defmodule Starcite.SessionTest do
     end
   end
 
-  describe "Session.to_map/1" do
-    test "converts session to API map" do
-      session = Session.new("ses-1", title: "Draft", metadata: %{workflow: "contract"})
-      map = Session.to_map(session)
+  describe "Session.to_map/2" do
+    test "converts session plus header to an API map" do
+      header = Header.new("ses-1", title: "Draft", metadata: %{workflow: "contract"})
+      session = Session.new_from_header(header)
+      map = Session.to_map(session, header)
 
       assert map.id == "ses-1"
       assert map.title == "Draft"

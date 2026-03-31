@@ -29,9 +29,11 @@ or controlled environments.
 The data plane owns session sequencing, replay semantics, hot event retention, and
 async archival.
 
-### Session logs
+### Session runtime and logs
 
-One session-log process exists per active session replica on a node.
+One session-runtime process exists per loaded session replica on a node. The
+runtime owns local residency, batching, hydrate/freeze, lifecycle events, and
+the mailbox around the in-memory session log state.
 
 Log responsibilities:
 - Assign monotonic `seq` per session.
@@ -41,6 +43,13 @@ Log responsibilities:
 - Broadcast cursor updates to PubSub for tail subscribers.
 - Track archive progress (`archived_seq`) and apply archive acknowledgements.
 
+Runtime responsibilities:
+- Hydrate a missing session from hot cache, peer bootstrap, or durable catalog.
+- Freeze idle owner sessions once `last_seq == archived_seq`.
+- Publish tenant-scoped lifecycle events (`activated`, `hydrating`, `freezing`,
+  `frozen`).
+- Keep process concerns out of the session log state machine.
+
 The append hot path is owner-based and does not call control-plane consensus.
 
 ### Write path
@@ -49,16 +58,19 @@ The append hot path is owner-based and does not call control-plane consensus.
 sequenceDiagram
     participant C as Client
     participant A as API
+    participant R as SessionRuntime
     participant O as SessionLog
     participant E as EventStore
     participant P as PubSub
 
     C->>A: POST /append
-    A->>O: append_event
+    A->>R: ensure loaded + activity
+    R->>O: append_event
     O->>O: assign seq + dedupe checks
     O->>E: store committed event
     O->>P: broadcast cursor update
-    O-->>A: {seq, cursor, committed_cursor}
+    O-->>R: {seq, cursor, committed_cursor}
+    R-->>A: {seq, cursor, committed_cursor}
     A-->>C: 201
 ```
 
@@ -82,20 +94,29 @@ Cursor contract:
 **Event store** - in-memory hot storage for unarchived events plus archived-read
 cache for replay acceleration.
 
-**Session store** - cache of session metadata/state used by API/auth/read paths and
-owner rehydration after owner restarts.
+**Session store** - cache of dynamic session state (`epoch`, `last_seq`,
+`archived_seq`) used by API/auth/read paths and owner rehydration after owner
+restarts.
+
+**Session catalog** - one durable Postgres row per session. It stores static
+session metadata (`id`, `tenant_id`, `title`, optional creator columns,
+`metadata`, `created_at`) plus the mutable archival frontier (`archived_seq`).
+Cold hydrate reads this row, sets `last_seq = archived_seq`, and gets `epoch`
+from routing.
 
 ### Archiver
 
 ```mermaid
 graph LR
     E["Event Store (hot)"] -- "pull pending events" --> AR["Archiver"]
-    AR -- "write batch" --> S["S3 / Postgres"]
-    AR -- "ack_archived" --> O["Session Owner"]
+    AR -- "write archived events" --> S["S3 Event Archive"]
+    AR -- "bulk update archived_seq" --> C["Postgres Session Catalog"]
+    AR -- "ack_archived" --> O["Session Owner Log"]
 ```
 
-A background worker periodically flushes committed hot events to archive storage.
-After a successful flush, it calls archive ack on the local session log, which advances
+A background worker periodically flushes committed hot events to the S3 event archive
+and then bulk-updates `archived_seq` in the Postgres session catalog. After a
+successful flush, it calls archive ack on the local session log, which advances
 `archived_seq` and evicts archived hot entries.
 
 Archive writes are idempotent. Archiver failures do not block append/tail hot paths.
@@ -124,8 +145,9 @@ deterministic and durable.
 
 ## Failure modes
 
-**Session log crash:** The local log process restarts and rehydrates from session cache.
-Short blips may return temporary timeout; retries succeed after restart.
+**Session runtime/log crash:** The local runtime rehydrates the session and starts
+a fresh log from hot cache or durable state. Short blips may return temporary
+timeout; retries succeed after restart.
 
 **Node failure:** Sessions owned on that node remain fenced to the existing owner
 until its control-plane lease expires. After lease expiry, ownership is moved and

@@ -1,6 +1,6 @@
-defmodule Starcite.Archive.Adapter.S3.Client do
+defmodule Starcite.Storage.EventArchive.S3.Client do
   @moduledoc """
-  Thin typed wrapper around ExAws S3 operations used by the archive adapter.
+  Thin typed wrapper around ExAws S3 operations used by the event archive.
 
   This module only translates ExAws HTTP responses into small result tuples so
   the adapter can stay focused on archive semantics.

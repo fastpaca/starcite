@@ -1,7 +1,7 @@
-defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
+defmodule Starcite.Storage.EventArchive.S3.SchemaControlTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.Archive.Adapter.S3.{Layout, Schema, SchemaControl}
+  alias Starcite.Storage.EventArchive.S3.{Layout, Schema, SchemaControl}
 
   defmodule FakeClient do
     @store __MODULE__.Store
@@ -96,29 +96,23 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
 
     assert decoded["state"] == "ready"
     assert decoded["current_versions"]["event_chunk"] == Schema.event_schema_version()
-    assert decoded["current_versions"]["session"] == Schema.session_schema_version()
-
-    assert decoded["current_versions"]["session_tenant_index"] ==
-             Schema.session_tenant_index_schema_version()
   end
 
   test "startup compatibility requires migration when archive data exists without a manifest", %{
     config: config
   } do
-    seed_session_blob(config, "acme", "ses-legacy")
+    seed_legacy_event_chunk(config, "acme", "ses-legacy")
 
     assert {:error, :archive_schema_migration_required} =
              SchemaControl.ensure_startup_compatibility(config)
   end
 
   test "manual migration updates manifest and unblocks startup compatibility", %{config: config} do
-    seed_session_blob(config, "acme", "ses-migrate")
+    seed_legacy_event_chunk(config, "acme", "ses-migrate")
 
     assert {:ok, stats} = SchemaControl.migrate(config, actor: "test")
 
-    assert stats.event_migrations_needed == 0
-    assert stats.session_migrations_needed == 0
-    assert stats.index_migrations_needed == 0
+    assert stats.event_migrations_needed == 1
 
     assert :ok = SchemaControl.ensure_startup_compatibility(config)
 
@@ -129,10 +123,6 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
 
     assert decoded["state"] == "ready"
     assert decoded["current_versions"]["event_chunk"] == Schema.event_schema_version()
-    assert decoded["current_versions"]["session"] == Schema.session_schema_version()
-
-    assert decoded["current_versions"]["session_tenant_index"] ==
-             Schema.session_tenant_index_schema_version()
 
     assert decoded["last_migration"]["status"] == "succeeded"
     assert decoded["last_migration"]["actor"] == "test"
@@ -148,11 +138,7 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
                Jason.encode!(%{
                  manifest_version: 1,
                  state: "ready",
-                 current_versions: %{
-                   event_chunk: Schema.event_schema_version() + 1,
-                   session: Schema.session_schema_version(),
-                   session_tenant_index: Schema.session_tenant_index_schema_version()
-                 }
+                 current_versions: %{event_chunk: Schema.event_schema_version() + 1}
                })
              )
 
@@ -160,22 +146,26 @@ defmodule Starcite.Archive.Adapter.S3.SchemaControlTest do
              SchemaControl.ensure_startup_compatibility(config)
   end
 
-  defp seed_session_blob(config, tenant_id, session_id)
+  defp seed_legacy_event_chunk(config, tenant_id, session_id)
        when is_map(config) and is_binary(tenant_id) and is_binary(session_id) do
-    session_key = Layout.session_key(config, tenant_id, session_id)
+    event_key = Layout.event_chunk_key(config, tenant_id, session_id, 1)
 
     :ok =
       FakeClient.put_object(
         config,
-        session_key,
-        Schema.encode_session(%{
-          id: session_id,
-          tenant_id: tenant_id,
-          title: nil,
-          creator_principal: %{tenant_id: tenant_id, id: "svc", type: "service"},
+        event_key,
+        Jason.encode!(%{
+          seq: 1,
+          type: "content",
+          payload: %{"n" => 1},
+          actor: "agent:test",
+          producer_id: "writer:test",
+          producer_seq: 1,
+          source: nil,
           metadata: %{},
-          archived_seq: 0,
-          created_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+          refs: %{},
+          idempotency_key: nil,
+          inserted_at: "2026-01-01T00:00:00"
         })
       )
   end

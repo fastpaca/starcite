@@ -1,4 +1,4 @@
-defmodule Starcite.Archive.Adapter.S3.Schema do
+defmodule Starcite.Storage.EventArchive.S3.Schema do
   @moduledoc """
   Versioned object schema for S3 archive blobs.
 
@@ -7,38 +7,19 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
   """
 
   @event_schema_version 2
-  @session_schema_version 3
-  @session_tenant_index_schema_version 2
-
   @baseline_event_schema_version 1
-  @baseline_session_schema_version 1
-  @baseline_session_tenant_index_schema_version 1
 
   @spec event_schema_version() :: pos_integer()
   def event_schema_version, do: @event_schema_version
 
-  @spec session_schema_version() :: pos_integer()
-  def session_schema_version, do: @session_schema_version
-
-  @spec session_tenant_index_schema_version() :: pos_integer()
-  def session_tenant_index_schema_version, do: @session_tenant_index_schema_version
-
   @spec current_versions() :: %{required(atom()) => pos_integer()}
   def current_versions do
-    %{
-      event_chunk: @event_schema_version,
-      session: @session_schema_version,
-      session_tenant_index: @session_tenant_index_schema_version
-    }
+    %{event_chunk: @event_schema_version}
   end
 
   @spec baseline_versions() :: %{required(atom()) => pos_integer()}
   def baseline_versions do
-    %{
-      event_chunk: @baseline_event_schema_version,
-      session: @baseline_session_schema_version,
-      session_tenant_index: @baseline_session_tenant_index_schema_version
-    }
+    %{event_chunk: @baseline_event_schema_version}
   end
 
   @spec encode_event_chunk([map()]) :: binary()
@@ -73,50 +54,6 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
 
       {:error, _reason} = error ->
         error
-    end
-  rescue
-    _ -> {:error, :archive_read_unavailable}
-  end
-
-  @spec encode_session(map()) :: binary()
-  def encode_session(session) when is_map(session) do
-    Jason.encode!(%{
-      schema_version: @session_schema_version,
-      session: session
-    })
-  end
-
-  @spec decode_session(binary()) ::
-          {:ok, map(), boolean()} | {:error, :archive_read_unavailable}
-  def decode_session(body) when is_binary(body) do
-    with {:ok, decoded} <- Jason.decode(body),
-         {:ok, session_payload, migration_required} <- migrate_session_payload(decoded),
-         {:ok, session} <- decode_session_payload(session_payload) do
-      {:ok, session, migration_required}
-    else
-      _ -> {:error, :archive_read_unavailable}
-    end
-  rescue
-    _ -> {:error, :archive_read_unavailable}
-  end
-
-  @spec encode_session_tenant_index(String.t()) :: binary()
-  def encode_session_tenant_index(tenant_id)
-      when is_binary(tenant_id) and tenant_id != "" do
-    Jason.encode!(%{
-      schema_version: @session_tenant_index_schema_version,
-      tenant_id: tenant_id
-    })
-  end
-
-  @spec decode_session_tenant_index(binary()) ::
-          {:ok, String.t(), boolean()} | {:error, :archive_read_unavailable}
-  def decode_session_tenant_index(body) when is_binary(body) do
-    with {:ok, decoded} <- Jason.decode(body),
-         {:ok, tenant_id, migration_required} <- migrate_session_tenant_index(decoded) do
-      {:ok, tenant_id, migration_required}
-    else
-      _ -> {:error, :archive_read_unavailable}
     end
   rescue
     _ -> {:error, :archive_read_unavailable}
@@ -233,90 +170,4 @@ defmodule Starcite.Archive.Adapter.S3.Schema do
         {:error, :archive_read_unavailable}
     end
   end
-
-  defp migrate_session_payload(%{"schema_version" => version, "session" => session_payload})
-       when is_integer(version) and version == @session_schema_version and is_map(session_payload) do
-    {:ok, session_payload, false}
-  end
-
-  defp migrate_session_payload(%{"schema_version" => version, "session" => session_payload})
-       when is_integer(version) and version > 0 and version < @session_schema_version and
-              is_map(session_payload) do
-    {:ok, session_payload, true}
-  end
-
-  defp migrate_session_payload(%{"schema_version" => version})
-       when is_integer(version) and version > @session_schema_version do
-    {:error, :archive_read_unavailable}
-  end
-
-  defp migrate_session_payload(%{"schema_version" => _invalid_version}),
-    do: {:error, :archive_read_unavailable}
-
-  defp migrate_session_payload(session_payload) when is_map(session_payload) do
-    {:ok, session_payload, true}
-  end
-
-  defp migrate_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
-
-  defp decode_session_payload(%{
-         "id" => id,
-         "title" => title,
-         "tenant_id" => tenant_id,
-         "creator_principal" => creator_principal,
-         "metadata" => metadata,
-         "archived_seq" => archived_seq,
-         "created_at" => created_at
-       })
-       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-              is_binary(tenant_id) and tenant_id != "" and is_map(creator_principal) and
-              is_map(metadata) and is_integer(archived_seq) and archived_seq >= 0 and
-              is_binary(created_at) do
-    {:ok,
-     %{
-       id: id,
-       title: title,
-       tenant_id: tenant_id,
-       creator_principal: creator_principal,
-       metadata: metadata,
-       archived_seq: archived_seq,
-       created_at: created_at
-     }}
-  end
-
-  defp decode_session_payload(_session_payload), do: {:error, :archive_read_unavailable}
-
-  defp migrate_session_tenant_index(%{
-         "schema_version" => version,
-         "tenant_id" => tenant_id
-       })
-       when is_integer(version) and version == @session_tenant_index_schema_version and
-              is_binary(tenant_id) and tenant_id != "" do
-    {:ok, tenant_id, false}
-  end
-
-  defp migrate_session_tenant_index(%{
-         "schema_version" => version,
-         "tenant_id" => tenant_id
-       })
-       when is_integer(version) and version > 0 and
-              version < @session_tenant_index_schema_version and
-              is_binary(tenant_id) and tenant_id != "" do
-    {:ok, tenant_id, true}
-  end
-
-  defp migrate_session_tenant_index(%{"schema_version" => version})
-       when is_integer(version) and version > @session_tenant_index_schema_version do
-    {:error, :archive_read_unavailable}
-  end
-
-  defp migrate_session_tenant_index(%{"schema_version" => _invalid_version}),
-    do: {:error, :archive_read_unavailable}
-
-  defp migrate_session_tenant_index(%{"tenant_id" => tenant_id})
-       when is_binary(tenant_id) and tenant_id != "" do
-    {:ok, tenant_id, true}
-  end
-
-  defp migrate_session_tenant_index(_decoded), do: {:error, :archive_read_unavailable}
 end

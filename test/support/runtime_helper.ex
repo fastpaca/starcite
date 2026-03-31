@@ -12,6 +12,7 @@ defmodule Starcite.Runtime.TestHelper do
       clear_session_store()
       clear_session_quorum()
       clear_archive_read_cache()
+      clear_test_event_archive()
       reset_repo_sandbox_mode()
       Process.sleep(50)
     end)
@@ -46,6 +47,12 @@ defmodule Starcite.Runtime.TestHelper do
   defp clear_archive_read_cache do
     if Process.whereis(:starcite_archive_read_cache) do
       _ = Cachex.clear(:starcite_archive_read_cache)
+    end
+  end
+
+  defp clear_test_event_archive do
+    if Code.ensure_loaded?(Starcite.TestSupport.EventArchiveClient) do
+      _ = Starcite.TestSupport.EventArchiveClient.reset()
     end
   end
 
