@@ -148,6 +148,27 @@ defmodule Starcite.DataPlane.EventStoreTest do
              })
   end
 
+  test "applies archive read cache max bytes independently of total event store budget" do
+    session_id = "ses-cache-cap-#{System.unique_integer([:positive, :monotonic])}"
+    inserted_at = NaiveDateTime.utc_now()
+    events = archived_events_only(inserted_at, 1..512)
+
+    :ok = EventStore.cache_archived_events(session_id, events)
+    uncapped_bytes = EventArchive.cache_memory_bytes_or_zero()
+
+    assert uncapped_bytes > 0
+
+    EventStore.clear()
+    with_env(:starcite, :event_store_max_bytes, 1_000_000_000)
+    with_env(:starcite, :archive_read_cache_max_bytes, max(div(uncapped_bytes, 4), 1))
+
+    :ok = EventStore.cache_archived_events(session_id, events)
+    capped_bytes = EventArchive.cache_memory_bytes_or_zero()
+
+    assert capped_bytes < uncapped_bytes
+    assert capped_bytes <= div(uncapped_bytes * 3, 4)
+  end
+
   test "stores and fetches events by {session_id, seq}" do
     session_id = "ses-store-#{System.unique_integer([:positive, :monotonic])}"
     inserted_at = NaiveDateTime.utc_now()

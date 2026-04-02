@@ -69,6 +69,10 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
   end
 
+  def call(conn, {:error, {:khepri, :mismatching_node, _info}}) do
+    error(conn, :service_unavailable, "owner_unavailable", "No active owner for session group")
+  end
+
   def call(conn, {:error, :no_ready_cluster_nodes}) do
     error(conn, :service_unavailable, "owner_unavailable", "No available owner replicas")
   end

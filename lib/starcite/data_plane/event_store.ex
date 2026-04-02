@@ -20,9 +20,11 @@ defmodule Starcite.DataPlane.EventStore do
   alias Starcite.Storage.EventArchive
 
   @default_max_memory_bytes 2_147_483_648
+  @default_archive_cache_max_bytes 536_870_912
   @default_capacity_check_interval 4
   @default_cache_reclaim_fraction 0.25
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}
+  @archive_cache_max_bytes_limit_cache_key {__MODULE__, :archive_cache_max_bytes_limit}
   @capacity_check_interval_cache_key {__MODULE__, :capacity_check_interval}
   @capacity_check_tick_key {__MODULE__, :capacity_check_tick}
   @archive_cache_memory_bytes_cache_key {__MODULE__, :archive_cache_memory_bytes}
@@ -165,8 +167,8 @@ defmodule Starcite.DataPlane.EventStore do
   def cache_archived_events(session_id, events)
       when is_binary(session_id) and session_id != "" and is_list(events) do
     :ok = EventArchive.cache_events(session_id, events)
-    :ok = maybe_enforce_capacity()
     :ok = refresh_archive_cache_memory_bytes()
+    :ok = maybe_enforce_capacity()
     :ok
   end
 
@@ -351,6 +353,7 @@ defmodule Starcite.DataPlane.EventStore do
   end
 
   defp maybe_enforce_capacity do
+    :ok = maybe_reclaim_cache_to_archive_limit()
     max_memory_bytes = max_memory_bytes_limit()
 
     if memory_bytes() > max_memory_bytes do
@@ -364,9 +367,26 @@ defmodule Starcite.DataPlane.EventStore do
        when is_integer(max_memory_bytes) and max_memory_bytes > 0 do
     pending_bytes = EventQueue.memory_bytes()
     target_total_bytes = reclaim_target_total_bytes(max_memory_bytes)
-    target_cache_bytes = max(target_total_bytes - pending_bytes, 0)
+
+    target_cache_bytes =
+      target_total_bytes
+      |> Kernel.-(pending_bytes)
+      |> max(0)
+      |> min(archive_cache_max_bytes_limit())
+
     :ok = EventArchive.evict_cache_to_target_memory(target_cache_bytes)
     :ok = refresh_archive_cache_memory_bytes()
+    :ok
+  end
+
+  defp maybe_reclaim_cache_to_archive_limit do
+    archive_cache_limit = archive_cache_max_bytes_limit()
+
+    if archive_cache_memory_bytes() > archive_cache_limit do
+      :ok = EventArchive.evict_cache_to_target_memory(archive_cache_limit)
+      :ok = refresh_archive_cache_memory_bytes()
+    end
+
     :ok
   end
 
@@ -388,6 +408,25 @@ defmodule Starcite.DataPlane.EventStore do
 
       _ ->
         @default_cache_reclaim_fraction
+    end
+  end
+
+  defp archive_cache_max_bytes_limit do
+    raw =
+      Application.get_env(
+        :starcite,
+        :archive_read_cache_max_bytes,
+        @default_archive_cache_max_bytes
+      )
+
+    case :persistent_term.get(@archive_cache_max_bytes_limit_cache_key, :undefined) do
+      {^raw, bytes} when is_integer(bytes) and bytes >= 0 ->
+        bytes
+
+      _ ->
+        bytes = normalize_archive_cache_max_bytes!(raw)
+        :persistent_term.put(@archive_cache_max_bytes_limit_cache_key, {raw, bytes})
+        bytes
     end
   end
 
@@ -425,5 +464,12 @@ defmodule Starcite.DataPlane.EventStore do
   defp normalize_capacity_check_interval!(value) do
     raise ArgumentError,
           "invalid value for event_store_capacity_check_interval: #{inspect(value)} (expected positive integer)"
+  end
+
+  defp normalize_archive_cache_max_bytes!(value) when is_integer(value) and value >= 0, do: value
+
+  defp normalize_archive_cache_max_bytes!(value) do
+    raise ArgumentError,
+          "invalid value for archive_read_cache_max_bytes: #{inspect(value)} (expected non-negative integer bytes)"
   end
 end

@@ -237,6 +237,15 @@ if event_store_capacity_check_interval =
          )
 end
 
+if producer_max_entries = System.get_env("STARCITE_PRODUCER_MAX_ENTRIES") do
+  config :starcite,
+         :producer_max_entries,
+         parse_positive_integer!.(
+           "STARCITE_PRODUCER_MAX_ENTRIES",
+           producer_max_entries
+         )
+end
+
 if archive_read_cache_max_size = System.get_env("STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE") do
   config :starcite,
          :archive_read_cache_max_bytes,

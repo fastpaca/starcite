@@ -56,4 +56,18 @@ defmodule StarciteWeb.FallbackControllerTest do
     assert body["error"] == "routing_timeout"
     assert body["message"] == "Control-plane routing request timed out"
   end
+
+  test "maps khepri mismatching_node to owner unavailable" do
+    conn =
+      conn(:get, "/")
+      |> FallbackController.call(
+        {:error,
+         {:khepri, :mismatching_node, %{path: [:transfers, "ses-123"], node: :node2@localhost}}}
+      )
+
+    assert conn.status == 503
+    body = Jason.decode!(conn.resp_body)
+    assert body["error"] == "owner_unavailable"
+    assert body["message"] == "No active owner for session group"
+  end
 end

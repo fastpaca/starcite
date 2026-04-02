@@ -123,6 +123,9 @@ defmodule StarciteWeb.SessionController do
   defp ingest_edge_error_reason({:error, {:routing_rpc_failed, _node, _reason}}),
     do: :unavailable
 
+  defp ingest_edge_error_reason({:error, {:khepri, :mismatching_node, _info}}),
+    do: :unavailable
+
   defp ingest_edge_error_reason({:error, :no_ready_cluster_nodes}), do: :unavailable
 
   defp ingest_edge_error_reason({:error, reason})

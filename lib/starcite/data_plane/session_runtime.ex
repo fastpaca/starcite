@@ -110,7 +110,7 @@ defmodule Starcite.DataPlane.SessionRuntime do
         {:stop, reason}
 
       {next_data, actions} ->
-        {:ok, actions, next_data}
+        {:ok, Enum.reverse(actions), next_data}
     end
   end
 
@@ -138,7 +138,7 @@ defmodule Starcite.DataPlane.SessionRuntime do
     {log_batch, rest} = collect_log_batch(batch, data.idle_timer_ref, [])
     {next_log, log_actions} = SessionLog.handle_batch(log_batch, log)
     next_data = reconcile_idle_tick(data, %{data | log: next_log})
-    process_runtime_batch(rest, next_data, actions ++ log_actions)
+    process_runtime_batch(rest, next_data, Enum.reverse(log_actions, actions))
   end
 
   defp collect_log_batch(

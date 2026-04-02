@@ -7,13 +7,15 @@ defmodule Starcite.RuntimeConfigTest do
   @enable_telemetry_env "STARCITE_ENABLE_TELEMETRY"
   @shutdown_drain_timeout_env "STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS"
   @jwks_hard_expiry_env "STARCITE_AUTH_JWKS_HARD_EXPIRY_MS"
+  @producer_max_entries_env "STARCITE_PRODUCER_MAX_ENTRIES"
   @runtime_envs [
     @routing_store_dir_env,
     @cluster_nodes_env,
     @routing_replication_factor_env,
     @enable_telemetry_env,
     @shutdown_drain_timeout_env,
-    @jwks_hard_expiry_env
+    @jwks_hard_expiry_env,
+    @producer_max_entries_env
   ]
 
   setup do
@@ -128,6 +130,15 @@ defmodule Starcite.RuntimeConfigTest do
     auth_config = Keyword.fetch!(starcite_config, StarciteWeb.Auth)
 
     assert Keyword.fetch!(auth_config, :jwks_hard_expiry_ms) == 15_000
+  end
+
+  test "runtime config applies producer index retention overrides" do
+    System.put_env(@producer_max_entries_env, "256")
+
+    config = Config.Reader.read!("config/runtime.exs", env: :test, target: :host)
+    starcite_config = Keyword.fetch!(config, :starcite)
+
+    assert Keyword.fetch!(starcite_config, :producer_max_entries) == 256
   end
 
   defp restore_env(env_name, nil), do: System.delete_env(env_name)

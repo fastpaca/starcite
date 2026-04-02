@@ -39,7 +39,10 @@ defmodule Starcite.DataPlane.SessionLog do
 
   @spec handle_batch([term()], t()) :: {t(), [term()]}
   def handle_batch(batch, data) when is_list(batch) do
-    process_batch(batch, data, [])
+    case process_batch(batch, data, []) do
+      {:stop, reason} -> {:stop, reason}
+      {next_data, actions} -> {next_data, Enum.reverse(actions)}
+    end
   end
 
   defp process_batch([], data, actions), do: {data, actions}
@@ -123,23 +126,23 @@ defmodule Starcite.DataPlane.SessionLog do
   defp process_single({:info, _message}, data, actions), do: {data, actions}
 
   defp process_single({:call, from, :get_role}, %{role: role} = data, actions) do
-    {data, actions ++ [{:reply, from, role}]}
+    {data, [{:reply, from, role} | actions]}
   end
 
   defp process_single({:call, from, :describe}, %{role: role, session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, %{role: role, session: session}}}]}
+    {data, [{:reply, from, {:ok, %{role: role, session: session}}} | actions]}
   end
 
   defp process_single({:call, from, :get_session}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, session}}]}
+    {data, [{:reply, from, {:ok, session}} | actions]}
   end
 
   defp process_single({:call, from, :fetch_cursor_snapshot}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, cursor_snapshot(session)}}]}
+    {data, [{:reply, from, {:ok, cursor_snapshot(session)}} | actions]}
   end
 
   defp process_single({:call, from, :fetch_archived_seq}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, session.archived_seq}}]}
+    {data, [{:reply, from, {:ok, session.archived_seq}} | actions]}
   end
 
   defp process_single(
@@ -185,7 +188,7 @@ defmodule Starcite.DataPlane.SessionLog do
          %{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    {data, [{:reply, from, {:error, :invalid_event}} | actions]}
   end
 
   defp process_single(
@@ -193,7 +196,7 @@ defmodule Starcite.DataPlane.SessionLog do
          %{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    {data, [{:reply, from, {:error, :invalid_event}} | actions]}
   end
 
   defp process_single(
@@ -202,7 +205,7 @@ defmodule Starcite.DataPlane.SessionLog do
          actions
        ) do
     :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+    {data, [{:reply, from, {:error, :not_owner}} | actions]}
   end
 
   defp process_single(
@@ -211,7 +214,7 @@ defmodule Starcite.DataPlane.SessionLog do
          actions
        ) do
     :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+    {data, [{:reply, from, {:error, :not_owner}} | actions]}
   end
 
   defp process_single(
@@ -249,10 +252,10 @@ defmodule Starcite.DataPlane.SessionLog do
           committed_cursor: %{epoch: next_session.epoch, seq: next_session.archived_seq}
         }
 
-        {%{data | session: next_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+        {%{data | session: next_session}, [{:reply, from, {:ok, reply}} | actions]}
 
       {:error, _reason} = error ->
-        {data, actions ++ [{:reply, from, error}]}
+        {data, [{:reply, from, error} | actions]}
     end
   end
 
@@ -261,12 +264,12 @@ defmodule Starcite.DataPlane.SessionLog do
          %{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    {data, [{:reply, from, {:error, :invalid_event}} | actions]}
   end
 
   defp process_single({:call, from, {:ack_archived, _upto_seq, _replicas}}, data, actions) do
     :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+    {data, [{:reply, from, {:error, :not_owner}} | actions]}
   end
 
   defp process_single(
@@ -298,9 +301,9 @@ defmodule Starcite.DataPlane.SessionLog do
 
       :ok = SessionStore.put_session(normalized_session)
 
-      {%{data | session: normalized_session, role: :follower}, actions ++ [{:reply, from, :ok}]}
+      {%{data | session: normalized_session, role: :follower}, [{:reply, from, :ok} | actions]}
     else
-      {data, actions ++ [{:reply, from, :ok}]}
+      {data, [{:reply, from, :ok} | actions]}
     end
   end
 
@@ -309,11 +312,11 @@ defmodule Starcite.DataPlane.SessionLog do
          data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    {data, [{:reply, from, {:error, :invalid_event}} | actions]}
   end
 
   defp process_single({:call, from, _message}, data, actions) do
-    {data, actions ++ [{:reply, from, {:error, :unsupported_command}}]}
+    {data, [{:reply, from, {:error, :unsupported_command}} | actions]}
   end
 
   defp process_single(_other, data, actions), do: {data, actions}
@@ -327,7 +330,6 @@ defmodule Starcite.DataPlane.SessionLog do
          {:ok, next_session, next_cursors, next_events, outcome} <-
            execute_append_request(session, producer_cursors, request) do
       next_session = Session.normalize_epoch(next_session)
-      events = put_events_epoch(next_events, next_session.epoch)
 
       commit_single_append(
         data,
@@ -335,13 +337,13 @@ defmodule Starcite.DataPlane.SessionLog do
         request.from,
         next_session,
         next_cursors,
-        events,
+        next_events,
         outcome,
         request.replicas
       )
     else
       {:error, reason} ->
-        {data, actions ++ [{:reply, request.from, {:error, reason}}]}
+        {data, [{:reply, request.from, {:error, reason}} | actions]}
     end
   end
 
@@ -352,28 +354,30 @@ defmodule Starcite.DataPlane.SessionLog do
        ) do
     replicas = hd(requests).replicas
 
-    {next_session, next_cursors, events_acc, outcomes} =
+    {next_session, next_cursors, events_rev, outcomes_rev} =
       Enum.reduce(requests, {session, producer_cursors, [], []}, fn request,
                                                                     {current_session,
-                                                                     current_cursors, events,
-                                                                     outcomes} ->
+                                                                     current_cursors, events_rev,
+                                                                     outcomes_rev} ->
         case execute_append_request(current_session, current_cursors, request) do
           {:ok, updated_session, updated_cursors, request_events, outcome} ->
             {
               Session.normalize_epoch(updated_session),
               updated_cursors,
-              events ++ request_events,
-              outcomes ++ [outcome]
+              Enum.reverse(request_events, events_rev),
+              [outcome | outcomes_rev]
             }
 
           {:error, reason} ->
-            {current_session, current_cursors, events,
-             outcomes ++ [{:error, request.from, reason}]}
+            {current_session, current_cursors, events_rev,
+             [{:error, request.from, reason} | outcomes_rev]}
         end
       end)
 
+    outcomes = Enum.reverse(outcomes_rev)
+
     if successful_outcomes?(outcomes) do
-      committed_events = put_events_epoch(events_acc, next_session.epoch)
+      committed_events = Enum.reverse(events_rev)
 
       commit_append_group(
         data,
@@ -390,7 +394,7 @@ defmodule Starcite.DataPlane.SessionLog do
           {:reply, outcome_from(outcome), finalize_outcome(outcome, session)}
         end)
 
-      {data, actions ++ reply_actions}
+      {data, Enum.reverse(reply_actions, actions)}
     end
   end
 
@@ -479,7 +483,7 @@ defmodule Starcite.DataPlane.SessionLog do
     reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
     {%{data | session: publish_session, producer_cursors: next_cursors},
-     actions ++ [{:reply, from, {:ok, reply}}]}
+     [{:reply, from, {:ok, reply}} | actions]}
   end
 
   defp commit_single_append(
@@ -499,10 +503,10 @@ defmodule Starcite.DataPlane.SessionLog do
           finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
         {%{data | session: publish_session, producer_cursors: next_cursors},
-         actions ++ [{:reply, from, {:ok, reply}}]}
+         [{:reply, from, {:ok, reply}} | actions]}
 
       {:error, _reason} = error ->
-        {data, actions ++ [{:reply, from, error}]}
+        {data, [{:reply, from, error} | actions]}
     end
   end
 
@@ -514,7 +518,8 @@ defmodule Starcite.DataPlane.SessionLog do
         {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
       end)
 
-    {%{data | session: publish_session, producer_cursors: next_cursors}, actions ++ reply_actions}
+    {%{data | session: publish_session, producer_cursors: next_cursors},
+     Enum.reverse(reply_actions, actions)}
   end
 
   defp commit_append_group(
@@ -535,7 +540,7 @@ defmodule Starcite.DataPlane.SessionLog do
           end)
 
         {%{data | session: publish_session, producer_cursors: next_cursors},
-         actions ++ reply_actions}
+         Enum.reverse(reply_actions, actions)}
 
       {:error, _reason} = error ->
         reply_actions =
@@ -543,7 +548,7 @@ defmodule Starcite.DataPlane.SessionLog do
             {:reply, outcome_from(outcome), finalize_failure_outcome(outcome, error)}
           end)
 
-        {data, actions ++ reply_actions}
+        {data, Enum.reverse(reply_actions, actions)}
     end
   end
 
