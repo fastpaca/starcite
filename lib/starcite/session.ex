@@ -21,7 +21,7 @@ defmodule Starcite.Session do
         }
 
   @default_tail_keep 1_000
-  @default_producer_max_entries 10_000
+  @default_producer_max_entries 1_024
   @retention_defaults_cache_key {__MODULE__, :retention_defaults}
 
   @spec new(String.t(), keyword()) :: t()

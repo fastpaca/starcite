@@ -19,8 +19,8 @@ defmodule Starcite.DataPlane.EventStore do
   alias Starcite.Session.Event
   alias Starcite.Storage.EventArchive
 
-  @default_max_memory_bytes 2_147_483_648
-  @default_archive_cache_max_bytes 536_870_912
+  @default_max_memory_bytes 268_435_456
+  @default_archive_cache_max_bytes 67_108_864
   @default_capacity_check_interval 4
   @default_cache_reclaim_fraction 0.25
   @max_memory_limit_cache_key {__MODULE__, :max_memory_bytes_limit}

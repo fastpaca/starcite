@@ -131,10 +131,10 @@ read those variables, so they are intentionally omitted here.
 
 | Variable | Purpose |
 | --- | --- |
-| `STARCITE_EVENT_STORE_MAX_SIZE` | Hot event-store memory budget. Default `2147483648` bytes. Accepts units such as `256MB` or `4G`. |
+| `STARCITE_EVENT_STORE_MAX_SIZE` | Hot event-store memory budget. Default `268435456` bytes. Accepts units such as `256MB` or `4G`. |
 | `STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL` | Event-store capacity poll interval. Default `4`. |
-| `STARCITE_PRODUCER_MAX_ENTRIES` | Per-session producer dedupe cursor budget. Default `10000`. Lower this when producer cardinality is bounded. |
-| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | Archive-read cache memory budget. Default `536870912` bytes. Accepts the same size units as `STARCITE_EVENT_STORE_MAX_SIZE`. |
+| `STARCITE_PRODUCER_MAX_ENTRIES` | Per-session producer dedupe cursor budget. Default `1024`. Lower this further when producer cardinality is bounded. |
+| `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE` | Archive-read cache memory budget. Default `67108864` bytes. Accepts the same size units as `STARCITE_EVENT_STORE_MAX_SIZE`. |
 | `STARCITE_ARCHIVE_READ_CACHE_RECLAIM_FRACTION` | Fraction reclaimed when the archive-read cache trims. Default `0.25`. |
 | `STARCITE_ARCHIVE_READ_CACHE_COMPRESSED` | Enables compressed archive-read cache entries. Default `true`. |
 | `STARCITE_SESSION_STORE_TTL_MS` | Session-store TTL. Default `21600000`. |
@@ -142,10 +142,12 @@ read those variables, so they are intentionally omitted here.
 | `STARCITE_SESSION_STORE_COMPRESSED` | Enables compressed session-store entries. Default `true`. |
 | `STARCITE_SESSION_STORE_TOUCH_ON_READ` | Refreshes session-store TTL on reads. Default `true`. |
 
-For small-node deployments, start with:
+Defaults now bias toward smaller nodes. If your workload needs a larger hot working set or more archive-read reuse, raise the budgets explicitly.
 
-- `STARCITE_EVENT_STORE_MAX_SIZE=256MB`
-- `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE=64MB`
+For extra-constrained nodes, start with:
+
+- `STARCITE_EVENT_STORE_MAX_SIZE=128MB`
+- `STARCITE_ARCHIVE_READ_CACHE_MAX_SIZE=32MB`
 - `STARCITE_PRODUCER_MAX_ENTRIES=256`
 - `STARCITE_EVENT_STORE_CAPACITY_CHECK_INTERVAL=512`
 - `STARCITE_ROUTING_REPLICATION_FACTOR=1` when you are intentionally running a single node without quorum replication
