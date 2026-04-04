@@ -1,0 +1,2013 @@
+{
+  "events": [
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 30,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774968005103,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 1.815e-4,
+                  "output": 2.0399999999999998e-5,
+                  "total": 2.019e-4
+                },
+                "input": 1210,
+                "output": 34,
+                "totalTokens": 1244
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774968005103,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 14,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774968005103,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 0,
+                  "output": 0,
+                  "total": 0
+                },
+                "input": 0,
+                "output": 0,
+                "totalTokens": 0
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774968005103,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 22,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967982030,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 0,
+                  "output": 0,
+                  "total": 0
+                },
+                "input": 0,
+                "output": 0,
+                "totalTokens": 0
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967982030,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 23,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "content": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "contentIndex": 0,
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967993476,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 1.338e-4,
+                  "output": 1.0199999999999999e-5,
+                  "total": 1.44e-4
+                },
+                "input": 892,
+                "output": 17,
+                "totalTokens": 909
+              }
+            },
+            "type": "xxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967993476,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "run.started",
+      "source": "xxxxx",
+      "payload": {
+        "question": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "turnId": "xxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.plan",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "assignments": [
+          {
+            "agent": "xxxxxxxxxxxxxx",
+            "name": "xxxxxxxxxxxxxx",
+            "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          {
+            "agent": "xxxxxxxxxxxxxx",
+            "name": "xxxxxxxxxxxxxx",
+            "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          {
+            "agent": "xxxxxxxxxxxxxxxxxxxxx",
+            "name": "xxxxxxxxxxxxxxxxxxxxx",
+            "prompt": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          }
+        ],
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 35,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "x",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967982030,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 7.425e-5,
+                  "output": 2.4e-5,
+                  "total": 9.825e-5
+                },
+                "input": 495,
+                "output": 40,
+                "totalTokens": 535
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967982030,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxxxxxxxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant.delta",
+      "source": "xxxxx",
+      "payload": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxxxxxx",
+        "turnId": "xxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant",
+      "source": "xxxxx",
+      "payload": {
+        "basis": {
+          "context": [
+            {
+              "id": "xxxxxxxxxxxxx",
+              "layer": "xxxxxxxxxxx",
+              "source": "xxxxxxxxxxxxxxxxxxxxx",
+              "title": "xxxxxxxxxxxxx"
+            },
+            {
+              "id": "xxxxxxxxxxxxxxxxxxxxxxx",
+              "layer": "xxxxxxxxxxxxxxxxx",
+              "source": "xxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "title": "xxxxxxxxxxxxxxxxxxxxxxx"
+            }
+          ]
+        },
+        "kind": "xxxxxx",
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant.delta",
+      "source": "xxxxx",
+      "payload": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxx",
+        "turnId": "xxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 44,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967982030,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 7.425e-5,
+                  "output": 2.4e-5,
+                  "total": 9.825e-5
+                },
+                "input": 495,
+                "output": 40,
+                "totalTokens": 535
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967982030,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant.delta",
+      "source": "xxxxx",
+      "payload": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxxxxxxxx",
+        "turnId": "xxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant.delta",
+      "source": "xxxxx",
+      "payload": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxx",
+        "turnId": "xxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 20,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967993476,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 1.338e-4,
+                  "output": 1.0199999999999999e-5,
+                  "total": 1.44e-4
+                },
+                "input": 892,
+                "output": 17,
+                "totalTokens": 909
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967993476,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 25,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774968005103,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 1.815e-4,
+                  "output": 2.0399999999999998e-5,
+                  "total": 2.019e-4
+                },
+                "input": 1210,
+                "output": 34,
+                "totalTokens": 1244
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774968005103,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 39,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967982030,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 7.425e-5,
+                  "output": 2.4e-5,
+                  "total": 9.825e-5
+                },
+                "input": 495,
+                "output": 40,
+                "totalTokens": 535
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967982030,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "message.assistant.delta",
+      "source": "xxxxx",
+      "payload": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "text": "xxxxxx",
+        "turnId": "xxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxxxxxxxx",
+        "delta": "xxxxxxxxxxxxx",
+        "name": "xxxxxxxxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 38,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967982030,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 7.425e-5,
+                  "output": 2.4e-5,
+                  "total": 9.825e-5
+                },
+                "input": 495,
+                "output": 40,
+                "totalTokens": 535
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967982030,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxxxxx",
+        "delta": "xxxxxxx",
+        "name": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxx",
+        "delta": "x",
+        "name": "xxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "runtime.pi.event",
+      "metadata": {
+        "runId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "runtime": "xxxxxxxx",
+        "sequence": 14,
+        "sessionId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+        "turnId": "xxxxxxx",
+        "version": 1
+      },
+      "source": "xxxxx",
+      "payload": {
+        "data": {
+          "assistantMessageEvent": {
+            "contentIndex": 0,
+            "delta": "xxxxxxxx",
+            "partial": {
+              "api": "xxxxxxxxxxxxxxxx",
+              "content": [
+                {
+                  "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                  "type": "xxxx"
+                }
+              ],
+              "model": "xxxxxxxxxxx",
+              "provider": "xxxxxx",
+              "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+              "role": "xxxxxxxxx",
+              "stopReason": "xxxx",
+              "timestamp": 1774967993476,
+              "usage": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "cost": {
+                  "cacheRead": 0,
+                  "cacheWrite": 0,
+                  "input": 1.338e-4,
+                  "output": 1.0199999999999999e-5,
+                  "total": 1.44e-4
+                },
+                "input": 892,
+                "output": 17,
+                "totalTokens": 909
+              }
+            },
+            "type": "xxxxxxxxxx"
+          },
+          "message": {
+            "api": "xxxxxxxxxxxxxxxx",
+            "content": [
+              {
+                "text": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "textSignature": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+                "type": "xxxx"
+              }
+            ],
+            "model": "xxxxxxxxxxx",
+            "provider": "xxxxxx",
+            "responseId": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx",
+            "role": "xxxxxxxxx",
+            "stopReason": "xxxx",
+            "timestamp": 1774967993476,
+            "usage": {
+              "cacheRead": 0,
+              "cacheWrite": 0,
+              "cost": {
+                "cacheRead": 0,
+                "cacheWrite": 0,
+                "input": 0,
+                "output": 0,
+                "total": 0
+              },
+              "input": 0,
+              "output": 0,
+              "totalTokens": 0
+            }
+          },
+          "type": "xxxxxxxxxxxxxx"
+        },
+        "kind": "xxxxxxxxxxxxxx"
+      }
+    },
+    {
+      "type": "agent.streaming.chunk",
+      "source": "xxxxx",
+      "payload": {
+        "agent": "xxxxxxxxxxx",
+        "delta": "xxxxxx",
+        "name": "xxxxxxxxxxx"
+      }
+    }
+  ],
+  "source": "s3_archive_sample",
+  "schema_version": 1,
+  "generated_at": "2026-04-04T08:22:38Z",
+  "sampled_object_count": 8,
+  "sampled_event_count": 1548,
+  "type_counts": {
+    "agent.plan": 1,
+    "agent.streaming.chunk": 109,
+    "message.assistant": 1,
+    "message.assistant.delta": 5,
+    "run.started": 1,
+    "runtime.pi.event": 11
+  }
+}

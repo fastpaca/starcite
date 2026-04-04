@@ -1,19 +1,29 @@
 import http from 'k6/http';
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
+import {
+  buildBenchmarkEvent,
+  estimateAppendRequestBytes,
+  estimatePayloadBytes,
+} from './k6-event-corpus.js';
 
 const appendLatency = new Trend('append_latency', true);
 const appendOk = new Counter('append_ok');
 const appendErr = new Counter('append_err');
+const appendRequestBytes = new Trend('append_request_bytes');
+const eventPayloadBytes = new Trend('event_payload_bytes');
 
 const apiUrl = (__ENV.API_URL || 'http://node1:4000/v1').replace(/\/$/, '');
 const sessionId = __ENV.SESSION_ID;
+const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || __ENV.BENCH_ACTOR || '').trim();
+const runId = __ENV.RUN_ID || 'session-latency';
 
 if (!sessionId) {
   throw new Error('SESSION_ID is required');
 }
 
 export const options = {
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   scenarios: {
     append_latency: {
       executor: 'constant-arrival-rate',
@@ -33,15 +43,21 @@ export const options = {
 export default function () {
   const producerId = `bench-vu-${__VU}`;
   const producerSeq = __ITER + 1;
+  const body = buildBenchmarkEvent({
+    runId,
+    scenario: 'session_latency',
+    vuId: __VU,
+    sessionId,
+    sessionIndex: 1,
+    producerSlot: 0,
+    producerId,
+    producerSeq,
+    actorOverride: benchmarkActor !== '' ? benchmarkActor : null,
+    metadata: { bench: true, scenario: 'session_latency', vu: __VU },
+  });
 
-  const body = {
-    type: 'content',
-    payload: { text: `bench-${__VU}-${__ITER}` },
-    producer_id: producerId,
-    producer_seq: producerSeq,
-    source: 'benchmark',
-    metadata: { bench: true, vu: __VU },
-  };
+  eventPayloadBytes.add(estimatePayloadBytes(body.payload));
+  appendRequestBytes.add(estimateAppendRequestBytes(body));
 
   const res = http.post(
     `${apiUrl}/sessions/${sessionId}/append`,

@@ -14,6 +14,8 @@ defmodule Mix.Tasks.Bench do
       mix bench routing
       mix bench internal
       mix bench k6
+      mix bench.corpus
+      mix bench.local_cluster
       mix bench --help
   """
 

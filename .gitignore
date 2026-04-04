@@ -49,6 +49,7 @@ starcite-*.tar
 /priv/plts
 /tmp/test_raft
 /nonode@nohost
+/bench/generated/*.json
 
 # In case you use Node.js/npm, you want to ignore these.
 npm-debug.log

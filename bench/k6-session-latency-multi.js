@@ -1,20 +1,30 @@
 import http from 'k6/http';
 import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
+import {
+  buildBenchmarkEvent,
+  estimateAppendRequestBytes,
+  estimatePayloadBytes,
+  eventCorpusSummary,
+} from './k6-event-corpus.js';
 
 const appendLatency = new Trend('append_latency', true);
 const appendOk = new Counter('append_ok');
 const appendErr = new Counter('append_err');
 const append503 = new Counter('append_503');
 const append409 = new Counter('append_409');
+const appendRequestBytes = new Trend('append_request_bytes');
+const eventPayloadBytes = new Trend('event_payload_bytes');
 
 const defaultApi = (__ENV.API_URL || 'http://node1:4000/v1').replace(/\/$/, '');
 const clusterNodes = parseNodes(__ENV.CLUSTER_NODES, defaultApi);
+const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || __ENV.BENCH_ACTOR || '').trim();
 
 const vuRuntime = {};
 
 export const options = {
   setupTimeout: __ENV.SETUP_TIMEOUT || '300s',
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   scenarios: {
     append_latency_multi: {
       executor: 'constant-arrival-rate',
@@ -41,6 +51,10 @@ export function setup() {
   }
 
   const sessions = [];
+
+  console.log(
+    `Event corpus: ${eventCorpusSummary.source} entries=${eventCorpusSummary.eventCount} payload_p50=${eventCorpusSummary.payloadP50}B payload_p95=${eventCorpusSummary.payloadP95}B append_body_p50=${eventCorpusSummary.appendBodyP50}B append_body_p95=${eventCorpusSummary.appendBodyP95}B`
+  );
 
   for (let i = 1; i <= sessionCount; i++) {
     let created = false;
@@ -74,7 +88,7 @@ export function setup() {
     }
   }
 
-  return { sessions, clusterNodes };
+  return { sessions, clusterNodes, runId };
 }
 
 export default function (data) {
@@ -85,14 +99,26 @@ export default function (data) {
   const producerSeq = runtime.nextSeqBySession[sessionIndex];
   const targetNode = data.clusterNodes[(__ITER + __VU) % data.clusterNodes.length];
 
-  const body = {
-    type: 'content',
-    payload: { text: `bench-vu-${__VU}-s-${sessionIndex}-pseq-${producerSeq}` },
-    producer_id: producerId,
-    producer_seq: producerSeq,
-    source: 'benchmark',
-    metadata: { bench: true, scenario: 'multi_session_contention', vu: __VU, session_slot: sessionIndex },
-  };
+  const body = buildBenchmarkEvent({
+    runId: data.runId,
+    scenario: 'multi_session_contention',
+    vuId: __VU,
+    sessionId,
+    sessionIndex,
+    producerSlot: 0,
+    producerId,
+    producerSeq,
+    actorOverride: benchmarkActor !== '' ? benchmarkActor : null,
+    metadata: {
+      bench: true,
+      scenario: 'multi_session_contention',
+      vu: __VU,
+      session_slot: sessionIndex,
+    },
+  });
+
+  eventPayloadBytes.add(estimatePayloadBytes(body.payload));
+  appendRequestBytes.add(estimateAppendRequestBytes(body));
 
   const res = http.post(
     `${targetNode}/sessions/${sessionId}/append`,

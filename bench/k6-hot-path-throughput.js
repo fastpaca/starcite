@@ -7,10 +7,18 @@
 import { check } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
 import * as lib from './k6-lib.js';
+import {
+  buildBenchmarkEvent,
+  estimateAppendRequestBytes,
+  estimatePayloadBytes,
+  eventCorpusSummary,
+} from './k6-event-corpus.js';
 
 const eventsSent = new Counter('events_sent');
 const appendLatency = new Trend('append_latency', true);
 const monotonicSeqViolations = new Counter('monotonic_seq_violations');
+const appendRequestBytes = new Trend('append_request_bytes');
+const eventPayloadBytes = new Trend('event_payload_bytes');
 
 const maxVUs = Number(__ENV.MAX_VUS || 20);
 const rampDuration = __ENV.RAMP_DURATION || '30s';
@@ -51,6 +59,7 @@ const throughputScenario =
 export const options = {
   setupTimeout: __ENV.SETUP_TIMEOUT || '180s',
   teardownTimeout: '60s',
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   scenarios: {
     throughput: throughputScenario,
   },
@@ -104,6 +113,9 @@ export function setup() {
 
   console.log(`Producers per VU: ${producersPerVu}`);
   console.log(`Pipeline depth: ${pipelineDepth}`);
+  console.log(
+    `Event corpus: ${eventCorpusSummary.source} entries=${eventCorpusSummary.eventCount} payload_p50=${eventCorpusSummary.payloadP50}B payload_p95=${eventCorpusSummary.payloadP95}B append_body_p50=${eventCorpusSummary.appendBodyP50}B append_body_p95=${eventCorpusSummary.appendBodyP95}B`
+  );
 
   if (skipClusterReadyCheck) {
     console.log('Skipping cluster ready check');
@@ -142,19 +154,23 @@ export default function (data) {
 
   const { sessionId } = session;
   const pipelineDepth = data.pipelineDepth;
+  const sessionIndex = ((vuId - 1) % data.sessionCount) + 1;
   let lastSeq = session.lastSeq;
 
   for (let i = 0; i < pipelineDepth; i++) {
     const producerSlot = i % session.producerIds.length;
     const producerId = session.producerIds[producerSlot];
     const producerSeq = readProducerSeq(session, producerSlot);
-    const text = `starcite hot-path run=${data.runId} vu=${vuId} p=${producerSlot} seq=${producerSeq}`;
-    const event = {
-      type: 'content',
-      payload: { text },
-      producer_id: producerId,
-      producer_seq: producerSeq,
-      source: 'benchmark',
+    const event = buildBenchmarkEvent({
+      runId: data.runId,
+      scenario: 'hot_path',
+      vuId,
+      sessionId,
+      sessionIndex,
+      producerSlot,
+      producerId,
+      producerSeq,
+      actorOverride: benchmarkActor !== '' ? benchmarkActor : null,
       metadata: {
         bench: true,
         scenario: 'hot_path',
@@ -162,11 +178,10 @@ export default function (data) {
         producer_slot: producerSlot,
         producer_seq: producerSeq,
       },
-    };
+    });
 
-    if (benchmarkActor !== '') {
-      event.actor = benchmarkActor;
-    }
+    eventPayloadBytes.add(estimatePayloadBytes(event.payload));
+    appendRequestBytes.add(estimateAppendRequestBytes(event));
 
     const { res, json } = lib.appendEvent(sessionId, event);
 

@@ -22,6 +22,7 @@ if (clusterNodes.length === 0) {
 }
 
 let nodeIndex = 0;
+const opsClusterNodes = parseClusterNodes(__ENV.OPS_CLUSTER_NODES || __ENV.CLUSTER_OPS_NODES);
 
 function getNextNode() {
   const node = clusterNodes[nodeIndex % clusterNodes.length];
@@ -71,12 +72,14 @@ function buildUrl(path, params = {}, useLoadBalancer = true) {
 export function waitForClusterReady(timeoutSeconds = 60) {
   const startTime = Date.now();
   const timeoutMs = timeoutSeconds * 1000;
+  const readyProbeUrls =
+    opsClusterNodes.length > 0 ? opsClusterNodes.map(readyProbeUrl) : clusterNodes.map(inferReadyProbeUrl);
 
   while (Date.now() - startTime < timeoutMs) {
     let allReady = true;
 
-    for (const node of clusterNodes) {
-      const res = http.get(`${node.replace('/v1', '')}/health/ready`, { timeout: '5s' });
+    for (const node of readyProbeUrls) {
+      const res = http.get(node, { timeout: '5s' });
       if (res.status !== 200) {
         allReady = false;
         break;
@@ -91,6 +94,22 @@ export function waitForClusterReady(timeoutSeconds = 60) {
   }
 
   throw new Error(`Cluster did not become ready within ${timeoutSeconds}s`);
+}
+
+function inferReadyProbeUrl(apiNode) {
+  const stripped = apiNode.replace(/\/$/, '');
+  const match = stripped.match(/^(https?:\/\/[^/:]+):(\d+)(\/.*)?$/);
+
+  if (!match) {
+    return readyProbeUrl(stripped.replace(/\/v1$/, ''));
+  }
+
+  const opsPort = String(Number(match[2]) + 100);
+  return `${match[1]}:${opsPort}/health/ready`;
+}
+
+function readyProbeUrl(baseUrl) {
+  return `${baseUrl.replace(/\/$/, '').replace(/\/health\/ready$/, '')}/health/ready`;
 }
 
 export function sessionId(prefix, vuId, extra = '') {

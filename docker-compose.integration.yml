@@ -93,6 +93,7 @@ services:
       CLUSTER_NODES: http://node1:4000/v1,http://node2:4000/v1,http://node3:4000/v1
     volumes:
       - ./bench:/bench:ro
+      - ./tmp:/results
 
   db:
     image: postgres:16

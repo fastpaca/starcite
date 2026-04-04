@@ -2,6 +2,12 @@ import http from 'k6/http';
 import ws from 'k6/ws';
 import { check, sleep } from 'k6';
 import { Counter, Trend } from 'k6/metrics';
+import {
+  buildBenchmarkEvent,
+  estimateAppendRequestBytes,
+  estimatePayloadBytes,
+  eventCorpusSummary,
+} from './k6-event-corpus.js';
 
 const appendLatency = new Trend('append_latency', true);
 const rywLatency = new Trend('ryw_latency', true);
@@ -12,13 +18,17 @@ const rywErr = new Counter('ryw_err');
 const rywTimeout = new Counter('ryw_timeout');
 const rywGap = new Counter('ryw_gap');
 const wsErr = new Counter('ws_err');
+const appendRequestBytes = new Trend('append_request_bytes');
+const eventPayloadBytes = new Trend('event_payload_bytes');
 
 const defaultApi = (__ENV.API_URL || 'http://node1:4000/v1').replace(/\/$/, '');
 const clusterNodes = parseNodes(__ENV.CLUSTER_NODES, defaultApi);
+const benchmarkActor = (__ENV.BENCH_EVENT_ACTOR || __ENV.BENCH_ACTOR || '').trim();
 const vuRuntime = {};
 
 export const options = {
   setupTimeout: __ENV.SETUP_TIMEOUT || '300s',
+  summaryTrendStats: ['avg', 'min', 'med', 'max', 'p(90)', 'p(95)', 'p(99)', 'p(99.9)'],
   scenarios: {
     tail_ryw_latency: {
       executor: 'constant-arrival-rate',
@@ -45,6 +55,10 @@ export function setup() {
   }
 
   const sessions = [];
+
+  console.log(
+    `Event corpus: ${eventCorpusSummary.source} entries=${eventCorpusSummary.eventCount} payload_p50=${eventCorpusSummary.payloadP50}B payload_p95=${eventCorpusSummary.payloadP95}B append_body_p50=${eventCorpusSummary.appendBodyP50}B append_body_p95=${eventCorpusSummary.appendBodyP95}B`
+  );
 
   for (let i = 1; i <= sessionCount; i++) {
     let created = false;
@@ -78,7 +92,7 @@ export function setup() {
     }
   }
 
-  return { sessions, clusterNodes };
+  return { sessions, clusterNodes, runId };
 }
 
 export default function (data) {
@@ -94,14 +108,26 @@ export default function (data) {
   const wsUrl = tailUrl(tailNode, sessionId, cursor);
   const wsTimeoutMs = Number(__ENV.WS_TIMEOUT_MS || 10000);
 
-  const body = {
-    type: 'content',
-    payload: { text: `ryw-vu-${__VU}-s-${sessionIndex}-pseq-${producerSeq}` },
-    producer_id: producerId,
-    producer_seq: producerSeq,
-    source: 'benchmark',
-    metadata: { bench: true, scenario: 'tail_ryw_latency', vu: __VU, session_slot: sessionIndex },
-  };
+  const body = buildBenchmarkEvent({
+    runId: data.runId,
+    scenario: 'tail_ryw_latency',
+    vuId: __VU,
+    sessionId,
+    sessionIndex,
+    producerSlot: 0,
+    producerId,
+    producerSeq,
+    actorOverride: benchmarkActor !== '' ? benchmarkActor : null,
+    metadata: {
+      bench: true,
+      scenario: 'tail_ryw_latency',
+      vu: __VU,
+      session_slot: sessionIndex,
+    },
+  });
+
+  eventPayloadBytes.add(estimatePayloadBytes(body.payload));
+  appendRequestBytes.add(estimateAppendRequestBytes(body));
 
   const outcome = {
     appendAccepted: false,
