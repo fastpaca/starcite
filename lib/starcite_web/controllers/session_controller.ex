@@ -13,6 +13,7 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
+  alias Starcite.Auth.Principal
   alias Starcite.Observability.Telemetry
   alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
@@ -217,8 +218,7 @@ defmodule StarciteWeb.SessionController do
     with {:ok, auth} <- fetch_auth(conn),
          :ok <- Policy.can_read_session(auth),
          :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- SessionCatalog.get_session_entry(id),
-         :ok <- require_same_tenant(auth, session.tenant_id) do
+         {:ok, session} <- get_session_entry_for_auth(auth, id) do
       json(conn, session)
     end
   end
@@ -232,8 +232,7 @@ defmodule StarciteWeb.SessionController do
     with {:ok, auth} <- fetch_auth(conn),
          :ok <- Policy.can_manage_session(auth),
          :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, tenant_id} <- SessionCatalog.get_tenant_id(id),
-         :ok <- require_same_tenant(auth, tenant_id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
          {:ok, session} <- WritePath.archive_session(id) do
       json(conn, session)
     end
@@ -248,8 +247,7 @@ defmodule StarciteWeb.SessionController do
     with {:ok, auth} <- fetch_auth(conn),
          :ok <- Policy.can_manage_session(auth),
          :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, tenant_id} <- SessionCatalog.get_tenant_id(id),
-         :ok <- require_same_tenant(auth, tenant_id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
          {:ok, session} <- WritePath.unarchive_session(id) do
       json(conn, session)
     end
@@ -580,24 +578,43 @@ defmodule StarciteWeb.SessionController do
 
   defp metadata_filter_value(_value), do: :error
 
-  defp require_same_tenant(%Context{kind: :none}, tenant_id)
-       when is_binary(tenant_id) and tenant_id != "",
-       do: :ok
+  defp get_session_entry_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_session_entry(session_id)
+  end
 
-  defp require_same_tenant(
-         %Context{kind: :jwt, principal: %Starcite.Auth.Principal{tenant_id: tenant_id}},
-         tenant_id
+  defp get_session_entry_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
        )
-       when is_binary(tenant_id) and tenant_id != "",
-       do: :ok
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, %{tenant_id: ^tenant_id} = session} <- SessionCatalog.get_session_entry(session_id) do
+      {:ok, session}
+    else
+      {:ok, _session} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
 
-  defp require_same_tenant(
-         %Context{kind: :jwt, principal: %Starcite.Auth.Principal{tenant_id: expected_tenant_id}},
-         tenant_id
+  defp get_session_entry_for_auth(_auth, _session_id), do: {:error, :forbidden}
+
+  defp get_session_tenant_id_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_tenant_id(session_id)
+  end
+
+  defp get_session_tenant_id_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
        )
-       when is_binary(expected_tenant_id) and expected_tenant_id != "" and
-              is_binary(tenant_id) and tenant_id != "",
-       do: {:error, :forbidden_tenant}
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, ^tenant_id} <- SessionCatalog.get_tenant_id(session_id) do
+      {:ok, tenant_id}
+    else
+      {:ok, _other_tenant_id} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp get_session_tenant_id_for_auth(_auth, _session_id), do: {:error, :forbidden}
 
   defp measure_append_request(fun) when is_function(fun, 0) do
     started_at = System.monotonic_time()

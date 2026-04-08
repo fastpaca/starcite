@@ -550,7 +550,7 @@ defmodule Starcite.Storage.SessionCatalog do
 
   defp set_archive_state(session_id, archived)
        when is_binary(session_id) and session_id != "" and is_boolean(archived) do
-    updated_at = DateTime.utc_now() |> DateTime.truncate(:second)
+    updated_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
 
     case Repo.update_all(
            from(s in SessionRecord, where: s.id == ^session_id and s.archived != ^archived),
