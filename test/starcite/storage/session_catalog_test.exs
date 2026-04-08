@@ -33,6 +33,11 @@ defmodule Starcite.Storage.SessionCatalogTest do
     assert loaded_header.tenant_id == "acme"
     assert loaded_header.metadata == %{"workflow" => "contract"}
 
+    assert :eq ==
+             loaded_header.updated_at
+             |> NaiveDateTime.truncate(:second)
+             |> NaiveDateTime.compare(loaded_header.created_at)
+
     assert {:ok, session} = SessionCatalog.get_session("ses-catalog-1")
     assert session.id == "ses-catalog-1"
     assert session.tenant_id == "acme"
@@ -121,6 +126,64 @@ defmodule Starcite.Storage.SessionCatalogTest do
 
     assert [%{creator_principal: %Principal{id: "user-a", type: :user, tenant_id: "acme"}}] =
              page.sessions
+  end
+
+  test "updates title and merges metadata without replacing unrelated keys" do
+    assert :ok =
+             SessionCatalog.persist_created(
+               Header.new("ses-catalog-update",
+                 tenant_id: "acme",
+                 title: "Draft",
+                 metadata: %{workflow: "contract", tags: ["one"]}
+               )
+             )
+
+    assert {:ok, original} = SessionCatalog.get_header("ses-catalog-update")
+
+    assert {:ok, updated} =
+             SessionCatalog.update_header("ses-catalog-update", %{
+               title: "Final",
+               metadata: %{"summary" => "Generated", "tags" => ["one", "two"]}
+             })
+
+    assert updated.title == "Final"
+
+    assert updated.metadata == %{
+             "workflow" => "contract",
+             "summary" => "Generated",
+             "tags" => ["one", "two"]
+           }
+
+    assert updated.version == original.version + 1
+    assert NaiveDateTime.compare(updated.updated_at, original.updated_at) in [:eq, :gt]
+  end
+
+  test "returns expected_version conflict when compare-and-swap token is stale" do
+    assert :ok =
+             SessionCatalog.persist_created(
+               Header.new("ses-catalog-conflict",
+                 tenant_id: "acme",
+                 title: "Draft",
+                 metadata: %{workflow: "contract"}
+               )
+             )
+
+    assert {:ok, current} = SessionCatalog.get_header("ses-catalog-conflict")
+    expected_version = current.version
+
+    assert {:ok, _updated} =
+             SessionCatalog.update_header("ses-catalog-conflict", %{
+               metadata: %{"summary" => "fresh"},
+               expected_version: expected_version
+             })
+
+    assert {:error, {:expected_version_conflict, ^expected_version, current_version}} =
+             SessionCatalog.update_header("ses-catalog-conflict", %{
+               title: "Stale",
+               expected_version: expected_version
+             })
+
+    assert current_version == expected_version + 1
   end
 
   defp ensure_repo_sandbox do

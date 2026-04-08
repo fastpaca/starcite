@@ -12,6 +12,17 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :conflict, "session_exists", "Session already exists")
   end
 
+  def call(conn, {:error, {:expected_version_conflict, expected, current}})
+      when is_integer(expected) and is_integer(current) do
+    error(
+      conn,
+      :conflict,
+      "expected_version_conflict",
+      "Expected version #{expected}, current version is #{current}",
+      %{current_version: current}
+    )
+  end
+
   def call(conn, {:error, {:expected_seq_conflict, expected, current}}) do
     error(
       conn,
@@ -171,9 +182,9 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"
 
-  defp error(conn, status, error, message) do
+  defp error(conn, status, error, message, extra \\ %{}) when is_map(extra) do
     conn
     |> put_status(status)
-    |> json(%{error: error, message: message})
+    |> json(Map.merge(%{error: error, message: message}, extra))
   end
 end

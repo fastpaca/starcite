@@ -134,6 +134,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["last_seq"] == 0
       assert String.ends_with?(body["created_at"], "Z")
       assert String.ends_with?(body["updated_at"], "Z")
+      assert body["version"] == 1
     end
 
     test "creates session with caller-provided id" do
@@ -378,6 +379,86 @@ defmodule StarciteWeb.SessionControllerTest do
     end
   end
 
+  describe "PATCH /v1/sessions/:id" do
+    test "updates title and merges metadata without dropping unrelated keys" do
+      id = unique_id("ses")
+
+      assert {:ok, created} =
+               WritePath.create_session(
+                 id: id,
+                 tenant_id: "acme",
+                 title: "Draft",
+                 metadata: %{"workflow" => "contract", "tags" => ["one"]}
+               )
+
+      conn =
+        json_conn(:patch, "/v1/sessions/#{id}", %{
+          "title" => "Final",
+          "metadata" => %{"summary" => "Generated", "tags" => ["one", "two"]}
+        })
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["id"] == id
+      assert body["title"] == "Final"
+
+      assert body["metadata"] == %{
+               "workflow" => "contract",
+               "summary" => "Generated",
+               "tags" => ["one", "two"]
+             }
+
+      assert body["last_seq"] == 0
+      assert body["created_at"] == created.created_at
+      assert body["version"] == 2
+
+      {:ok, created_at, _} = DateTime.from_iso8601(body["created_at"])
+      {:ok, updated_at, _} = DateTime.from_iso8601(body["updated_at"])
+      assert DateTime.compare(updated_at, created_at) in [:eq, :gt]
+    end
+
+    test "supports optimistic concurrency with expected_version" do
+      id = unique_id("ses")
+
+      assert {:ok, created} =
+               WritePath.create_session(
+                 id: id,
+                 tenant_id: "acme",
+                 title: "Draft",
+                 metadata: %{"workflow" => "contract"}
+               )
+
+      assert 200 ==
+               json_conn(:patch, "/v1/sessions/#{id}", %{
+                 "metadata" => %{"summary" => "fresh"},
+                 "expected_version" => created.version
+               }).status
+
+      conn =
+        json_conn(:patch, "/v1/sessions/#{id}", %{
+          "title" => "Stale",
+          "expected_version" => created.version
+        })
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "expected_version_conflict"
+      assert is_binary(body["message"])
+      assert body["current_version"] == 2
+    end
+
+    test "rejects no-op patches" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      conn = json_conn(:patch, "/v1/sessions/#{id}", %{"metadata" => %{}})
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_session"
+    end
+  end
+
   describe "POST /v1/sessions/:id/append" do
     test "appends an event" do
       id = unique_id("ses")
@@ -561,6 +642,34 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 409
       assert_receive_ingest_edge(:append_event, :error, :seq_conflict, "acme")
+    end
+
+    test "update expected_version conflict emits a dedicated conflict reason" do
+      attach_ingest_edge_handler()
+      id = unique_id("ses")
+
+      assert {:ok, session} =
+               WritePath.create_session(
+                 id: id,
+                 tenant_id: "acme",
+                 title: "Draft",
+                 metadata: %{"workflow" => "contract"}
+               )
+
+      assert 200 ==
+               json_conn(:patch, "/v1/sessions/#{id}", %{
+                 "metadata" => %{"summary" => "fresh"},
+                 "expected_version" => session.version
+               }).status
+
+      conn =
+        json_conn(:patch, "/v1/sessions/#{id}", %{
+          "title" => "Stale",
+          "expected_version" => session.version
+        })
+
+      assert conn.status == 409
+      assert_receive_ingest_edge(:update_session, :error, :expected_version_conflict, "acme")
     end
   end
 

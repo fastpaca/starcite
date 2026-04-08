@@ -85,6 +85,11 @@ defmodule StarciteWeb.Auth.Policy do
     session_permission(auth, session, "session:read")
   end
 
+  @spec allowed_to_update_session(auth(), Session.t()) :: :ok | {:error, atom()}
+  def allowed_to_update_session(%Context{} = auth, %Session{} = session) do
+    session_permission(auth, session, "session:create")
+  end
+
   @spec allowed_to_access_session(auth(), String.t()) :: :ok | {:error, :forbidden_session}
   def allowed_to_access_session(%Context{kind: :none}, session_id)
       when is_binary(session_id) and session_id != "",

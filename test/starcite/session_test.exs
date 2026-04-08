@@ -246,6 +246,8 @@ defmodule Starcite.SessionTest do
       assert map.last_seq == 0
       assert is_binary(map.created_at)
       assert is_binary(map.updated_at)
+      assert map.created_at == map.updated_at
+      assert map.version == 1
     end
   end
 end

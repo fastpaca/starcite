@@ -123,6 +123,45 @@ defmodule StarciteWeb.LifecycleChannelTest do
     assert event == %{kind: "session.activated", session_id: session_id, tenant_id: "acme"}
   end
 
+  test "pushes session.updated when mutable header fields change" do
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-update", %{auth: service_auth_context()})
+      |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
+
+    session_id = unique_id("ses-update")
+
+    assert {:ok, _session} =
+             WritePath.create_session(
+               id: session_id,
+               tenant_id: "acme",
+               title: "Draft",
+               metadata: %{workflow: "contract"}
+             )
+
+    assert_push "lifecycle", %{event: %{kind: "session.activated"}}
+    assert_push "lifecycle", %{event: %{kind: "session.created", version: 1}}
+
+    assert {:ok, _session} =
+             WritePath.update_session(session_id, %{
+               title: "Final",
+               metadata: %{"summary" => "Generated"}
+             })
+
+    assert_push "lifecycle", %{
+      event: %{
+        kind: "session.updated",
+        session_id: ^session_id,
+        tenant_id: "acme",
+        title: "Final",
+        metadata: %{"workflow" => "contract", "summary" => "Generated"},
+        updated_at: updated_at,
+        version: 2
+      }
+    }
+
+    assert String.ends_with?(updated_at, "Z")
+  end
+
   test "does not push lifecycle events for another tenant" do
     {:ok, _, _socket} =
       socket(StarciteWeb.UserSocket, "client-tenant-scope", %{auth: service_auth_context()})

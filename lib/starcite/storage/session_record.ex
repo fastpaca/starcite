@@ -14,5 +14,7 @@ defmodule Starcite.Storage.SessionRecord do
     field(:metadata, :map)
     field(:archived_seq, :integer)
     field(:created_at, :utc_datetime)
+    field(:updated_at, :utc_datetime_usec)
+    field(:version, :integer)
   end
 end

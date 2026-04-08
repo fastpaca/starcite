@@ -95,14 +95,20 @@ Starcite emits lifecycle events it owns directly. Current lifecycle kinds
 include:
 
 - `session.created`
+- `session.updated`
 - `session.activated`
 - `session.hydrating`
 - `session.freezing`
 - `session.frozen`
 
-`session.created` includes immutable session header fields such as `title`,
-`metadata`, and `created_at`. Runtime lifecycle events are tenant-scoped and
-intentionally minimal: `kind`, `session_id`, and `tenant_id`.
+`session.created` includes the initial session header fields such as `title`,
+`metadata`, `created_at`, and `version`.
+
+`session.updated` includes the mutable session header fields `title`,
+`metadata`, `updated_at`, and `version`.
+
+Runtime lifecycle events are tenant-scoped and intentionally minimal: `kind`,
+`session_id`, and `tenant_id`.
 
 Appended session events are available on `tail:<session_id>` and are not
 reinterpreted as lifecycle notifications.

@@ -139,7 +139,8 @@ defmodule Starcite.WritePath do
                      tenant_id: session.tenant_id,
                      title: session_map.title,
                      metadata: session_map.metadata,
-                     created_at: session_map.created_at
+                     created_at: session_map.created_at,
+                     version: session_map.version
                    }}
                 )
 
@@ -173,6 +174,33 @@ defmodule Starcite.WritePath do
     epoch = SessionRouter.local_owner_epoch(session_id, current_epoch)
     %Session{session | epoch: epoch}
   end
+
+  @spec update_session(String.t(), map()) :: {:ok, map()} | {:error, term()} | {:timeout, term()}
+  def update_session(id, attrs) when is_binary(id) and id != "" and is_map(attrs) do
+    route_to_replica(
+      id,
+      :update_session_local,
+      [id, attrs],
+      :update_session_local,
+      [id, attrs]
+    )
+  end
+
+  def update_session(_id, _attrs), do: {:error, :invalid_session}
+
+  @doc false
+  @spec update_session_local(String.t(), map()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
+  def update_session_local(id, attrs) when is_binary(id) and id != "" and is_map(attrs) do
+    with {:ok, session} <- SessionQuorum.get_session(id),
+         {:ok, header} <- SessionCatalog.update_header(id, attrs) do
+      session_map = Session.to_map(session, header)
+      :ok = publish_session_updated(session_map, session.tenant_id)
+      {:ok, session_map}
+    end
+  end
+
+  def update_session_local(_id, _attrs), do: {:error, :invalid_session}
 
   @spec append_event(String.t(), map()) ::
           {:ok, %{seq: non_neg_integer(), last_seq: non_neg_integer(), deduped: boolean()}}
@@ -326,6 +354,40 @@ defmodule Starcite.WritePath do
   end
 
   defp maybe_index_session(_session, _creator_principal, _tenant_id), do: :ok
+
+  defp publish_session_updated(
+         %{
+           id: id,
+           title: title,
+           metadata: metadata,
+           updated_at: updated_at,
+           version: version
+         },
+         tenant_id
+       )
+       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
+              is_map(metadata) and is_binary(updated_at) and updated_at != "" and
+              is_integer(version) and version > 0 and
+              is_binary(tenant_id) and tenant_id != "" do
+    PubSub.broadcast(
+      Starcite.PubSub,
+      "lifecycle:" <> tenant_id,
+      {:session_lifecycle,
+       %{
+         kind: "session.updated",
+         session_id: id,
+         tenant_id: tenant_id,
+         title: title,
+         metadata: metadata,
+         updated_at: updated_at,
+         version: version
+       }}
+    )
+
+    :ok
+  end
+
+  defp publish_session_updated(_session, _tenant_id), do: :ok
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)
