@@ -10,7 +10,10 @@ defmodule StarciteWeb.Router do
 
     post "/sessions", SessionController, :create
     get "/sessions", SessionController, :index
+    get "/sessions/:id", SessionController, :show
     patch "/sessions/:id", SessionController, :update
     post "/sessions/:id/append", SessionController, :append
+    post "/sessions/:id/archive", SessionController, :archive
+    post "/sessions/:id/unarchive", SessionController, :unarchive
   end
 end

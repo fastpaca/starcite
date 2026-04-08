@@ -6,10 +6,14 @@ defmodule StarciteWeb.SessionController do
   - `update` via `PATCH /v1/sessions/:id`
   - `append` via `POST /v1/sessions/:id/append`
   - `index` via `GET /v1/sessions`
+  - `show` via `GET /v1/sessions/:id`
+  - `archive` via `POST /v1/sessions/:id/archive`
+  - `unarchive` via `POST /v1/sessions/:id/unarchive`
   """
 
   use StarciteWeb, :controller
 
+  alias Starcite.Auth.Principal
   alias Starcite.Observability.Telemetry
   alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
@@ -207,6 +211,50 @@ defmodule StarciteWeb.SessionController do
     end
   end
 
+  @doc """
+  Fetch one session from the durable session catalog by id.
+  """
+  def show(conn, %{"id" => id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- get_session_entry_for_auth(auth, id) do
+      json(conn, session)
+    end
+  end
+
+  def show(_conn, _params), do: {:error, :invalid_session_id}
+
+  @doc """
+  Archive one session without deleting its timeline.
+  """
+  def archive(conn, %{"id" => id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
+         {:ok, session} <- WritePath.archive_session(id) do
+      json(conn, session)
+    end
+  end
+
+  def archive(_conn, _params), do: {:error, :invalid_session_id}
+
+  @doc """
+  Restore an archived session to active listing results.
+  """
+  def unarchive(conn, %{"id" => id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
+         {:ok, session} <- WritePath.unarchive_session(id) do
+      json(conn, session)
+    end
+  end
+
+  def unarchive(_conn, _params), do: {:error, :invalid_session_id}
+
   # Validation
 
   defp validate_create(params, %Context{} = auth) when is_map(params) do
@@ -353,8 +401,9 @@ defmodule StarciteWeb.SessionController do
   defp validate_list(params) when is_map(params) do
     with {:ok, limit} <- optional_limit(params["limit"]),
          {:ok, cursor} <- optional_cursor(params["cursor"]),
+         {:ok, archived} <- parse_archived_filter(params["archived"]),
          {:ok, metadata} <- optional_metadata_filters(params) do
-      {:ok, %{limit: limit, cursor: cursor, metadata: metadata}}
+      {:ok, %{limit: limit, cursor: cursor, archived: archived, metadata: metadata}}
     end
   end
 
@@ -482,6 +531,12 @@ defmodule StarciteWeb.SessionController do
   defp optional_cursor(value) when is_binary(value) and value != "", do: {:ok, value}
   defp optional_cursor(_value), do: {:error, :invalid_cursor}
 
+  defp parse_archived_filter(nil), do: {:ok, :active}
+  defp parse_archived_filter("false"), do: {:ok, :active}
+  defp parse_archived_filter("true"), do: {:ok, :archived}
+  defp parse_archived_filter("all"), do: {:ok, :all}
+  defp parse_archived_filter(_value), do: {:error, :invalid_list_query}
+
   defp optional_metadata_filters(params) when is_map(params) do
     with {:ok, nested} <- optional_metadata_filter_map(params["metadata"]) do
       dotted =
@@ -522,6 +577,44 @@ defmodule StarciteWeb.SessionController do
        do: {:ok, value}
 
   defp metadata_filter_value(_value), do: :error
+
+  defp get_session_entry_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_session_entry(session_id)
+  end
+
+  defp get_session_entry_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, %{tenant_id: ^tenant_id} = session} <- SessionCatalog.get_session_entry(session_id) do
+      {:ok, session}
+    else
+      {:ok, _session} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp get_session_entry_for_auth(_auth, _session_id), do: {:error, :forbidden}
+
+  defp get_session_tenant_id_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_tenant_id(session_id)
+  end
+
+  defp get_session_tenant_id_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, ^tenant_id} <- SessionCatalog.get_tenant_id(session_id) do
+      {:ok, tenant_id}
+    else
+      {:ok, _other_tenant_id} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp get_session_tenant_id_for_auth(_auth, _session_id), do: {:error, :forbidden}
 
   defp measure_append_request(fun) when is_function(fun, 0) do
     started_at = System.monotonic_time()

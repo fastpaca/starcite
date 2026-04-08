@@ -126,7 +126,7 @@ defmodule Starcite.WritePath do
           case SessionQuorum.replicate_state(session, []) do
             :ok ->
               :ok = SessionStore.put_session(session)
-              session_map = Session.to_map(session, header)
+              session_map = session |> Session.to_map(header) |> Map.put(:archived, false)
 
               :ok =
                 PubSub.broadcast(
@@ -309,6 +309,28 @@ defmodule Starcite.WritePath do
     SessionQuorum.ack_archived(id, upto_seq)
   end
 
+  @spec archive_session(String.t()) :: {:ok, map()} | {:error, term()}
+  def archive_session(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, %{session: session, changed: changed?}} <-
+           SessionCatalog.archive_session(session_id) do
+      if changed?, do: :ok = broadcast_archive_lifecycle(session, "session.archived")
+      {:ok, session}
+    end
+  end
+
+  def archive_session(_session_id), do: {:error, :invalid_session_id}
+
+  @spec unarchive_session(String.t()) :: {:ok, map()} | {:error, term()}
+  def unarchive_session(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, %{session: session, changed: changed?}} <-
+           SessionCatalog.unarchive_session(session_id) do
+      if changed?, do: :ok = broadcast_archive_lifecycle(session, "session.unarchived")
+      {:ok, session}
+    end
+  end
+
+  def unarchive_session(_session_id), do: {:error, :invalid_session_id}
+
   defp route_to_replica(session_id, remote_fun, remote_args, local_fun, local_args)
        when is_binary(session_id) and session_id != "" and is_atom(remote_fun) and
               is_list(remote_args) and is_atom(local_fun) and is_list(local_args) do
@@ -388,6 +410,27 @@ defmodule Starcite.WritePath do
   end
 
   defp publish_session_updated(_session, _tenant_id), do: :ok
+
+  defp broadcast_archive_lifecycle(
+         %{id: session_id, tenant_id: tenant_id, archived: archived},
+         kind
+       )
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" and is_boolean(archived) and is_binary(kind) and kind != "" do
+    PubSub.broadcast(
+      Starcite.PubSub,
+      "lifecycle:" <> tenant_id,
+      {:session_lifecycle,
+       %{
+         kind: kind,
+         session_id: session_id,
+         tenant_id: tenant_id,
+         archived: archived
+       }}
+    )
+
+    :ok
+  end
 
   defp expected_seq_from_opts(opts) when is_list(opts) do
     Keyword.get(opts, :expected_seq)

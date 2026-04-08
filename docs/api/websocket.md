@@ -96,6 +96,8 @@ include:
 
 - `session.created`
 - `session.updated`
+- `session.archived`
+- `session.unarchived`
 - `session.activated`
 - `session.hydrating`
 - `session.freezing`
@@ -107,8 +109,8 @@ include:
 `session.updated` includes the mutable session header fields `title`,
 `metadata`, `updated_at`, and `version`.
 
-Runtime lifecycle events are tenant-scoped and intentionally minimal: `kind`,
-`session_id`, and `tenant_id`.
+Archive lifecycle events include `archived`. Runtime lifecycle events are
+tenant-scoped and intentionally minimal: `kind`, `session_id`, and `tenant_id`.
 
 Appended session events are available on `tail:<session_id>` and are not
 reinterpreted as lifecycle notifications.

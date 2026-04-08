@@ -100,9 +100,9 @@ restarts.
 
 **Session catalog** - one durable Postgres row per session. It stores static
 session metadata (`id`, `tenant_id`, `title`, optional creator columns,
-`metadata`, `created_at`) plus the mutable archival frontier (`archived_seq`).
-Cold hydrate reads this row, sets `last_seq = archived_seq`, and gets `epoch`
-from routing.
+`metadata`, `created_at`) plus mutable session visibility (`archived`) and
+the mutable archival frontier (`archived_seq`). Cold hydrate reads this row,
+sets `last_seq = archived_seq`, and gets `epoch` from routing.
 
 ### Archiver
 

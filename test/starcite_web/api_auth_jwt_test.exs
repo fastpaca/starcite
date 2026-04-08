@@ -229,7 +229,53 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(list_conn.resp_body)["error"] == "forbidden_scope"
   end
 
-  test "enforces tenant boundary for update append list and tail channel join" do
+  test "uses create scope for archive and keeps archived sessions readable by id" do
+    bypass = Bypass.open()
+    private_key = AuthTestSupport.generate_rsa_private_key()
+    kid = "kid-archive-scope"
+    jwks = AuthTestSupport.jwks_for_private_key(private_key, kid)
+
+    Bypass.expect(bypass, "GET", @jwks_path, fn conn ->
+      conn
+      |> put_resp_content_type("application/json")
+      |> resp(200, Jason.encode!(jwks))
+    end)
+
+    configure_jwt_auth!(bypass)
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+    read_only_token = token_for(private_key, kid, %{"scope" => "session:read"})
+
+    denied_archive_conn =
+      json_conn(:post, "/v1/sessions/#{session_id}/archive", %{}, [
+        {"authorization", "Bearer #{read_only_token}"}
+      ])
+
+    assert denied_archive_conn.status == 403
+    assert Jason.decode!(denied_archive_conn.resp_body)["error"] == "forbidden_scope"
+
+    archive_token = token_for(private_key, kid, %{"scope" => "session:create"})
+
+    archive_header = {"authorization", "Bearer #{archive_token}"}
+
+    archive_conn = json_conn(:post, "/v1/sessions/#{session_id}/archive", %{}, [archive_header])
+    assert archive_conn.status == 200
+    assert Jason.decode!(archive_conn.resp_body)["archived"] == true
+
+    show_token = token_for(private_key, kid, %{"scope" => "session:read"})
+    show_header = {"authorization", "Bearer #{show_token}"}
+
+    show_conn = json_conn(:get, "/v1/sessions/#{session_id}", nil, [show_header])
+    assert show_conn.status == 200
+    assert Jason.decode!(show_conn.resp_body)["archived"] == true
+
+    list_conn = json_conn(:get, "/v1/sessions", nil, [show_header])
+    assert list_conn.status == 200
+    refute session_id in Enum.map(Jason.decode!(list_conn.resp_body)["sessions"], & &1["id"])
+  end
+
+  test "enforces tenant boundary for update, append, list, and tail channel join" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tenant-boundary"

@@ -132,6 +132,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert body["title"] == "Draft"
       assert body["metadata"]["workflow"] == "legal"
       assert body["last_seq"] == 0
+      assert body["archived"] == false
       assert String.ends_with?(body["created_at"], "Z")
       assert String.ends_with?(body["updated_at"], "Z")
       assert body["version"] == 1
@@ -370,6 +371,58 @@ defmodule StarciteWeb.SessionControllerTest do
       assert Enum.map(body["sessions"], & &1["id"]) == [id]
     end
 
+    test "excludes archived sessions from default results and supports archived filters" do
+      active_id = unique_id("ses-active")
+      archived_id = unique_id("ses-archived")
+      marker = unique_id("archive-filter")
+
+      assert 201 ==
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => active_id,
+                   "metadata" => %{"marker" => marker}
+                 })
+               ).status
+
+      assert 201 ==
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => archived_id,
+                   "metadata" => %{"marker" => marker}
+                 })
+               ).status
+
+      archive_conn = json_conn(:post, "/v1/sessions/#{archived_id}/archive", %{})
+      assert archive_conn.status == 200
+      assert Jason.decode!(archive_conn.resp_body)["archived"] == true
+
+      default_conn = json_conn(:get, "/v1/sessions?metadata[marker]=#{marker}", nil)
+      assert default_conn.status == 200
+
+      assert Enum.map(Jason.decode!(default_conn.resp_body)["sessions"], & &1["id"]) == [
+               active_id
+             ]
+
+      archived_conn =
+        json_conn(:get, "/v1/sessions?archived=true&metadata[marker]=#{marker}", nil)
+
+      assert archived_conn.status == 200
+
+      assert Enum.map(Jason.decode!(archived_conn.resp_body)["sessions"], & &1["id"]) == [
+               archived_id
+             ]
+
+      all_conn = json_conn(:get, "/v1/sessions?archived=all&metadata[marker]=#{marker}", nil)
+      assert all_conn.status == 200
+
+      assert Enum.sort(Enum.map(Jason.decode!(all_conn.resp_body)["sessions"], & &1["id"])) ==
+               Enum.sort([active_id, archived_id])
+    end
+
     test "invalid limit returns 400" do
       conn = json_conn(:get, "/v1/sessions?limit=0", nil)
 
@@ -456,6 +509,62 @@ defmodule StarciteWeb.SessionControllerTest do
       assert conn.status == 400
       body = Jason.decode!(conn.resp_body)
       assert body["error"] == "invalid_session"
+    end
+  end
+
+  describe "GET /v1/sessions/:id" do
+    test "returns archived sessions by id" do
+      id = unique_id("ses")
+
+      assert 201 ==
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => id,
+                   "title" => "Archived draft"
+                 })
+               ).status
+
+      assert 200 == json_conn(:post, "/v1/sessions/#{id}/archive", %{}).status
+
+      conn = json_conn(:get, "/v1/sessions/#{id}", nil)
+      assert conn.status == 200
+
+      body = Jason.decode!(conn.resp_body)
+      assert body["id"] == id
+      assert body["title"] == "Archived draft"
+      assert body["archived"] == true
+    end
+  end
+
+  describe "POST /v1/sessions/:id/archive" do
+    test "archives and unarchives a session" do
+      id = unique_id("ses")
+
+      assert 201 ==
+               json_conn(
+                 :post,
+                 "/v1/sessions",
+                 service_create_body(%{
+                   "id" => id,
+                   "title" => "Reversible"
+                 })
+               ).status
+
+      archive_conn = json_conn(:post, "/v1/sessions/#{id}/archive", %{})
+      assert archive_conn.status == 200
+
+      archived_body = Jason.decode!(archive_conn.resp_body)
+      assert archived_body["id"] == id
+      assert archived_body["archived"] == true
+
+      unarchive_conn = json_conn(:post, "/v1/sessions/#{id}/unarchive", %{})
+      assert unarchive_conn.status == 200
+
+      unarchived_body = Jason.decode!(unarchive_conn.resp_body)
+      assert unarchived_body["id"] == id
+      assert unarchived_body["archived"] == false
     end
   end
 

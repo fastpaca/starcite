@@ -17,15 +17,28 @@ defmodule Starcite.Storage.SessionCatalog do
   @progress_batch_size 5_000
 
   @type session_query :: %{
-          optional(:limit) => pos_integer(),
-          optional(:cursor) => String.t() | nil,
-          optional(:metadata) => map(),
+          required(:limit) => pos_integer(),
+          required(:cursor) => String.t() | nil,
+          required(:archived) => :active | :archived | :all,
+          required(:metadata) => map(),
           optional(:owner_principal_ids) => [String.t()],
           optional(:tenant_id) => String.t()
         }
 
+  @type session_entry :: %{
+          required(:id) => String.t(),
+          required(:title) => String.t() | nil,
+          required(:tenant_id) => String.t(),
+          required(:creator_principal) => Principal.t() | nil,
+          required(:metadata) => map(),
+          required(:created_at) => String.t(),
+          required(:updated_at) => String.t(),
+          required(:version) => pos_integer(),
+          required(:archived) => boolean()
+        }
+
   @type session_page :: %{
-          required(:sessions) => [map()],
+          required(:sessions) => [session_entry()],
           required(:next_cursor) => String.t() | nil
         }
 
@@ -38,6 +51,11 @@ defmodule Starcite.Storage.SessionCatalog do
           optional(:title) => String.t() | nil,
           optional(:metadata) => map(),
           optional(:expected_version) => pos_integer()
+        }
+
+  @type archive_update_result :: %{
+          required(:session) => session_entry(),
+          required(:changed) => boolean()
         }
 
   @spec persist_created(Header.t()) :: :ok | {:error, term()}
@@ -55,6 +73,7 @@ defmodule Starcite.Storage.SessionCatalog do
              is_binary(tenant_id) and tenant_id != "" and is_map(metadata) and
              is_integer(version) and version > 0 do
     {creator_id, creator_type} = creator_identity(creator_principal)
+    persisted_at = created_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:second)
 
     {_inserted, _} =
       Repo.insert_all(
@@ -68,8 +87,7 @@ defmodule Starcite.Storage.SessionCatalog do
             creator_type: creator_type,
             metadata: metadata,
             archived_seq: 0,
-            created_at:
-              created_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:second),
+            created_at: persisted_at,
             updated_at:
               updated_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:microsecond),
             version: version
@@ -141,6 +159,15 @@ defmodule Starcite.Storage.SessionCatalog do
 
   def get_header(_session_id), do: {:error, :invalid_session_id}
 
+  @spec get_session_entry(String.t()) :: {:ok, session_entry()} | {:error, term()}
+  def get_session_entry(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, row} <- get_record(session_id) do
+      {:ok, to_session_row(row)}
+    end
+  end
+
+  def get_session_entry(_session_id), do: {:error, :invalid_session_id}
+
   @spec get_tenant_id(String.t()) :: {:ok, String.t()} | {:error, term()}
   def get_tenant_id(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, row} <- get_record(session_id),
@@ -167,6 +194,20 @@ defmodule Starcite.Storage.SessionCatalog do
 
   def get_progress(_session_id), do: {:error, :invalid_session_id}
 
+  @spec archive_session(String.t()) :: {:ok, archive_update_result()} | {:error, term()}
+  def archive_session(session_id) when is_binary(session_id) and session_id != "" do
+    set_archive_state(session_id, true)
+  end
+
+  def archive_session(_session_id), do: {:error, :invalid_session_id}
+
+  @spec unarchive_session(String.t()) :: {:ok, archive_update_result()} | {:error, term()}
+  def unarchive_session(session_id) when is_binary(session_id) and session_id != "" do
+    set_archive_state(session_id, false)
+  end
+
+  def unarchive_session(_session_id), do: {:error, :invalid_session_id}
+
   @spec put_progress_batch([progress_update()]) :: :ok | {:error, term()}
   def put_progress_batch(progress_updates) when is_list(progress_updates) do
     progress_updates
@@ -185,29 +226,63 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   @spec list_sessions(session_query()) :: {:ok, session_page()} | {:error, term()}
-  def list_sessions(%{limit: limit, cursor: cursor, metadata: metadata} = query_opts)
+  def list_sessions(
+        %{limit: limit, cursor: cursor, archived: archived, metadata: metadata} = query_opts
+      )
       when is_integer(limit) and limit > 0 and
              (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
     query =
       SessionRecord
-      |> apply_cursor(cursor)
-      |> apply_tenant_filter(Map.get(query_opts, :tenant_id))
-      |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
-      |> apply_metadata_filters(metadata)
+      |> then(fn query ->
+        if is_nil(cursor), do: query, else: where(query, [s], s.id > ^cursor)
+      end)
+      |> then(fn query ->
+        case archived do
+          :active -> where(query, [s], s.archived == false)
+          :archived -> where(query, [s], s.archived == true)
+          :all -> query
+        end
+      end)
+      |> then(fn query ->
+        case Map.get(query_opts, :tenant_id) do
+          nil ->
+            query
+
+          tenant_id when is_binary(tenant_id) and tenant_id != "" ->
+            where(query, [s], s.tenant_id == ^tenant_id)
+        end
+      end)
+      |> then(fn query ->
+        case Map.get(query_opts, :owner_principal_ids) do
+          nil ->
+            query
+
+          owner_principal_ids ->
+            owner_principal_ids = owner_principal_ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
+
+            case owner_principal_ids do
+              [] -> where(query, [s], false)
+              _other -> where(query, [s], s.creator_id in ^owner_principal_ids)
+            end
+        end
+      end)
+      |> then(fn query ->
+        Enum.reduce(metadata, query, fn {key, value}, acc ->
+          where(acc, [s], fragment("? @> ?", s.metadata, type(^%{key => value}, :map)))
+        end)
+      end)
       |> order_by([s], asc: s.id)
       |> limit(^limit)
 
-    rows = Repo.all(query)
-    build_session_page(rows, limit)
-  rescue
-    _ -> {:error, :session_catalog_unavailable}
+    fetch_session_page(query, limit)
   end
-
-  def list_sessions(_query_opts), do: {:error, :invalid_list_query}
 
   @spec list_sessions_by_ids([String.t()], session_query()) ::
           {:ok, session_page()} | {:error, term()}
-  def list_sessions_by_ids(ids, %{limit: limit, cursor: cursor, metadata: metadata} = query_opts)
+  def list_sessions_by_ids(
+        ids,
+        %{limit: limit, cursor: cursor, archived: archived, metadata: metadata} = query_opts
+      )
       when is_list(ids) and is_integer(limit) and limit > 0 and
              (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
     session_ids = ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
@@ -218,21 +293,50 @@ defmodule Starcite.Storage.SessionCatalog do
       query =
         SessionRecord
         |> where([s], s.id in ^session_ids)
-        |> apply_cursor(cursor)
-        |> apply_tenant_filter(Map.get(query_opts, :tenant_id))
-        |> apply_owner_principal_filters(Map.get(query_opts, :owner_principal_ids))
-        |> apply_metadata_filters(metadata)
+        |> then(fn query ->
+          if is_nil(cursor), do: query, else: where(query, [s], s.id > ^cursor)
+        end)
+        |> then(fn query ->
+          case archived do
+            :active -> where(query, [s], s.archived == false)
+            :archived -> where(query, [s], s.archived == true)
+            :all -> query
+          end
+        end)
+        |> then(fn query ->
+          case Map.get(query_opts, :tenant_id) do
+            nil ->
+              query
+
+            tenant_id when is_binary(tenant_id) and tenant_id != "" ->
+              where(query, [s], s.tenant_id == ^tenant_id)
+          end
+        end)
+        |> then(fn query ->
+          case Map.get(query_opts, :owner_principal_ids) do
+            nil ->
+              query
+
+            owner_principal_ids ->
+              owner_principal_ids = owner_principal_ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
+
+              case owner_principal_ids do
+                [] -> where(query, [s], false)
+                _other -> where(query, [s], s.creator_id in ^owner_principal_ids)
+              end
+          end
+        end)
+        |> then(fn query ->
+          Enum.reduce(metadata, query, fn {key, value}, acc ->
+            where(acc, [s], fragment("? @> ?", s.metadata, type(^%{key => value}, :map)))
+          end)
+        end)
         |> order_by([s], asc: s.id)
         |> limit(^limit)
 
-      rows = Repo.all(query)
-      build_session_page(rows, limit)
+      fetch_session_page(query, limit)
     end
-  rescue
-    _ -> {:error, :session_catalog_unavailable}
   end
-
-  def list_sessions_by_ids(_ids, _query_opts), do: {:error, :invalid_list_query}
 
   defp get_record(session_id) when is_binary(session_id) and session_id != "" do
     case Repo.get(SessionRecord, session_id) do
@@ -367,55 +471,19 @@ defmodule Starcite.Storage.SessionCatalog do
     _ -> {:error, :session_catalog_unavailable}
   end
 
-  defp apply_cursor(query, nil), do: query
-
-  defp apply_cursor(query, cursor) when is_binary(cursor) and cursor != "" do
-    where(query, [s], s.id > ^cursor)
-  end
-
-  defp apply_tenant_filter(query, nil), do: query
-
-  defp apply_tenant_filter(query, tenant_id) when is_binary(tenant_id) and tenant_id != "" do
-    where(query, [s], s.tenant_id == ^tenant_id)
-  end
-
-  defp apply_tenant_filter(query, _invalid_filter), do: where(query, [s], false)
-
-  defp apply_owner_principal_filters(query, nil), do: query
-
-  defp apply_owner_principal_filters(query, owner_principal_ids)
-       when is_list(owner_principal_ids) do
-    owner_principal_ids =
-      owner_principal_ids
-      |> Enum.uniq()
-      |> Enum.reject(&(&1 == ""))
-
-    case owner_principal_ids do
-      [] ->
-        where(query, [s], false)
-
-      _other ->
-        where(query, [s], s.creator_id in ^owner_principal_ids)
-    end
-  end
-
-  defp apply_owner_principal_filters(query, _invalid_filter), do: where(query, [s], false)
-
-  defp apply_metadata_filters(query, metadata_filters) when map_size(metadata_filters) == 0,
-    do: query
-
-  defp apply_metadata_filters(query, metadata_filters) do
-    Enum.reduce(metadata_filters, query, fn {key, value}, acc ->
-      where(acc, [s], fragment("? @> ?", s.metadata, type(^%{key => value}, :map)))
-    end)
-  end
-
   defp build_session_page(rows, limit) when is_list(rows) and is_integer(limit) and limit > 0 do
     {:ok,
      %{
        sessions: Enum.map(rows, &to_session_row/1),
        next_cursor: next_cursor(rows, limit)
      }}
+  end
+
+  defp fetch_session_page(query, limit) do
+    rows = Repo.all(query)
+    build_session_page(rows, limit)
+  rescue
+    _ -> {:error, :session_catalog_unavailable}
   end
 
   defp next_cursor(rows, limit) when is_list(rows) and length(rows) == limit do
@@ -437,7 +505,8 @@ defmodule Starcite.Storage.SessionCatalog do
       metadata: session.metadata || %{},
       created_at: updated_at_to_iso8601(session.created_at),
       updated_at: updated_at_to_iso8601(session.updated_at || session.created_at),
-      version: session.version
+      version: session.version,
+      archived: session.archived
     }
   end
 
@@ -478,6 +547,28 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   defp row_to_header(_session_id, _row), do: {:error, :session_catalog_unavailable}
+
+  defp set_archive_state(session_id, archived)
+       when is_binary(session_id) and session_id != "" and is_boolean(archived) do
+    updated_at = DateTime.utc_now() |> DateTime.truncate(:microsecond)
+
+    case Repo.update_all(
+           from(s in SessionRecord, where: s.id == ^session_id and s.archived != ^archived),
+           set: [archived: archived, updated_at: updated_at]
+         ) do
+      {1, _} ->
+        with {:ok, updated_row} <- get_record(session_id) do
+          {:ok, %{session: to_session_row(updated_row), changed: true}}
+        end
+
+      {0, _} ->
+        with {:ok, row} <- get_record(session_id) do
+          {:ok, %{session: to_session_row(row), changed: false}}
+        end
+    end
+  rescue
+    _ -> {:error, :session_catalog_unavailable}
+  end
 
   defp session_created_at(%DateTime{} = created_at), do: {:ok, DateTime.to_naive(created_at)}
   defp session_created_at(%NaiveDateTime{} = created_at), do: {:ok, created_at}
