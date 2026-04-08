@@ -86,7 +86,8 @@ bunx starcite --help
 
 ## API At A Glance
 
-Three operations: **create** a session, **append** an event, **tail** from a cursor.
+Core operations: **create** a session, **append** an event, **list/get** session
+metadata, **archive/unarchive** a session, and **tail** from a cursor.
 
 Self-hosted Starcite defaults to JWT auth. The examples below assume
 `STARCITE_TOKEN` is a bearer JWT with the scopes you need. Omit auth headers only
@@ -122,7 +123,13 @@ curl -X POST http://localhost:4000/v1/sessions/ses_demo/append \
 
 # Response: {"seq":1,"last_seq":1,"deduped":false}
 
-# 3) Tail from a cursor (Phoenix Channel over one shared WebSocket)
+# 3) Archive the session from active list views
+curl -X POST http://localhost:4000/v1/sessions/ses_demo/archive \
+  -H "Authorization: Bearer ${STARCITE_TOKEN}" \
+  -H "Content-Type: application/json" \
+  -d '{}'
+
+# 4) Tail from a cursor (Phoenix Channel over one shared WebSocket)
 # connect a Phoenix socket to ws://localhost:4000/v1/socket
 # pass params { token: STARCITE_TOKEN }
 # then join topic "tail:ses_demo" with payload {"cursor": 0}
@@ -195,9 +202,11 @@ There's a working [Next.js example app](https://github.com/fastpaca/starcite-cli
 </details>
 
 Append supports `expected_seq` for optimistic concurrency and `producer_id`/`producer_seq`
-for dedup. Tail replays ordered history, then continues live on the same connection.
-Session headers support `PATCH /v1/sessions/:id` with shallow metadata merge and
-`expected_version` compare-and-swap for optimistic concurrency.
+for dedup. Session headers support `PATCH /v1/sessions/:id` with shallow
+metadata merge and `expected_version` compare-and-swap. Session listing
+excludes archived sessions by default, while archived sessions remain readable
+by id and tail. Tail replays ordered history, then continues live on the same
+connection.
 
 [REST details](docs/api/rest.md) · [WebSocket details](docs/api/websocket.md)
 

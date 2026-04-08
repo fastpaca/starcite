@@ -1,7 +1,8 @@
 # REST API
 
-All public API endpoints are under `/v1`. The API is small by design — four
-operations on one resource type (sessions).
+All public API endpoints are under `/v1`. The API stays focused on one resource
+type (sessions), with separate endpoints for discovery, header mutation,
+append, and archive state management.
 
 Operational endpoints such as `/health/*`, `/metrics`, and `pprof` live on a
 separate ops port and are not part of the public API surface.
@@ -39,8 +40,9 @@ Optional JWT claim:
 Scopes:
 
 - `session:create` for `POST /v1/sessions`
-- `session:read` for `GET /v1/sessions` and socket subscriptions over `/v1/socket`
+- `session:read` for `GET /v1/sessions`, `GET /v1/sessions/:id`, and socket subscriptions over `/v1/socket`
 - `session:append` for `POST /v1/sessions/:id/append`
+- `session:create` also covers `POST /v1/sessions/:id/archive` and `POST /v1/sessions/:id/unarchive`
 
 Unauthorized requests fail with `401`.
 
@@ -61,7 +63,18 @@ List sessions. Requires `session:read`.
 
 - In JWT mode, results are tenant-fenced by token `tenant_id`
 - If JWT has `session_id`, the result set is constrained to that session
-- Supports `limit`, `cursor`, and metadata filters (exact matching)
+- Archived sessions are excluded by default
+- Supports `limit`, `cursor`, `archived`, and metadata filters (exact matching)
+- `archived=false` or omitted returns active sessions
+- `archived=true` returns archived sessions only
+- `archived=all` returns both active and archived sessions
+
+### `GET /v1/sessions/:id`
+
+Fetch one session by id. Requires `session:read`.
+
+- Archived sessions remain readable by id
+- Response includes `archived`
 
 ### `PATCH /v1/sessions/:id`
 
@@ -102,6 +115,20 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
   - `cursor` (`seq` of the appended event)
   - `committed_cursor` (current durable frontier as `seq`)
 
+### `POST /v1/sessions/:id/archive`
+
+Archive one session. Requires `session:create`.
+
+- Archive is reversible and does not delete the event timeline
+- Archived sessions stay readable by id and tailable by session id
+- Response includes `archived: true`
+
+### `POST /v1/sessions/:id/unarchive`
+
+Restore one archived session to active list results. Requires `session:create`.
+
+- Response includes `archived: false`
+
 ## Behavioral rules
 
 - Append is sequenced per-session; response includes monotonic `seq`.
@@ -117,6 +144,8 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
   the update is rejected with `409` and `current_version`.
 - `tail` replay is ordered by `seq` and continues with live commits after replay.
 - Resume discontinuities are explicit via WebSocket `gap` frames (never silent).
+- Archiving is a visibility flag on the session catalog, not an event deletion path.
+- Default list results include only active sessions; archived sessions require an explicit filter or direct lookup by id.
 
 ## Error shape
 

@@ -43,6 +43,9 @@ defmodule Starcite.Storage.SessionCatalogTest do
     assert session.tenant_id == "acme"
     assert session.last_seq == 12
     assert session.archived_seq == 12
+
+    assert {:ok, entry} = SessionCatalog.get_session_entry("ses-catalog-1")
+    assert entry.archived == false
   end
 
   test "lists sessions from the catalog without consulting the archive adapter" do
@@ -66,6 +69,7 @@ defmodule Starcite.Storage.SessionCatalogTest do
 
     assert {:ok, page} =
              SessionCatalog.list_sessions(%{
+               archived: :active,
                limit: 10,
                cursor: nil,
                tenant_id: "acme",
@@ -73,6 +77,7 @@ defmodule Starcite.Storage.SessionCatalogTest do
              })
 
     assert Enum.map(page.sessions, & &1.id) == ["ses-catalog-a"]
+    assert [%{archived: false}] = page.sessions
   end
 
   test "progress updates are monotonic" do
@@ -115,6 +120,7 @@ defmodule Starcite.Storage.SessionCatalogTest do
 
     assert {:ok, page} =
              SessionCatalog.list_sessions(%{
+               archived: :active,
                limit: 10,
                cursor: nil,
                tenant_id: "acme",
@@ -184,6 +190,78 @@ defmodule Starcite.Storage.SessionCatalogTest do
              })
 
     assert current_version == expected_version + 1
+  end
+
+  test "archives sessions, excludes them from default list results, and restores them" do
+    archived_id = "ses-catalog-archived"
+    active_id = "ses-catalog-active"
+
+    assert :ok =
+             SessionCatalog.persist_created(
+               Header.new(archived_id, tenant_id: "acme", metadata: %{marker: "archive"})
+             )
+
+    assert :ok =
+             SessionCatalog.persist_created(
+               Header.new(active_id, tenant_id: "acme", metadata: %{marker: "archive"})
+             )
+
+    assert {:ok, %{session: archived_entry, changed: true}} =
+             SessionCatalog.archive_session(archived_id)
+
+    assert archived_entry.id == archived_id
+    assert archived_entry.archived == true
+
+    assert {:ok, %{session: same_archived_entry, changed: false}} =
+             SessionCatalog.archive_session(archived_id)
+
+    assert same_archived_entry.archived == true
+
+    assert {:ok, entry} = SessionCatalog.get_session_entry(archived_id)
+    assert entry.archived == true
+
+    assert {:ok, default_page} =
+             SessionCatalog.list_sessions(%{
+               archived: :active,
+               limit: 10,
+               cursor: nil,
+               tenant_id: "acme",
+               metadata: %{"marker" => "archive"}
+             })
+
+    assert Enum.map(default_page.sessions, & &1.id) == [active_id]
+
+    assert {:ok, archived_page} =
+             SessionCatalog.list_sessions(%{
+               limit: 10,
+               cursor: nil,
+               tenant_id: "acme",
+               archived: :archived,
+               metadata: %{"marker" => "archive"}
+             })
+
+    assert Enum.map(archived_page.sessions, & &1.id) == [archived_id]
+
+    assert {:ok, all_page} =
+             SessionCatalog.list_sessions(%{
+               limit: 10,
+               cursor: nil,
+               tenant_id: "acme",
+               archived: :all,
+               metadata: %{"marker" => "archive"}
+             })
+
+    assert Enum.sort(Enum.map(all_page.sessions, & &1.id)) == Enum.sort([archived_id, active_id])
+
+    assert {:ok, %{session: unarchived_entry, changed: true}} =
+             SessionCatalog.unarchive_session(archived_id)
+
+    assert unarchived_entry.archived == false
+
+    assert {:ok, %{session: same_unarchived_entry, changed: false}} =
+             SessionCatalog.unarchive_session(archived_id)
+
+    assert same_unarchived_entry.archived == false
   end
 
   defp ensure_repo_sandbox do

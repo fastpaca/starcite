@@ -180,6 +180,47 @@ defmodule StarciteWeb.LifecycleChannelTest do
     refute_received %Phoenix.Socket.Message{event: "lifecycle"}
   end
 
+  test "pushes archive lifecycle events for the authenticated tenant" do
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-archive", %{auth: service_auth_context()})
+      |> subscribe_and_join(LifecycleChannel, "lifecycle", %{})
+
+    session_id = unique_id("ses-archive")
+
+    assert {:ok, _session} =
+             WritePath.create_session(
+               id: session_id,
+               tenant_id: "acme"
+             )
+
+    assert_push "lifecycle", %{event: %{kind: "session.activated", session_id: ^session_id}}
+    assert_push "lifecycle", %{event: %{kind: "session.created", session_id: ^session_id}}
+
+    assert {:ok, archived} = WritePath.archive_session(session_id)
+    assert archived.archived == true
+
+    assert_push "lifecycle", %{event: event}
+
+    assert event == %{
+             kind: "session.archived",
+             session_id: session_id,
+             tenant_id: "acme",
+             archived: true
+           }
+
+    assert {:ok, unarchived} = WritePath.unarchive_session(session_id)
+    assert unarchived.archived == false
+
+    assert_push "lifecycle", %{event: event}
+
+    assert event == %{
+             kind: "session.unarchived",
+             session_id: session_id,
+             tenant_id: "acme",
+             archived: false
+           }
+  end
+
   test "rejects lifecycle joins for non-service jwt principals" do
     assert {:error, %{reason: "forbidden"}} =
              socket(StarciteWeb.UserSocket, "client-user", %{

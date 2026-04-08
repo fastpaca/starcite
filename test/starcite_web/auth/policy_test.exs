@@ -31,6 +31,8 @@ defmodule StarciteWeb.Auth.PolicyTest do
 
     assert {:ok, "ses-1"} = Policy.resolve_create_session_id(none, "ses-1")
     assert :ok = Policy.can_list_sessions(none)
+    assert :ok = Policy.can_read_session(none)
+    assert :ok = Policy.can_manage_session(none)
     assert :ok = Policy.allowed_to_access_session(none, "ses-1")
     assert :ok = Policy.allowed_to_read_session(none, session)
     assert :ok = Policy.allowed_to_append_session(none, session)
@@ -57,6 +59,13 @@ defmodule StarciteWeb.Auth.PolicyTest do
 
     assert {:error, :forbidden_scope} =
              Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:append"]}))
+  end
+
+  test "can_manage_session reuses session:create scope" do
+    assert :ok = Policy.can_manage_session(jwt_ctx(%{scopes: ["session:create"]}))
+
+    assert {:error, :forbidden_scope} =
+             Policy.can_manage_session(jwt_ctx(%{scopes: ["session:read"]}))
   end
 
   test "can_subscribe_lifecycle requires a service principal with read scope" do
