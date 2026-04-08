@@ -1,6 +1,6 @@
 # REST API
 
-All public API endpoints are under `/v1`. The API is small by design — three
+All public API endpoints are under `/v1`. The API is small by design — four
 operations on one resource type (sessions).
 
 Operational endpoints such as `/health/*`, `/metrics`, and `pprof` live on a
@@ -63,6 +63,29 @@ List sessions. Requires `session:read`.
 - If JWT has `session_id`, the result set is constrained to that session
 - Supports `limit`, `cursor`, and metadata filters (exact matching)
 
+### `PATCH /v1/sessions/:id`
+
+Update mutable session header fields. Requires `session:create`.
+
+Requires `session:create`. Session must match JWT `tenant_id`. If JWT has
+`session_id`, `:id` must match it.
+
+- Optional: `title`, `metadata`, `expected_version`
+- At least one of `title` or `metadata` must be present
+- `title: null` clears the title
+- `metadata` uses shallow merge semantics:
+  - omitted keys are preserved
+  - provided keys overwrite existing keys
+  - nested objects are replaced at the top-level key you send
+- `metadata` does not support delete semantics; use overwrite-at-key instead
+- `expected_version` enables optimistic concurrency:
+  - when omitted: last writer wins
+  - when present: the update is rejected with `409 expected_version_conflict`
+    unless it matches the current session `version`
+- Response returns the updated session record, including `id`, `title`,
+  `creator_principal`, `metadata`, `last_seq`, `created_at`, `updated_at`, and
+  `version`
+
 ### `POST /v1/sessions/:id/append`
 
 Append one event to a session. This is the hot path — see
@@ -82,11 +105,16 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
 ## Behavioral rules
 
 - Append is sequenced per-session; response includes monotonic `seq`.
+- Session header updates do not change `last_seq`; they only update mutable
+  catalog fields, advance `updated_at`, and increment `version`.
 - On retry with same `(producer_id, producer_seq)`:
   - same full event content → dedupe response with `deduped: true`
   - same IDs + different event content → conflict error
 - `expected_seq` enables optimistic concurrency — if the session's current `seq`
   doesn't match, the append is rejected with `409`.
+- `expected_version` enables optimistic concurrency for session header
+  mutations — if the session header changed since the caller last observed it,
+  the update is rejected with `409` and `current_version`.
 - `tail` replay is ordered by `seq` and continues with live commits after replay.
 - Resume discontinuities are explicit via WebSocket `gap` frames (never silent).
 
@@ -101,12 +129,22 @@ All errors follow the same structure:
 }
 ```
 
+Session header compare-and-swap conflicts add `current_version`:
+
+```json
+{
+  "error": "expected_version_conflict",
+  "message": "Expected version 3, current version is 4",
+  "current_version": 4
+}
+```
+
 Status codes:
 
 - `400` invalid payload
 - `401` unauthorized
 - `403` forbidden by scope/session/tenant policy
 - `404` session not found
-- `409` expected sequence or producer conflicts
+- `409` expected sequence, expected version, or producer conflicts
 - `429` `event_store_backpressure`
 - `503` owner/routing unavailable, replication quorum unavailable, or routing failure

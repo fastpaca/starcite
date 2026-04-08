@@ -57,12 +57,12 @@ defmodule Starcite.Observability.Telemetry do
     - `:count` – fixed at 1 per request
 
   Metadata:
-    - `:operation` (`:create_session` or `:append_event`)
+    - `:operation` (`:create_session`, `:update_session`, or `:append_event`)
     - `:tenant_id` – normalized tenancy label
     - `:outcome` (`:ok` or `:error`)
     - `:error_reason` – reason atom for failures (`:none` for success)
   """
-  @type ingest_edge_operation :: :create_session | :append_event
+  @type ingest_edge_operation :: :create_session | :update_session | :append_event
   @type ingest_edge_outcome :: :ok | :error
   @type ingest_edge_error_reason :: atom()
 
@@ -76,7 +76,8 @@ defmodule Starcite.Observability.Telemetry do
           ingest_edge_error_reason()
         ) :: :ok
   def ingest_edge(operation, tenant_id, :ok, _error_reason)
-      when operation in [:create_session, :append_event] and is_binary(tenant_id) and
+      when operation in [:create_session, :update_session, :append_event] and
+             is_binary(tenant_id) and
              tenant_id != "" do
     execute_if_enabled(
       [:starcite, :ingest, :edge],
@@ -93,7 +94,8 @@ defmodule Starcite.Observability.Telemetry do
   end
 
   def ingest_edge(operation, tenant_id, :error, error_reason)
-      when operation in [:create_session, :append_event] and is_binary(tenant_id) and
+      when operation in [:create_session, :update_session, :append_event] and
+             is_binary(tenant_id) and
              tenant_id != "" and is_atom(error_reason) do
     execute_if_enabled(
       [:starcite, :ingest, :edge],

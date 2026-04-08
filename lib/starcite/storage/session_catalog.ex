@@ -34,6 +34,12 @@ defmodule Starcite.Storage.SessionCatalog do
           required(:archived_seq) => non_neg_integer()
         }
 
+  @type header_update :: %{
+          optional(:title) => String.t() | nil,
+          optional(:metadata) => map(),
+          optional(:expected_version) => pos_integer()
+        }
+
   @spec persist_created(Header.t()) :: :ok | {:error, term()}
   def persist_created(%Header{
         id: id,
@@ -41,10 +47,13 @@ defmodule Starcite.Storage.SessionCatalog do
         creator_principal: creator_principal,
         tenant_id: tenant_id,
         metadata: metadata,
-        created_at: created_at
+        created_at: created_at,
+        updated_at: updated_at,
+        version: version
       })
       when is_binary(id) and id != "" and (is_binary(title) or is_nil(title)) and
-             is_binary(tenant_id) and tenant_id != "" and is_map(metadata) do
+             is_binary(tenant_id) and tenant_id != "" and is_map(metadata) and
+             is_integer(version) and version > 0 do
     {creator_id, creator_type} = creator_identity(creator_principal)
 
     {_inserted, _} =
@@ -60,7 +69,10 @@ defmodule Starcite.Storage.SessionCatalog do
             metadata: metadata,
             archived_seq: 0,
             created_at:
-              created_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:second)
+              created_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:second),
+            updated_at:
+              updated_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:microsecond),
+            version: version
           }
         ],
         on_conflict: :nothing,
@@ -73,6 +85,38 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   def persist_created(_header), do: {:error, :invalid_session}
+
+  @spec update_header(String.t(), header_update()) :: {:ok, Header.t()} | {:error, term()}
+  def update_header(session_id, attrs)
+      when is_binary(session_id) and session_id != "" and is_map(attrs) do
+    title = Map.get(attrs, :title, :unchanged)
+    metadata = Map.get(attrs, :metadata, :unchanged)
+    expected_version = Map.get(attrs, :expected_version)
+
+    cond do
+      title == :unchanged and metadata == :unchanged ->
+        {:error, :invalid_session}
+
+      title != :unchanged and not (is_binary(title) or is_nil(title)) ->
+        {:error, :invalid_session}
+
+      metadata != :unchanged and not is_map(metadata) ->
+        {:error, :invalid_session}
+
+      title == :unchanged and metadata == %{} ->
+        {:error, :invalid_session}
+
+      not is_nil(expected_version) and not (is_integer(expected_version) and expected_version > 0) ->
+        {:error, :invalid_session}
+
+      true ->
+        with {:ok, row} <- do_update_header(session_id, title, metadata, expected_version) do
+          row_to_header(session_id, row)
+        end
+    end
+  end
+
+  def update_header(_session_id, _attrs), do: {:error, :invalid_session}
 
   @spec get_session(String.t()) :: {:ok, Session.t()} | {:error, term()}
   def get_session(session_id) when is_binary(session_id) and session_id != "" do
@@ -197,6 +241,71 @@ defmodule Starcite.Storage.SessionCatalog do
     end
   rescue
     _ -> {:error, :session_catalog_unavailable}
+  end
+
+  defp do_update_header(session_id, title, metadata, expected_version)
+       when is_binary(session_id) and session_id != "" and
+              (is_binary(title) or is_nil(title) or title == :unchanged) and
+              (is_map(metadata) or metadata == :unchanged) and
+              (is_nil(expected_version) or (is_integer(expected_version) and expected_version > 0)) do
+    case Repo.transaction(fn ->
+           with {:ok, row} <- get_record_for_update(session_id),
+                :ok <- guard_expected_version(row, expected_version) do
+             changes = %{
+               updated_at: DateTime.utc_now() |> DateTime.truncate(:microsecond),
+               version: row.version + 1
+             }
+
+             changes = if title == :unchanged, do: changes, else: Map.put(changes, :title, title)
+
+             changes =
+               if metadata == :unchanged do
+                 changes
+               else
+                 Map.put(changes, :metadata, Map.merge(row.metadata || %{}, metadata))
+               end
+
+             case Repo.update(Ecto.Changeset.change(row, changes)) do
+               {:ok, %SessionRecord{} = updated_row} -> updated_row
+               {:error, _changeset} -> Repo.rollback(:session_catalog_unavailable)
+             end
+           else
+             {:error, reason} -> Repo.rollback(reason)
+           end
+         end) do
+      {:ok, %SessionRecord{} = row} -> {:ok, row}
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :session_catalog_unavailable}
+  end
+
+  defp get_record_for_update(session_id) when is_binary(session_id) and session_id != "" do
+    query =
+      from(session in SessionRecord,
+        where: session.id == ^session_id,
+        lock: "FOR UPDATE"
+      )
+
+    case Repo.one(query) do
+      %SessionRecord{} = row -> {:ok, row}
+      nil -> {:error, :session_not_found}
+    end
+  end
+
+  defp get_record_for_update(_session_id), do: {:error, :session_catalog_unavailable}
+
+  defp guard_expected_version(%SessionRecord{}, nil), do: :ok
+
+  defp guard_expected_version(
+         %SessionRecord{version: current_version},
+         expected_version
+       ) do
+    if current_version == expected_version do
+      :ok
+    else
+      {:error, {:expected_version_conflict, expected_version, current_version}}
+    end
   end
 
   defp normalize_progress_updates(progress_updates) when is_list(progress_updates) do
@@ -326,7 +435,9 @@ defmodule Starcite.Storage.SessionCatalog do
       tenant_id: session.tenant_id,
       creator_principal: creator_principal,
       metadata: session.metadata || %{},
-      created_at: DateTime.to_iso8601(session.created_at)
+      created_at: updated_at_to_iso8601(session.created_at),
+      updated_at: updated_at_to_iso8601(session.updated_at || session.created_at),
+      version: session.version
     }
   end
 
@@ -339,12 +450,15 @@ defmodule Starcite.Storage.SessionCatalog do
            creator_id: creator_id,
            creator_type: creator_type,
            metadata: metadata,
-           created_at: created_at
+           created_at: created_at,
+           updated_at: updated_at,
+           version: version
          }
        )
        when is_binary(tenant_id) and tenant_id != "" and (is_binary(title) or is_nil(title)) and
-              is_map(metadata) do
+              is_map(metadata) and is_integer(version) and version > 0 do
     with {:ok, timestamp} <- session_created_at(created_at),
+         {:ok, updated_at} <- session_updated_at(updated_at, created_at),
          {:ok, creator_principal} <- creator_principal(tenant_id, creator_id, creator_type) do
       try do
         {:ok,
@@ -353,7 +467,9 @@ defmodule Starcite.Storage.SessionCatalog do
            tenant_id: tenant_id,
            creator_principal: creator_principal,
            metadata: metadata,
-           timestamp: timestamp
+           timestamp: timestamp,
+           updated_at: updated_at,
+           version: version
          )}
       rescue
         ArgumentError -> {:error, :session_catalog_unavailable}
@@ -380,6 +496,36 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   defp session_created_at(_created_at), do: {:error, :session_catalog_unavailable}
+
+  defp session_updated_at(nil, created_at), do: session_created_at(created_at)
+
+  defp session_updated_at(%DateTime{} = updated_at, _created_at),
+    do: {:ok, DateTime.to_naive(updated_at)}
+
+  defp session_updated_at(%NaiveDateTime{} = updated_at, _created_at), do: {:ok, updated_at}
+
+  defp session_updated_at(updated_at, _created_at) when is_binary(updated_at) do
+    case DateTime.from_iso8601(updated_at) do
+      {:ok, datetime, _offset} ->
+        {:ok, DateTime.to_naive(datetime)}
+
+      _ ->
+        case NaiveDateTime.from_iso8601(updated_at) do
+          {:ok, datetime} -> {:ok, datetime}
+          _ -> {:error, :session_catalog_unavailable}
+        end
+    end
+  end
+
+  defp session_updated_at(_updated_at, _created_at), do: {:error, :session_catalog_unavailable}
+
+  defp updated_at_to_iso8601(%DateTime{} = updated_at), do: DateTime.to_iso8601(updated_at)
+
+  defp updated_at_to_iso8601(%NaiveDateTime{} = updated_at) do
+    updated_at
+    |> DateTime.from_naive!("Etc/UTC")
+    |> DateTime.to_iso8601()
+  end
 
   defp creator_identity(nil), do: {nil, nil}
 

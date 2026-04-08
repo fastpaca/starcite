@@ -3,6 +3,7 @@ defmodule StarciteWeb.SessionController do
   HTTP controller for Starcite session primitives:
 
   - `create` via `POST /v1/sessions`
+  - `update` via `PATCH /v1/sessions/:id`
   - `append` via `POST /v1/sessions/:id/append`
   - `index` via `GET /v1/sessions`
   """
@@ -47,6 +48,35 @@ defmodule StarciteWeb.SessionController do
       end
     end
   end
+
+  @doc """
+  Update mutable session header fields.
+  """
+  def update(conn, %{"id" => id} = params) do
+    with {:ok, auth} <- fetch_auth(conn) do
+      with :ok <- Policy.allowed_to_access_session(auth, id),
+           {:ok, attrs} <- validate_update(params),
+           {:ok, current_session} <- SessionCatalog.get_session(id),
+           :ok <- Policy.allowed_to_update_session(auth, current_session),
+           {:ok, session} <- WritePath.update_session(id, attrs) do
+        :ok = Telemetry.ingest_edge(:update_session, auth.principal.tenant_id, :ok)
+        json(conn, session)
+      else
+        error ->
+          :ok =
+            Telemetry.ingest_edge(
+              :update_session,
+              auth.principal.tenant_id,
+              :error,
+              ingest_edge_error_reason(error)
+            )
+
+          error
+      end
+    end
+  end
+
+  def update(_conn, _params), do: {:error, :invalid_session}
 
   @doc """
   Append one event to a session.
@@ -99,6 +129,9 @@ defmodule StarciteWeb.SessionController do
 
   defp ingest_edge_error_reason({:error, {:not_leader, _leader}}), do: :not_leader
   defp ingest_edge_error_reason({:error, :not_leader}), do: :not_leader
+
+  defp ingest_edge_error_reason({:error, {:expected_version_conflict, _expected, _current}}),
+    do: :expected_version_conflict
 
   defp ingest_edge_error_reason({:error, {:expected_seq_conflict, _expected, _current}}),
     do: :seq_conflict
@@ -195,6 +228,38 @@ defmodule StarciteWeb.SessionController do
   end
 
   defp validate_create(_params, _auth), do: {:error, :invalid_session}
+
+  defp validate_update(params) when is_map(params) do
+    title = Map.get(params, "title", :unchanged)
+    metadata = Map.get(params, "metadata", :unchanged)
+
+    cond do
+      title == :unchanged and metadata == :unchanged ->
+        {:error, :invalid_session}
+
+      title != :unchanged and not (is_binary(title) or is_nil(title)) ->
+        {:error, :invalid_session}
+
+      metadata != :unchanged and not is_map(metadata) ->
+        {:error, :invalid_metadata}
+
+      title == :unchanged and metadata == %{} ->
+        {:error, :invalid_session}
+
+      true ->
+        with {:ok, expected_version} <- optional_positive_integer(params["expected_version"]) do
+          attrs = %{}
+          attrs = if title == :unchanged, do: attrs, else: Map.put(attrs, :title, title)
+          attrs = if metadata == :unchanged, do: attrs, else: Map.put(attrs, :metadata, metadata)
+
+          if is_nil(expected_version) do
+            {:ok, attrs}
+          else
+            {:ok, Map.put(attrs, :expected_version, expected_version)}
+          end
+        end
+    end
+  end
 
   defp validate_append(
          %{
@@ -374,6 +439,18 @@ defmodule StarciteWeb.SessionController do
   defp optional_string(nil), do: {:ok, nil}
   defp optional_string(value) when is_binary(value), do: {:ok, value}
   defp optional_string(_value), do: {:error, :invalid_event}
+
+  defp optional_positive_integer(nil), do: {:ok, nil}
+  defp optional_positive_integer(value) when is_integer(value) and value > 0, do: {:ok, value}
+
+  defp optional_positive_integer(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {parsed, ""} when parsed > 0 -> {:ok, parsed}
+      _ -> {:error, :invalid_session}
+    end
+  end
+
+  defp optional_positive_integer(_value), do: {:error, :invalid_session}
 
   defp optional_non_neg_integer(nil), do: {:ok, nil}
   defp optional_non_neg_integer(value) when is_integer(value) and value >= 0, do: {:ok, value}

@@ -109,7 +109,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     end
   end
 
-  test "accepts valid JWT for create list append and derives actor from sub" do
+  test "accepts valid JWT for create list update append and derives actor from sub" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-valid-flow"
@@ -137,6 +137,19 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     create_conn = json_conn(:post, "/v1/sessions", %{"id" => session_id}, [auth_header])
     assert create_conn.status == 201
 
+    update_conn =
+      json_conn(
+        :patch,
+        "/v1/sessions/#{session_id}",
+        %{"title" => "Renamed", "metadata" => %{"summary" => "fresh"}},
+        [auth_header]
+      )
+
+    assert update_conn.status == 200
+    update_body = Jason.decode!(update_conn.resp_body)
+    assert update_body["title"] == "Renamed"
+    assert update_body["metadata"]["summary"] == "fresh"
+
     append_conn =
       json_conn(
         :post,
@@ -162,7 +175,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert_session_list_contains(auth_header, session_id)
   end
 
-  test "enforces scope checks for append and list" do
+  test "enforces scope checks for update append and list" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-scope-checks"
@@ -196,6 +209,17 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert append_conn.status == 403
     assert Jason.decode!(append_conn.resp_body)["error"] == "forbidden_scope"
 
+    update_conn =
+      json_conn(
+        :patch,
+        "/v1/sessions/#{session_id}",
+        %{"title" => "scope denied"},
+        [{"authorization", "Bearer #{read_only_token}"}]
+      )
+
+    assert update_conn.status == 403
+    assert Jason.decode!(update_conn.resp_body)["error"] == "forbidden_scope"
+
     append_only_token = token_for(private_key, kid, %{"scope" => "session:append"})
 
     list_conn =
@@ -205,7 +229,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     assert Jason.decode!(list_conn.resp_body)["error"] == "forbidden_scope"
   end
 
-  test "enforces tenant boundary for append, list, and tail channel join" do
+  test "enforces tenant boundary for update append list and tail channel join" do
     bypass = Bypass.open()
     private_key = AuthTestSupport.generate_rsa_private_key()
     kid = "kid-tenant-boundary"
@@ -225,7 +249,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
       token_for(private_key, kid, %{
         "sub" => "user:user-acme",
         "tenant_id" => "acme",
-        "scope" => "session:read session:append"
+        "scope" => "session:create session:read session:append"
       })
 
     auth_header = {"authorization", "Bearer #{token}"}
@@ -245,6 +269,17 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert append_conn.status == 403
     assert Jason.decode!(append_conn.resp_body)["error"] == "forbidden_tenant"
+
+    update_conn =
+      json_conn(
+        :patch,
+        "/v1/sessions/#{beta_session_id}",
+        %{"title" => "forbidden tenant"},
+        [auth_header]
+      )
+
+    assert update_conn.status == 403
+    assert Jason.decode!(update_conn.resp_body)["error"] == "forbidden_tenant"
 
     list_conn = json_conn(:get, "/v1/sessions", nil, [auth_header])
     assert list_conn.status == 200
@@ -273,7 +308,9 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     configure_jwt_auth!(bypass)
 
     service_token =
-      token_for(private_key, kid, %{"scope" => "session:create session:read session:append"})
+      token_for(private_key, kid, %{
+        "scope" => "session:create session:read session:append"
+      })
 
     service_header = {"authorization", "Bearer #{service_token}"}
     allowed_session_id = unique_id("ses")
@@ -288,7 +325,7 @@ defmodule StarciteWeb.ApiAuthJwtTest do
     scoped_token =
       token_for(private_key, kid, %{
         "sub" => "user:user-42",
-        "scope" => "session:read session:append",
+        "scope" => "session:create session:read session:append",
         "session_id" => allowed_session_id
       })
 
@@ -314,6 +351,16 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert allowed_append.status == 201
 
+    allowed_update =
+      json_conn(
+        :patch,
+        "/v1/sessions/#{allowed_session_id}",
+        %{"title" => "ok"},
+        [scoped_header]
+      )
+
+    assert allowed_update.status == 200
+
     blocked_append =
       json_conn(
         :post,
@@ -329,6 +376,17 @@ defmodule StarciteWeb.ApiAuthJwtTest do
 
     assert blocked_append.status == 403
     assert Jason.decode!(blocked_append.resp_body)["error"] == "forbidden_session"
+
+    blocked_update =
+      json_conn(
+        :patch,
+        "/v1/sessions/#{blocked_session_id}",
+        %{"title" => "blocked"},
+        [scoped_header]
+      )
+
+    assert blocked_update.status == 403
+    assert Jason.decode!(blocked_update.resp_body)["error"] == "forbidden_session"
   end
 
   test "protects Phoenix tail channel join with JWT auth and session lock" do

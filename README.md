@@ -196,6 +196,8 @@ There's a working [Next.js example app](https://github.com/fastpaca/starcite-cli
 
 Append supports `expected_seq` for optimistic concurrency and `producer_id`/`producer_seq`
 for dedup. Tail replays ordered history, then continues live on the same connection.
+Session headers support `PATCH /v1/sessions/:id` with shallow metadata merge and
+`expected_version` compare-and-swap for optimistic concurrency.
 
 [REST details](docs/api/rest.md) · [WebSocket details](docs/api/websocket.md)
 
@@ -242,6 +244,11 @@ Official clients live in [`fastpaca/starcite-clients`](https://github.com/fastpa
 - [`starcite` CLI](https://github.com/fastpaca/starcite-clients/tree/main/packages/starcite-cli) — terminal workflows
 - [`@starcite/sdk`](https://github.com/fastpaca/starcite-clients/tree/main/packages/typescript-sdk) — TypeScript SDK for backends and browsers
 - [`@starcite/react`](https://github.com/fastpaca/starcite-clients/tree/main/packages/starcite-react) — drop-in `useChat` replacement backed by the durable session log
+
+The REST mutation surface for session headers is `PATCH /v1/sessions/:id`.
+Official SDKs should expose that as a first-class method such as
+`updateSession(sessionId, { title, metadata, expectedVersion })` or an
+equivalent session-scoped helper.
 
 Or use the HTTP + WebSocket API directly from any language.
 

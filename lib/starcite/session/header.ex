@@ -1,13 +1,22 @@
 defmodule Starcite.Session.Header do
   @moduledoc """
-  Immutable session metadata persisted once at session creation.
+  Session metadata persisted in the durable session catalog.
   """
 
   alias __MODULE__, as: Header
   alias Starcite.Auth.Principal
 
-  @enforce_keys [:id, :tenant_id, :created_at]
-  defstruct [:id, :tenant_id, :title, :creator_principal, :metadata, :created_at]
+  @enforce_keys [:id, :tenant_id, :created_at, :updated_at, :version]
+  defstruct [
+    :id,
+    :tenant_id,
+    :title,
+    :creator_principal,
+    :metadata,
+    :created_at,
+    :updated_at,
+    :version
+  ]
 
   @type t :: %Header{
           id: String.t(),
@@ -15,17 +24,27 @@ defmodule Starcite.Session.Header do
           title: String.t() | nil,
           creator_principal: Principal.t() | nil,
           metadata: map(),
-          created_at: NaiveDateTime.t()
+          created_at: NaiveDateTime.t(),
+          updated_at: NaiveDateTime.t(),
+          version: pos_integer()
         }
 
   @spec new(String.t(), keyword()) :: t()
   def new(id, opts \\ []) when is_binary(id) do
-    created_at = Keyword.get(opts, :timestamp, NaiveDateTime.utc_now())
+    created_at =
+      Keyword.get(opts, :timestamp, NaiveDateTime.utc_now() |> NaiveDateTime.truncate(:second))
+
+    updated_at = Keyword.get(opts, :updated_at, created_at)
+    version = Keyword.get(opts, :version, 1)
 
     creator_principal =
       optional_principal!(Keyword.get(opts, :creator_principal), :creator_principal)
 
     tenant_id = resolve_tenant_id!(Keyword.get(opts, :tenant_id), creator_principal)
+
+    unless is_integer(version) and version > 0 do
+      raise ArgumentError, "invalid session version: #{inspect(version)}"
+    end
 
     %Header{
       id: id,
@@ -33,7 +52,9 @@ defmodule Starcite.Session.Header do
       title: Keyword.get(opts, :title),
       creator_principal: creator_principal,
       metadata: Keyword.get(opts, :metadata, %{}),
-      created_at: created_at
+      created_at: created_at,
+      updated_at: updated_at,
+      version: version
     }
   end
 
@@ -41,6 +62,7 @@ defmodule Starcite.Session.Header do
   def to_map(%Header{} = header, last_seq)
       when is_integer(last_seq) and last_seq >= 0 do
     created_at = iso8601_utc(header.created_at)
+    updated_at = iso8601_utc(header.updated_at)
 
     %{
       id: header.id,
@@ -49,7 +71,8 @@ defmodule Starcite.Session.Header do
       metadata: header.metadata,
       last_seq: last_seq,
       created_at: created_at,
-      updated_at: created_at
+      updated_at: updated_at,
+      version: header.version
     }
   end
 
