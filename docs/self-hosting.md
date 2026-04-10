@@ -74,7 +74,7 @@ read those variables, so they are intentionally omitted here.
 | Variable | Purpose |
 | --- | --- |
 | `PHX_SERVER` | Required for Phoenix to serve HTTP in releases. The official Docker image sets this to `true`. |
-| `SECRET_KEY_BASE` | Required Phoenix secret. Generate with `mix phx.gen.secret`. |
+| `SECRET_KEY_BASE` | Required Phoenix secret. Generate with `mise exec -- mix phx.gen.secret` when running from a repo checkout under the pinned local toolchain. |
 | `PORT` | Public API listen port. Default `4000`. |
 | `PHX_HOST` | External host used in endpoint URL config. Default `example.com` in prod runtime. |
 | `STARCITE_OPS_PORT` | Separate ops listener for `/health/live`, `/health/ready`, `/metrics`, and `pprof`. These endpoints are not served on `PORT`. |
@@ -145,8 +145,8 @@ read those variables, so they are intentionally omitted here.
 
 When upgrading S3 archive payload schemas, run:
 
-- `mix starcite.archive.migrate_s3_schema --dry-run`
-- `mix starcite.archive.migrate_s3_schema`
+- `mise exec -- mix starcite.archive.migrate_s3_schema --dry-run`
+- `mise exec -- mix starcite.archive.migrate_s3_schema`
 
 Run on one node at a time during a maintenance window.
 

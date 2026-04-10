@@ -208,7 +208,7 @@ excludes archived sessions by default, while archived sessions remain readable
 by id and tail. Tail replays ordered history, then continues live on the same
 connection.
 
-[REST details](docs/api/rest.md) · [WebSocket details](docs/api/websocket.md)
+[REST details](docs/api/rest.md) · [WebSocket details](docs/api/websocket.md) · [Changelog](CHANGELOG.md) · [Release process](docs/releasing.md)
 
 ## How It Works
 
@@ -283,17 +283,19 @@ Your orchestrator stays yours.
 
 ```bash
 git clone https://github.com/fastpaca/starcite && cd starcite
-mix deps.get
-mix compile
-mix phx.server  # http://localhost:4000
-mix precommit   # format + compile (warnings-as-errors) + test
+mise install
+mise trust .mise.toml
+mise exec -- mix deps.get
+mise exec -- mix compile
+mise exec -- mix phx.server  # http://localhost:4000
+mise exec -- mix precommit   # format + compile (warnings-as-errors) + test
 ```
 
 ## Contributing
 
 1. Fork and create a branch.
 2. Add tests for behavior changes.
-3. Run `mix precommit` before opening a PR.
+3. Run `mise exec -- mix precommit` before opening a PR.
 
 ## License
 
