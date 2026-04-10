@@ -10,8 +10,6 @@ defmodule Starcite.Observability.PromEx.Metrics do
   import Telemetry.Metrics, only: [counter: 2, distribution: 2, last_value: 2]
 
   @default_memory_layout_poll_rate 5_000
-  @default_event_store_limit_bytes 2_147_483_648
-  @default_archive_read_cache_limit_bytes 536_870_912
   @memory_layout_event [:starcite, :memory, :layout]
 
   @impl true
@@ -617,13 +615,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
       event_queue_bytes: EventQueue.memory_bytes(),
       archive_read_cache_bytes: EventArchive.cache_memory_bytes_or_zero(),
       session_store_bytes: SessionStore.memory_bytes(),
-      event_store_limit_bytes:
-        configured_positive_integer(:event_store_max_bytes, @default_event_store_limit_bytes),
-      archive_read_cache_limit_bytes:
-        configured_positive_integer(
-          :archive_read_cache_max_bytes,
-          @default_archive_read_cache_limit_bytes
-        )
+      event_store_limit_bytes: configured_positive_integer!(:event_store_max_bytes),
+      archive_read_cache_limit_bytes: configured_positive_integer!(:archive_read_cache_max_bytes)
     })
   end
 
@@ -635,9 +628,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
     }
   end
 
-  defp configured_positive_integer(key, default)
-       when is_atom(key) and is_integer(default) and default > 0 do
-    case Application.get_env(:starcite, key, default) do
+  defp configured_positive_integer!(key) when is_atom(key) do
+    case Application.fetch_env!(:starcite, key) do
       value when is_integer(value) and value > 0 ->
         value
 
