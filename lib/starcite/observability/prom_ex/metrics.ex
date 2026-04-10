@@ -3,7 +3,16 @@ defmodule Starcite.Observability.PromEx.Metrics do
 
   use PromEx.Plugin
 
+  alias Starcite.DataPlane.{EventQueue, SessionStore}
+  alias Starcite.Observability.Telemetry, as: StarciteTelemetry
+  alias Starcite.Storage.EventArchive
+
   import Telemetry.Metrics, only: [counter: 2, distribution: 2, last_value: 2]
+
+  @default_memory_layout_poll_rate 5_000
+  @default_event_store_limit_bytes 2_147_483_648
+  @default_archive_read_cache_limit_bytes 536_870_912
+  @memory_layout_event [:starcite, :memory, :layout]
 
   @impl true
   def event_metrics(_opts) do
@@ -18,6 +27,15 @@ defmodule Starcite.Observability.PromEx.Metrics do
       archive_metrics(),
       session_metrics(),
       event_store_metrics()
+    ]
+  end
+
+  @impl true
+  def polling_metrics(opts) do
+    poll_rate = Keyword.get(opts, :poll_rate, @default_memory_layout_poll_rate)
+
+    [
+      memory_layout_metrics(poll_rate)
     ]
   end
 
@@ -454,11 +472,178 @@ defmodule Starcite.Observability.PromEx.Metrics do
     )
   end
 
+  defp memory_layout_metrics(poll_rate) when is_integer(poll_rate) and poll_rate > 0 do
+    Polling.build(
+      :starcite_memory_layout_polling_metrics,
+      poll_rate,
+      {__MODULE__, :execute_memory_layout_metrics, []},
+      [
+        last_value("starcite_memory_layout_vm_total_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_total_bytes,
+          description: "Total BEAM memory allocated",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_system_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_system_bytes,
+          description: "BEAM system memory allocated outside process heaps",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_processes_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_processes_bytes,
+          description: "BEAM memory allocated for Erlang processes",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_processes_used_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_processes_used_bytes,
+          description: "BEAM process memory currently used by Erlang processes",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_processes_overhead_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_processes_overhead_bytes,
+          description: "Allocated but currently unused process memory in the BEAM",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_atom_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_atom_bytes,
+          description: "BEAM memory allocated for the atom table",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_atom_used_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_atom_used_bytes,
+          description: "BEAM atom table memory currently used",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_atom_unused_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_atom_unused_bytes,
+          description: "Allocated but currently unused atom table memory",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_binary_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_binary_bytes,
+          description: "BEAM memory allocated for binaries",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_code_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_code_bytes,
+          description: "BEAM memory allocated for loaded code",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_ets_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_ets_bytes,
+          description: "BEAM memory allocated for ETS tables",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_vm_persistent_term_bytes",
+          event_name: @memory_layout_event,
+          measurement: :vm_persistent_term_bytes,
+          description: "BEAM memory allocated for persistent_term",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_event_queue_bytes",
+          event_name: @memory_layout_event,
+          measurement: :event_queue_bytes,
+          description: "Approximate memory used by the in-memory event queue",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_archive_read_cache_bytes",
+          event_name: @memory_layout_event,
+          measurement: :archive_read_cache_bytes,
+          description: "Approximate memory used by the archive read cache",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_session_store_bytes",
+          event_name: @memory_layout_event,
+          measurement: :session_store_bytes,
+          description: "Approximate memory used by the hot session store cache",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_event_store_bytes",
+          event_name: @memory_layout_event,
+          measurement: :event_store_bytes,
+          description:
+            "Approximate combined memory used by the event queue and archive read cache",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_tracked_local_storage_bytes",
+          event_name: @memory_layout_event,
+          measurement: :tracked_local_storage_bytes,
+          description: "Approximate combined memory used by Starcite hot local storage tiers",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_event_store_limit_bytes",
+          event_name: @memory_layout_event,
+          measurement: :event_store_limit_bytes,
+          description: "Configured event store memory limit",
+          unit: :byte
+        ),
+        last_value("starcite_memory_layout_archive_read_cache_limit_bytes",
+          event_name: @memory_layout_event,
+          measurement: :archive_read_cache_limit_bytes,
+          description: "Configured archive read cache memory limit",
+          unit: :byte
+        )
+      ],
+      detach_on_error: false
+    )
+  end
+
+  @doc false
+  def execute_memory_layout_metrics do
+    %{memory: persistent_term_bytes} = :persistent_term.info()
+    vm_memory = :erlang.memory() |> Map.new()
+
+    StarciteTelemetry.memory_layout(%{
+      vm_total_bytes: Map.fetch!(vm_memory, :total),
+      vm_system_bytes: Map.fetch!(vm_memory, :system),
+      vm_processes_bytes: Map.fetch!(vm_memory, :processes),
+      vm_processes_used_bytes: Map.fetch!(vm_memory, :processes_used),
+      vm_atom_bytes: Map.fetch!(vm_memory, :atom),
+      vm_atom_used_bytes: Map.fetch!(vm_memory, :atom_used),
+      vm_binary_bytes: Map.fetch!(vm_memory, :binary),
+      vm_code_bytes: Map.fetch!(vm_memory, :code),
+      vm_ets_bytes: Map.fetch!(vm_memory, :ets),
+      vm_persistent_term_bytes: persistent_term_bytes,
+      event_queue_bytes: EventQueue.memory_bytes(),
+      archive_read_cache_bytes: EventArchive.cache_memory_bytes_or_zero(),
+      session_store_bytes: SessionStore.memory_bytes(),
+      event_store_limit_bytes:
+        configured_positive_integer(:event_store_max_bytes, @default_event_store_limit_bytes),
+      archive_read_cache_limit_bytes:
+        configured_positive_integer(
+          :archive_read_cache_max_bytes,
+          @default_archive_read_cache_limit_bytes
+        )
+    })
+  end
+
   defp edge_http_tag_values(%{conn: %{method: method, status: status}})
        when is_binary(method) and is_integer(status) do
     %{
       method: method,
       status_class: "#{div(status, 100)}xx"
     }
+  end
+
+  defp configured_positive_integer(key, default)
+       when is_atom(key) and is_integer(default) and default > 0 do
+    case Application.get_env(:starcite, key, default) do
+      value when is_integer(value) and value > 0 ->
+        value
+
+      value ->
+        raise ArgumentError,
+              "invalid value for #{inspect(key)}: #{inspect(value)} (expected positive integer bytes)"
+    end
   end
 end

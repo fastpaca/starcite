@@ -176,7 +176,10 @@ issue is misconfigured cluster discovery or unreachable peers.
 
 Set `STARCITE_OPS_PORT` on each node and keep that listener private to your cluster
 or admin network. `/health/live`, `/health/ready`, `/metrics`, and `pprof` are
-served there instead of the public API port.
+served there instead of the public API port. `/metrics` now includes
+`starcite_prom_ex_beam_*` gauges from `PromEx.Plugins.Beam` plus
+`starcite_memory_layout_*` gauges for Starcite's hot storage tiers,
+which makes cache pressure visible before event-store backpressure fires.
 
 ## Rolling restarts
 

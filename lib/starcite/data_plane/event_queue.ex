@@ -120,7 +120,10 @@ defmodule Starcite.DataPlane.EventQueue do
   Return total pending event count.
   """
   def size do
-    :ets.info(@table, :size) || 0
+    case :ets.info(@table, :size) do
+      size when is_integer(size) and size >= 0 -> size
+      _ -> 0
+    end
   end
 
   @spec session_size(String.t()) :: non_neg_integer()
@@ -181,8 +184,13 @@ defmodule Starcite.DataPlane.EventQueue do
   Return approximate memory consumed by pending state.
   """
   def memory_bytes do
-    words = :ets.info(@table, :memory) || 0
-    words * :erlang.system_info(:wordsize)
+    case :ets.info(@table, :memory) do
+      words when is_integer(words) and words >= 0 ->
+        words * :erlang.system_info(:wordsize)
+
+      _ ->
+        0
+    end
   end
 
   defp ensure_named_table(table_name) when is_atom(table_name) do

@@ -295,6 +295,118 @@ defmodule Starcite.Observability.Telemetry do
     :ok
   end
 
+  @typedoc """
+  Required measurements for one memory layout sample.
+  """
+  @type memory_layout_measurements :: %{
+          required(:vm_total_bytes) => non_neg_integer(),
+          required(:vm_system_bytes) => non_neg_integer(),
+          required(:vm_processes_bytes) => non_neg_integer(),
+          required(:vm_processes_used_bytes) => non_neg_integer(),
+          required(:vm_atom_bytes) => non_neg_integer(),
+          required(:vm_atom_used_bytes) => non_neg_integer(),
+          required(:vm_binary_bytes) => non_neg_integer(),
+          required(:vm_code_bytes) => non_neg_integer(),
+          required(:vm_ets_bytes) => non_neg_integer(),
+          required(:vm_persistent_term_bytes) => non_neg_integer(),
+          required(:event_queue_bytes) => non_neg_integer(),
+          required(:archive_read_cache_bytes) => non_neg_integer(),
+          required(:session_store_bytes) => non_neg_integer(),
+          required(:event_store_limit_bytes) => pos_integer(),
+          required(:archive_read_cache_limit_bytes) => pos_integer()
+        }
+
+  @doc """
+  Emit telemetry for one memory layout sample.
+
+  Measurements:
+    - `:vm_total_bytes`
+    - `:vm_system_bytes`
+    - `:vm_processes_bytes`
+    - `:vm_processes_used_bytes`
+    - `:vm_processes_overhead_bytes`
+    - `:vm_atom_bytes`
+    - `:vm_atom_used_bytes`
+    - `:vm_atom_unused_bytes`
+    - `:vm_binary_bytes`
+    - `:vm_code_bytes`
+    - `:vm_ets_bytes`
+    - `:vm_persistent_term_bytes`
+    - `:event_queue_bytes`
+    - `:archive_read_cache_bytes`
+    - `:session_store_bytes`
+    - `:event_store_bytes`
+    - `:tracked_local_storage_bytes`
+    - `:event_store_limit_bytes`
+    - `:archive_read_cache_limit_bytes`
+
+  Metadata:
+    - `:node` - local node name
+  """
+  @spec memory_layout(memory_layout_measurements()) :: :ok
+  def memory_layout(%{
+        vm_total_bytes: vm_total_bytes,
+        vm_system_bytes: vm_system_bytes,
+        vm_processes_bytes: vm_processes_bytes,
+        vm_processes_used_bytes: vm_processes_used_bytes,
+        vm_atom_bytes: vm_atom_bytes,
+        vm_atom_used_bytes: vm_atom_used_bytes,
+        vm_binary_bytes: vm_binary_bytes,
+        vm_code_bytes: vm_code_bytes,
+        vm_ets_bytes: vm_ets_bytes,
+        vm_persistent_term_bytes: vm_persistent_term_bytes,
+        event_queue_bytes: event_queue_bytes,
+        archive_read_cache_bytes: archive_read_cache_bytes,
+        session_store_bytes: session_store_bytes,
+        event_store_limit_bytes: event_store_limit_bytes,
+        archive_read_cache_limit_bytes: archive_read_cache_limit_bytes
+      })
+      when is_integer(vm_total_bytes) and vm_total_bytes >= 0 and is_integer(vm_system_bytes) and
+             vm_system_bytes >= 0 and is_integer(vm_processes_bytes) and vm_processes_bytes >= 0 and
+             is_integer(vm_processes_used_bytes) and vm_processes_used_bytes >= 0 and
+             vm_processes_bytes >= vm_processes_used_bytes and is_integer(vm_atom_bytes) and
+             vm_atom_bytes >= 0 and is_integer(vm_atom_used_bytes) and vm_atom_used_bytes >= 0 and
+             vm_atom_bytes >= vm_atom_used_bytes and is_integer(vm_binary_bytes) and
+             vm_binary_bytes >= 0 and is_integer(vm_code_bytes) and vm_code_bytes >= 0 and
+             is_integer(vm_ets_bytes) and vm_ets_bytes >= 0 and
+             is_integer(vm_persistent_term_bytes) and vm_persistent_term_bytes >= 0 and
+             is_integer(event_queue_bytes) and event_queue_bytes >= 0 and
+             is_integer(archive_read_cache_bytes) and archive_read_cache_bytes >= 0 and
+             is_integer(session_store_bytes) and session_store_bytes >= 0 and
+             is_integer(event_store_limit_bytes) and event_store_limit_bytes > 0 and
+             is_integer(archive_read_cache_limit_bytes) and archive_read_cache_limit_bytes > 0 do
+    event_store_bytes = event_queue_bytes + archive_read_cache_bytes
+    tracked_local_storage_bytes = event_store_bytes + session_store_bytes
+
+    execute_if_enabled(
+      [:starcite, :memory, :layout],
+      %{
+        vm_total_bytes: vm_total_bytes,
+        vm_system_bytes: vm_system_bytes,
+        vm_processes_bytes: vm_processes_bytes,
+        vm_processes_used_bytes: vm_processes_used_bytes,
+        vm_processes_overhead_bytes: vm_processes_bytes - vm_processes_used_bytes,
+        vm_atom_bytes: vm_atom_bytes,
+        vm_atom_used_bytes: vm_atom_used_bytes,
+        vm_atom_unused_bytes: vm_atom_bytes - vm_atom_used_bytes,
+        vm_binary_bytes: vm_binary_bytes,
+        vm_code_bytes: vm_code_bytes,
+        vm_ets_bytes: vm_ets_bytes,
+        vm_persistent_term_bytes: vm_persistent_term_bytes,
+        event_queue_bytes: event_queue_bytes,
+        archive_read_cache_bytes: archive_read_cache_bytes,
+        session_store_bytes: session_store_bytes,
+        event_store_bytes: event_store_bytes,
+        tracked_local_storage_bytes: tracked_local_storage_bytes,
+        event_store_limit_bytes: event_store_limit_bytes,
+        archive_read_cache_limit_bytes: archive_read_cache_limit_bytes
+      },
+      %{node: current_node_name()}
+    )
+
+    :ok
+  end
+
   @doc """
   Emit telemetry for one event-store write.
 
