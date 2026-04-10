@@ -600,6 +600,10 @@ defmodule Starcite.Observability.PromEx.Metrics do
   def execute_memory_layout_metrics do
     %{memory: persistent_term_bytes} = :persistent_term.info()
     vm_memory = :erlang.memory() |> Map.new()
+    event_store_limit_bytes = Application.fetch_env!(:starcite, :event_store_max_bytes)
+
+    archive_read_cache_limit_bytes =
+      Application.fetch_env!(:starcite, :archive_read_cache_max_bytes)
 
     StarciteTelemetry.memory_layout(%{
       vm_total_bytes: Map.fetch!(vm_memory, :total),
@@ -615,8 +619,8 @@ defmodule Starcite.Observability.PromEx.Metrics do
       event_queue_bytes: EventQueue.memory_bytes(),
       archive_read_cache_bytes: EventArchive.cache_memory_bytes_or_zero(),
       session_store_bytes: SessionStore.memory_bytes(),
-      event_store_limit_bytes: configured_positive_integer!(:event_store_max_bytes),
-      archive_read_cache_limit_bytes: configured_positive_integer!(:archive_read_cache_max_bytes)
+      event_store_limit_bytes: event_store_limit_bytes,
+      archive_read_cache_limit_bytes: archive_read_cache_limit_bytes
     })
   end
 
@@ -626,16 +630,5 @@ defmodule Starcite.Observability.PromEx.Metrics do
       method: method,
       status_class: "#{div(status, 100)}xx"
     }
-  end
-
-  defp configured_positive_integer!(key) when is_atom(key) do
-    case Application.fetch_env!(:starcite, key) do
-      value when is_integer(value) and value > 0 ->
-        value
-
-      value ->
-        raise ArgumentError,
-              "invalid value for #{inspect(key)}: #{inspect(value)} (expected positive integer bytes)"
-    end
   end
 end
