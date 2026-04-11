@@ -15,9 +15,9 @@ defmodule StarciteWeb.LifecycleChannel do
 
   @impl true
   def join("lifecycle", _params, %{assigns: %{auth: %Context{} = auth}} = socket) do
-    with :ok <- ensure_auth_current(auth),
-         :ok <- Policy.can_subscribe_lifecycle(auth),
-         :ok <- PubSub.subscribe(Starcite.PubSub, topic(auth.principal.tenant_id)) do
+    with :ok <- Context.ensure_current(auth),
+         {:ok, tenant_id} <- Policy.authorize_lifecycle_subscription(auth),
+         :ok <- PubSub.subscribe(Starcite.PubSub, topic(tenant_id)) do
       {:ok, schedule_auth_expiry(socket, auth)}
     else
       {:error, reason} -> {:error, %{reason: to_string(reason)}}
@@ -41,13 +41,6 @@ defmodule StarciteWeb.LifecycleChannel do
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
-
-  defp ensure_auth_current(%Context{expires_at: expires_at})
-       when is_integer(expires_at) and expires_at > 0 do
-    if expires_at <= System.system_time(:second), do: {:error, :token_expired}, else: :ok
-  end
-
-  defp ensure_auth_current(%Context{}), do: :ok
 
   defp schedule_auth_expiry(socket, %Context{expires_at: expires_at})
        when is_integer(expires_at) and expires_at > 0 do

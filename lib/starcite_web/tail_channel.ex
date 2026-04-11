@@ -19,11 +19,11 @@ defmodule StarciteWeb.TailChannel do
   @impl true
   def join("tail:" <> session_id, params, %{assigns: %{auth: %Context{} = auth}} = socket)
       when is_binary(session_id) and session_id != "" and is_map(params) do
-    with :ok <- ensure_auth_current(auth),
+    with :ok <- Context.ensure_current(auth),
          {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- TailParams.parse(params),
-         :ok <- Policy.allowed_to_access_session(auth, session_id),
+         :ok <- Policy.authorize_session_read(auth, session_id),
          {:ok, session} <- ReadPath.get_session_routed(session_id, true),
-         :ok <- Policy.allowed_to_read_session(auth, session),
+         :ok <- Policy.authorize_session_read(auth, session),
          {:ok, state} <-
            TailStream.init(%{
              session_id: session_id,
@@ -68,11 +68,4 @@ defmodule StarciteWeb.TailChannel do
   end
 
   def handle_info(_message, socket), do: {:noreply, socket}
-
-  defp ensure_auth_current(%Context{expires_at: expires_at})
-       when is_integer(expires_at) and expires_at > 0 do
-    if expires_at <= System.system_time(:second), do: {:error, :token_expired}, else: :ok
-  end
-
-  defp ensure_auth_current(%Context{}), do: :ok
 end

@@ -5,9 +5,14 @@ defmodule StarciteWeb.Auth.Policy do
 
   alias Starcite.Auth.Principal
   alias Starcite.Session
+  alias Starcite.Storage.SessionCatalog
   alias StarciteWeb.Auth.Context
 
   @type auth :: Context.t()
+  @type session_resource ::
+          Session.t()
+          | SessionCatalog.session_entry()
+          | %{required(:id) => String.t(), required(:tenant_id) => String.t()}
 
   @spec can_create_session(auth(), map()) :: {:ok, Principal.t()} | {:error, atom()}
   def can_create_session(%Context{kind: :none, principal: %Principal{} = principal}, _params),
@@ -17,7 +22,7 @@ defmodule StarciteWeb.Auth.Policy do
         %Context{kind: :jwt, principal: %Principal{} = principal} = auth,
         _params
       ) do
-    with :ok <- has_scope(auth, "session:create") do
+    with :ok <- authorize_scope(auth, "session:create") do
       {:ok, principal}
     end
   end
@@ -43,85 +48,84 @@ defmodule StarciteWeb.Auth.Policy do
 
   def resolve_create_session_id(_auth, _requested_id), do: {:error, :invalid_session}
 
-  @spec can_list_sessions(auth()) :: :ok | {:error, atom()}
-  def can_list_sessions(%Context{} = auth), do: can_read_session(auth)
-
-  def can_list_sessions(_auth), do: {:error, :forbidden}
-
-  @spec can_read_session(auth()) :: :ok | {:error, atom()}
-  def can_read_session(%Context{kind: :none}), do: :ok
-
-  def can_read_session(%Context{kind: :jwt, principal: %Principal{}} = auth) do
-    has_scope(auth, "session:read")
+  @spec authorize_session_list(auth(), map()) :: {:ok, map()} | {:error, atom()}
+  def authorize_session_list(%Context{} = auth, opts) when is_map(opts) do
+    with :ok <- authorize_scope(auth, "session:read"),
+         {:ok, scoped_opts} <- scope_session_list(auth, opts) do
+      {:ok, scoped_opts}
+    end
   end
 
-  def can_read_session(_auth), do: {:error, :forbidden}
+  def authorize_session_list(%Context{}, _opts), do: {:error, :invalid_list_query}
+  def authorize_session_list(_auth, _opts), do: {:error, :forbidden}
 
-  @spec can_manage_session(auth()) :: :ok | {:error, atom()}
-  def can_manage_session(%Context{kind: :none}), do: :ok
-
-  def can_manage_session(%Context{kind: :jwt, principal: %Principal{}} = auth) do
-    has_scope(auth, "session:create")
+  @spec authorize_session_read(auth(), String.t() | session_resource()) :: :ok | {:error, atom()}
+  def authorize_session_read(%Context{} = auth, session_id)
+      when is_binary(session_id) and session_id != "" do
+    authorize_session_access(auth, session_id, "session:read")
   end
 
-  def can_manage_session(_auth), do: {:error, :forbidden}
+  def authorize_session_read(%Context{} = auth, session) when is_map(session) do
+    authorize_session_resource(auth, session, "session:read")
+  end
 
-  @spec can_subscribe_lifecycle(auth()) :: :ok | {:error, atom()}
-  def can_subscribe_lifecycle(%Context{kind: :none}), do: :ok
+  def authorize_session_read(%Context{}, _session_or_id), do: {:error, :invalid_session_id}
+  def authorize_session_read(_auth, _session_or_id), do: {:error, :forbidden}
 
-  def can_subscribe_lifecycle(
+  @spec authorize_session_manage(auth(), String.t() | session_resource()) ::
+          :ok | {:error, atom()}
+  def authorize_session_manage(%Context{} = auth, session_id)
+      when is_binary(session_id) and session_id != "" do
+    authorize_session_access(auth, session_id, "session:create")
+  end
+
+  def authorize_session_manage(%Context{} = auth, session) when is_map(session) do
+    authorize_session_resource(auth, session, "session:create")
+  end
+
+  def authorize_session_manage(%Context{}, _session_or_id), do: {:error, :invalid_session_id}
+  def authorize_session_manage(_auth, _session_or_id), do: {:error, :forbidden}
+
+  @spec authorize_session_append(auth(), String.t()) :: :ok | {:error, atom()}
+  def authorize_session_append(%Context{} = auth, session_id)
+      when is_binary(session_id) and session_id != "" do
+    authorize_session_access(auth, session_id, "session:append")
+  end
+
+  def authorize_session_append(%Context{}, _session_id), do: {:error, :invalid_session_id}
+  def authorize_session_append(_auth, _session_id), do: {:error, :forbidden}
+
+  @spec authorize_lifecycle_subscription(auth()) :: {:ok, String.t()} | {:error, atom()}
+  def authorize_lifecycle_subscription(%Context{
+        kind: :none,
+        principal: %Principal{tenant_id: tenant_id}
+      })
+      when is_binary(tenant_id) and tenant_id != "" do
+    {:ok, tenant_id}
+  end
+
+  def authorize_lifecycle_subscription(
         %Context{
           kind: :jwt,
           session_id: nil,
-          principal: %Principal{type: :service}
+          principal: %Principal{type: :service, tenant_id: tenant_id}
         } = auth
-      ) do
-    has_scope(auth, "session:read")
+      )
+      when is_binary(tenant_id) and tenant_id != "" do
+    with :ok <- authorize_scope(auth, "session:read") do
+      {:ok, tenant_id}
+    end
   end
 
-  def can_subscribe_lifecycle(%Context{kind: :jwt, session_id: session_id})
+  def authorize_lifecycle_subscription(%Context{kind: :jwt, session_id: session_id})
       when is_binary(session_id) and session_id != "" do
     {:error, :forbidden_session}
   end
 
-  def can_subscribe_lifecycle(%Context{kind: :jwt, principal: %Principal{}}),
+  def authorize_lifecycle_subscription(%Context{kind: :jwt, principal: %Principal{}}),
     do: {:error, :forbidden}
 
-  def can_subscribe_lifecycle(_auth), do: {:error, :forbidden}
-
-  @spec allowed_to_append_session(auth(), Session.t()) :: :ok | {:error, atom()}
-  def allowed_to_append_session(%Context{} = auth, %Session{} = session) do
-    session_permission(auth, session, "session:append")
-  end
-
-  @spec allowed_to_read_session(auth(), Session.t()) :: :ok | {:error, atom()}
-  def allowed_to_read_session(%Context{} = auth, %Session{} = session) do
-    session_permission(auth, session, "session:read")
-  end
-
-  @spec allowed_to_update_session(auth(), Session.t()) :: :ok | {:error, atom()}
-  def allowed_to_update_session(%Context{} = auth, %Session{} = session) do
-    session_permission(auth, session, "session:create")
-  end
-
-  @spec allowed_to_access_session(auth(), String.t()) :: :ok | {:error, :forbidden_session}
-  def allowed_to_access_session(%Context{kind: :none}, session_id)
-      when is_binary(session_id) and session_id != "",
-      do: :ok
-
-  def allowed_to_access_session(%Context{kind: :jwt, session_id: nil}, session_id)
-      when is_binary(session_id) and session_id != "",
-      do: :ok
-
-  def allowed_to_access_session(%Context{kind: :jwt, session_id: session_id}, session_id)
-      when is_binary(session_id) and session_id != "",
-      do: :ok
-
-  def allowed_to_access_session(%Context{kind: :jwt, session_id: session_id}, _session_id)
-      when is_binary(session_id) and session_id != "",
-      do: {:error, :forbidden_session}
-
-  def allowed_to_access_session(_auth, _session_id), do: {:error, :forbidden_session}
+  def authorize_lifecycle_subscription(_auth), do: {:error, :forbidden}
 
   @spec resolve_event_actor(auth(), String.t() | nil) ::
           {:ok, String.t()} | {:error, :invalid_event}
@@ -153,37 +157,97 @@ defmodule StarciteWeb.Auth.Policy do
     end)
   end
 
-  @spec has_scope(auth(), String.t()) :: :ok | {:error, :forbidden_scope}
-  def has_scope(%Context{kind: :jwt, scopes: scopes}, scope)
-      when is_binary(scope) and scope != "" and is_list(scopes) do
+  defp authorize_scope(%Context{kind: :none}, _scope), do: :ok
+
+  defp authorize_scope(%Context{kind: :jwt, principal: %Principal{}, scopes: scopes}, scope)
+       when is_binary(scope) and scope != "" and is_list(scopes) do
     if Enum.member?(scopes, scope), do: :ok, else: {:error, :forbidden_scope}
   end
 
-  def has_scope(_auth, _scope), do: {:error, :forbidden_scope}
+  defp authorize_scope(_auth, _scope), do: {:error, :forbidden_scope}
 
-  defp session_permission(
+  defp scope_session_list(%Context{kind: :none}, opts) when is_map(opts), do: {:ok, opts}
+
+  defp scope_session_list(
+         %Context{
+           kind: :jwt,
+           principal: %Principal{tenant_id: tenant_id},
+           session_id: nil
+         },
+         opts
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
+    {:ok, Map.put(opts, :tenant_id, tenant_id)}
+  end
+
+  defp scope_session_list(
+         %Context{
+           kind: :jwt,
+           principal: %Principal{tenant_id: tenant_id},
+           session_id: session_id
+         },
+         opts
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
+              session_id != "" and is_map(opts) do
+    {:ok,
+     opts
+     |> Map.put(:tenant_id, tenant_id)
+     |> Map.put(:session_ids, [session_id])}
+  end
+
+  defp scope_session_list(_auth, _opts), do: {:error, :forbidden}
+
+  defp authorize_session_resource(
          %Context{kind: :none},
-         %Session{id: session_id},
+         %{id: session_id},
          _scope
        )
        when is_binary(session_id) and session_id != "",
        do: :ok
 
-  defp session_permission(
+  defp authorize_session_resource(
          %Context{kind: :jwt, principal: %Principal{}} = auth,
-         %Session{id: session_id, tenant_id: session_tenant_id},
+         %{id: session_id, tenant_id: session_tenant_id},
          scope
        )
        when is_binary(session_id) and session_id != "" and is_binary(scope) and scope != "" and
               is_binary(session_tenant_id) and session_tenant_id != "" do
-    with :ok <- has_scope(auth, scope),
-         :ok <- allowed_to_access_session(auth, session_id),
+    with :ok <- authorize_session_access(auth, session_id, scope),
          :ok <- require_same_tenant(auth, session_tenant_id) do
       :ok
     end
   end
 
-  defp session_permission(_auth, _session, _scope), do: {:error, :forbidden_session}
+  defp authorize_session_resource(_auth, _session, _scope), do: {:error, :forbidden_session}
+
+  defp authorize_session_access(%Context{} = auth, session_id, scope)
+       when is_binary(session_id) and session_id != "" and is_binary(scope) and scope != "" do
+    with :ok <- authorize_scope(auth, scope),
+         :ok <- authorize_session_pin(auth, session_id) do
+      :ok
+    end
+  end
+
+  defp authorize_session_access(_auth, _session_id, _scope), do: {:error, :forbidden_session}
+
+  defp authorize_session_pin(%Context{kind: :none}, session_id)
+       when is_binary(session_id) and session_id != "",
+       do: :ok
+
+  defp authorize_session_pin(%Context{kind: :jwt, session_id: nil}, session_id)
+       when is_binary(session_id) and session_id != "",
+       do: :ok
+
+  defp authorize_session_pin(%Context{kind: :jwt, session_id: session_id}, session_id)
+       when is_binary(session_id) and session_id != "",
+       do: :ok
+
+  defp authorize_session_pin(%Context{kind: :jwt, session_id: session_id}, _session_id)
+       when is_binary(session_id) and session_id != "",
+       do: {:error, :forbidden_session}
+
+  defp authorize_session_pin(_auth, _session_id), do: {:error, :forbidden_session}
 
   defp require_same_tenant(
          %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},

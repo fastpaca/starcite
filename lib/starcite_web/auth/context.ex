@@ -23,4 +23,12 @@ defmodule StarciteWeb.Auth.Context do
 
   @spec none() :: t()
   def none, do: %__MODULE__{}
+
+  @spec ensure_current(t()) :: :ok | {:error, :token_expired}
+  def ensure_current(%__MODULE__{expires_at: expires_at})
+      when is_integer(expires_at) and expires_at > 0 do
+    if expires_at <= System.system_time(:second), do: {:error, :token_expired}, else: :ok
+  end
+
+  def ensure_current(%__MODULE__{}), do: :ok
 end
