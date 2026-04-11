@@ -4,7 +4,12 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 
 ## Ground Rules
 
-- Run `mix precommit` before you hand work back. It compiles with warnings-as-errors, formats, and runs tests.
+- Use the pinned local toolchain from `.mise.toml`. Run `mise install` after
+  cloning, then either activate `mise` in your shell or prefix local project
+  commands with `mise exec --`.
+- Run `mise exec -- mix precommit` before you hand work back unless your shell
+  already has `mise` activated. It compiles with warnings-as-errors, formats,
+  and runs tests.
 - Use the built-in [`Req`](https://hexdocs.pm/req/Req.html) client for HTTP. Do not add `:httpoison`, `:tesla`, or `:httpc`.
 - Never introduce new dependencies or services without explicit approval.
 - Keep the default Tailwind v4 imports in `assets/css/app.css`; extend styling with Tailwind utility classes, not `@apply`.
@@ -127,13 +132,16 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 
 - Emit telemetry via the centralized telemetry helper module; add new events there so tags stay normalised.
 - When you touch collections rendered in LiveView, prefer streams (`stream/3`) and track counts/empty states separately.
-- Use `mix test`, `mix test --failed`, or file-scoped runs to iterate quickly. End every work session with `mix precommit`.
+- Use `mise exec -- mix test`, `mise exec -- mix test --failed`, or file-scoped
+  runs to iterate quickly unless your shell already has `mise` activated. End
+  every work session with `mise exec -- mix precommit`.
 - Local cluster testing/benchmarking uses manual Compose lifecycle:
   - `docker compose -f docker-compose.integration.yml -p <project> up -d --build`
   - `docker compose -f docker-compose.integration.yml -p <project> --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js`
   - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
 - Avoid adding start/stop wrapper scripts for Docker Compose workflows; keep local failover drills explicit (`docker compose kill/pause/up`) and document them only when the main operational docs genuinely need them.
-- Treat cluster runs as optional vibe checks for local iteration; default to faster `mix test` loops when cluster behavior is not under test.
+- Treat cluster runs as optional vibe checks for local iteration; default to
+  faster `mise exec -- mix test` loops when cluster behavior is not under test.
 - For k6 throughput tests, distinguish offered rate from effective throughput (`events_sent`/`http_reqs`) and always inspect `dropped_iterations` and failure rate before concluding the service ceiling.
 - For append benchmarks, avoid artificial contention by using enough sessions and stable producer identity/sequence generation; otherwise results overstate contention bottlenecks.
 - Ensure cluster readiness before high-load tests; if skipping readiness checks for warm reruns, verify node/bootstrap health first.

@@ -4,11 +4,16 @@ Guidance for Claude Code when collaborating on Starcite.
 
 ## Quick Start
 
-- `mix deps.get` - install dependencies
-- `mix compile` - compile the application
-- `mix phx.server` - run the dev server
-- `mix test` / `mix test path/to/file.exs` - execute test suites
-- `mix precommit` - final gate before handing work back (compile + format + tests)
+- Use the pinned local toolchain from `.mise.toml`. Run `mise install` and
+  `mise trust .mise.toml`, then either activate `mise` in your shell or prefix
+  commands with `mise exec --`.
+- `mise exec -- mix deps.get` - install dependencies
+- `mise exec -- mix compile` - compile the application
+- `mise exec -- mix phx.server` - run the dev server
+- `mise exec -- mix test` / `mise exec -- mix test path/to/file.exs` - execute
+  test suites
+- `mise exec -- mix precommit` - final gate before handing work back (compile +
+  format + tests)
 
 ## Local Cluster Testing
 
@@ -18,7 +23,8 @@ Guidance for Claude Code when collaborating on Starcite.
   - `docker compose -f docker-compose.integration.yml -p <project> down -v --remove-orphans`
 - For failover drills, run workload and inject faults directly: `docker compose ... kill`, `pause`, `unpause`, `up -d`.
 - Use unique Compose project names for concurrent local clusters (`-p starcite-it-a`, `-p starcite-it-b`).
-- Keep cluster runs optional during local iteration; use `mix test` unless you specifically need cluster behavior/failover coverage.
+- Keep cluster runs optional during local iteration; use `mise exec -- mix test`
+  unless you specifically need cluster behavior/failover coverage.
 
 ## Product Surface
 
@@ -55,7 +61,8 @@ Contract reminders:
 - Make telemetry strict. Add clauses like `defp message_tags(%{role: role})` and treat everything else as the fallback path that highlights anomalies.
 - When serializing structs/maps, destructure once and build the response. Avoid peppering `Map.get` across atom/string variants; normalize at the boundary.
 - Preserve API contract semantics: idempotency dedupe, expected-seq conflicts, and replay ordering.
-- Lint, format, and test locally. Every PR should pass `mix precommit`.
+- Lint, format, and test locally through the pinned `mise` toolchain. Every PR
+  should pass `mise exec -- mix precommit`.
 
 ## Domain Assumptions & Conventions
 
@@ -68,16 +75,19 @@ Contract reminders:
 
 ## Tooling Shortcuts
 
-- `mix ecto.migrate` / `mix ecto.rollback` for schema changes
-- `mix assets.build` for rebuilding Tailwind + JS bundles
-- `mix phx.gen.html` / `mix phx.gen.live` are unused-prefer handcrafted components consistent with the design language
+- `mise exec -- mix ecto.migrate` / `mise exec -- mix ecto.rollback` for schema
+  changes
+- `mise exec -- mix assets.build` for rebuilding Tailwind + JS bundles
+- `mise exec -- mix phx.gen.html` / `mise exec -- mix phx.gen.live` are
+  unused-prefer handcrafted components consistent with the design language
 
 ## Checklist Before You Finish
 
 1. All new/modified modules follow the fail-loud, pattern-matching style.
 2. Telemetry tags remain explicit; no new "unknown" defaults unless product requirements demand it.
 3. Tests cover new code paths, especially create/append/tail contracts, conflict handling, and Raft group behavior.
-4. Run `mix precommit` and address every warning, formatter diff, and test failure.
+4. Run `mise exec -- mix precommit` and address every warning, formatter diff,
+   and test failure.
 5. Document runtime changes (Raft membership, rebalancing, storage) in `docs/` if behaviour shifts meaningfully.
 
 ## Hot Path Design
