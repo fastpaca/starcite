@@ -10,6 +10,7 @@ defmodule Starcite.DataPlane.SessionQuorumTest do
   alias Starcite.Storage.{EventArchive, SessionCatalog}
 
   setup do
+    Starcite.Runtime.TestHelper.reset()
     ensure_repo_sandbox()
     original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
     original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)

@@ -3,6 +3,8 @@ defmodule Starcite.Storage.SessionCatalogTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.Repo
+  alias Starcite.Session
+  alias Starcite.Session.Projections
   alias Starcite.Session.Header
   alias Starcite.Storage.SessionCatalog
 
@@ -43,9 +45,189 @@ defmodule Starcite.Storage.SessionCatalogTest do
     assert session.tenant_id == "acme"
     assert session.last_seq == 12
     assert session.archived_seq == 12
+    assert session.projection_version == 0
+    assert Session.latest_projection_items(session) == []
 
     assert {:ok, entry} = SessionCatalog.get_session_entry("ses-catalog-1")
     assert entry.archived == false
+  end
+
+  test "persists projection state alongside session progress" do
+    session_id = "ses-catalog-projections"
+
+    header =
+      Header.new(session_id,
+        tenant_id: "acme",
+        creator_principal: %Principal{tenant_id: "acme", id: "svc", type: :service},
+        metadata: %{}
+      )
+
+    assert :ok = SessionCatalog.persist_created(header)
+    assert :ok = SessionCatalog.put_progress_batch([%{session_id: session_id, archived_seq: 4}])
+
+    {:ok, projections, _stored_items} =
+      Projections.put_items(Projections.new(), 4, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "one two"},
+          metadata: %{}
+        },
+        %{
+          item_id: "msg-2",
+          version: 1,
+          from_seq: 3,
+          to_seq: 4,
+          payload: %{"text" => "three four"},
+          metadata: %{}
+        }
+      ])
+
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections, 2)
+    assert {:ok, session} = SessionCatalog.get_session(session_id)
+
+    assert session.projection_version == 2
+
+    assert Enum.map(Session.latest_projection_items(session), & &1.item_id) == ["msg-1", "msg-2"]
+  end
+
+  test "projection state writes are idempotent for the same version and state" do
+    session_id = "ses-catalog-projection-idempotent"
+
+    header =
+      Header.new(session_id,
+        tenant_id: "acme",
+        creator_principal: %Principal{tenant_id: "acme", id: "svc", type: :service},
+        metadata: %{}
+      )
+
+    assert :ok = SessionCatalog.persist_created(header)
+    assert :ok = SessionCatalog.put_progress_batch([%{session_id: session_id, archived_seq: 2}])
+
+    {:ok, projections, _stored_items} =
+      Projections.put_items(Projections.new(), 2, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "hello"},
+          metadata: %{}
+        }
+      ])
+
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections, 1)
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections, 1)
+    assert {:ok, 1} = SessionCatalog.get_projection_version(session_id)
+  end
+
+  test "projection state rejects conflicting rewrites at the same version" do
+    session_id = "ses-catalog-projection-conflict"
+
+    header =
+      Header.new(session_id,
+        tenant_id: "acme",
+        creator_principal: %Principal{tenant_id: "acme", id: "svc", type: :service},
+        metadata: %{}
+      )
+
+    assert :ok = SessionCatalog.persist_created(header)
+    assert :ok = SessionCatalog.put_progress_batch([%{session_id: session_id, archived_seq: 2}])
+
+    {:ok, projections_v1, _stored_items} =
+      Projections.put_items(Projections.new(), 2, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "hello"},
+          metadata: %{}
+        }
+      ])
+
+    {:ok, conflicting_projections, _stored_items} =
+      Projections.put_items(Projections.new(), 2, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "goodbye"},
+          metadata: %{}
+        }
+      ])
+
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections_v1, 1)
+
+    assert {:error, {:projection_version_conflict, 1, 1}} =
+             SessionCatalog.put_projection_state(session_id, conflicting_projections, 1)
+  end
+
+  test "projection state rejects stale versions" do
+    session_id = "ses-catalog-projection-stale"
+
+    header =
+      Header.new(session_id,
+        tenant_id: "acme",
+        creator_principal: %Principal{tenant_id: "acme", id: "svc", type: :service},
+        metadata: %{}
+      )
+
+    assert :ok = SessionCatalog.persist_created(header)
+    assert :ok = SessionCatalog.put_progress_batch([%{session_id: session_id, archived_seq: 2}])
+
+    {:ok, projections, _stored_items} =
+      Projections.put_items(Projections.new(), 2, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "hello"},
+          metadata: %{}
+        }
+      ])
+
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections, 2)
+
+    assert {:error, {:stale_projection_version, 1, 2}} =
+             SessionCatalog.put_projection_state(session_id, projections, 1)
+  end
+
+  test "drops projection state that extends past persisted archived progress on hydrate" do
+    session_id = "ses-catalog-projection-ahead-of-progress"
+
+    header =
+      Header.new(session_id,
+        tenant_id: "acme",
+        creator_principal: %Principal{tenant_id: "acme", id: "svc", type: :service},
+        metadata: %{}
+      )
+
+    assert :ok = SessionCatalog.persist_created(header)
+
+    {:ok, projections, _stored_items} =
+      Projections.put_items(Projections.new(), 2, [
+        %{
+          item_id: "msg-1",
+          version: 1,
+          from_seq: 1,
+          to_seq: 2,
+          payload: %{"text" => "ahead"},
+          metadata: %{}
+        }
+      ])
+
+    assert :ok = SessionCatalog.put_projection_state(session_id, projections, 1)
+    assert {:ok, session} = SessionCatalog.get_session(session_id)
+
+    assert session.last_seq == 0
+    assert session.archived_seq == 0
+    assert session.projection_version == 0
+    assert Session.latest_projection_items(session) == []
   end
 
   test "lists sessions from the catalog without consulting the archive adapter" do

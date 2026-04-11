@@ -1161,6 +1161,69 @@ defmodule Starcite.RuntimeTest do
       assert event == %{kind: "session.frozen", session_id: id, tenant_id: "acme"}
     end
 
+    test "repairs a dirty projection mirror before freezing an idle owner log" do
+      original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
+
+      original_idle_check_interval =
+        Application.get_env(:starcite, :session_log_idle_check_interval_ms)
+
+      on_exit(fn ->
+        restore_app_env(:session_log_idle_timeout_ms, original_idle_timeout)
+        restore_app_env(:session_log_idle_check_interval_ms, original_idle_check_interval)
+      end)
+
+      Application.put_env(:starcite, :session_log_idle_timeout_ms, 120)
+      Application.put_env(:starcite, :session_log_idle_check_interval_ms, 20)
+
+      Phoenix.PubSub.subscribe(Starcite.PubSub, "lifecycle:acme")
+
+      id = unique_id("ses-idle-projection-repair")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+      flush_lifecycle_events()
+
+      assert {:ok, %{seq: 1, last_seq: 1}} =
+               append_event(id, %{
+                 type: "content",
+                 payload: %{text: "projection source"},
+                 actor: "agent:test"
+               })
+
+      flush_archive_until(id, 1)
+
+      assert {:ok, [_stored_item]} =
+               WritePath.put_projection_items(id, [
+                 %{
+                   item_id: "msg-1",
+                   version: 1,
+                   from_seq: 1,
+                   to_seq: 1,
+                   payload: %{"text" => "projected"},
+                   metadata: %{}
+                 }
+               ])
+
+      [{pid, _value}] = Registry.lookup(Starcite.DataPlane.SessionRuntimeRegistry, id)
+      ref = Process.monitor(pid)
+
+      :sys.replace_state(pid, fn {:state, batch, batch_count, config, data, needs_gc, debug} ->
+        log = data.log
+
+        {:state, batch, batch_count, config,
+         %{data | log: %{log | mirrored_projection_version: 0}}, needs_gc, debug}
+      end)
+
+      assert {:ok, 1} = SessionCatalog.get_projection_version(id)
+
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.freezing", session_id: id, tenant_id: "acme"}
+
+      assert_receive {:session_lifecycle, event}, 2_000
+      assert event == %{kind: "session.frozen", session_id: id, tenant_id: "acme"}
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, reason}, 2_000
+      assert reason in [:normal, :shutdown]
+    end
+
     test "does not freeze dirty owner logs while unarchived events remain" do
       original_idle_timeout = Application.get_env(:starcite, :session_log_idle_timeout_ms)
 

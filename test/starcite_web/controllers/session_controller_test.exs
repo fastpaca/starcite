@@ -5,6 +5,8 @@ defmodule StarciteWeb.SessionControllerTest do
   import Plug.Test
 
   alias Starcite.AuthTestSupport
+  alias Starcite.DataPlane.SessionStore
+  alias Starcite.Projection
   alias Starcite.Repo
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -200,7 +202,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
-    test "returns 503 when too few ready nodes remain to claim a session" do
+    test "returns 503 when in-memory replication quorum cannot be reached" do
       original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
@@ -209,13 +211,8 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
-      Application.put_env(
-        :starcite,
-        :cluster_node_ids,
-        [Node.self(), :"missing-a@127.0.0.1", :"missing-b@127.0.0.1"]
-      )
-
-      Application.put_env(:starcite, :routing_replication_factor, 3)
+      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
+      Application.put_env(:starcite, :routing_replication_factor, 2)
 
       conn =
         json_conn(
@@ -229,7 +226,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 503
       body = Jason.decode!(conn.resp_body)
-      assert body["error"] == "owner_unavailable"
+      assert body["error"] in ["owner_unavailable", "replication_unavailable"]
       assert is_binary(body["message"])
     end
 
@@ -844,6 +841,621 @@ defmodule StarciteWeb.SessionControllerTest do
         {:ack, :error, :expected_seq_conflict},
         {:total, :error, :expected_seq_conflict}
       ])
+    end
+  end
+
+  describe "POST /v1/sessions/:id/projections" do
+    test "writes projection item versions from the request payload" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions/#{id}/projections",
+          %{
+            "items" => [
+              %{
+                "item_id" => "msg-1",
+                "version" => 1,
+                "from_seq" => 1,
+                "to_seq" => 2,
+                "payload" => %{"role" => "assistant", "text" => "one two"},
+                "metadata" => %{"kind" => "message"},
+                "schema" => "ai.message.v1",
+                "content_type" => "application/json"
+              },
+              %{
+                "item_id" => "msg-2",
+                "version" => 1,
+                "from_seq" => 3,
+                "to_seq" => 3,
+                "payload" => %{"role" => "assistant", "text" => "three"},
+                "metadata" => %{"kind" => "message"}
+              }
+            ]
+          }
+        )
+
+      assert conn.status == 201
+      body = Jason.decode!(conn.resp_body)
+      assert [first_item, second_item] = body["items"]
+      assert first_item["item_id"] == "msg-1"
+      assert first_item["version"] == 1
+      assert first_item["from_seq"] == 1
+      assert first_item["to_seq"] == 2
+      assert first_item["payload"] == %{"role" => "assistant", "text" => "one two"}
+      assert first_item["metadata"] == %{"kind" => "message"}
+      assert first_item["schema"] == "ai.message.v1"
+      assert first_item["content_type"] == "application/json"
+      assert second_item["item_id"] == "msg-2"
+      assert second_item["version"] == 1
+      assert second_item["from_seq"] == 3
+      assert second_item["to_seq"] == 3
+
+      assert {:ok, latest_items} = Projection.latest_items(id)
+      assert Enum.map(latest_items, & &1.item_id) == ["msg-1", "msg-2"]
+    end
+
+    test "rejects overlapping latest items" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three", "four"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _item} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions/#{id}/projections",
+          %{
+            "items" => [
+              %{
+                "item_id" => "msg-2",
+                "version" => 1,
+                "from_seq" => 2,
+                "to_seq" => 3,
+                "payload" => %{"text" => "two three"},
+                "metadata" => %{}
+              }
+            ]
+          }
+        )
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "projection_item_overlap"
+    end
+
+    test "rejects duplicate item_ids in a single batch" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions/#{id}/projections",
+          %{
+            "items" => [
+              %{
+                "item_id" => "msg-1",
+                "version" => 1,
+                "from_seq" => 1,
+                "to_seq" => 1,
+                "payload" => %{"text" => "one"},
+                "metadata" => %{}
+              },
+              %{
+                "item_id" => "msg-1",
+                "version" => 2,
+                "from_seq" => 2,
+                "to_seq" => 2,
+                "payload" => %{"text" => "two"},
+                "metadata" => %{}
+              }
+            ]
+          }
+        )
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "projection_item_duplicate"
+    end
+
+    test "rejects overlapping intervals within the same batch" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions/#{id}/projections",
+          %{
+            "items" => [
+              %{
+                "item_id" => "msg-1",
+                "version" => 1,
+                "from_seq" => 1,
+                "to_seq" => 2,
+                "payload" => %{"text" => "one two"},
+                "metadata" => %{}
+              },
+              %{
+                "item_id" => "msg-2",
+                "version" => 1,
+                "from_seq" => 2,
+                "to_seq" => 3,
+                "payload" => %{"text" => "two three"},
+                "metadata" => %{}
+              }
+            ]
+          }
+        )
+
+      assert conn.status == 409
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "projection_item_overlap"
+    end
+
+    test "rejects intervals outside the current raw seq range" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      conn =
+        json_conn(
+          :post,
+          "/v1/sessions/#{id}/projections",
+          %{
+            "item_id" => "msg-1",
+            "version" => 1,
+            "from_seq" => 1,
+            "to_seq" => 3,
+            "payload" => %{"text" => "one two three"},
+            "metadata" => %{}
+          }
+        )
+
+      assert conn.status == 400
+      body = Jason.decode!(conn.resp_body)
+      assert body["error"] == "invalid_projection_item"
+    end
+  end
+
+  describe "GET /v1/sessions/:id/projections" do
+    test "lists the latest projection version for each item id" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-2",
+                 version: 1,
+                 from_seq: 3,
+                 to_seq: 3,
+                 payload: %{"text" => "three"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:get, "/v1/sessions/#{id}/projections", nil)
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+
+      assert [%{"item_id" => "msg-1", "version" => 2}, %{"item_id" => "msg-2", "version" => 1}] =
+               body["items"]
+    end
+
+    test "rejects cross-tenant projection reads across all projection endpoints" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "beta")
+
+      {:ok, _} =
+        WritePath.append_event(id, %{
+          type: "content",
+          payload: %{text: "hidden"},
+          actor: "user:user-beta",
+          producer_id: "writer-1",
+          producer_seq: 1
+        })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "hidden"},
+                 metadata: %{}
+               })
+
+      for path <- [
+            "/v1/sessions/#{id}/projections",
+            "/v1/sessions/#{id}/projections/msg-1",
+            "/v1/sessions/#{id}/projections/msg-1/versions",
+            "/v1/sessions/#{id}/projections/msg-1/versions/1"
+          ] do
+        conn = json_conn(:get, path, nil)
+
+        assert conn.status == 403
+        body = Jason.decode!(conn.resp_body)
+        assert body["error"] == "forbidden_tenant"
+      end
+    end
+  end
+
+  describe "GET /v1/sessions/:id/projections/:item_id" do
+    test "returns the latest stored version for one item id" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1", nil)
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["item_id"] == "msg-1"
+      assert body["version"] == 2
+      assert body["payload"] == %{"text" => "one two"}
+    end
+  end
+
+  describe "GET /v1/sessions/:id/projections/:item_id/versions" do
+    test "lists all stored versions for one item id" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1/versions", nil)
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert Enum.map(body["items"], & &1["version"]) == [1, 2]
+    end
+
+    test "reads version history from persisted archived-safe projection state" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three", "four"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      assert {:ok, %{archived_seq: 4}} = WritePath.ack_archived(id, 4)
+
+      :ok = SessionStore.clear()
+
+      conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1/versions", nil)
+
+      assert conn.status == 200
+      assert Enum.map(Jason.decode!(conn.resp_body)["items"], & &1["version"]) == [1, 2]
+    end
+  end
+
+  describe "GET /v1/sessions/:id/projections/:item_id/versions/:version" do
+    test "returns one stored projection item version" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1/versions/1", nil)
+
+      assert conn.status == 200
+      body = Jason.decode!(conn.resp_body)
+      assert body["item_id"] == "msg-1"
+      assert body["version"] == 1
+      assert body["payload"] == %{"text" => "one"}
+    end
+  end
+
+  describe "DELETE /v1/sessions/:id/projections/:item_id" do
+    test "deletes all stored versions for one item id" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two", "three"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-2",
+                 version: 1,
+                 from_seq: 3,
+                 to_seq: 3,
+                 payload: %{"text" => "three"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:delete, "/v1/sessions/#{id}/projections/msg-1", nil)
+
+      assert conn.status == 204
+      assert {:error, :projection_item_not_found} = Projection.get_item(id, "msg-1")
+      assert {:ok, [%{item_id: "msg-2"}]} = Projection.latest_items(id)
+    end
+
+    test "deletes all stored versions from the public projection API" do
+      id = unique_id("ses")
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for {text, producer_seq} <- Enum.with_index(["one", "two"], 1) do
+        {:ok, _} =
+          WritePath.append_event(id, %{
+            type: "content",
+            payload: %{text: text},
+            actor: "user:user-test",
+            producer_id: "writer-1",
+            producer_seq: producer_seq
+          })
+      end
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 1,
+                 from_seq: 1,
+                 to_seq: 1,
+                 payload: %{"text" => "one"},
+                 metadata: %{}
+               })
+
+      assert {:ok, _} =
+               Projection.put_item(id, %{
+                 item_id: "msg-1",
+                 version: 2,
+                 from_seq: 1,
+                 to_seq: 2,
+                 payload: %{"text" => "one two"},
+                 metadata: %{}
+               })
+
+      conn = json_conn(:delete, "/v1/sessions/#{id}/projections/msg-1", nil)
+
+      assert conn.status == 204
+
+      versions_conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1/versions", nil)
+      assert versions_conn.status == 404
+      assert Jason.decode!(versions_conn.resp_body)["error"] == "projection_item_not_found"
+
+      version_conn = json_conn(:get, "/v1/sessions/#{id}/projections/msg-1/versions/1", nil)
+      assert version_conn.status == 404
+      assert Jason.decode!(version_conn.resp_body)["error"] == "projection_item_not_found"
     end
   end
 

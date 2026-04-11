@@ -5,6 +5,12 @@ defmodule StarciteWeb.SessionController do
   - `create` via `POST /v1/sessions`
   - `update` via `PATCH /v1/sessions/:id`
   - `append` via `POST /v1/sessions/:id/append`
+  - `list_projections` via `GET /v1/sessions/:id/projections`
+  - `put_projections` via `POST /v1/sessions/:id/projections`
+  - `show_projection` via `GET /v1/sessions/:id/projections/:item_id`
+  - `delete_projection` via `DELETE /v1/sessions/:id/projections/:item_id`
+  - `list_projection_versions` via `GET /v1/sessions/:id/projections/:item_id/versions`
+  - `show_projection_version` via `GET /v1/sessions/:id/projections/:item_id/versions/:version`
   - `index` via `GET /v1/sessions`
   - `show` via `GET /v1/sessions/:id`
   - `archive` via `POST /v1/sessions/:id/archive`
@@ -13,7 +19,10 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
+  alias Starcite.Auth.Principal
+  alias Starcite.Projection
   alias Starcite.Observability.Telemetry
+  alias Starcite.ReadPath
   alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
   alias StarciteWeb.Auth.Context
@@ -57,10 +66,10 @@ defmodule StarciteWeb.SessionController do
   """
   def update(conn, %{"id" => id} = params) do
     with {:ok, auth} <- fetch_auth(conn) do
-      with {:ok, attrs} <- validate_update(params),
-           :ok <- Policy.authorize_session_access(auth, id, :manage),
+      with :ok <- Policy.allowed_to_access_session(auth, id),
+           {:ok, attrs} <- validate_update(params),
            {:ok, current_session} <- SessionCatalog.get_session(id),
-           :ok <- Policy.authorize_session_resource(auth, current_session, :manage),
+           :ok <- Policy.allowed_to_update_session(auth, current_session),
            {:ok, session} <- WritePath.update_session(id, attrs) do
         :ok = Telemetry.ingest_edge(:update_session, auth.principal.tenant_id, :ok)
         json(conn, session)
@@ -103,7 +112,8 @@ defmodule StarciteWeb.SessionController do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_api(%Context{} = auth, id, params)
       when is_binary(id) and id != "" and is_map(params) do
-    with :ok <- Policy.authorize_session_access(auth, id, :append),
+    with :ok <- Policy.allowed_to_access_session(auth, id),
+         :ok <- authorize_append(auth, id),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_reply(id, event, expected_seq) do
       :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
@@ -192,14 +202,19 @@ defmodule StarciteWeb.SessionController do
 
   defp ingest_edge_error_reason({:error, reason}) when is_atom(reason), do: reason
 
+  # Keep the no-auth path free of per-append read/route overhead.
+  defp authorize_append(%Context{kind: :none}, _id), do: :ok
+
+  defp authorize_append(%Context{} = auth, _id), do: Policy.has_scope(auth, "session:append")
+
   @doc """
   List known sessions from the durable session catalog.
   """
   def index(conn, params) do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, opts} <- validate_list(params),
-         {:ok, scoped_opts} <- Policy.authorize_session_list(auth, opts),
-         {:ok, page} <- SessionCatalog.list_sessions(scoped_opts) do
+         :ok <- Policy.can_list_sessions(auth),
+         {:ok, page} <- list_sessions(auth, opts) do
       json(conn, page)
     end
   end
@@ -209,9 +224,9 @@ defmodule StarciteWeb.SessionController do
   """
   def show(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_access(auth, id, :read),
-         {:ok, session} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_resource(auth, session, :read) do
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- get_session_entry_for_auth(auth, id) do
       json(conn, session)
     end
   end
@@ -223,9 +238,9 @@ defmodule StarciteWeb.SessionController do
   """
   def archive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_access(auth, id, :manage),
-         {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
          {:ok, session} <- WritePath.archive_session(id) do
       json(conn, session)
     end
@@ -238,15 +253,119 @@ defmodule StarciteWeb.SessionController do
   """
   def unarchive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_access(auth, id, :manage),
-         {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
          {:ok, session} <- WritePath.unarchive_session(id) do
       json(conn, session)
     end
   end
 
   def unarchive(_conn, _params), do: {:error, :invalid_session_id}
+
+  @doc """
+  List the latest projection item version for each item id.
+  """
+  def list_projections(conn, %{"id" => id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_read_session(auth, session),
+         {:ok, items} <- Projection.latest_items(session) do
+      json(conn, %{items: items})
+    end
+  end
+
+  def list_projections(_conn, _params), do: {:error, :invalid_session_id}
+
+  @doc """
+  Fetch the latest projection item version for one item id.
+  """
+  def show_projection(conn, %{"id" => id, "item_id" => item_id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_read_session(auth, session),
+         {:ok, item_id} <- required_non_empty_string(item_id),
+         {:ok, item} <- Projection.get_item(session, item_id) do
+      json(conn, item)
+    end
+  end
+
+  def show_projection(_conn, _params), do: {:error, :invalid_projection_item}
+
+  @doc """
+  List all stored versions for one projection item id.
+  """
+  def list_projection_versions(conn, %{"id" => id, "item_id" => item_id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_read_session(auth, session),
+         {:ok, item_id} <- required_non_empty_string(item_id),
+         {:ok, items} <- Projection.item_versions(session, item_id) do
+      json(conn, %{items: items})
+    end
+  end
+
+  def list_projection_versions(_conn, _params), do: {:error, :invalid_projection_item}
+
+  @doc """
+  Fetch one stored projection item version.
+  """
+  def show_projection_version(conn, %{"id" => id, "item_id" => item_id, "version" => version}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_read_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_read_session(auth, session),
+         {:ok, item_id} <- required_non_empty_string(item_id),
+         {:ok, version} <- required_projection_positive_integer(version),
+         {:ok, item} <- Projection.get_item_version(session, item_id, version) do
+      json(conn, item)
+    end
+  end
+
+  def show_projection_version(_conn, _params), do: {:error, :invalid_projection_item}
+
+  @doc """
+  Write one or more projection item versions for covered seq intervals.
+  """
+  def put_projections(conn, %{"id" => id} = params) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_update_session(auth, session),
+         {:ok, items} <- validate_projection_items(params),
+         {:ok, stored_items} <- Projection.put_items(id, items) do
+      conn
+      |> put_status(:created)
+      |> json(%{items: stored_items})
+    end
+  end
+
+  def put_projections(_conn, _params), do: {:error, :invalid_projection_item}
+
+  @doc """
+  Delete every stored version for one projection item id.
+  """
+  def delete_projection(conn, %{"id" => id, "item_id" => item_id}) do
+    with {:ok, auth} <- fetch_auth(conn),
+         :ok <- Policy.can_manage_session(auth),
+         :ok <- Policy.allowed_to_access_session(auth, id),
+         {:ok, session} <- ReadPath.get_session_routed(id, true),
+         :ok <- Policy.allowed_to_update_session(auth, session),
+         {:ok, item_id} <- required_non_empty_string(item_id),
+         :ok <- Projection.delete_item(id, item_id) do
+      send_resp(conn, :no_content, "")
+    end
+  end
+
+  def delete_projection(_conn, _params), do: {:error, :invalid_projection_item}
 
   # Validation
 
@@ -402,6 +521,113 @@ defmodule StarciteWeb.SessionController do
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
 
+  defp validate_projection_items(%{"items" => items})
+       when is_list(items) and items != [] do
+    items
+    |> Enum.reduce_while({:ok, []}, fn item, {:ok, acc} ->
+      case validate_projection_item(item) do
+        {:ok, validated} -> {:cont, {:ok, [validated | acc]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, validated_items} -> {:ok, Enum.reverse(validated_items)}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_projection_items(params)
+       when is_map(params) do
+    case validate_projection_item(params) do
+      {:ok, item} -> {:ok, [item]}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp validate_projection_item(
+         %{
+           "item_id" => item_id,
+           "version" => version,
+           "from_seq" => from_seq,
+           "to_seq" => to_seq,
+           "payload" => payload
+         } = params
+       ) do
+    with {:ok, item_id} <- required_non_empty_string(item_id),
+         {:ok, version} <- required_positive_integer(version),
+         {:ok, from_seq} <- required_positive_integer(from_seq),
+         {:ok, to_seq} <- required_positive_integer(to_seq),
+         {:ok, schema} <- optional_non_empty_string(params["schema"]),
+         {:ok, content_type} <- optional_non_empty_string(params["content_type"]),
+         {:ok, metadata} <- optional_object(params["metadata"]),
+         true <- is_map(payload),
+         true <- from_seq <= to_seq do
+      {:ok,
+       %{
+         item_id: item_id,
+         version: version,
+         from_seq: from_seq,
+         to_seq: to_seq,
+         schema: schema,
+         content_type: content_type,
+         payload: payload,
+         metadata: metadata
+       }}
+    else
+      false -> {:error, :invalid_projection_item}
+      {:error, :invalid_event} -> {:error, :invalid_projection_item}
+      {:error, :invalid_metadata} -> {:error, :invalid_projection_item}
+    end
+  end
+
+  defp validate_projection_item(_params),
+    do: {:error, :invalid_projection_item}
+
+  defp required_projection_positive_integer(value) do
+    case required_positive_integer(value) do
+      {:ok, parsed} -> {:ok, parsed}
+      {:error, :invalid_event} -> {:error, :invalid_projection_item}
+    end
+  end
+
+  defp list_sessions(%Context{kind: :none}, opts) when is_map(opts) do
+    SessionCatalog.list_sessions(opts)
+  end
+
+  defp list_sessions(
+         %Context{
+           kind: :jwt,
+           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
+           session_id: nil
+         },
+         opts
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
+    SessionCatalog.list_sessions(
+      opts
+      |> Map.put(:tenant_id, tenant_id)
+    )
+  end
+
+  defp list_sessions(
+         %Context{
+           kind: :jwt,
+           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
+           session_id: session_id
+         },
+         opts
+       )
+       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
+              session_id != "" and is_map(opts) do
+    SessionCatalog.list_sessions_by_ids(
+      [session_id],
+      opts
+      |> Map.put(:tenant_id, tenant_id)
+    )
+  end
+
+  defp list_sessions(_auth, _opts), do: {:error, :forbidden}
+
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
@@ -532,6 +758,44 @@ defmodule StarciteWeb.SessionController do
        do: {:ok, value}
 
   defp metadata_filter_value(_value), do: :error
+
+  defp get_session_entry_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_session_entry(session_id)
+  end
+
+  defp get_session_entry_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, %{tenant_id: ^tenant_id} = session} <- SessionCatalog.get_session_entry(session_id) do
+      {:ok, session}
+    else
+      {:ok, _session} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp get_session_entry_for_auth(_auth, _session_id), do: {:error, :forbidden}
+
+  defp get_session_tenant_id_for_auth(%Context{kind: :none}, session_id) do
+    SessionCatalog.get_tenant_id(session_id)
+  end
+
+  defp get_session_tenant_id_for_auth(
+         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
+         session_id
+       )
+       when is_binary(tenant_id) and tenant_id != "" do
+    with {:ok, ^tenant_id} <- SessionCatalog.get_tenant_id(session_id) do
+      {:ok, tenant_id}
+    else
+      {:ok, _other_tenant_id} -> {:error, :forbidden_tenant}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  defp get_session_tenant_id_for_auth(_auth, _session_id), do: {:error, :forbidden}
 
   defp measure_append_request(fun) when is_function(fun, 0) do
     started_at = System.monotonic_time()
