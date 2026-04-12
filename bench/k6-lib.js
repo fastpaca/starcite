@@ -21,6 +21,11 @@ if (clusterNodes.length === 0) {
   clusterNodes.push((__ENV.API_URL || 'http://localhost:4000/v1').replace(/\/$/, ''));
 }
 
+const readyNodes = parseClusterNodes(__ENV.CLUSTER_READY_NODES);
+if (readyNodes.length === 0) {
+  readyNodes.push(...clusterNodes.map((url) => url.replace(/\/v1$/, '')));
+}
+
 let nodeIndex = 0;
 
 function getNextNode() {
@@ -33,6 +38,7 @@ export const config = {
   apiUrl: clusterNodes[0],
   getNextNode,
   clusterNodes,
+  readyNodes,
   runId: __ENV.RUN_ID || `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
 };
 
@@ -75,8 +81,8 @@ export function waitForClusterReady(timeoutSeconds = 60) {
   while (Date.now() - startTime < timeoutMs) {
     let allReady = true;
 
-    for (const node of clusterNodes) {
-      const res = http.get(`${node.replace('/v1', '')}/health/ready`, { timeout: '5s' });
+    for (const node of readyNodes) {
+      const res = http.get(`${node}/health/ready`, { timeout: '5s' });
       if (res.status !== 200) {
         allReady = false;
         break;

@@ -49,6 +49,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
 - `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"`, plus drain metadata during shutdown drain, instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
+- the existing hot-path k6 bench can target the split public and ops listeners by keeping `CLUSTER_NODES` on the public `/v1` URLs and setting `CLUSTER_READY_NODES` to the matching ops base URLs
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
 `phx_join`, and `phx_leave` with the usual Phoenix frame array shape
