@@ -2,7 +2,6 @@ defmodule StarciteWeb.Auth.PolicyTest do
   use ExUnit.Case, async: true
 
   alias Starcite.Auth.Principal
-  alias Starcite.Session
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.Auth.Policy
 
@@ -23,19 +22,19 @@ defmodule StarciteWeb.Auth.PolicyTest do
   end
 
   test "none mode allows create/list/read/append without jwt claims" do
-    session = Session.new("ses-1", tenant_id: "acme")
+    session = %{id: "ses-1", tenant_id: "acme"}
     none = Context.none()
 
     assert {:ok, %Principal{tenant_id: "service", id: "service", type: :service}} =
              Policy.can_create_session(none, %{})
 
     assert {:ok, "ses-1"} = Policy.resolve_create_session_id(none, "ses-1")
-    assert :ok = Policy.can_list_sessions(none)
-    assert :ok = Policy.can_read_session(none)
-    assert :ok = Policy.can_manage_session(none)
-    assert :ok = Policy.allowed_to_access_session(none, "ses-1")
-    assert :ok = Policy.allowed_to_read_session(none, session)
-    assert :ok = Policy.allowed_to_append_session(none, session)
+    assert {:ok, %{limit: 10}} = Policy.authorize_session_list(none, %{limit: 10})
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :read)
+    assert :ok = Policy.authorize_session_resource(none, session, :read)
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :manage)
+    assert :ok = Policy.authorize_session_resource(none, session, :manage)
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :append)
   end
 
   test "resolve_create_session_id enforces optional session_id lock" do
@@ -51,26 +50,23 @@ defmodule StarciteWeb.Auth.PolicyTest do
              Policy.resolve_create_session_id(jwt_ctx(%{session_id: "ses-1"}), "ses-2")
   end
 
-  test "can_list_sessions enforces read scope" do
-    assert :ok = Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:read"]}))
+  test "authorize_session_list scopes reads to the caller tenant and optional pinned session" do
+    assert {:ok, %{limit: 10, tenant_id: "acme"}} =
+             Policy.authorize_session_list(jwt_ctx(%{scopes: ["session:read"]}), %{limit: 10})
 
-    assert :ok =
-             Policy.can_list_sessions(jwt_ctx(%{session_id: "ses-42", scopes: ["session:read"]}))
-
-    assert {:error, :forbidden_scope} =
-             Policy.can_list_sessions(jwt_ctx(%{scopes: ["session:append"]}))
-  end
-
-  test "can_manage_session reuses session:create scope" do
-    assert :ok = Policy.can_manage_session(jwt_ctx(%{scopes: ["session:create"]}))
+    assert {:ok, %{limit: 10, tenant_id: "acme", session_ids: ["ses-42"]}} =
+             Policy.authorize_session_list(
+               jwt_ctx(%{session_id: "ses-42", scopes: ["session:read"]}),
+               %{limit: 10}
+             )
 
     assert {:error, :forbidden_scope} =
-             Policy.can_manage_session(jwt_ctx(%{scopes: ["session:read"]}))
+             Policy.authorize_session_list(jwt_ctx(%{scopes: ["session:append"]}), %{limit: 10})
   end
 
-  test "can_subscribe_lifecycle requires a service principal with read scope" do
-    assert :ok =
-             Policy.can_subscribe_lifecycle(
+  test "authorize_lifecycle_subscription requires a service principal with read scope" do
+    assert {:ok, "acme"} =
+             Policy.authorize_lifecycle_subscription(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
                  scopes: ["session:read"]
@@ -78,7 +74,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
 
     assert {:error, :forbidden} =
-             Policy.can_subscribe_lifecycle(
+             Policy.authorize_lifecycle_subscription(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "acme", id: "user-1", type: :user},
                  scopes: ["session:read"]
@@ -86,7 +82,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.can_subscribe_lifecycle(
+             Policy.authorize_lifecycle_subscription(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
                  scopes: ["session:append"]
@@ -94,7 +90,7 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
 
     assert {:error, :forbidden_session} =
-             Policy.can_subscribe_lifecycle(
+             Policy.authorize_lifecycle_subscription(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "acme", id: "svc-backend", type: :service},
                  scopes: ["session:read"],
@@ -103,69 +99,121 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
   end
 
-  test "allowed_to_access_session enforces session_id claim lock" do
-    assert :ok = Policy.allowed_to_access_session(jwt_ctx(%{session_id: nil}), "ses-1")
-    assert :ok = Policy.allowed_to_access_session(jwt_ctx(%{session_id: "ses-1"}), "ses-1")
-
-    assert {:error, :forbidden_session} =
-             Policy.allowed_to_access_session(jwt_ctx(%{session_id: "ses-1"}), "ses-2")
-  end
-
-  test "allowed_to_append_session enforces scope, tenant, and session lock" do
-    session = Session.new("ses-1", tenant_id: "acme")
-
+  test "authorize_session_access enforces append scope and session lock" do
     assert :ok =
-             Policy.allowed_to_append_session(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: nil, scopes: ["session:append"]}),
-               session
+               "ses-1",
+               :append
+             )
+
+    assert :ok =
+             Policy.authorize_session_access(
+               jwt_ctx(%{session_id: "ses-1", scopes: ["session:append"]}),
+               "ses-1",
+               :append
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.allowed_to_append_session(
-               jwt_ctx(%{session_id: nil, scopes: ["session:read"]}),
-               session
-             )
-
-    assert {:error, :forbidden_tenant} =
-             Policy.allowed_to_append_session(
-               jwt_ctx(%{
-                 principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
-                 session_id: nil,
-                 scopes: ["session:append"]
-               }),
-               session
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:read"]}),
+               "ses-1",
+               :append
              )
 
     assert {:error, :forbidden_session} =
-             Policy.allowed_to_append_session(
-               jwt_ctx(%{session_id: "ses-2", scopes: ["session:append"]}),
-               session
+             Policy.authorize_session_access(
+               jwt_ctx(%{session_id: "ses-1", scopes: ["session:append"]}),
+               "ses-2",
+               :append
              )
   end
 
-  test "allowed_to_read_session enforces scope, tenant, and session lock" do
-    session = Session.new("ses-9", tenant_id: "acme")
-
+  test "authorize_session_access enforces read access on session ids" do
     assert :ok =
-             Policy.allowed_to_read_session(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-9", scopes: ["session:read"]}),
-               session
+               "ses-9",
+               :read
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.allowed_to_read_session(
-               jwt_ctx(%{session_id: "ses-9", scopes: ["session:append"]}),
-               session
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:append"]}),
+               "ses-9",
+               :read
+             )
+
+    assert {:error, :forbidden_session} =
+             Policy.authorize_session_access(
+               jwt_ctx(%{session_id: "ses-locked", scopes: ["session:read"]}),
+               "ses-9",
+               :read
+             )
+  end
+
+  test "authorize_session_resource enforces tenant checks on loaded sessions" do
+    session = %{id: "ses-9", tenant_id: "acme"}
+
+    assert :ok =
+             Policy.authorize_session_resource(
+               jwt_ctx(%{session_id: "ses-9", scopes: ["session:read"]}),
+               session,
+               :read
              )
 
     assert {:error, :forbidden_tenant} =
-             Policy.allowed_to_read_session(
+             Policy.authorize_session_resource(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
-                 session_id: "ses-9",
                  scopes: ["session:read"]
                }),
-               session
+               session,
+               :read
+             )
+  end
+
+  test "authorize_session_access enforces manage access on session ids" do
+    assert :ok =
+             Policy.authorize_session_access(
+               jwt_ctx(%{session_id: "ses-11", scopes: ["session:create"]}),
+               "ses-11",
+               :manage
+             )
+
+    assert {:error, :forbidden_scope} =
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:read"]}),
+               "ses-11",
+               :manage
+             )
+
+    assert {:error, :forbidden_session} =
+             Policy.authorize_session_access(
+               jwt_ctx(%{session_id: "ses-locked", scopes: ["session:create"]}),
+               "ses-11",
+               :manage
+             )
+  end
+
+  test "authorize_session_resource enforces manage tenant checks on loaded sessions" do
+    session = %{id: "ses-11", tenant_id: "acme"}
+
+    assert :ok =
+             Policy.authorize_session_resource(
+               jwt_ctx(%{session_id: "ses-11", scopes: ["session:create"]}),
+               session,
+               :manage
+             )
+
+    assert {:error, :forbidden_tenant} =
+             Policy.authorize_session_resource(
+               jwt_ctx(%{
+                 principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
+                 scopes: ["session:create"]
+               }),
+               session,
+               :manage
              )
   end
 

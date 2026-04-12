@@ -13,7 +13,6 @@ defmodule StarciteWeb.SessionController do
 
   use StarciteWeb, :controller
 
-  alias Starcite.Auth.Principal
   alias Starcite.Observability.Telemetry
   alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
@@ -58,10 +57,10 @@ defmodule StarciteWeb.SessionController do
   """
   def update(conn, %{"id" => id} = params) do
     with {:ok, auth} <- fetch_auth(conn) do
-      with :ok <- Policy.allowed_to_access_session(auth, id),
-           {:ok, attrs} <- validate_update(params),
+      with {:ok, attrs} <- validate_update(params),
+           :ok <- Policy.authorize_session_access(auth, id, :manage),
            {:ok, current_session} <- SessionCatalog.get_session(id),
-           :ok <- Policy.allowed_to_update_session(auth, current_session),
+           :ok <- Policy.authorize_session_resource(auth, current_session, :manage),
            {:ok, session} <- WritePath.update_session(id, attrs) do
         :ok = Telemetry.ingest_edge(:update_session, auth.principal.tenant_id, :ok)
         json(conn, session)
@@ -104,8 +103,7 @@ defmodule StarciteWeb.SessionController do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_api(%Context{} = auth, id, params)
       when is_binary(id) and id != "" and is_map(params) do
-    with :ok <- Policy.allowed_to_access_session(auth, id),
-         :ok <- authorize_append(auth, id),
+    with :ok <- Policy.authorize_session_access(auth, id, :append),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_reply(id, event, expected_seq) do
       :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
@@ -194,19 +192,14 @@ defmodule StarciteWeb.SessionController do
 
   defp ingest_edge_error_reason({:error, reason}) when is_atom(reason), do: reason
 
-  # Keep the no-auth path free of per-append read/route overhead.
-  defp authorize_append(%Context{kind: :none}, _id), do: :ok
-
-  defp authorize_append(%Context{} = auth, _id), do: Policy.has_scope(auth, "session:append")
-
   @doc """
   List known sessions from the durable session catalog.
   """
   def index(conn, params) do
     with {:ok, auth} <- fetch_auth(conn),
          {:ok, opts} <- validate_list(params),
-         :ok <- Policy.can_list_sessions(auth),
-         {:ok, page} <- list_sessions(auth, opts) do
+         {:ok, scoped_opts} <- Policy.authorize_session_list(auth, opts),
+         {:ok, page} <- SessionCatalog.list_sessions(scoped_opts) do
       json(conn, page)
     end
   end
@@ -216,9 +209,9 @@ defmodule StarciteWeb.SessionController do
   """
   def show(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.can_read_session(auth),
-         :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, session} <- get_session_entry_for_auth(auth, id) do
+         :ok <- Policy.authorize_session_access(auth, id, :read),
+         {:ok, session} <- SessionCatalog.get_session_entry(id),
+         :ok <- Policy.authorize_session_resource(auth, session, :read) do
       json(conn, session)
     end
   end
@@ -230,9 +223,9 @@ defmodule StarciteWeb.SessionController do
   """
   def archive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.can_manage_session(auth),
-         :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
+         :ok <- Policy.authorize_session_access(auth, id, :manage),
+         {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
+         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
          {:ok, session} <- WritePath.archive_session(id) do
       json(conn, session)
     end
@@ -245,9 +238,9 @@ defmodule StarciteWeb.SessionController do
   """
   def unarchive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.can_manage_session(auth),
-         :ok <- Policy.allowed_to_access_session(auth, id),
-         {:ok, _tenant_id} <- get_session_tenant_id_for_auth(auth, id),
+         :ok <- Policy.authorize_session_access(auth, id, :manage),
+         {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
+         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
          {:ok, session} <- WritePath.unarchive_session(id) do
       json(conn, session)
     end
@@ -409,44 +402,6 @@ defmodule StarciteWeb.SessionController do
 
   defp validate_list(_params), do: {:error, :invalid_list_query}
 
-  defp list_sessions(%Context{kind: :none}, opts) when is_map(opts) do
-    SessionCatalog.list_sessions(opts)
-  end
-
-  defp list_sessions(
-         %Context{
-           kind: :jwt,
-           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
-           session_id: nil
-         },
-         opts
-       )
-       when is_binary(tenant_id) and tenant_id != "" and is_map(opts) do
-    SessionCatalog.list_sessions(
-      opts
-      |> Map.put(:tenant_id, tenant_id)
-    )
-  end
-
-  defp list_sessions(
-         %Context{
-           kind: :jwt,
-           principal: %Starcite.Auth.Principal{tenant_id: tenant_id},
-           session_id: session_id
-         },
-         opts
-       )
-       when is_binary(tenant_id) and tenant_id != "" and is_binary(session_id) and
-              session_id != "" and is_map(opts) do
-    SessionCatalog.list_sessions_by_ids(
-      [session_id],
-      opts
-      |> Map.put(:tenant_id, tenant_id)
-    )
-  end
-
-  defp list_sessions(_auth, _opts), do: {:error, :forbidden}
-
   defp fetch_auth(%Plug.Conn{assigns: %{auth: %Context{} = auth}}), do: {:ok, auth}
   defp fetch_auth(_conn), do: {:error, :unauthorized}
 
@@ -577,44 +532,6 @@ defmodule StarciteWeb.SessionController do
        do: {:ok, value}
 
   defp metadata_filter_value(_value), do: :error
-
-  defp get_session_entry_for_auth(%Context{kind: :none}, session_id) do
-    SessionCatalog.get_session_entry(session_id)
-  end
-
-  defp get_session_entry_for_auth(
-         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
-         session_id
-       )
-       when is_binary(tenant_id) and tenant_id != "" do
-    with {:ok, %{tenant_id: ^tenant_id} = session} <- SessionCatalog.get_session_entry(session_id) do
-      {:ok, session}
-    else
-      {:ok, _session} -> {:error, :forbidden_tenant}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp get_session_entry_for_auth(_auth, _session_id), do: {:error, :forbidden}
-
-  defp get_session_tenant_id_for_auth(%Context{kind: :none}, session_id) do
-    SessionCatalog.get_tenant_id(session_id)
-  end
-
-  defp get_session_tenant_id_for_auth(
-         %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
-         session_id
-       )
-       when is_binary(tenant_id) and tenant_id != "" do
-    with {:ok, ^tenant_id} <- SessionCatalog.get_tenant_id(session_id) do
-      {:ok, tenant_id}
-    else
-      {:ok, _other_tenant_id} -> {:error, :forbidden_tenant}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp get_session_tenant_id_for_auth(_auth, _session_id), do: {:error, :forbidden}
 
   defp measure_append_request(fun) when is_function(fun, 0) do
     started_at = System.monotonic_time()

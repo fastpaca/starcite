@@ -22,6 +22,7 @@ defmodule Starcite.Storage.SessionCatalog do
           required(:archived) => :active | :archived | :all,
           required(:metadata) => map(),
           optional(:owner_principal_ids) => [String.t()],
+          optional(:session_ids) => [String.t()],
           optional(:tenant_id) => String.t()
         }
 
@@ -231,8 +232,16 @@ defmodule Starcite.Storage.SessionCatalog do
       )
       when is_integer(limit) and limit > 0 and
              (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
+    session_ids = Map.get(query_opts, :session_ids)
+
     query =
       SessionRecord
+      |> then(fn query ->
+        case session_ids do
+          nil -> query
+          session_ids when is_list(session_ids) -> where(query, [s], s.id in ^session_ids)
+        end
+      end)
       |> then(fn query ->
         if is_nil(cursor), do: query, else: where(query, [s], s.id > ^cursor)
       end)
@@ -258,7 +267,8 @@ defmodule Starcite.Storage.SessionCatalog do
             query
 
           owner_principal_ids ->
-            owner_principal_ids = owner_principal_ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
+            owner_principal_ids =
+              owner_principal_ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
 
             case owner_principal_ids do
               [] -> where(query, [s], false)
@@ -275,67 +285,6 @@ defmodule Starcite.Storage.SessionCatalog do
       |> limit(^limit)
 
     fetch_session_page(query, limit)
-  end
-
-  @spec list_sessions_by_ids([String.t()], session_query()) ::
-          {:ok, session_page()} | {:error, term()}
-  def list_sessions_by_ids(
-        ids,
-        %{limit: limit, cursor: cursor, archived: archived, metadata: metadata} = query_opts
-      )
-      when is_list(ids) and is_integer(limit) and limit > 0 and
-             (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_map(metadata) do
-    session_ids = ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
-
-    if session_ids == [] do
-      {:ok, %{sessions: [], next_cursor: nil}}
-    else
-      query =
-        SessionRecord
-        |> where([s], s.id in ^session_ids)
-        |> then(fn query ->
-          if is_nil(cursor), do: query, else: where(query, [s], s.id > ^cursor)
-        end)
-        |> then(fn query ->
-          case archived do
-            :active -> where(query, [s], s.archived == false)
-            :archived -> where(query, [s], s.archived == true)
-            :all -> query
-          end
-        end)
-        |> then(fn query ->
-          case Map.get(query_opts, :tenant_id) do
-            nil ->
-              query
-
-            tenant_id when is_binary(tenant_id) and tenant_id != "" ->
-              where(query, [s], s.tenant_id == ^tenant_id)
-          end
-        end)
-        |> then(fn query ->
-          case Map.get(query_opts, :owner_principal_ids) do
-            nil ->
-              query
-
-            owner_principal_ids ->
-              owner_principal_ids = owner_principal_ids |> Enum.uniq() |> Enum.reject(&(&1 == ""))
-
-              case owner_principal_ids do
-                [] -> where(query, [s], false)
-                _other -> where(query, [s], s.creator_id in ^owner_principal_ids)
-              end
-          end
-        end)
-        |> then(fn query ->
-          Enum.reduce(metadata, query, fn {key, value}, acc ->
-            where(acc, [s], fragment("? @> ?", s.metadata, type(^%{key => value}, :map)))
-          end)
-        end)
-        |> order_by([s], asc: s.id)
-        |> limit(^limit)
-
-      fetch_session_page(query, limit)
-    end
   end
 
   defp get_record(session_id) when is_binary(session_id) and session_id != "" do
