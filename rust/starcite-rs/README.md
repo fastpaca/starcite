@@ -1,0 +1,243 @@
+# starcite-rs
+
+`starcite-rs` is a deliberate rewrite experiment for Starcite:
+
+- Rust + Axum instead of Phoenix
+- Postgres as the default source of truth for both session headers and events
+- no S3 archive split
+- no Raft or cluster ownership layer
+
+This is a parallel implementation inside the existing repo, not a drop-in replacement yet.
+
+## What it does today
+
+- `POST /v1/sessions`
+- `GET /v1/sessions`
+- `GET /metrics` on the ops listener
+- `GET /v1/lifecycle/events`
+- `GET /v1/lifecycle` over WebSocket
+- `GET /v1/socket/websocket` over WebSocket with Phoenix channel framing
+- `GET /v1/sessions/:id`
+- `PATCH /v1/sessions/:id`
+- `POST /v1/sessions/:id/append`
+- `GET /v1/sessions/:id/events`
+- `GET /v1/sessions/:id/lifecycle/events`
+- `GET /v1/sessions/:id/lifecycle` over WebSocket
+- `GET /v1/sessions/:id/tail` over WebSocket
+- `POST /v1/sessions/:id/archive`
+- `POST /v1/sessions/:id/unarchive`
+- `GET /health/live` on the ops listener
+- `GET /health/ready` on the ops listener
+
+The API shape stays close to the current Starcite REST surface. The main intentional differences are:
+
+- `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
+- `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
+- `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
+- In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
+- Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
+- `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
+- In `unsafe_jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
+- Session-scoped lifecycle replay is available over `GET /v1/sessions/:id/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/sessions/:id/lifecycle?cursor=N`.
+- Tenant-scoped lifecycle replay is available over `GET /v1/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/lifecycle?cursor=N`.
+- Tenant-scoped lifecycle replay and streaming still accept optional `session_id` filters for compatibility, but the dedicated session routes and Phoenix `lifecycle:<session_id>` topic are the preferred client path.
+- Live tail uses a direct WebSocket endpoint (`GET /v1/sessions/:id/tail?cursor=N`) instead of Phoenix Channels.
+- Lifecycle frames follow the canonical payload shape `{"cursor": N, "inserted_at": "...", "event": {...}}`, with the inner event discriminator serialized as `kind`. The Rust rewrite emits both session catalog events (`session.created`, `session.updated`, `session.archived`, `session.unarchived`) and local runtime state transitions (`session.activated`, `session.hydrating`, `session.freezing`, `session.frozen`).
+- Lifecycle storage is still tenant-scoped under the hood, but the public lifecycle surface now exposes both tenant streams and dedicated session streams. When a tenant lifecycle stream uses `session_id`, gap detection is computed against that filtered session head rather than the full tenant head.
+- Raw WebSocket tail uses query params for `cursor` and `batch_size` because there is no channel join payload.
+- Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
+- Raw lifecycle sockets subscribe before replaying from Postgres, then reuse the same Postgres replay path when fanout lags.
+- Tail connections subscribe before replaying from Postgres, then receive in-process fanout updates; if the fanout buffer lags, the server replays from Postgres again to close the gap.
+- In-process fanout channels are demand-driven: broadcasts do not allocate dormant per-session or per-tenant channels, and idle channels are pruned once the last receiver disconnects.
+- `/health/live`, `/health/ready`, and `/metrics` now live on `STARCITE_OPS_PORT` instead of the public API port, matching the Phoenix deployment shape more closely.
+- Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
+- `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
+- In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
+
+## Run locally
+
+```bash
+cd rust/starcite-rs
+cargo run
+```
+
+Environment variables:
+
+```bash
+PORT=4001
+STARCITE_OPS_PORT=4002
+DATABASE_URL=postgres://postgres:postgres@localhost:5433/starcite_rust_dev
+DATABASE_MAX_CONNECTIONS=20
+MIGRATE_ON_BOOT=true
+STARCITE_AUTH_MODE=none
+STARCITE_ENABLE_TELEMETRY=true
+SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
+RUST_LOG=info
+```
+
+Auth mode values:
+
+- `none` for the current trust-everything local workflow
+- `unsafe_jwt` to parse JWT claims without signature verification and enforce the claim contract locally
+
+Telemetry values:
+
+- `true` to expose `/metrics` and record counters/histograms in-process
+- `false` to keep only the uptime gauge and skip telemetry updates
+
+## Docker Compose
+
+From the repo root:
+
+```bash
+docker compose -f docker-compose.rust.yml up --build
+```
+
+That starts:
+
+- Postgres on host port `5433` by default
+- `starcite-rs` on host port `4001` by default
+- ops endpoints on host port `4002` by default
+
+If those collide with something local, override them when you start the stack:
+
+```bash
+STARCITE_RS_HOST_PORT=4011 STARCITE_RS_OPS_HOST_PORT=4012 STARCITE_RS_DB_HOST_PORT=5434 \
+  docker compose -f docker-compose.rust.yml up --build
+```
+
+## Example
+
+```bash
+curl -X POST http://localhost:4001/v1/sessions \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "ses_demo",
+    "title": "Draft contract",
+    "tenant_id": "acme",
+    "creator_principal": {
+      "tenant_id": "acme",
+      "id": "user-42",
+      "type": "user"
+    },
+    "metadata": {"workflow": "contract"}
+  }'
+
+curl -X POST http://localhost:4001/v1/sessions/ses_demo/append \
+  -H "Content-Type: application/json" \
+  -d '{
+    "type": "content",
+    "payload": {"text": "Reviewing clause 4.2..."},
+    "actor": "user:user-42",
+    "producer_id": "drafter-1",
+    "producer_seq": 1,
+    "expected_seq": 0
+  }'
+
+curl "http://localhost:4001/v1/sessions/ses_demo/events?cursor=0&limit=100"
+
+curl "http://localhost:4001/v1/sessions/ses_demo/lifecycle/events?cursor=0&limit=100"
+
+curl "http://localhost:4001/v1/lifecycle/events?tenant_id=acme&session_id=ses_demo&cursor=0&limit=100"
+
+curl "http://localhost:4002/health/ready"
+
+curl "http://localhost:4002/metrics"
+```
+
+To tail replay plus live events over WebSocket:
+
+```bash
+node -e '
+const ws = new WebSocket("ws://localhost:4001/v1/sessions/ses_demo/tail?cursor=0&batch_size=128");
+ws.onmessage = (event) => {
+  const frame = JSON.parse(event.data);
+  if (frame.events) console.log("events", frame.events);
+  if (frame.type === "gap") console.log("gap", frame);
+};
+'
+```
+
+To replay then stream session-scoped lifecycle events:
+
+```bash
+node -e '
+const ws = new WebSocket("ws://localhost:4001/v1/sessions/ses_demo/lifecycle?cursor=0");
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+'
+```
+
+To replay then stream tenant-scoped lifecycle events:
+
+```bash
+node -e '
+const ws = new WebSocket("ws://localhost:4001/v1/lifecycle?tenant_id=acme&session_id=ses_demo&cursor=0");
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+'
+```
+
+With the default runtime settings, that socket will see `session.activated` immediately on create,
+`session.created` after the row is stored, and `session.freezing` plus `session.frozen` once a
+session has been idle for `SESSION_RUNTIME_IDLE_TIMEOUT_MS`. The next read, tail, or append on a
+frozen session emits `session.hydrating` and then `session.activated`.
+
+In `unsafe_jwt` mode, use a `token` query param instead of `tenant_id` and let the token principal
+derive the tenant:
+
+```bash
+node -e '
+const token = "<jwt>";
+const ws = new WebSocket(`ws://localhost:4001/v1/sessions/ses_demo/lifecycle?token=${token}&cursor=0`);
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+'
+```
+
+To connect with Phoenix channel framing on one shared socket:
+
+```bash
+node -e '
+const ws = new WebSocket("ws://localhost:4001/v1/socket/websocket?vsn=2.0.0&tenant_id=acme");
+ws.onopen = () => {
+  ws.send(JSON.stringify(["1", "1", "lifecycle:ses_demo", "phx_join", { cursor: 0 }]));
+  ws.send(JSON.stringify(["2", "2", "tail:ses_demo", "phx_join", { cursor: 0, batch_size: 128 }]));
+  ws.send(JSON.stringify([null, "3", "phoenix", "heartbeat", {}]));
+};
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+'
+```
+
+That Phoenix-compatible socket currently supports `heartbeat`, `phx_join`, and `phx_leave`
+for the operator `lifecycle` topic plus `lifecycle:<session_id>` and `tail:<session_id>` topics.
+It keeps the normal Phoenix frame array shape `[join_ref, ref, topic, event, payload]`, replies
+with `phx_reply`, pushes `lifecycle`, `events`, `gap`, and `token_expired`, lets one socket
+multiplex many session streams, and accepts either `cursor` plus optional `session_id` on the
+operator `lifecycle` topic or plain `cursor` on `lifecycle:<session_id>` joins.
+
+In `unsafe_jwt` mode, pass the token on the socket URL instead of `tenant_id`:
+
+```bash
+node -e '
+const token = "<jwt>";
+const ws = new WebSocket(`ws://localhost:4001/v1/socket/websocket?vsn=2.0.0&token=${token}`);
+ws.onopen = () => {
+  ws.send(JSON.stringify(["1", "1", "lifecycle:ses_demo", "phx_join", { cursor: 0 }]));
+  ws.send(JSON.stringify(["2", "2", "tail:ses_demo", "phx_join", { cursor: 0 }]));
+};
+ws.onmessage = (event) => console.log(JSON.parse(event.data));
+'
+```
+
+The Prometheus surface is intentionally narrow. Right now it exports:
+
+- `starcite_edge_http_total` and `starcite_edge_http_duration_ms`
+- `starcite_auth_total` and `starcite_auth_duration_ms`
+- `starcite_ingest_edge_total`
+- `starcite_request_total` and `starcite_request_duration_ms`
+- `starcite_read_total` and `starcite_read_duration_ms`
+- `starcite_socket_connections` and `starcite_socket_subscriptions`
+- `starcite_session_create_total`, `starcite_session_freeze_total`, and `starcite_session_hydrate_total`
+- `starcite_process_uptime_seconds`
+
+The socket gauges reflect currently open raw and Phoenix transports. Raw tail and lifecycle
+handlers now keep reading the socket for close and ping frames, so those gauges clear promptly
+when a quiet client disconnects instead of waiting for the next broadcast.

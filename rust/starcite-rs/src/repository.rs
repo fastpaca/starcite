@@ -1,0 +1,659 @@
+use sqlx::{PgPool, Postgres, QueryBuilder};
+
+use crate::{
+    error::AppError,
+    model::{
+        AppendReply, ArchivedFilter, EventResponse, EventRow, EventsOptions, EventsPage, JsonMap,
+        LifecycleEvent, LifecyclePage, LifecycleResponse, LifecycleRow, ListOptions,
+        SessionResponse, SessionRow, SessionsPage, ValidatedAppendEvent, ValidatedCreateSession,
+        ValidatedUpdateSession, merge_metadata,
+    },
+};
+
+#[derive(Debug, Clone)]
+pub struct AppendOutcome {
+    pub reply: AppendReply,
+    pub event: Option<EventResponse>,
+    pub tenant_id: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ArchiveStateOutcome {
+    pub session: SessionResponse,
+    pub tenant_id: String,
+    pub changed: bool,
+}
+
+pub async fn create_session(
+    pool: &PgPool,
+    input: ValidatedCreateSession,
+) -> Result<SessionResponse, AppError> {
+    let row = sqlx::query_as::<_, SessionRow>(
+        r#"
+        INSERT INTO sessions (
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata
+        )
+        VALUES ($1, $2, $3, $4, $5, $6)
+        RETURNING
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        "#,
+    )
+    .bind(input.id)
+    .bind(input.title)
+    .bind(input.tenant_id)
+    .bind(input.creator_principal.id)
+    .bind(input.creator_principal.principal_type)
+    .bind(serde_json::Value::Object(input.metadata))
+    .fetch_one(pool)
+    .await
+    .map_err(map_insert_error)?;
+
+    row.try_into()
+}
+
+pub async fn list_sessions(pool: &PgPool, opts: ListOptions) -> Result<SessionsPage, AppError> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        FROM sessions
+        WHERE TRUE
+        "#,
+    );
+
+    if let Some(cursor) = opts.cursor.as_ref() {
+        builder.push(" AND id > ").push_bind(cursor);
+    }
+
+    match opts.archived {
+        ArchivedFilter::Active => {
+            builder.push(" AND archived = FALSE");
+        }
+        ArchivedFilter::Archived => {
+            builder.push(" AND archived = TRUE");
+        }
+        ArchivedFilter::All => {}
+    }
+
+    if let Some(tenant_id) = opts.tenant_id.as_ref() {
+        builder.push(" AND tenant_id = ").push_bind(tenant_id);
+    }
+
+    if let Some(session_id) = opts.session_id.as_ref() {
+        builder.push(" AND id = ").push_bind(session_id);
+    }
+
+    if !opts.metadata.is_empty() {
+        builder
+            .push(" AND metadata @> ")
+            .push_bind(serde_json::Value::Object(opts.metadata.clone()));
+    }
+
+    builder
+        .push(" ORDER BY id ASC LIMIT ")
+        .push_bind(i64::from(opts.limit));
+
+    let rows = builder
+        .build_query_as::<SessionRow>()
+        .fetch_all(pool)
+        .await
+        .map_err(AppError::from)?;
+
+    let next_cursor = if rows.len() == opts.limit as usize {
+        rows.last().map(|row| row.id.clone())
+    } else {
+        None
+    };
+
+    let sessions = rows
+        .into_iter()
+        .map(SessionResponse::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(SessionsPage {
+        sessions,
+        next_cursor,
+    })
+}
+
+pub async fn get_session(pool: &PgPool, session_id: &str) -> Result<SessionResponse, AppError> {
+    let row = load_session_row(pool, session_id).await?;
+    row.try_into()
+}
+
+pub async fn get_session_tenant_id(pool: &PgPool, session_id: &str) -> Result<String, AppError> {
+    Ok(load_session_row(pool, session_id).await?.tenant_id)
+}
+
+pub async fn update_session(
+    pool: &PgPool,
+    session_id: &str,
+    patch: ValidatedUpdateSession,
+) -> Result<SessionResponse, AppError> {
+    let mut tx = pool.begin().await?;
+
+    let current = load_session_row_tx(&mut tx, session_id).await?;
+
+    if let Some(expected_version) = patch.expected_version {
+        if current.version != expected_version {
+            return Err(AppError::ExpectedVersionConflict {
+                expected: expected_version,
+                current: current.version,
+            });
+        }
+    }
+
+    let current_metadata = value_to_object(&current.metadata)?;
+    let merged_metadata = patch
+        .metadata
+        .as_ref()
+        .map(|incoming| merge_metadata(&current_metadata, incoming))
+        .unwrap_or(current_metadata);
+
+    let title = match patch.title {
+        Some(value) => value,
+        None => current.title,
+    };
+
+    let row = sqlx::query_as::<_, SessionRow>(
+        r#"
+        UPDATE sessions
+        SET
+          title = $2,
+          metadata = $3,
+          updated_at = now(),
+          version = version + 1
+        WHERE id = $1
+        RETURNING
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        "#,
+    )
+    .bind(session_id)
+    .bind(title)
+    .bind(serde_json::Value::Object(merged_metadata))
+    .fetch_one(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
+
+    row.try_into()
+}
+
+pub async fn set_archive_state(
+    pool: &PgPool,
+    session_id: &str,
+    archived: bool,
+) -> Result<ArchiveStateOutcome, AppError> {
+    let current = load_session_row(pool, session_id).await?;
+    let tenant_id = current.tenant_id.clone();
+
+    if current.archived == archived {
+        return Ok(ArchiveStateOutcome {
+            session: current.try_into()?,
+            tenant_id,
+            changed: false,
+        });
+    }
+
+    let row = sqlx::query_as::<_, SessionRow>(
+        r#"
+        UPDATE sessions
+        SET archived = $2
+        WHERE id = $1
+        RETURNING
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        "#,
+    )
+    .bind(session_id)
+    .bind(archived)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(ArchiveStateOutcome {
+        session: row.try_into()?,
+        tenant_id,
+        changed: true,
+    })
+}
+
+pub async fn append_event(
+    pool: &PgPool,
+    session_id: &str,
+    input: ValidatedAppendEvent,
+) -> Result<AppendOutcome, AppError> {
+    let mut tx = pool.begin().await?;
+
+    let session = load_session_row_tx(&mut tx, session_id).await?;
+
+    if let Some(expected_seq) = input.expected_seq {
+        if session.last_seq != expected_seq {
+            return Err(AppError::ExpectedSeqConflict {
+                expected: expected_seq,
+                current: session.last_seq,
+            });
+        }
+    }
+
+    let existing = sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND producer_id = $2
+          AND producer_seq = $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(&input.producer_id)
+    .bind(input.producer_seq)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(existing) = existing {
+        if matches_event(&existing, &input, &session.tenant_id)? {
+            let seq = existing.seq;
+            tx.commit().await?;
+
+            return Ok(AppendOutcome {
+                reply: AppendReply {
+                    seq,
+                    last_seq: session.last_seq,
+                    deduped: true,
+                    cursor: seq,
+                    committed_cursor: session.last_seq,
+                },
+                event: None,
+                tenant_id: session.tenant_id,
+            });
+        }
+
+        return Err(AppError::ProducerReplayConflict);
+    }
+
+    let latest_producer_seq = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT producer_seq
+        FROM events
+        WHERE session_id = $1
+          AND producer_id = $2
+        ORDER BY producer_seq DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .bind(&input.producer_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+
+    if let Some(latest_producer_seq) = latest_producer_seq {
+        let expected = latest_producer_seq + 1;
+        if input.producer_seq != expected {
+            return Err(AppError::ProducerSeqConflict {
+                producer_id: input.producer_id,
+                expected,
+                current: input.producer_seq,
+            });
+        }
+    }
+
+    let next_seq = session.last_seq + 1;
+
+    let event = sqlx::query_as::<_, EventRow>(
+        r#"
+        INSERT INTO events (
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+        RETURNING
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(next_seq)
+    .bind(input.event_type)
+    .bind(serde_json::Value::Object(input.payload))
+    .bind(input.actor)
+    .bind(input.source)
+    .bind(serde_json::Value::Object(input.metadata))
+    .bind(serde_json::Value::Object(input.refs))
+    .bind(input.idempotency_key)
+    .bind(&input.producer_id)
+    .bind(input.producer_seq)
+    .bind(&session.tenant_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(map_insert_error)?;
+
+    sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
+        .bind(session_id)
+        .bind(next_seq)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(AppendOutcome {
+        reply: AppendReply {
+            seq: next_seq,
+            last_seq: next_seq,
+            deduped: false,
+            cursor: next_seq,
+            committed_cursor: next_seq,
+        },
+        event: Some(EventResponse::try_from(event)?),
+        tenant_id: session.tenant_id,
+    })
+}
+
+pub async fn read_events(
+    pool: &PgPool,
+    session_id: &str,
+    opts: EventsOptions,
+) -> Result<EventsPage, AppError> {
+    let _ = load_session_row(pool, session_id).await?;
+
+    let rows = sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND seq > $2
+        ORDER BY seq ASC
+        LIMIT $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(opts.cursor)
+    .bind(i64::from(opts.limit))
+    .fetch_all(pool)
+    .await?;
+
+    let next_cursor = rows.last().map(|row| row.seq);
+    let events = rows
+        .into_iter()
+        .map(EventResponse::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(EventsPage {
+        events,
+        next_cursor,
+    })
+}
+
+pub async fn append_lifecycle_event(
+    pool: &PgPool,
+    event: LifecycleEvent,
+) -> Result<LifecycleResponse, AppError> {
+    let row = sqlx::query_as::<_, LifecycleRow>(
+        r#"
+        INSERT INTO lifecycle_events (
+          tenant_id,
+          session_id,
+          event
+        )
+        VALUES ($1, $2, $3)
+        RETURNING
+          seq,
+          tenant_id,
+          session_id,
+          event,
+          inserted_at
+        "#,
+    )
+    .bind(event.tenant_id())
+    .bind(event.session_id())
+    .bind(serde_json::to_value(&event).map_err(|_| AppError::Internal)?)
+    .fetch_one(pool)
+    .await?;
+
+    row.try_into()
+}
+
+pub async fn read_lifecycle_events(
+    pool: &PgPool,
+    tenant_id: &str,
+    session_id: Option<&str>,
+    opts: EventsOptions,
+) -> Result<LifecyclePage, AppError> {
+    let mut builder = QueryBuilder::<Postgres>::new(
+        r#"
+        SELECT
+          seq,
+          tenant_id,
+          session_id,
+          event,
+          inserted_at
+        FROM lifecycle_events
+        WHERE tenant_id =
+        "#,
+    );
+
+    builder.push_bind(tenant_id);
+    builder.push(" AND seq > ").push_bind(opts.cursor);
+
+    if let Some(session_id) = session_id {
+        builder.push(" AND session_id = ").push_bind(session_id);
+    }
+
+    builder
+        .push(" ORDER BY seq ASC LIMIT ")
+        .push_bind(i64::from(opts.limit));
+
+    let rows = builder
+        .build_query_as::<LifecycleRow>()
+        .fetch_all(pool)
+        .await?;
+
+    let next_cursor = rows.last().map(|row| row.seq);
+    let events = rows
+        .into_iter()
+        .map(LifecycleResponse::try_from)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    Ok(LifecyclePage {
+        events,
+        next_cursor,
+    })
+}
+
+pub async fn lifecycle_head_seq(
+    pool: &PgPool,
+    tenant_id: &str,
+    session_id: Option<&str>,
+) -> Result<i64, AppError> {
+    let mut builder =
+        QueryBuilder::<Postgres>::new("SELECT MAX(seq) FROM lifecycle_events WHERE tenant_id = ");
+    builder.push_bind(tenant_id);
+
+    if let Some(session_id) = session_id {
+        builder.push(" AND session_id = ").push_bind(session_id);
+    }
+
+    Ok(builder
+        .build_query_scalar::<Option<i64>>()
+        .fetch_one(pool)
+        .await?
+        .unwrap_or(0))
+}
+
+async fn load_session_row(pool: &PgPool, session_id: &str) -> Result<SessionRow, AppError> {
+    let row = sqlx::query_as::<_, SessionRow>(
+        r#"
+        SELECT
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        FROM sessions
+        WHERE id = $1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.ok_or(AppError::SessionNotFound)
+}
+
+async fn load_session_row_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+) -> Result<SessionRow, AppError> {
+    let row = sqlx::query_as::<_, SessionRow>(
+        r#"
+        SELECT
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        FROM sessions
+        WHERE id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(&mut **tx)
+    .await?;
+
+    row.ok_or(AppError::SessionNotFound)
+}
+
+fn matches_event(
+    existing: &EventRow,
+    input: &ValidatedAppendEvent,
+    tenant_id: &str,
+) -> Result<bool, AppError> {
+    Ok(existing.event_type == input.event_type
+        && value_to_object(&existing.payload)? == input.payload
+        && existing.actor == input.actor
+        && existing.source == input.source
+        && value_to_object(&existing.metadata)? == input.metadata
+        && value_to_object(&existing.refs)? == input.refs
+        && existing.idempotency_key == input.idempotency_key
+        && existing.tenant_id == tenant_id)
+}
+
+fn value_to_object(value: &serde_json::Value) -> Result<JsonMap, AppError> {
+    match value {
+        serde_json::Value::Object(map) => Ok(map.clone()),
+        _ => Err(AppError::Internal),
+    }
+}
+
+fn map_insert_error(error: sqlx::Error) -> AppError {
+    if let sqlx::Error::Database(database_error) = &error
+        && database_error.code().as_deref() == Some("23505")
+    {
+        return AppError::SessionExists;
+    }
+
+    AppError::Sqlx(error)
+}

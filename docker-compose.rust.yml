@@ -1,0 +1,38 @@
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: starcite_rust_dev
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "postgres", "-d", "starcite_rust_dev"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    ports:
+      - "${STARCITE_RS_DB_HOST_PORT:-5433}:5432"
+    volumes:
+      - starcite-rust-db:/var/lib/postgresql/data
+
+  app:
+    build:
+      context: ./rust/starcite-rs
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      PORT: 4001
+      STARCITE_OPS_PORT: 4002
+      DATABASE_URL: postgres://postgres:postgres@db:5432/starcite_rust_dev
+      MIGRATE_ON_BOOT: "true"
+      STARCITE_AUTH_MODE: "${STARCITE_AUTH_MODE:-none}"
+      STARCITE_ENABLE_TELEMETRY: "${STARCITE_ENABLE_TELEMETRY:-true}"
+      SESSION_RUNTIME_IDLE_TIMEOUT_MS: "${SESSION_RUNTIME_IDLE_TIMEOUT_MS:-30000}"
+      RUST_LOG: info
+    ports:
+      - "${STARCITE_RS_HOST_PORT:-4001}:4001"
+      - "${STARCITE_RS_OPS_HOST_PORT:-4002}:4002"
+
+volumes:
+  starcite-rust-db:
