@@ -5,6 +5,7 @@ mod fanout;
 mod model;
 mod ops;
 mod phoenix;
+mod relay;
 mod repository;
 mod runtime;
 mod telemetry;
@@ -19,11 +20,12 @@ use fanout::{LifecycleFanout, SessionFanout};
 use ops::OpsState;
 use runtime::SessionRuntime;
 use sqlx::postgres::PgPoolOptions;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 use telemetry::Telemetry;
 use tokio::sync::watch;
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 use tracing_subscriber::{EnvFilter, fmt};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -34,6 +36,7 @@ pub struct AppState {
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
     pub telemetry: Telemetry,
+    pub instance_id: Arc<str>,
 }
 
 #[tokio::main]
@@ -63,24 +66,30 @@ async fn run() -> Result<(), String> {
     }
 
     let lifecycle = LifecycleFanout::default();
+    let fanout = SessionFanout::default();
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
+    let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
     let runtime = SessionRuntime::new(
         Some(pool.clone()),
         lifecycle.clone(),
         telemetry.clone(),
+        instance_id.clone(),
         Duration::from_millis(config.session_runtime_idle_timeout_ms),
     );
 
     let state = AppState {
-        pool,
-        fanout: SessionFanout::default(),
+        pool: pool.clone(),
+        fanout: fanout.clone(),
         lifecycle,
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
         telemetry: telemetry.clone(),
+        instance_id: instance_id.clone(),
     };
+
+    relay::spawn(pool, fanout, state.lifecycle.clone(), instance_id);
 
     let app = build_public_router(telemetry.clone(), ops_state.clone()).with_state(state.clone());
     let ops_router = build_ops_router(telemetry).with_state(state);

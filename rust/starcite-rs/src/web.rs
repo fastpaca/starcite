@@ -346,7 +346,9 @@ pub async fn append_event(
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
-        let outcome = repository::append_event(&state.pool, &session_id, validated).await;
+        let outcome =
+            repository::append_event(&state.pool, &session_id, validated, &state.instance_id)
+                .await;
         record_request_result(
             &state,
             RequestPhase::Ack,
@@ -901,7 +903,7 @@ fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
 }
 
 async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {
-    match repository::append_lifecycle_event(&state.pool, event).await {
+    match repository::append_lifecycle_event(&state.pool, event, &state.instance_id).await {
         Ok(event) => {
             state.lifecycle.broadcast(event).await;
         }

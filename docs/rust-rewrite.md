@@ -116,6 +116,12 @@ keeps successful appends on small session and producer rows plus the one new eve
 still falling back to an exact historical event lookup for replay-vs-conflict decisions when a
 producer sends an older sequence.
 
+Live delivery is no longer purely process-local either. Committed event and lifecycle writes now
+emit Postgres `NOTIFY` payloads, and every Rust process runs a `LISTEN` loop that reloads the
+committed row from Postgres and rebroadcasts it into local fanout. That means a client connected to
+one Rust node can still receive live events or lifecycle updates produced by another Rust node
+sharing the same database, without adding Redis or a separate broker.
+
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active

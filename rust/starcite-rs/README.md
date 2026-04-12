@@ -40,6 +40,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
+- Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
 - In `unsafe_jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
 - Session-scoped lifecycle replay is available over `GET /v1/sessions/:id/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/sessions/:id/lifecycle?cursor=N`.

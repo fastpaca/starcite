@@ -8,6 +8,10 @@ use crate::{
         SessionResponse, SessionRow, SessionsPage, ValidatedAppendEvent, ValidatedCreateSession,
         ValidatedUpdateSession, merge_metadata,
     },
+    relay::{
+        EVENT_NOTIFICATION_CHANNEL, EventNotification, LIFECYCLE_NOTIFICATION_CHANNEL,
+        LifecycleNotification,
+    },
 };
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -278,6 +282,7 @@ pub async fn append_event(
     pool: &PgPool,
     session_id: &str,
     input: ValidatedAppendEvent,
+    emitter_id: &str,
 ) -> Result<AppendOutcome, AppError> {
     let mut tx = pool.begin().await?;
 
@@ -422,6 +427,17 @@ pub async fn append_event(
         .execute(&mut *tx)
         .await?;
 
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(EVENT_NOTIFICATION_CHANNEL)
+        .bind(serde_json::to_string(&EventNotification {
+            emitter_id: emitter_id.to_string(),
+            session_id: session_id.to_string(),
+            seq: next_seq,
+        })
+        .map_err(|_| AppError::Internal)?)
+        .execute(&mut *tx)
+        .await?;
+
     tx.commit().await?;
 
     Ok(AppendOutcome {
@@ -485,10 +501,47 @@ pub async fn read_events(
     })
 }
 
+pub async fn load_event_by_seq(
+    pool: &PgPool,
+    session_id: &str,
+    seq: i64,
+) -> Result<Option<EventResponse>, AppError> {
+    let row = sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND seq = $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(seq)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(EventResponse::try_from).transpose()
+}
+
 pub async fn append_lifecycle_event(
     pool: &PgPool,
     event: LifecycleEvent,
+    emitter_id: &str,
 ) -> Result<LifecycleResponse, AppError> {
+    let mut tx = pool.begin().await?;
+
     let row = sqlx::query_as::<_, LifecycleRow>(
         r#"
         INSERT INTO lifecycle_events (
@@ -508,10 +561,24 @@ pub async fn append_lifecycle_event(
     .bind(event.tenant_id())
     .bind(event.session_id())
     .bind(serde_json::to_value(&event).map_err(|_| AppError::Internal)?)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
-    row.try_into()
+    let response = LifecycleResponse::try_from(row)?;
+
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(LIFECYCLE_NOTIFICATION_CHANNEL)
+        .bind(serde_json::to_string(&LifecycleNotification {
+            emitter_id: emitter_id.to_string(),
+            cursor: response.cursor,
+        })
+        .map_err(|_| AppError::Internal)?)
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+
+    Ok(response)
 }
 
 pub async fn read_lifecycle_events(
@@ -579,6 +646,29 @@ pub async fn lifecycle_head_seq(
         .fetch_one(pool)
         .await?
         .unwrap_or(0))
+}
+
+pub async fn load_lifecycle_by_cursor(
+    pool: &PgPool,
+    cursor: i64,
+) -> Result<Option<LifecycleResponse>, AppError> {
+    let row = sqlx::query_as::<_, LifecycleRow>(
+        r#"
+        SELECT
+          seq,
+          tenant_id,
+          session_id,
+          event,
+          inserted_at
+        FROM lifecycle_events
+        WHERE seq = $1
+        "#,
+    )
+    .bind(cursor)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(LifecycleResponse::try_from).transpose()
 }
 
 async fn load_session_row(pool: &PgPool, session_id: &str) -> Result<SessionRow, AppError> {

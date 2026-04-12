@@ -21,6 +21,7 @@ pub struct SessionRuntime {
     pool: Option<PgPool>,
     lifecycle: LifecycleFanout,
     telemetry: Telemetry,
+    instance_id: Arc<str>,
     idle_timeout: Duration,
 }
 
@@ -72,6 +73,7 @@ impl SessionRuntime {
         pool: Option<PgPool>,
         lifecycle: LifecycleFanout,
         telemetry: Telemetry,
+        instance_id: Arc<str>,
         idle_timeout: Duration,
     ) -> Self {
         Self {
@@ -79,6 +81,7 @@ impl SessionRuntime {
             pool,
             lifecycle,
             telemetry,
+            instance_id,
             idle_timeout,
         }
     }
@@ -153,14 +156,16 @@ impl SessionRuntime {
 
     async fn emit(&self, event: LifecycleEvent) {
         match &self.pool {
-            Some(pool) => match repository::append_lifecycle_event(pool, event).await {
+            Some(pool) => {
+                match repository::append_lifecycle_event(pool, event, &self.instance_id).await {
                 Ok(event) => {
                     self.lifecycle.broadcast(event).await;
                 }
                 Err(error) => {
                     tracing::error!(error = ?error, "failed to persist runtime lifecycle event");
                 }
-            },
+                }
+            }
             None => {
                 self.lifecycle
                     .broadcast(crate::model::LifecycleResponse {
@@ -284,7 +289,7 @@ fn idle_expires_in_ms(last_touch_at: Instant, idle_timeout: Duration, now: Insta
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
 
     use tokio::time::timeout;
 
@@ -298,6 +303,7 @@ mod tests {
             None,
             lifecycle.clone(),
             Telemetry::default(),
+            Arc::from("test-runtime"),
             Duration::from_millis(20),
         );
         let mut receiver = lifecycle.subscribe_tenant("acme").await;
@@ -358,6 +364,7 @@ mod tests {
             None,
             LifecycleFanout::new(16),
             Telemetry::default(),
+            Arc::from("test-runtime"),
             Duration::from_secs(30),
         );
 
