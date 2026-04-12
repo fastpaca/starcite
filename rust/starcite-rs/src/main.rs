@@ -148,6 +148,7 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
         .route("/health/live", get(web::live))
         .route("/health/ready", get(web::ready))
         .route("/metrics", get(telemetry::metrics))
+        .route("/debug/state", get(web::debug_state))
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,

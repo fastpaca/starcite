@@ -18,12 +18,14 @@ use crate::{
     AppState, auth,
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::AppError,
+    fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     model::{
         AppendEventRequest, ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions,
         LifecycleEvent, LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest,
         parse_query_scalar,
     },
     repository,
+    runtime::RuntimeSnapshot,
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, ReadOperation,
         ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase, SocketSurface,
@@ -69,6 +71,20 @@ struct TokenExpiredFrame {
     reason: &'static str,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DebugStateResponse {
+    auth_mode: &'static str,
+    telemetry_enabled: bool,
+    runtime: RuntimeSnapshot,
+    fanout: DebugFanoutState,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct DebugFanoutState {
+    events: SessionFanoutSnapshot,
+    lifecycle: LifecycleFanoutSnapshot,
+}
+
 pub async fn live() -> impl IntoResponse {
     StatusCode::NO_CONTENT
 }
@@ -84,6 +100,19 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
             AppError::DatabaseUnavailable.into_response()
         }
     }
+}
+
+pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
+    let runtime = state.runtime.snapshot().await;
+    let events = state.fanout.snapshot().await;
+    let lifecycle = state.lifecycle.snapshot().await;
+
+    Json(DebugStateResponse {
+        auth_mode: auth_mode_name(state.auth_mode),
+        telemetry_enabled: state.telemetry.enabled(),
+        runtime,
+        fanout: DebugFanoutState { events, lifecycle },
+    })
 }
 
 pub async fn create_session(
@@ -709,6 +738,13 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
 
+fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
+    match auth_mode {
+        crate::config::AuthMode::None => "none",
+        crate::config::AuthMode::UnsafeJwt => "unsafe_jwt",
+    }
+}
+
 async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {
     match repository::append_lifecycle_event(&state.pool, event).await {
         Ok(event) => {
@@ -734,6 +770,7 @@ async fn run_tail_session(
     let _subscription = state
         .telemetry
         .track_socket_subscription(SocketTransport::Raw, SocketSurface::Tail);
+    let _fanout_guard = state.fanout.session_guard(session_id.clone());
     let mut cursor = tail.cursor;
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
@@ -901,6 +938,10 @@ async fn run_lifecycle_session(
     let _subscription = state
         .telemetry
         .track_socket_subscription(SocketTransport::Raw, lifecycle_socket_surface(&lifecycle));
+    let _fanout_guard = match lifecycle.session_id.as_ref() {
+        Some(session_id) => state.lifecycle.session_guard(session_id.clone()),
+        None => state.lifecycle.tenant_guard(lifecycle.tenant_id.clone()),
+    };
     let mut cursor = lifecycle.cursor;
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 

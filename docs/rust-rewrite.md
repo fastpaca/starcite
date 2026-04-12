@@ -19,6 +19,7 @@ The goal is not feature parity in one shot. The goal is to test whether a saner 
 - explicit auth modes with `none` and `unsafe_jwt`
 - Prometheus text metrics on a separate ops listener
 - `/health/live` and `/health/ready` on the same separate ops listener
+- local ops-state JSON on `GET /debug/state`
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
 - tenant-scoped durable lifecycle replay through `GET /v1/lifecycle/events?tenant_id=...`
 - tenant-scoped replay-then-live lifecycle streaming through `GET /v1/lifecycle?tenant_id=...`
@@ -38,6 +39,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - in `unsafe_jwt` mode, raw lifecycle and tail sockets emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
+- `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local runtime plus fanout state for this one process
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
@@ -71,16 +73,19 @@ story without pretending it already has cluster ownership semantics. The lifecyc
 tenant-scoped, but the lifecycle surface now exposes dedicated session routes and topics in
 addition to the older server-filtered tenant view. When the tenant lifecycle stream is filtered to
 one session, resume-gap detection is computed against that session head instead of the full tenant
-head.
+head. `GET /debug/state` exposes that local runtime map directly, including the current generation
+per active session, so the rewrite now has one honest ops surface for "what this process thinks it
+owns right now."
 
 Because this rewrite keeps the full event log in Postgres, it does not currently emit
 `cursor_expired` gaps. There is no hot-tail trimming boundary to fall behind.
 
 The in-process fanout is now demand-driven instead of append-driven. A tail or lifecycle
 subscription allocates its Tokio broadcast channel lazily on first subscribe, plain broadcasts do
-not create dormant channels for untouched sessions or tenants, and a stale channel is pruned after
-the last receiver disconnects. That keeps the local memory story closer to "active sockets only"
-instead of "every session ever touched by this process."
+not create dormant channels for untouched sessions or tenants, and a stale channel is pruned when
+the last receiver disconnects instead of waiting for another broadcast to notice the zero-subscriber
+sender. That keeps the local memory story closer to "active sockets only" instead of "every session
+ever touched by this process."
 
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail

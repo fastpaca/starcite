@@ -538,6 +538,10 @@ async fn run_lifecycle_topic(
         SocketTransport::Phoenix,
         lifecycle_socket_surface(&lifecycle),
     );
+    let _fanout_guard = match lifecycle.session_id.as_ref() {
+        Some(session_id) => state.lifecycle.session_guard(session_id.clone()),
+        None => state.lifecycle.tenant_guard(tenant_id.to_string()),
+    };
     let mut cursor = lifecycle.cursor;
 
     match sync_lifecycle(
@@ -732,6 +736,7 @@ async fn run_tail_topic(
     let _subscription = state
         .telemetry
         .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::Tail);
+    let _fanout_guard = state.fanout.session_guard(session_id.clone());
     let mut cursor = tail.cursor;
 
     match sync_tail(

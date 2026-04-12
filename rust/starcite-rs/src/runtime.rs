@@ -1,5 +1,6 @@
 use std::{collections::HashMap, sync::Arc, time::Duration};
 
+use serde::Serialize;
 use sqlx::PgPool;
 use tokio::{sync::Mutex, time::sleep};
 
@@ -17,6 +18,19 @@ pub struct SessionRuntime {
     lifecycle: LifecycleFanout,
     telemetry: Telemetry,
     idle_timeout: Duration,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct RuntimeSnapshot {
+    pub idle_timeout_ms: u64,
+    pub active_session_count: usize,
+    pub sessions: Vec<ActiveSessionSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ActiveSessionSnapshot {
+    pub session_id: String,
+    pub generation: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -77,6 +91,25 @@ impl SessionRuntime {
                 SessionOutcome::Ok,
                 SessionReason::Hydrate,
             );
+        }
+    }
+
+    pub async fn snapshot(&self) -> RuntimeSnapshot {
+        let sessions = self.sessions.lock().await;
+        let mut active_sessions = sessions
+            .iter()
+            .map(|(session_id, session)| ActiveSessionSnapshot {
+                session_id: session_id.clone(),
+                generation: session.generation,
+            })
+            .collect::<Vec<_>>();
+
+        active_sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
+
+        RuntimeSnapshot {
+            idle_timeout_ms: self.idle_timeout.as_millis().min(u64::MAX as u128) as u64,
+            active_session_count: active_sessions.len(),
+            sessions: active_sessions,
         }
     }
 
@@ -175,7 +208,7 @@ mod tests {
 
     use tokio::time::timeout;
 
-    use super::SessionRuntime;
+    use super::{RuntimeSnapshot, SessionRuntime};
     use crate::{fanout::LifecycleFanout, model::LifecycleEvent, telemetry::Telemetry};
 
     #[tokio::test]
@@ -234,6 +267,39 @@ mod tests {
                 .expect("event")
                 .event,
             LifecycleEvent::activated("ses_demo".to_string(), "acme".to_string())
+        );
+    }
+
+    #[tokio::test]
+    async fn snapshot_reports_sorted_active_sessions() {
+        let runtime = SessionRuntime::new(
+            None,
+            LifecycleFanout::new(16),
+            Telemetry::default(),
+            Duration::from_secs(30),
+        );
+
+        runtime.session_created("ses_b", "acme").await;
+        runtime.session_created("ses_a", "acme").await;
+
+        let snapshot = runtime.snapshot().await;
+
+        assert_eq!(
+            snapshot,
+            RuntimeSnapshot {
+                idle_timeout_ms: 30_000,
+                active_session_count: 2,
+                sessions: vec![
+                    super::ActiveSessionSnapshot {
+                        session_id: "ses_a".to_string(),
+                        generation: 1,
+                    },
+                    super::ActiveSessionSnapshot {
+                        session_id: "ses_b".to_string(),
+                        generation: 1,
+                    },
+                ],
+            }
         );
     }
 }
