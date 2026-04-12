@@ -6,11 +6,15 @@ defmodule Starcite.Routing.Policy do
   def choose_claim_nodes(assignments, ready_nodes, desired)
       when is_map(assignments) and is_list(ready_nodes) and is_integer(desired) and desired > 0 do
     counts = session_counts(assignments)
+    required_ready_nodes = quorum_size(desired)
 
-    case least_loaded_nodes(ready_nodes, counts, desired) do
-      [] -> {:error, :no_ready_cluster_nodes}
-      nodes when length(nodes) < desired -> {:error, :no_ready_cluster_nodes}
-      nodes -> {:ok, nodes}
+    if length(ready_nodes) < required_ready_nodes do
+      {:error, :no_ready_cluster_nodes}
+    else
+      case least_loaded_nodes(ready_nodes, counts, desired) do
+        [] -> {:error, :no_ready_cluster_nodes}
+        nodes -> {:ok, nodes}
+      end
     end
   end
 
@@ -102,5 +106,9 @@ defmodule Starcite.Routing.Policy do
     nodes
     |> least_loaded_nodes(counts, 1)
     |> List.first()
+  end
+
+  defp quorum_size(replica_count) when is_integer(replica_count) and replica_count > 0 do
+    div(replica_count, 2) + 1
   end
 end

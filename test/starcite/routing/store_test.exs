@@ -472,6 +472,44 @@ defmodule Starcite.Routing.StoreTest do
     assert Enum.sort(assignment.replicas) == Enum.sort([peer_a, peer_b, peer_c])
   end
 
+  test "ensure_assignment claims on the surviving ready nodes after a single-node failure" do
+    peer = :"routing-store-single-failure-peer@127.0.0.1"
+    expired = :"routing-store-single-failure-expired@127.0.0.1"
+    nodes = [Node.self(), peer, expired]
+    now_ms = System.system_time(:millisecond)
+    session_id = "routing-store-single-failure-#{System.unique_integer([:positive, :monotonic])}"
+
+    Application.put_env(:starcite, :cluster_node_ids, nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    TestHelper.reset()
+
+    assert :ok =
+             put_node_record(Node.self(), %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(peer, %{
+               status: :ready,
+               lease_until_ms: now_ms + 60_000,
+               updated_at_ms: now_ms
+             })
+
+    assert :ok =
+             put_node_record(expired, %{
+               status: :ready,
+               lease_until_ms: now_ms - 1,
+               updated_at_ms: now_ms
+             })
+
+    assert {:ok, assignment} = Store.ensure_assignment(session_id)
+    assert assignment.owner in [Node.self(), peer]
+    assert Enum.sort(assignment.replicas) == Enum.sort([Node.self(), peer])
+    refute expired in assignment.replicas
+  end
+
   test "concurrent claims during lease-expiry failover never use the expired owner" do
     expired_owner = :"routing-store-failover-expired-owner@127.0.0.1"
     peer_a = :"routing-store-failover-claim-a@127.0.0.1"
