@@ -21,9 +21,9 @@ defmodule StarciteWeb.TailChannel do
       when is_binary(session_id) and session_id != "" and is_map(params) do
     with :ok <- Context.ensure_current(auth),
          {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- TailParams.parse(params),
-         :ok <- Policy.authorize_session_read(auth, session_id),
+         :ok <- Policy.authorize_session_access(auth, session_id, :read),
          {:ok, session} <- ReadPath.get_session_routed(session_id, true),
-         :ok <- Policy.authorize_session_read(auth, session),
+         :ok <- Policy.authorize_session_resource(auth, session, :read),
          {:ok, state} <-
            TailStream.init(%{
              session_id: session_id,

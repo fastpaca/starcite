@@ -30,11 +30,11 @@ defmodule StarciteWeb.Auth.PolicyTest do
 
     assert {:ok, "ses-1"} = Policy.resolve_create_session_id(none, "ses-1")
     assert {:ok, %{limit: 10}} = Policy.authorize_session_list(none, %{limit: 10})
-    assert :ok = Policy.authorize_session_read(none, "ses-1")
-    assert :ok = Policy.authorize_session_read(none, session)
-    assert :ok = Policy.authorize_session_manage(none, "ses-1")
-    assert :ok = Policy.authorize_session_manage(none, session)
-    assert :ok = Policy.authorize_session_append(none, "ses-1")
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :read)
+    assert :ok = Policy.authorize_session_resource(none, session, :read)
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :manage)
+    assert :ok = Policy.authorize_session_resource(none, session, :manage)
+    assert :ok = Policy.authorize_session_access(none, "ses-1", :append)
   end
 
   test "resolve_create_session_id enforces optional session_id lock" do
@@ -99,98 +99,121 @@ defmodule StarciteWeb.Auth.PolicyTest do
              )
   end
 
-  test "authorize_session_append enforces scope and session lock" do
+  test "authorize_session_access enforces append scope and session lock" do
     assert :ok =
-             Policy.authorize_session_append(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: nil, scopes: ["session:append"]}),
-               "ses-1"
+               "ses-1",
+               :append
              )
 
     assert :ok =
-             Policy.authorize_session_append(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-1", scopes: ["session:append"]}),
-               "ses-1"
+               "ses-1",
+               :append
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.authorize_session_append(jwt_ctx(%{scopes: ["session:read"]}), "ses-1")
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:read"]}),
+               "ses-1",
+               :append
+             )
 
     assert {:error, :forbidden_session} =
-             Policy.authorize_session_append(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-1", scopes: ["session:append"]}),
-               "ses-2"
+               "ses-2",
+               :append
              )
   end
 
-  test "authorize_session_read enforces access on session ids" do
+  test "authorize_session_access enforces read access on session ids" do
     assert :ok =
-             Policy.authorize_session_read(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-9", scopes: ["session:read"]}),
-               "ses-9"
+               "ses-9",
+               :read
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.authorize_session_read(jwt_ctx(%{scopes: ["session:append"]}), "ses-9")
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:append"]}),
+               "ses-9",
+               :read
+             )
 
     assert {:error, :forbidden_session} =
-             Policy.authorize_session_read(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-locked", scopes: ["session:read"]}),
-               "ses-9"
+               "ses-9",
+               :read
              )
   end
 
-  test "authorize_session_read enforces tenant checks on loaded sessions" do
+  test "authorize_session_resource enforces tenant checks on loaded sessions" do
     session = %{id: "ses-9", tenant_id: "acme"}
 
     assert :ok =
-             Policy.authorize_session_read(
+             Policy.authorize_session_resource(
                jwt_ctx(%{session_id: "ses-9", scopes: ["session:read"]}),
-               session
+               session,
+               :read
              )
 
     assert {:error, :forbidden_tenant} =
-             Policy.authorize_session_read(
+             Policy.authorize_session_resource(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
                  scopes: ["session:read"]
                }),
-               session
+               session,
+               :read
              )
   end
 
-  test "authorize_session_manage enforces access on session ids" do
+  test "authorize_session_access enforces manage access on session ids" do
     assert :ok =
-             Policy.authorize_session_manage(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-11", scopes: ["session:create"]}),
-               "ses-11"
+               "ses-11",
+               :manage
              )
 
     assert {:error, :forbidden_scope} =
-             Policy.authorize_session_manage(jwt_ctx(%{scopes: ["session:read"]}), "ses-11")
+             Policy.authorize_session_access(
+               jwt_ctx(%{scopes: ["session:read"]}),
+               "ses-11",
+               :manage
+             )
 
     assert {:error, :forbidden_session} =
-             Policy.authorize_session_manage(
+             Policy.authorize_session_access(
                jwt_ctx(%{session_id: "ses-locked", scopes: ["session:create"]}),
-               "ses-11"
+               "ses-11",
+               :manage
              )
   end
 
-  test "authorize_session_manage enforces tenant checks on loaded sessions" do
+  test "authorize_session_resource enforces manage tenant checks on loaded sessions" do
     session = %{id: "ses-11", tenant_id: "acme"}
 
     assert :ok =
-             Policy.authorize_session_manage(
+             Policy.authorize_session_resource(
                jwt_ctx(%{session_id: "ses-11", scopes: ["session:create"]}),
-               session
+               session,
+               :manage
              )
 
     assert {:error, :forbidden_tenant} =
-             Policy.authorize_session_manage(
+             Policy.authorize_session_resource(
                jwt_ctx(%{
                  principal: %Principal{tenant_id: "beta", id: "user-1", type: :user},
                  scopes: ["session:create"]
                }),
-               session
+               session,
+               :manage
              )
   end
 

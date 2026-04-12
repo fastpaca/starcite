@@ -58,9 +58,9 @@ defmodule StarciteWeb.SessionController do
   def update(conn, %{"id" => id} = params) do
     with {:ok, auth} <- fetch_auth(conn) do
       with {:ok, attrs} <- validate_update(params),
-           :ok <- Policy.authorize_session_manage(auth, id),
+           :ok <- Policy.authorize_session_access(auth, id, :manage),
            {:ok, current_session} <- SessionCatalog.get_session(id),
-           :ok <- Policy.authorize_session_manage(auth, current_session),
+           :ok <- Policy.authorize_session_resource(auth, current_session, :manage),
            {:ok, session} <- WritePath.update_session(id, attrs) do
         :ok = Telemetry.ingest_edge(:update_session, auth.principal.tenant_id, :ok)
         json(conn, session)
@@ -103,7 +103,7 @@ defmodule StarciteWeb.SessionController do
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def append_api(%Context{} = auth, id, params)
       when is_binary(id) and id != "" and is_map(params) do
-    with :ok <- Policy.authorize_session_append(auth, id),
+    with :ok <- Policy.authorize_session_access(auth, id, :append),
          {:ok, event, expected_seq} <- validate_append(params, auth),
          {:ok, reply} <- append_reply(id, event, expected_seq) do
       :ok = Telemetry.ingest_edge(:append_event, auth.principal.tenant_id, :ok)
@@ -209,9 +209,9 @@ defmodule StarciteWeb.SessionController do
   """
   def show(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_read(auth, id),
+         :ok <- Policy.authorize_session_access(auth, id, :read),
          {:ok, session} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_read(auth, session) do
+         :ok <- Policy.authorize_session_resource(auth, session, :read) do
       json(conn, session)
     end
   end
@@ -223,9 +223,9 @@ defmodule StarciteWeb.SessionController do
   """
   def archive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_manage(auth, id),
+         :ok <- Policy.authorize_session_access(auth, id, :manage),
          {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_manage(auth, session_entry),
+         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
          {:ok, session} <- WritePath.archive_session(id) do
       json(conn, session)
     end
@@ -238,9 +238,9 @@ defmodule StarciteWeb.SessionController do
   """
   def unarchive(conn, %{"id" => id}) do
     with {:ok, auth} <- fetch_auth(conn),
-         :ok <- Policy.authorize_session_manage(auth, id),
+         :ok <- Policy.authorize_session_access(auth, id, :manage),
          {:ok, session_entry} <- SessionCatalog.get_session_entry(id),
-         :ok <- Policy.authorize_session_manage(auth, session_entry),
+         :ok <- Policy.authorize_session_resource(auth, session_entry, :manage),
          {:ok, session} <- WritePath.unarchive_session(id) do
       json(conn, session)
     end

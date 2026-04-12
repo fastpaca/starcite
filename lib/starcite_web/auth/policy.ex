@@ -9,6 +9,7 @@ defmodule StarciteWeb.Auth.Policy do
   alias StarciteWeb.Auth.Context
 
   @type auth :: Context.t()
+  @type session_action :: :read | :manage | :append
   @type session_resource ::
           Session.t()
           | SessionCatalog.session_entry()
@@ -50,7 +51,7 @@ defmodule StarciteWeb.Auth.Policy do
 
   @spec authorize_session_list(auth(), map()) :: {:ok, map()} | {:error, atom()}
   def authorize_session_list(%Context{} = auth, opts) when is_map(opts) do
-    with :ok <- authorize_scope(auth, "session:read"),
+    with :ok <- authorize_scope(auth, action_scope(:read)),
          {:ok, scoped_opts} <- scope_session_list(auth, opts) do
       {:ok, scoped_opts}
     end
@@ -59,41 +60,47 @@ defmodule StarciteWeb.Auth.Policy do
   def authorize_session_list(%Context{}, _opts), do: {:error, :invalid_list_query}
   def authorize_session_list(_auth, _opts), do: {:error, :forbidden}
 
-  @spec authorize_session_read(auth(), String.t() | session_resource()) :: :ok | {:error, atom()}
-  def authorize_session_read(%Context{} = auth, session_id)
-      when is_binary(session_id) and session_id != "" do
-    authorize_session_access(auth, session_id, "session:read")
+  @spec authorize_session_access(auth(), String.t(), session_action()) :: :ok | {:error, atom()}
+  def authorize_session_access(%Context{} = auth, session_id, action)
+      when is_binary(session_id) and session_id != "" and action in [:read, :manage, :append] do
+    with :ok <- authorize_scope(auth, action_scope(action)),
+         :ok <- authorize_session_pin(auth, session_id) do
+      :ok
+    end
   end
 
-  def authorize_session_read(%Context{} = auth, session) when is_map(session) do
-    authorize_session_resource(auth, session, "session:read")
-  end
+  def authorize_session_access(%Context{}, _session_id, action)
+      when action in [:read, :manage, :append],
+      do: {:error, :invalid_session_id}
 
-  def authorize_session_read(%Context{}, _session_or_id), do: {:error, :invalid_session_id}
-  def authorize_session_read(_auth, _session_or_id), do: {:error, :forbidden}
+  def authorize_session_access(_auth, _session_id, _action), do: {:error, :forbidden}
 
-  @spec authorize_session_manage(auth(), String.t() | session_resource()) ::
+  @spec authorize_session_resource(auth(), session_resource(), session_action()) ::
           :ok | {:error, atom()}
-  def authorize_session_manage(%Context{} = auth, session_id)
-      when is_binary(session_id) and session_id != "" do
-    authorize_session_access(auth, session_id, "session:create")
+  def authorize_session_resource(%Context{kind: :none}, %{id: session_id}, action)
+      when is_binary(session_id) and session_id != "" and action in [:read, :manage] do
+    :ok
   end
 
-  def authorize_session_manage(%Context{} = auth, session) when is_map(session) do
-    authorize_session_resource(auth, session, "session:create")
+  def authorize_session_resource(
+        %Context{kind: :jwt, principal: %Principal{}} = auth,
+        %{id: session_id, tenant_id: session_tenant_id},
+        action
+      )
+      when is_binary(session_id) and session_id != "" and
+             is_binary(session_tenant_id) and session_tenant_id != "" and
+             action in [:read, :manage] do
+    with :ok <- authorize_session_access(auth, session_id, action),
+         :ok <- require_same_tenant(auth, session_tenant_id) do
+      :ok
+    end
   end
 
-  def authorize_session_manage(%Context{}, _session_or_id), do: {:error, :invalid_session_id}
-  def authorize_session_manage(_auth, _session_or_id), do: {:error, :forbidden}
+  def authorize_session_resource(%Context{}, _session, action)
+      when action in [:read, :manage],
+      do: {:error, :forbidden_session}
 
-  @spec authorize_session_append(auth(), String.t()) :: :ok | {:error, atom()}
-  def authorize_session_append(%Context{} = auth, session_id)
-      when is_binary(session_id) and session_id != "" do
-    authorize_session_access(auth, session_id, "session:append")
-  end
-
-  def authorize_session_append(%Context{}, _session_id), do: {:error, :invalid_session_id}
-  def authorize_session_append(_auth, _session_id), do: {:error, :forbidden}
+  def authorize_session_resource(_auth, _session, _action), do: {:error, :forbidden}
 
   @spec authorize_lifecycle_subscription(auth()) :: {:ok, String.t()} | {:error, atom()}
   def authorize_lifecycle_subscription(%Context{
@@ -112,7 +119,7 @@ defmodule StarciteWeb.Auth.Policy do
         } = auth
       )
       when is_binary(tenant_id) and tenant_id != "" do
-    with :ok <- authorize_scope(auth, "session:read") do
+    with :ok <- authorize_scope(auth, action_scope(:read)) do
       {:ok, tenant_id}
     end
   end
@@ -198,39 +205,6 @@ defmodule StarciteWeb.Auth.Policy do
 
   defp scope_session_list(_auth, _opts), do: {:error, :forbidden}
 
-  defp authorize_session_resource(
-         %Context{kind: :none},
-         %{id: session_id},
-         _scope
-       )
-       when is_binary(session_id) and session_id != "",
-       do: :ok
-
-  defp authorize_session_resource(
-         %Context{kind: :jwt, principal: %Principal{}} = auth,
-         %{id: session_id, tenant_id: session_tenant_id},
-         scope
-       )
-       when is_binary(session_id) and session_id != "" and is_binary(scope) and scope != "" and
-              is_binary(session_tenant_id) and session_tenant_id != "" do
-    with :ok <- authorize_session_access(auth, session_id, scope),
-         :ok <- require_same_tenant(auth, session_tenant_id) do
-      :ok
-    end
-  end
-
-  defp authorize_session_resource(_auth, _session, _scope), do: {:error, :forbidden_session}
-
-  defp authorize_session_access(%Context{} = auth, session_id, scope)
-       when is_binary(session_id) and session_id != "" and is_binary(scope) and scope != "" do
-    with :ok <- authorize_scope(auth, scope),
-         :ok <- authorize_session_pin(auth, session_id) do
-      :ok
-    end
-  end
-
-  defp authorize_session_access(_auth, _session_id, _scope), do: {:error, :forbidden_session}
-
   defp authorize_session_pin(%Context{kind: :none}, session_id)
        when is_binary(session_id) and session_id != "",
        do: :ok
@@ -248,6 +222,10 @@ defmodule StarciteWeb.Auth.Policy do
        do: {:error, :forbidden_session}
 
   defp authorize_session_pin(_auth, _session_id), do: {:error, :forbidden_session}
+
+  defp action_scope(:read), do: "session:read"
+  defp action_scope(:manage), do: "session:create"
+  defp action_scope(:append), do: "session:append"
 
   defp require_same_tenant(
          %Context{kind: :jwt, principal: %Principal{tenant_id: tenant_id}},
