@@ -113,8 +113,10 @@ Telemetry parity is now partial instead of missing. The Rust service exports edg
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
 socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
-state plus runtime/fanout occupancy, with metric names aligned to the existing PromEx surface
-where that still makes sense. It still does not cover routing, replication, archive, or
+state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
+metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
+now exposes that same local runtime map with tenant, generation, last touch reason, and remaining
+idle time per active session. It still does not cover routing, replication, archive, or
 event-store invariants because those subsystems do not exist in this rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep

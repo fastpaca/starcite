@@ -27,7 +27,7 @@ use crate::{
     },
     ops::OpsSnapshot,
     repository,
-    runtime::RuntimeSnapshot,
+    runtime::{RuntimeSnapshot, RuntimeTouchReason},
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, ReadOperation,
         ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase, SocketSurface,
@@ -239,7 +239,10 @@ pub async fn show_session(
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     let session = repository::get_session(&state.pool, &session_id).await?;
 
-    state.runtime.touch_existing(&session_id, &tenant_id).await;
+    state
+        .runtime
+        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpRead)
+        .await;
 
     Ok(Json(session))
 }
@@ -257,7 +260,10 @@ pub async fn update_session(
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
         tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
         auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
-        state.runtime.touch_existing(&session_id, &tenant_id).await;
+        state
+            .runtime
+            .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpWrite)
+            .await;
 
         let session =
             repository::update_session(&state.pool, &session_id, request.validate()?).await?;
@@ -281,6 +287,10 @@ pub async fn archive_session(
     let auth = authenticate_http(&state, &headers)?;
     let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
+    state
+        .runtime
+        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpWrite)
+        .await;
     let outcome = repository::set_archive_state(&state.pool, &session_id, true).await?;
 
     if outcome.changed {
@@ -303,6 +313,10 @@ pub async fn unarchive_session(
     let auth = authenticate_http(&state, &headers)?;
     let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
+    state
+        .runtime
+        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpWrite)
+        .await;
     let outcome = repository::set_archive_state(&state.pool, &session_id, false).await?;
 
     if outcome.changed {
@@ -343,7 +357,11 @@ pub async fn append_event(
 
         state
             .runtime
-            .touch_existing(&session_id, &outcome.tenant_id)
+            .touch_existing(
+                &session_id,
+                &outcome.tenant_id,
+                RuntimeTouchReason::HttpWrite,
+            )
             .await;
 
         if let Some(event) = outcome.event.clone() {
@@ -372,6 +390,16 @@ pub async fn lifecycle_events(
     let auth = authenticate_socket(&state, &params)?;
     let expiry = auth.expiry_delay();
     let lifecycle = resolve_lifecycle_options(&state, &auth, &params).await?;
+    if let Some(session_id) = lifecycle.session_id.as_deref() {
+        state
+            .runtime
+            .touch_existing(
+                session_id,
+                &lifecycle.tenant_id,
+                RuntimeTouchReason::RawLifecycle,
+            )
+            .await;
+    }
     let receiver = state.lifecycle.subscribe_tenant(&lifecycle.tenant_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
@@ -397,6 +425,17 @@ pub async fn read_lifecycle(
     )
     .await?;
 
+    if let Some(session_id) = lifecycle.session_id.as_deref() {
+        state
+            .runtime
+            .touch_existing(
+                session_id,
+                &lifecycle.tenant_id,
+                RuntimeTouchReason::HttpLifecycle,
+            )
+            .await;
+    }
+
     Ok(Json(page))
 }
 
@@ -412,6 +451,14 @@ pub async fn session_lifecycle_events(
     let expiry = auth.expiry_delay();
     let cursor = parse_events_options(params)?.cursor;
     let lifecycle = resolve_session_lifecycle(&state, &auth, &session_id, cursor).await?;
+    state
+        .runtime
+        .touch_existing(
+            &session_id,
+            &lifecycle.tenant_id,
+            RuntimeTouchReason::RawLifecycle,
+        )
+        .await;
     let receiver = state.lifecycle.subscribe_session(&session_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
@@ -438,6 +485,15 @@ pub async fn read_session_lifecycle(
     )
     .await?;
 
+    state
+        .runtime
+        .touch_existing(
+            &session_id,
+            &lifecycle.tenant_id,
+            RuntimeTouchReason::HttpLifecycle,
+        )
+        .await;
+
     Ok(Json(page))
 }
 
@@ -454,7 +510,10 @@ pub async fn read_events(
     let page =
         repository::read_events(&state.pool, &session_id, parse_events_options(params)?).await?;
 
-    state.runtime.touch_existing(&session_id, &tenant_id).await;
+    state
+        .runtime
+        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpRead)
+        .await;
 
     Ok(Json(page))
 }
@@ -473,7 +532,10 @@ pub async fn tail_events(
     let _session = repository::get_session(&state.pool, &session_id).await?;
     let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    state.runtime.touch_existing(&session_id, &tenant_id).await;
+    state
+        .runtime
+        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::RawTail)
+        .await;
     let receiver = state.fanout.subscribe(&session_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {

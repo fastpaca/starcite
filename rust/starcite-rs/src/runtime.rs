@@ -1,4 +1,8 @@
-use std::{collections::HashMap, sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use serde::Serialize;
 use sqlx::PgPool;
@@ -30,18 +34,37 @@ pub struct RuntimeSnapshot {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ActiveSessionSnapshot {
     pub session_id: String,
+    pub tenant_id: String,
     pub generation: u64,
+    pub last_touch_reason: RuntimeTouchReason,
+    pub idle_expires_in_ms: u64,
 }
 
 #[derive(Debug, Clone)]
 struct ActiveSession {
+    tenant_id: String,
     generation: u64,
+    last_touch_at: Instant,
+    last_touch_reason: RuntimeTouchReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Activation {
     Resumed,
     AlreadyActive,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeTouchReason {
+    Create,
+    HttpRead,
+    HttpWrite,
+    HttpLifecycle,
+    RawTail,
+    RawLifecycle,
+    PhoenixTail,
+    PhoenixLifecycle,
 }
 
 impl SessionRuntime {
@@ -61,7 +84,9 @@ impl SessionRuntime {
     }
 
     pub async fn session_created(&self, session_id: &str, tenant_id: &str) {
-        let generation = self.mark_active(session_id).await;
+        let generation = self
+            .mark_active(session_id, tenant_id, RuntimeTouchReason::Create)
+            .await;
         self.schedule_freeze(session_id.to_string(), tenant_id.to_string(), generation);
         self.emit(LifecycleEvent::activated(
             session_id.to_string(),
@@ -71,8 +96,13 @@ impl SessionRuntime {
         self.telemetry.record_session_create(tenant_id);
     }
 
-    pub async fn touch_existing(&self, session_id: &str, tenant_id: &str) {
-        let (generation, activation) = self.resume(session_id).await;
+    pub async fn touch_existing(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        reason: RuntimeTouchReason,
+    ) {
+        let (generation, activation) = self.resume(session_id, tenant_id, reason).await;
         self.schedule_freeze(session_id.to_string(), tenant_id.to_string(), generation);
 
         if activation == Activation::Resumed {
@@ -96,11 +126,19 @@ impl SessionRuntime {
 
     pub async fn snapshot(&self) -> RuntimeSnapshot {
         let sessions = self.sessions.lock().await;
+        let now = Instant::now();
         let mut active_sessions = sessions
             .iter()
             .map(|(session_id, session)| ActiveSessionSnapshot {
                 session_id: session_id.clone(),
+                tenant_id: session.tenant_id.clone(),
                 generation: session.generation,
+                last_touch_reason: session.last_touch_reason,
+                idle_expires_in_ms: idle_expires_in_ms(
+                    session.last_touch_at,
+                    self.idle_timeout,
+                    now,
+                ),
             })
             .collect::<Vec<_>>();
 
@@ -135,27 +173,58 @@ impl SessionRuntime {
         }
     }
 
-    async fn mark_active(&self, session_id: &str) -> u64 {
+    async fn mark_active(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        reason: RuntimeTouchReason,
+    ) -> u64 {
         let mut sessions = self.sessions.lock().await;
+        let now = Instant::now();
         let generation = sessions
             .get(session_id)
             .map(|session| session.generation + 1)
             .unwrap_or(1);
 
-        sessions.insert(session_id.to_string(), ActiveSession { generation });
+        sessions.insert(
+            session_id.to_string(),
+            ActiveSession {
+                tenant_id: tenant_id.to_string(),
+                generation,
+                last_touch_at: now,
+                last_touch_reason: reason,
+            },
+        );
         generation
     }
 
-    async fn resume(&self, session_id: &str) -> (u64, Activation) {
+    async fn resume(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        reason: RuntimeTouchReason,
+    ) -> (u64, Activation) {
         let mut sessions = self.sessions.lock().await;
+        let now = Instant::now();
 
         match sessions.get_mut(session_id) {
             Some(session) => {
                 session.generation += 1;
+                session.tenant_id = tenant_id.to_string();
+                session.last_touch_at = now;
+                session.last_touch_reason = reason;
                 (session.generation, Activation::AlreadyActive)
             }
             None => {
-                sessions.insert(session_id.to_string(), ActiveSession { generation: 1 });
+                sessions.insert(
+                    session_id.to_string(),
+                    ActiveSession {
+                        tenant_id: tenant_id.to_string(),
+                        generation: 1,
+                        last_touch_at: now,
+                        last_touch_reason: reason,
+                    },
+                );
                 (1, Activation::Resumed)
             }
         }
@@ -202,13 +271,24 @@ impl SessionRuntime {
     }
 }
 
+fn idle_expires_in_ms(last_touch_at: Instant, idle_timeout: Duration, now: Instant) -> u64 {
+    let Some(deadline) = last_touch_at.checked_add(idle_timeout) else {
+        return idle_timeout.as_millis().min(u64::MAX as u128) as u64;
+    };
+
+    deadline
+        .saturating_duration_since(now)
+        .as_millis()
+        .min(u64::MAX as u128) as u64
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
     use tokio::time::timeout;
 
-    use super::{RuntimeSnapshot, SessionRuntime};
+    use super::{RuntimeTouchReason, SessionRuntime};
     use crate::{fanout::LifecycleFanout, model::LifecycleEvent, telemetry::Telemetry};
 
     #[tokio::test]
@@ -250,7 +330,9 @@ mod tests {
             LifecycleEvent::frozen("ses_demo".to_string(), "acme".to_string())
         );
 
-        runtime.touch_existing("ses_demo", "acme").await;
+        runtime
+            .touch_existing("ses_demo", "acme", RuntimeTouchReason::HttpRead)
+            .await;
 
         assert_eq!(
             timeout(Duration::from_secs(1), receiver.recv())
@@ -280,26 +362,31 @@ mod tests {
         );
 
         runtime.session_created("ses_b", "acme").await;
-        runtime.session_created("ses_a", "acme").await;
+        runtime.session_created("ses_a", "beta").await;
+        runtime
+            .touch_existing("ses_b", "acme", RuntimeTouchReason::HttpWrite)
+            .await;
 
         let snapshot = runtime.snapshot().await;
 
-        assert_eq!(
-            snapshot,
-            RuntimeSnapshot {
-                idle_timeout_ms: 30_000,
-                active_session_count: 2,
-                sessions: vec![
-                    super::ActiveSessionSnapshot {
-                        session_id: "ses_a".to_string(),
-                        generation: 1,
-                    },
-                    super::ActiveSessionSnapshot {
-                        session_id: "ses_b".to_string(),
-                        generation: 1,
-                    },
-                ],
-            }
-        );
+        assert_eq!(snapshot.idle_timeout_ms, 30_000);
+        assert_eq!(snapshot.active_session_count, 2);
+        assert_eq!(snapshot.sessions.len(), 2);
+
+        let first = &snapshot.sessions[0];
+        assert_eq!(first.session_id, "ses_a");
+        assert_eq!(first.tenant_id, "beta");
+        assert_eq!(first.generation, 1);
+        assert_eq!(first.last_touch_reason, RuntimeTouchReason::Create);
+        assert!(first.idle_expires_in_ms > 0);
+        assert!(first.idle_expires_in_ms <= 30_000);
+
+        let second = &snapshot.sessions[1];
+        assert_eq!(second.session_id, "ses_b");
+        assert_eq!(second.tenant_id, "acme");
+        assert_eq!(second.generation, 2);
+        assert_eq!(second.last_touch_reason, RuntimeTouchReason::HttpWrite);
+        assert!(second.idle_expires_in_ms > 0);
+        assert!(second.idle_expires_in_ms <= 30_000);
     }
 }

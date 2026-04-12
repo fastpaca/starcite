@@ -17,7 +17,7 @@ use crate::{
     config::AuthMode,
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     ops::OpsSnapshot,
-    runtime::RuntimeSnapshot,
+    runtime::{RuntimeSnapshot, RuntimeTouchReason},
 };
 
 const DEFAULT_MS_BUCKETS: &[u64] = &[
@@ -593,6 +593,37 @@ impl Telemetry {
             &node_labels,
             runtime.active_session_count as i64,
         );
+        let runtime_reason_labels = runtime
+            .sessions
+            .iter()
+            .fold(
+                BTreeMap::<RuntimeTouchReason, i64>::new(),
+                |mut counts, session| {
+                    *counts.entry(session.last_touch_reason).or_insert(0) += 1;
+                    counts
+                },
+            )
+            .into_iter()
+            .map(|(reason, value)| {
+                (
+                    label_set(&[
+                        ("node", self.node_name().to_string()),
+                        ("reason", runtime_touch_reason_label(reason).to_string()),
+                    ]),
+                    value,
+                )
+            })
+            .collect::<Vec<_>>();
+        let runtime_reason_series = runtime_reason_labels
+            .iter()
+            .map(|(labels, value)| (labels, *value))
+            .collect::<Vec<_>>();
+        render_scalar_gauge_family(
+            &mut out,
+            "starcite_runtime_active_sessions_by_reason",
+            "Active runtime sessions grouped by last touch reason",
+            &runtime_reason_series,
+        );
         render_scalar_gauge_family(
             &mut out,
             "starcite_fanout_active_keys",
@@ -932,6 +963,19 @@ fn session_reason_label(reason: SessionReason) -> &'static str {
     }
 }
 
+fn runtime_touch_reason_label(reason: RuntimeTouchReason) -> &'static str {
+    match reason {
+        RuntimeTouchReason::Create => "create",
+        RuntimeTouchReason::HttpRead => "http_read",
+        RuntimeTouchReason::HttpWrite => "http_write",
+        RuntimeTouchReason::HttpLifecycle => "http_lifecycle",
+        RuntimeTouchReason::RawTail => "raw_tail",
+        RuntimeTouchReason::RawLifecycle => "raw_lifecycle",
+        RuntimeTouchReason::PhoenixTail => "phoenix_tail",
+        RuntimeTouchReason::PhoenixLifecycle => "phoenix_lifecycle",
+    }
+}
+
 fn socket_transport_label(transport: SocketTransport) -> &'static str {
     match transport {
         SocketTransport::Raw => "raw",
@@ -959,7 +1003,7 @@ mod tests {
             TenantSubscriptionSnapshot,
         },
         ops::OpsSnapshot,
-        runtime::RuntimeSnapshot,
+        runtime::{ActiveSessionSnapshot, RuntimeSnapshot, RuntimeTouchReason},
     };
 
     use super::{
@@ -1092,7 +1136,22 @@ mod tests {
             &RuntimeSnapshot {
                 idle_timeout_ms: 30_000,
                 active_session_count: 2,
-                sessions: vec![],
+                sessions: vec![
+                    ActiveSessionSnapshot {
+                        session_id: "ses_a".to_string(),
+                        tenant_id: "acme".to_string(),
+                        generation: 1,
+                        last_touch_reason: RuntimeTouchReason::HttpLifecycle,
+                        idle_expires_in_ms: 12_345,
+                    },
+                    ActiveSessionSnapshot {
+                        session_id: "ses_b".to_string(),
+                        tenant_id: "acme".to_string(),
+                        generation: 2,
+                        last_touch_reason: RuntimeTouchReason::PhoenixTail,
+                        idle_expires_in_ms: 20_000,
+                    },
+                ],
             },
             &SessionFanoutSnapshot {
                 active_session_count: 1,
@@ -1125,6 +1184,13 @@ mod tests {
         assert!(rendered.contains(r#"drain_source="manual""#));
         assert!(rendered.contains("starcite_runtime_active_sessions"));
         assert!(rendered.contains(r#"starcite_runtime_active_sessions{node="starcite-rs"} 2"#));
+        assert!(rendered.contains("starcite_runtime_active_sessions_by_reason"));
+        assert!(rendered.contains(
+            r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="http_lifecycle"} 1"#
+        ));
+        assert!(rendered.contains(
+            r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="phoenix_tail"} 1"#
+        ));
         assert!(rendered.contains("starcite_fanout_active_keys"));
         assert!(rendered.contains(
             r#"starcite_fanout_active_keys{node="starcite-rs",scope="events_session"} 1"#

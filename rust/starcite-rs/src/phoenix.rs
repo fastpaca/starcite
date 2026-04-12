@@ -22,6 +22,7 @@ use crate::{
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
     repository,
+    runtime::RuntimeTouchReason,
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, ReadOperation, ReadOutcome, ReadPhase, SocketSurface,
         SocketTransport,
@@ -320,6 +321,14 @@ async fn handle_join(
                 cursor,
                 session_id: Some(session_id.clone()),
             };
+            state
+                .runtime
+                .touch_existing(
+                    &session_id,
+                    &tenant_id,
+                    RuntimeTouchReason::PhoenixLifecycle,
+                )
+                .await;
             let receiver = state.lifecycle.subscribe_session(&session_id).await;
             let join_ref = frame.join_ref.clone();
             let topic = frame.topic.clone();
@@ -383,6 +392,13 @@ async fn handle_join(
                     json!({"reason": reason_for_error(&error)}),
                 ));
                 return;
+            }
+
+            if let Some(session_id) = lifecycle.session_id.as_deref() {
+                state
+                    .runtime
+                    .touch_existing(session_id, &tenant_id, RuntimeTouchReason::PhoenixLifecycle)
+                    .await;
             }
 
             let receiver = state.lifecycle.subscribe_tenant(&tenant_id).await;
@@ -490,7 +506,10 @@ async fn handle_join(
                 return;
             }
 
-            state.runtime.touch_existing(&session_id, &tenant_id).await;
+            state
+                .runtime
+                .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::PhoenixTail)
+                .await;
             let receiver = state.fanout.subscribe(&session_id).await;
             let join_ref = frame.join_ref.clone();
             let topic = frame.topic.clone();
