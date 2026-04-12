@@ -18,7 +18,7 @@ use tokio::{sync::broadcast, time::sleep};
 use crate::{
     AppState, auth,
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
-    error::AppError,
+    error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     model::{
         AppendEventRequest, ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions,
@@ -66,6 +66,10 @@ struct ReadyResponse {
     mode: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drain_source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -91,6 +95,10 @@ struct NodeDrainingFrame {
     #[serde(rename = "type")]
     frame_type: &'static str,
     reason: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    drain_source: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    retry_after_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -116,7 +124,9 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
 
     if ops.draining {
-        return ready_response(&ops, Some("draining")).into_response();
+        let mut response = ready_response(&ops, Some("draining")).into_response();
+        error::apply_drain_headers(response.headers_mut(), ops.drain_source, ops.retry_after_ms);
+        return response;
     }
 
     match sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
@@ -170,7 +180,7 @@ pub async fn reject_when_draining(
     next: Next,
 ) -> Response {
     if ops.is_draining() {
-        AppError::NodeDraining.into_response()
+        AppError::node_draining(&ops.snapshot()).into_response()
     } else {
         next.run(request).await
     }
@@ -815,6 +825,8 @@ fn ready_response(
             status: if reason.is_some() { "starting" } else { "ok" },
             mode: ops.mode,
             reason,
+            drain_source: ops.drain_source,
+            retry_after_ms: ops.retry_after_ms,
         }),
     )
 }
@@ -856,7 +868,7 @@ async fn run_tail_session(
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
     if state.ops.is_draining() {
-        let _ = send_node_draining(&mut socket).await;
+        let _ = send_node_draining(&mut socket, &state.ops).await;
         return;
     }
 
@@ -880,7 +892,7 @@ async fn run_tail_session(
                         session_id = %session_id,
                         "closing raw tail socket because node is draining"
                     );
-                    let _ = send_node_draining(&mut socket).await;
+                    let _ = send_node_draining(&mut socket, &state.ops).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -926,7 +938,7 @@ async fn run_tail_session(
                         session_id = %session_id,
                         "closing raw tail socket because node is draining"
                     );
-                    let _ = send_node_draining(&mut socket).await;
+                    let _ = send_node_draining(&mut socket, &state.ops).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -1048,7 +1060,7 @@ async fn run_lifecycle_session(
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
     if state.ops.is_draining() {
-        let _ = send_node_draining(&mut socket).await;
+        let _ = send_node_draining(&mut socket, &state.ops).await;
         return;
     }
 
@@ -1077,7 +1089,7 @@ async fn run_lifecycle_session(
                         session_id = ?lifecycle.session_id,
                         "closing raw lifecycle socket because node is draining"
                     );
-                    let _ = send_node_draining(&mut socket).await;
+                    let _ = send_node_draining(&mut socket, &state.ops).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -1136,7 +1148,7 @@ async fn run_lifecycle_session(
                         session_id = ?lifecycle.session_id,
                         "closing raw lifecycle socket because node is draining"
                     );
-                    let _ = send_node_draining(&mut socket).await;
+                    let _ = send_node_draining(&mut socket, &state.ops).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -1289,10 +1301,12 @@ fn build_token_expired_frame() -> TokenExpiredFrame {
     }
 }
 
-fn build_node_draining_frame() -> NodeDrainingFrame {
+fn build_node_draining_frame(ops: &crate::ops::OpsSnapshot) -> NodeDrainingFrame {
     NodeDrainingFrame {
         frame_type: "node_draining",
         reason: "node_draining",
+        drain_source: ops.drain_source,
+        retry_after_ms: ops.retry_after_ms,
     }
 }
 
@@ -1343,8 +1357,9 @@ async fn send_token_expired(socket: &mut WebSocket) -> Result<(), ()> {
     send_terminal_message(socket, message, close_code::POLICY, "token_expired").await
 }
 
-async fn send_node_draining(socket: &mut WebSocket) -> Result<(), ()> {
-    let message = serde_json::to_string(&build_node_draining_frame()).map_err(|_| ())?;
+async fn send_node_draining(socket: &mut WebSocket, ops: &crate::ops::OpsState) -> Result<(), ()> {
+    let message =
+        serde_json::to_string(&build_node_draining_frame(&ops.snapshot())).map_err(|_| ())?;
     send_terminal_message(socket, message, close_code::RESTART, "node_draining").await
 }
 
@@ -1518,10 +1533,14 @@ mod tests {
 
     #[test]
     fn node_draining_frame_uses_public_shape() {
-        let frame = build_node_draining_frame();
+        let ops_state = OpsState::new(5_000);
+        ops_state.begin_shutdown_drain();
+        let frame = build_node_draining_frame(&ops_state.snapshot());
 
         assert_eq!(frame.frame_type, "node_draining");
         assert_eq!(frame.reason, "node_draining");
+        assert_eq!(frame.drain_source, Some("shutdown"));
+        assert!(frame.retry_after_ms.is_some());
     }
 
     #[test]
@@ -1533,6 +1552,8 @@ mod tests {
         assert_eq!(body.status, "ok");
         assert_eq!(body.mode, "ready");
         assert_eq!(body.reason, None);
+        assert_eq!(body.drain_source, None);
+        assert_eq!(body.retry_after_ms, None);
     }
 
     #[test]
@@ -1546,6 +1567,8 @@ mod tests {
         assert_eq!(body.status, "starting");
         assert_eq!(body.mode, "draining");
         assert_eq!(body.reason, Some("draining"));
+        assert_eq!(body.drain_source, Some("shutdown"));
+        assert!(body.retry_after_ms.is_some());
     }
 
     #[test]

@@ -94,7 +94,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
         .map(|delay| Box::pin(sleep(delay)));
 
     if state.ops.is_draining() {
-        let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
+        let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
         return;
     }
 
@@ -110,7 +110,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
                     );
-                    let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
+                    let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
                     break;
                 }
                 outbound = outbound_rx.recv() => {
@@ -157,7 +157,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
                     );
-                    let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
+                    let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
                     break;
                 }
                 outbound = outbound_rx.recv() => {
@@ -1045,7 +1045,10 @@ async fn send_token_expired_frames(
 async fn send_node_draining_frames(
     socket: &mut WebSocket,
     subscriptions: &HashMap<String, TopicSubscription>,
+    ops: &crate::ops::OpsState,
 ) -> Result<(), ()> {
+    let snapshot = ops.snapshot();
+
     for (topic, subscription) in subscriptions {
         send_frame(
             socket,
@@ -1053,13 +1056,36 @@ async fn send_node_draining_frames(
                 subscription.join_ref.clone(),
                 topic.clone(),
                 "node_draining",
-                json!({"reason": "node_draining"}),
+                build_node_draining_payload(&snapshot),
             ),
         )
         .await?;
     }
 
     send_socket_close(socket, close_code::RESTART, "node_draining").await
+}
+
+fn build_node_draining_payload(ops: &crate::ops::OpsSnapshot) -> Value {
+    let mut payload = serde_json::Map::from_iter([(
+        "reason".to_string(),
+        Value::String("node_draining".to_string()),
+    )]);
+
+    if let Some(drain_source) = ops.drain_source {
+        payload.insert(
+            "drain_source".to_string(),
+            Value::String(drain_source.to_string()),
+        );
+    }
+
+    if let Some(retry_after_ms) = ops.retry_after_ms {
+        payload.insert(
+            "retry_after_ms".to_string(),
+            Value::Number(retry_after_ms.into()),
+        );
+    }
+
+    Value::Object(payload)
 }
 
 async fn wait_for_drain(ops: &crate::ops::OpsState) {
@@ -1264,11 +1290,11 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PhoenixFrame, SocketContext, parse_client_frame, parse_lifecycle_join_payload,
-        parse_session_lifecycle_join_payload, parse_tail_join_payload, push_frame, reply_frame,
-        resolve_lifecycle_tenant_id,
+        PhoenixFrame, SocketContext, build_node_draining_payload, parse_client_frame,
+        parse_lifecycle_join_payload, parse_session_lifecycle_join_payload,
+        parse_tail_join_payload, push_frame, reply_frame, resolve_lifecycle_tenant_id,
     };
-    use crate::{auth::AuthContext, config::AuthMode};
+    use crate::{auth::AuthContext, config::AuthMode, ops::OpsSnapshot};
 
     #[test]
     fn parses_client_frame_from_protocol_array() {
@@ -1423,6 +1449,26 @@ mod tests {
         assert_eq!(
             push_value,
             json!(["1", null, "tail:ses_demo", "events", {"events": []}])
+        );
+    }
+
+    #[test]
+    fn node_draining_payload_includes_shutdown_retry_hint() {
+        let payload = build_node_draining_payload(&OpsSnapshot {
+            mode: "draining",
+            draining: true,
+            drain_source: Some("shutdown"),
+            retry_after_ms: Some(2_400),
+            shutdown_drain_timeout_ms: 5_000,
+        });
+
+        assert_eq!(
+            payload,
+            json!({
+                "reason": "node_draining",
+                "drain_source": "shutdown",
+                "retry_after_ms": 2400
+            })
         );
     }
 }

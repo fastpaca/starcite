@@ -1,10 +1,18 @@
 use axum::{
     Json,
-    http::StatusCode,
+    http::{
+        HeaderMap, HeaderValue, StatusCode,
+        header::{self, HeaderName},
+    },
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
 use thiserror::Error;
+
+use crate::ops::OpsSnapshot;
+
+pub const DRAIN_SOURCE_HEADER: HeaderName = HeaderName::from_static("x-starcite-drain-source");
+pub const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("x-starcite-retry-after-ms");
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -61,7 +69,10 @@ pub enum AppError {
     #[error("database unavailable")]
     DatabaseUnavailable,
     #[error("node draining")]
-    NodeDraining,
+    NodeDraining {
+        drain_source: Option<&'static str>,
+        retry_after_ms: Option<u64>,
+    },
     #[error("manual drain cannot clear shutdown drain")]
     DrainResetForbidden,
     #[error("internal error")]
@@ -71,6 +82,13 @@ pub enum AppError {
 }
 
 impl AppError {
+    pub fn node_draining(ops: &OpsSnapshot) -> Self {
+        Self::NodeDraining {
+            drain_source: ops.drain_source,
+            retry_after_ms: ops.retry_after_ms,
+        }
+    }
+
     pub fn error_code(&self) -> &'static str {
         match self {
             Self::MissingBearerToken => "missing_bearer_token",
@@ -97,7 +115,7 @@ impl AppError {
             Self::ProducerReplayConflict => "producer_replay_conflict",
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
             Self::DatabaseUnavailable => "database_unavailable",
-            Self::NodeDraining => "node_draining",
+            Self::NodeDraining { .. } => "node_draining",
             Self::DrainResetForbidden => "drain_reset_forbidden",
             Self::Internal | Self::Sqlx(_) => "internal_error",
         }
@@ -129,7 +147,9 @@ impl AppError {
             | Self::ProducerReplayConflict
             | Self::ProducerSeqConflict { .. }
             | Self::DrainResetForbidden => StatusCode::CONFLICT,
-            Self::DatabaseUnavailable | Self::NodeDraining => StatusCode::SERVICE_UNAVAILABLE,
+            Self::DatabaseUnavailable | Self::NodeDraining { .. } => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Internal | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -241,14 +261,41 @@ impl AppError {
                 "error": self.error_code(),
                 "message": "Database is unavailable"
             }),
-            Self::NodeDraining => json!({
+            Self::NodeDraining {
+                drain_source,
+                retry_after_ms,
+            } => json!({
                 "error": self.error_code(),
-                "message": "Node is draining"
+                "message": "Node is draining",
+                "drain_source": drain_source,
+                "retry_after_ms": retry_after_ms
             }),
             Self::Internal | Self::Sqlx(_) => json!({
                 "error": self.error_code(),
                 "message": "Internal server error"
             }),
+        }
+    }
+}
+
+pub fn apply_drain_headers(
+    headers: &mut HeaderMap,
+    drain_source: Option<&'static str>,
+    retry_after_ms: Option<u64>,
+) {
+    if let Some(drain_source) = drain_source {
+        headers.insert(DRAIN_SOURCE_HEADER, HeaderValue::from_static(drain_source));
+    }
+
+    if let Some(retry_after_ms) = retry_after_ms {
+        if let Ok(value) = HeaderValue::from_str(&retry_after_ms.to_string()) {
+            headers.insert(RETRY_AFTER_MS_HEADER.clone(), value);
+        }
+
+        let retry_after_seconds = retry_after_ms.saturating_add(999) / 1_000;
+
+        if let Ok(value) = HeaderValue::from_str(&retry_after_seconds.to_string()) {
+            headers.insert(header::RETRY_AFTER, value);
         }
     }
 }
@@ -259,6 +306,94 @@ impl IntoResponse for AppError {
             tracing::error!(error = ?error, "database request failed");
         }
 
-        (self.status_code(), Json(self.body())).into_response()
+        let mut response = (self.status_code(), Json(self.body())).into_response();
+
+        if let Self::NodeDraining {
+            drain_source,
+            retry_after_ms,
+        } = self
+        {
+            apply_drain_headers(response.headers_mut(), drain_source, retry_after_ms);
+        }
+
+        response
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use axum::{body, http::StatusCode, response::IntoResponse};
+    use serde_json::json;
+
+    use super::{AppError, DRAIN_SOURCE_HEADER, RETRY_AFTER_MS_HEADER};
+    use crate::ops::OpsSnapshot;
+
+    #[tokio::test]
+    async fn node_draining_response_includes_retry_headers() {
+        let response = AppError::node_draining(&OpsSnapshot {
+            mode: "draining",
+            draining: true,
+            drain_source: Some("shutdown"),
+            retry_after_ms: Some(3_450),
+            shutdown_drain_timeout_ms: 5_000,
+        })
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(&DRAIN_SOURCE_HEADER).unwrap(),
+            "shutdown"
+        );
+        assert_eq!(
+            response.headers().get(&RETRY_AFTER_MS_HEADER).unwrap(),
+            "3450"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .unwrap(),
+            "4"
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+
+        assert_eq!(
+            json_body,
+            json!({
+                "error": "node_draining",
+                "message": "Node is draining",
+                "drain_source": "shutdown",
+                "retry_after_ms": 3450
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn manual_node_draining_response_omits_retry_headers() {
+        let response = AppError::node_draining(&OpsSnapshot {
+            mode: "draining",
+            draining: true,
+            drain_source: Some("manual"),
+            retry_after_ms: None,
+            shutdown_drain_timeout_ms: 5_000,
+        })
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(&DRAIN_SOURCE_HEADER).unwrap(),
+            "manual"
+        );
+        assert!(response.headers().get(&RETRY_AFTER_MS_HEADER).is_none());
+        assert!(
+            response
+                .headers()
+                .get(axum::http::header::RETRY_AFTER)
+                .is_none()
+        );
     }
 }

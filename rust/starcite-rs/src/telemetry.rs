@@ -1086,6 +1086,7 @@ mod tests {
                 mode: "draining",
                 draining: true,
                 drain_source: Some("manual"),
+                retry_after_ms: None,
                 shutdown_drain_timeout_ms: 4_000,
             },
             &RuntimeSnapshot {

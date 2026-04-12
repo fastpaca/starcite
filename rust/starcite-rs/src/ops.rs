@@ -1,7 +1,8 @@
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicBool, AtomicU8, Ordering},
 };
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tokio::sync::watch;
@@ -10,6 +11,7 @@ use tokio::sync::watch;
 pub struct OpsState {
     draining: Arc<AtomicBool>,
     drain_source: Arc<AtomicU8>,
+    shutdown_deadline: Arc<Mutex<Option<Instant>>>,
     draining_tx: watch::Sender<bool>,
     shutdown_drain_timeout_ms: u64,
 }
@@ -19,6 +21,7 @@ pub struct OpsSnapshot {
     pub mode: &'static str,
     pub draining: bool,
     pub drain_source: Option<&'static str>,
+    pub retry_after_ms: Option<u64>,
     pub shutdown_drain_timeout_ms: u64,
 }
 
@@ -59,6 +62,7 @@ impl OpsState {
         Self {
             draining: Arc::new(AtomicBool::new(false)),
             drain_source: Arc::new(AtomicU8::new(0)),
+            shutdown_deadline: Arc::new(Mutex::new(None)),
             draining_tx,
             shutdown_drain_timeout_ms,
         }
@@ -74,6 +78,10 @@ impl OpsState {
 
     pub fn clear_drain(&self) {
         self.drain_source.store(0, Ordering::SeqCst);
+        *self
+            .shutdown_deadline
+            .lock()
+            .expect("shutdown deadline lock") = None;
 
         if self.draining.swap(false, Ordering::SeqCst) {
             let _ = self.draining_tx.send(false);
@@ -92,26 +100,52 @@ impl OpsState {
         let draining = self.is_draining();
         let drain_source = if draining {
             DrainSource::from_code(self.drain_source.load(Ordering::SeqCst))
-                .map(DrainSource::as_str)
         } else {
             None
+        };
+        let retry_after_ms = match drain_source {
+            Some(DrainSource::Shutdown) => self
+                .shutdown_deadline
+                .lock()
+                .expect("shutdown deadline lock")
+                .as_ref()
+                .map(|deadline| {
+                    deadline
+                        .saturating_duration_since(Instant::now())
+                        .as_millis() as u64
+                }),
+            _ => None,
         };
 
         OpsSnapshot {
             mode: if draining { "draining" } else { "ready" },
             draining,
-            drain_source,
+            drain_source: drain_source.map(DrainSource::as_str),
+            retry_after_ms,
             shutdown_drain_timeout_ms: self.shutdown_drain_timeout_ms,
         }
     }
 
     fn begin_drain(&self, source: DrainSource) {
         self.drain_source.store(source.code(), Ordering::SeqCst);
+        *self
+            .shutdown_deadline
+            .lock()
+            .expect("shutdown deadline lock") = match source {
+            DrainSource::Manual => None,
+            DrainSource::Shutdown => {
+                Some(Instant::now() + drain_timeout(self.shutdown_drain_timeout_ms))
+            }
+        };
 
         if !self.draining.swap(true, Ordering::SeqCst) {
             let _ = self.draining_tx.send(true);
         }
     }
+}
+
+fn drain_timeout(timeout_ms: u64) -> Duration {
+    Duration::from_millis(timeout_ms)
 }
 
 #[cfg(test)]
@@ -128,6 +162,7 @@ mod tests {
                 mode: "ready",
                 draining: false,
                 drain_source: None,
+                retry_after_ms: None,
                 shutdown_drain_timeout_ms: 30_000,
             }
         );
@@ -138,14 +173,11 @@ mod tests {
         let ops = OpsState::new(5_000);
         ops.begin_shutdown_drain();
 
-        assert_eq!(
-            ops.snapshot(),
-            OpsSnapshot {
-                mode: "draining",
-                draining: true,
-                drain_source: Some("shutdown"),
-                shutdown_drain_timeout_ms: 5_000,
-            }
+        assert_eq!(ops.snapshot().drain_source, Some("shutdown"));
+        assert!(
+            ops.snapshot()
+                .retry_after_ms
+                .is_some_and(|retry_after_ms| retry_after_ms <= 5_000)
         );
     }
 
@@ -160,6 +192,7 @@ mod tests {
                 mode: "draining",
                 draining: true,
                 drain_source: Some("manual"),
+                retry_after_ms: None,
                 shutdown_drain_timeout_ms: 5_000,
             }
         );
@@ -177,6 +210,7 @@ mod tests {
                 mode: "ready",
                 draining: false,
                 drain_source: None,
+                retry_after_ms: None,
                 shutdown_drain_timeout_ms: 5_000,
             }
         );

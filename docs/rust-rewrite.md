@@ -40,14 +40,14 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
 - in `unsafe_jwt` mode, raw lifecycle and tail sockets emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
-- when local shutdown drain begins, raw lifecycle and tail sockets emit `{"type":"node_draining","reason":"node_draining"}` before the connection closes
+- when local shutdown drain begins, raw lifecycle and tail sockets emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
 - `DELETE /debug/drain` clears only a manual drain and refuses to undo a real shutdown drain
 - `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
-- `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"` instead of only exposing probe status code
+- `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"`, plus drain metadata during shutdown drain, instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
@@ -88,10 +88,12 @@ owns right now."
 
 The rewrite now also has a minimal local drain story instead of pretending graceful shutdown is
 free. On `SIGTERM` or `Ctrl-C`, the process flips into `draining`, `/health/ready` returns `503`
-with `reason = "draining"`, new public HTTP requests and new WebSocket handshakes fail with
-`node_draining`, existing raw sockets emit a terminal `node_draining` frame and then close with
-code `1012`, existing Phoenix topic subscriptions receive a `node_draining` push and then the
-socket closes with code `1012`, and the listeners stay up for
+with `reason = "draining"` plus `drain_source = "shutdown"` and a live `retry_after_ms`, new
+public HTTP requests and new WebSocket handshakes fail with `node_draining`, `x-starcite-drain-source`,
+and shutdown `Retry-After` headers, existing raw sockets emit a terminal `node_draining` frame
+with the same metadata and then close with code `1012`, existing Phoenix topic subscriptions
+receive a `node_draining` push with the same metadata and then the socket closes with code `1012`,
+and the listeners stay up for
 `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` before the actual server shutdown future resolves. The same
 local drain state can be triggered manually through `POST /debug/drain` on the ops listener for
 local drills without terminating the process. That is still much simpler than the Phoenix routing
