@@ -10,6 +10,19 @@ use crate::{
     },
 };
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct ProducerCursorRow {
+    last_producer_seq: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProducerSequenceCheck {
+    AcceptFirst,
+    AcceptNext,
+    ReplayOrConflict { expected: i64 },
+    Gap { expected: i64 },
+}
+
 #[derive(Debug, Clone)]
 pub struct AppendOutcome {
     pub reply: AppendReply,
@@ -279,73 +292,50 @@ pub async fn append_event(
         }
     }
 
-    let existing = sqlx::query_as::<_, EventRow>(
-        r#"
-        SELECT
-          session_id,
-          seq,
-          type,
-          payload,
-          actor,
-          source,
-          metadata,
-          refs,
-          idempotency_key,
-          producer_id,
-          producer_seq,
-          tenant_id,
-          inserted_at
-        FROM events
-        WHERE session_id = $1
-          AND producer_id = $2
-          AND producer_seq = $3
-        "#,
-    )
-    .bind(session_id)
-    .bind(&input.producer_id)
-    .bind(input.producer_seq)
-    .fetch_optional(&mut *tx)
-    .await?;
+    let producer_cursor = load_producer_cursor_tx(&mut tx, session_id, &input.producer_id).await?;
 
-    if let Some(existing) = existing {
-        if matches_event(&existing, &input, &session.tenant_id)? {
-            let seq = existing.seq;
-            tx.commit().await?;
+    match classify_producer_sequence(
+        producer_cursor.as_ref().map(|row| row.last_producer_seq),
+        input.producer_seq,
+    ) {
+        ProducerSequenceCheck::AcceptFirst | ProducerSequenceCheck::AcceptNext => {}
+        ProducerSequenceCheck::ReplayOrConflict { expected } => {
+            let existing = load_event_for_producer_seq_tx(
+                &mut tx,
+                session_id,
+                &input.producer_id,
+                input.producer_seq,
+            )
+            .await?;
 
-            return Ok(AppendOutcome {
-                reply: AppendReply {
-                    seq,
-                    last_seq: session.last_seq,
-                    deduped: true,
-                    cursor: seq,
-                    committed_cursor: session.last_seq,
-                },
-                event: None,
-                tenant_id: session.tenant_id,
+            if let Some(existing) = existing {
+                if matches_event(&existing, &input, &session.tenant_id)? {
+                    let seq = existing.seq;
+                    tx.commit().await?;
+
+                    return Ok(AppendOutcome {
+                        reply: AppendReply {
+                            seq,
+                            last_seq: session.last_seq,
+                            deduped: true,
+                            cursor: seq,
+                            committed_cursor: session.last_seq,
+                        },
+                        event: None,
+                        tenant_id: session.tenant_id,
+                    });
+                }
+
+                return Err(AppError::ProducerReplayConflict);
+            }
+
+            return Err(AppError::ProducerSeqConflict {
+                producer_id: input.producer_id,
+                expected,
+                current: input.producer_seq,
             });
         }
-
-        return Err(AppError::ProducerReplayConflict);
-    }
-
-    let latest_producer_seq = sqlx::query_scalar::<_, i64>(
-        r#"
-        SELECT producer_seq
-        FROM events
-        WHERE session_id = $1
-          AND producer_id = $2
-        ORDER BY producer_seq DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(session_id)
-    .bind(&input.producer_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    if let Some(latest_producer_seq) = latest_producer_seq {
-        let expected = latest_producer_seq + 1;
-        if input.producer_seq != expected {
+        ProducerSequenceCheck::Gap { expected } => {
             return Err(AppError::ProducerSeqConflict {
                 producer_id: input.producer_id,
                 expected,
@@ -404,6 +394,27 @@ pub async fn append_event(
     .fetch_one(&mut *tx)
     .await
     .map_err(map_insert_error)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO session_producers (
+          session_id,
+          producer_id,
+          last_producer_seq
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (session_id, producer_id)
+        DO UPDATE
+        SET
+          last_producer_seq = EXCLUDED.last_producer_seq,
+          updated_at = now()
+        "#,
+    )
+    .bind(session_id)
+    .bind(&input.producer_id)
+    .bind(input.producer_seq)
+    .execute(&mut *tx)
+    .await?;
 
     sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
         .bind(session_id)
@@ -626,6 +637,83 @@ async fn load_session_row_tx(
     row.ok_or(AppError::SessionNotFound)
 }
 
+async fn load_producer_cursor_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    producer_id: &str,
+) -> Result<Option<ProducerCursorRow>, AppError> {
+    sqlx::query_as::<_, ProducerCursorRow>(
+        r#"
+        SELECT last_producer_seq
+        FROM session_producers
+        WHERE session_id = $1
+          AND producer_id = $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(producer_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn load_event_for_producer_seq_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    producer_id: &str,
+    producer_seq: i64,
+) -> Result<Option<EventRow>, AppError> {
+    sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND producer_id = $2
+          AND producer_seq = $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(producer_id)
+    .bind(producer_seq)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
+}
+
+fn classify_producer_sequence(
+    last_producer_seq: Option<i64>,
+    incoming_producer_seq: i64,
+) -> ProducerSequenceCheck {
+    match last_producer_seq {
+        None if incoming_producer_seq == 1 => ProducerSequenceCheck::AcceptFirst,
+        None => ProducerSequenceCheck::Gap { expected: 1 },
+        Some(last_producer_seq) if incoming_producer_seq == last_producer_seq + 1 => {
+            ProducerSequenceCheck::AcceptNext
+        }
+        Some(last_producer_seq) if incoming_producer_seq <= last_producer_seq => {
+            ProducerSequenceCheck::ReplayOrConflict {
+                expected: last_producer_seq + 1,
+            }
+        }
+        Some(last_producer_seq) => ProducerSequenceCheck::Gap {
+            expected: last_producer_seq + 1,
+        },
+    }
+}
+
 fn matches_event(
     existing: &EventRow,
     input: &ValidatedAppendEvent,
@@ -656,4 +744,49 @@ fn map_insert_error(error: sqlx::Error) -> AppError {
     }
 
     AppError::Sqlx(error)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProducerSequenceCheck, classify_producer_sequence};
+
+    #[test]
+    fn producer_sequence_accepts_first_append() {
+        assert_eq!(
+            classify_producer_sequence(None, 1),
+            ProducerSequenceCheck::AcceptFirst
+        );
+    }
+
+    #[test]
+    fn producer_sequence_rejects_gaps_from_empty_state() {
+        assert_eq!(
+            classify_producer_sequence(None, 3),
+            ProducerSequenceCheck::Gap { expected: 1 }
+        );
+    }
+
+    #[test]
+    fn producer_sequence_accepts_next_seq_from_cursor_table() {
+        assert_eq!(
+            classify_producer_sequence(Some(4), 5),
+            ProducerSequenceCheck::AcceptNext
+        );
+    }
+
+    #[test]
+    fn producer_sequence_sends_older_seq_to_replay_path() {
+        assert_eq!(
+            classify_producer_sequence(Some(4), 4),
+            ProducerSequenceCheck::ReplayOrConflict { expected: 5 }
+        );
+    }
+
+    #[test]
+    fn producer_sequence_rejects_forward_gap() {
+        assert_eq!(
+            classify_producer_sequence(Some(4), 7),
+            ProducerSequenceCheck::Gap { expected: 5 }
+        );
+    }
 }

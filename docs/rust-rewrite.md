@@ -109,6 +109,13 @@ the last receiver disconnects instead of waiting for another broadcast to notice
 sender. That keeps the local memory story closer to "active sockets only" instead of "every session
 ever touched by this process."
 
+The Postgres append path is also less naive than the first cut now. Instead of deriving producer
+ordering from the `events` table on every write, the rewrite keeps a dedicated `session_producers`
+table in Postgres with the last committed `producer_seq` per `(session_id, producer_id)`. That
+keeps successful appends on small session and producer rows plus the one new event insert, while
+still falling back to an exact historical event lookup for replay-vs-conflict decisions when a
+producer sends an older sequence.
+
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
