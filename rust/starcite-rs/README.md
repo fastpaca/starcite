@@ -57,7 +57,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `/health/live`, `/health/ready`, and `/metrics` now live on `STARCITE_OPS_PORT` instead of the public API port, matching the Phoenix deployment shape more closely.
 - `GET /health/live` returns `{"status":"ok"}` and stays live during shutdown drain.
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining"}` once shutdown drain begins.
-- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, runtime state, and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
+- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, drain source, runtime state, and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
 - `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.

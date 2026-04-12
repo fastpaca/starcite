@@ -147,7 +147,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 pub async fn begin_drain(State(state): State<AppState>) -> impl IntoResponse {
-    state.ops.begin_shutdown_drain();
+    state.ops.begin_manual_drain();
     tracing::info!("triggered local drain from ops endpoint");
     (StatusCode::ACCEPTED, Json(state.ops.snapshot()))
 }

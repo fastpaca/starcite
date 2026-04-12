@@ -42,7 +42,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - when local shutdown drain begins, raw lifecycle and tail sockets emit `{"type":"node_draining","reason":"node_draining"}` before the connection closes
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
-- `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local runtime plus fanout state for this one process
+- `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
 - `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
 - `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"` instead of only exposing probe status code
