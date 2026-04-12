@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use axum::{
     Json,
@@ -12,7 +12,7 @@ use axum::{
     response::IntoResponse,
 };
 use serde::Serialize;
-use tokio::sync::broadcast;
+use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
     AppState, auth,
@@ -60,6 +60,13 @@ struct TailGapFrame {
     next_cursor: i64,
     committed_cursor: i64,
     earliest_available_cursor: i64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct TokenExpiredFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    reason: &'static str,
 }
 
 pub async fn live() -> impl IntoResponse {
@@ -263,11 +270,12 @@ pub async fn lifecycle_events(
     websocket: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
     let auth = authenticate_socket(&state, &params)?;
+    let expiry = auth.expiry_delay();
     let lifecycle = resolve_lifecycle_options(&state, &auth, &params).await?;
     let receiver = state.lifecycle.subscribe_tenant(&lifecycle.tenant_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
-        run_lifecycle_session(socket, state, lifecycle, receiver).await;
+        run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
     }))
 }
 
@@ -301,12 +309,13 @@ pub async fn session_lifecycle_events(
     validate_session_id(&session_id)?;
 
     let auth = authenticate_socket(&state, &params)?;
+    let expiry = auth.expiry_delay();
     let cursor = parse_events_options(params)?.cursor;
     let lifecycle = resolve_session_lifecycle(&state, &auth, &session_id, cursor).await?;
     let receiver = state.lifecycle.subscribe_session(&session_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
-        run_lifecycle_session(socket, state, lifecycle, receiver).await;
+        run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
     }))
 }
 
@@ -359,6 +368,7 @@ pub async fn tail_events(
     validate_session_id(&session_id)?;
 
     let auth = authenticate_socket(&state, &params)?;
+    let expiry = auth.expiry_delay();
     let tail = parse_tail_options(params.clone())?;
     let _session = repository::get_session(&state.pool, &session_id).await?;
     let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
@@ -367,7 +377,7 @@ pub async fn tail_events(
     let receiver = state.fanout.subscribe(&session_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
-        run_tail_session(socket, state, session_id, tail, receiver).await;
+        run_tail_session(socket, state, session_id, tail, receiver, expiry).await;
     }))
 }
 
@@ -716,11 +726,16 @@ async fn run_tail_session(
     session_id: String,
     tail: TailOptions,
     mut receiver: broadcast::Receiver<EventResponse>,
+    expiry_delay: Option<Duration>,
 ) {
     let _connection = state
         .telemetry
         .track_socket_connection(SocketTransport::Raw, SocketSurface::Tail);
+    let _subscription = state
+        .telemetry
+        .track_socket_subscription(SocketTransport::Raw, SocketSurface::Tail);
     let mut cursor = tail.cursor;
+    let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
     match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
         Ok(next_cursor) => cursor = next_cursor,
@@ -731,41 +746,85 @@ async fn run_tail_session(
     }
 
     loop {
-        tokio::select! {
-            incoming = socket.recv() => {
-                if !handle_socket_message(&mut socket, incoming).await {
+        if let Some(expires_at) = expiry.as_mut() {
+            tokio::select! {
+                _ = expires_at => {
+                    let _ = send_token_expired(&mut socket).await;
                     return;
                 }
-            }
-            received = receiver.recv() => match received {
-                Ok(event) if event.seq <= cursor => continue,
-                Ok(event) => {
-                    cursor = event.seq;
-                    let started_at = Instant::now();
-                    let result = send_events(&mut socket, &[event]).await;
-                    record_read_result(&state, ReadOperation::TailLive, started_at, result);
-
-                    if result.is_err() {
+                incoming = socket.recv() => {
+                    if !handle_socket_message(&mut socket, incoming).await {
                         return;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        session_id,
-                        skipped,
-                        cursor,
-                        "tail broadcast lagged, replaying from store"
-                    );
+                received = receiver.recv() => match received {
+                    Ok(event) if event.seq <= cursor => continue,
+                    Ok(event) => {
+                        cursor = event.seq;
+                        let started_at = Instant::now();
+                        let result = send_events(&mut socket, &[event]).await;
+                        record_read_result(&state, ReadOperation::TailLive, started_at, result);
 
-                    match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
-                        Ok(next_cursor) => cursor = next_cursor,
-                        Err(error) => {
-                            tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
+                        if result.is_err() {
                             return;
                         }
                     }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            session_id,
+                            skipped,
+                            cursor,
+                            "tail broadcast lagged, replaying from store"
+                        );
+
+                        match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
+                            Ok(next_cursor) => cursor = next_cursor,
+                            Err(error) => {
+                                tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
-                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        } else {
+            tokio::select! {
+                incoming = socket.recv() => {
+                    if !handle_socket_message(&mut socket, incoming).await {
+                        return;
+                    }
+                }
+                received = receiver.recv() => match received {
+                    Ok(event) if event.seq <= cursor => continue,
+                    Ok(event) => {
+                        cursor = event.seq;
+                        let started_at = Instant::now();
+                        let result = send_events(&mut socket, &[event]).await;
+                        record_read_result(&state, ReadOperation::TailLive, started_at, result);
+
+                        if result.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            session_id,
+                            skipped,
+                            cursor,
+                            "tail broadcast lagged, replaying from store"
+                        );
+
+                        match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
+                            Ok(next_cursor) => cursor = next_cursor,
+                            Err(error) => {
+                                tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
             }
         }
     }
@@ -834,11 +893,16 @@ async fn run_lifecycle_session(
     state: AppState,
     lifecycle: LifecycleOptions,
     mut receiver: broadcast::Receiver<LifecycleResponse>,
+    expiry_delay: Option<Duration>,
 ) {
     let _connection = state
         .telemetry
         .track_socket_connection(SocketTransport::Raw, lifecycle_socket_surface(&lifecycle));
+    let _subscription = state
+        .telemetry
+        .track_socket_subscription(SocketTransport::Raw, lifecycle_socket_surface(&lifecycle));
     let mut cursor = lifecycle.cursor;
+    let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
     match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
         Ok(next_cursor) => cursor = next_cursor,
@@ -853,53 +917,109 @@ async fn run_lifecycle_session(
     }
 
     loop {
-        tokio::select! {
-            incoming = socket.recv() => {
-                if !handle_socket_message(&mut socket, incoming).await {
+        if let Some(expires_at) = expiry.as_mut() {
+            tokio::select! {
+                _ = expires_at => {
+                    let _ = send_token_expired(&mut socket).await;
                     return;
                 }
-            }
-            received = receiver.recv() => match received {
-                Ok(event) if event.cursor <= cursor => continue,
-                Ok(event)
-                    if lifecycle
-                        .session_id
-                        .as_ref()
-                        .is_some_and(|session_id| event.event.session_id() != session_id) =>
-                {
-                    continue;
-                }
-                Ok(event) => {
-                    cursor = event.cursor;
-                    let started_at = Instant::now();
-                    let result = send_lifecycle(&mut socket, &event).await;
-                    record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
-
-                    if result.is_err() {
+                incoming = socket.recv() => {
+                    if !handle_socket_message(&mut socket, incoming).await {
                         return;
                     }
                 }
-                Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                    tracing::warn!(
-                        skipped,
-                        tenant_id = lifecycle.tenant_id,
-                        cursor,
-                        "lifecycle broadcast lagged, replaying from store"
-                    );
+                received = receiver.recv() => match received {
+                    Ok(event) if event.cursor <= cursor => continue,
+                    Ok(event)
+                        if lifecycle
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|session_id| event.event.session_id() != session_id) =>
+                    {
+                        continue;
+                    }
+                    Ok(event) => {
+                        cursor = event.cursor;
+                        let started_at = Instant::now();
+                        let result = send_lifecycle(&mut socket, &event).await;
+                        record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
 
-                    match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
-                        Ok(next_cursor) => cursor = next_cursor,
-                        Err(error) => {
-                            tracing::warn!(
-                                error = ?error,
-                                tenant_id = lifecycle.tenant_id,
-                                "lifecycle replay after lag failed"
-                            );
+                        if result.is_err() {
                             return;
                         }
                     }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            tenant_id = lifecycle.tenant_id,
+                            cursor,
+                            "lifecycle broadcast lagged, replaying from store"
+                        );
+
+                        match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
+                            Ok(next_cursor) => cursor = next_cursor,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = ?error,
+                                    tenant_id = lifecycle.tenant_id,
+                                    "lifecycle replay after lag failed"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
                 }
-                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        } else {
+            tokio::select! {
+                incoming = socket.recv() => {
+                    if !handle_socket_message(&mut socket, incoming).await {
+                        return;
+                    }
+                }
+                received = receiver.recv() => match received {
+                    Ok(event) if event.cursor <= cursor => continue,
+                    Ok(event)
+                        if lifecycle
+                            .session_id
+                            .as_ref()
+                            .is_some_and(|session_id| event.event.session_id() != session_id) =>
+                    {
+                        continue;
+                    }
+                    Ok(event) => {
+                        cursor = event.cursor;
+                        let started_at = Instant::now();
+                        let result = send_lifecycle(&mut socket, &event).await;
+                        record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
+
+                        if result.is_err() {
+                            return;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            skipped,
+                            tenant_id = lifecycle.tenant_id,
+                            cursor,
+                            "lifecycle broadcast lagged, replaying from store"
+                        );
+
+                        match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
+                            Ok(next_cursor) => cursor = next_cursor,
+                            Err(error) => {
+                                tracing::warn!(
+                                    error = ?error,
+                                    tenant_id = lifecycle.tenant_id,
+                                    "lifecycle replay after lag failed"
+                                );
+                                return;
+                            }
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return,
+                }
             }
         }
     }
@@ -996,6 +1116,13 @@ fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> TailGapFrame
     build_resume_invalidated_gap_with_earliest(from_cursor, last_seq, 1)
 }
 
+fn build_token_expired_frame() -> TokenExpiredFrame {
+    TokenExpiredFrame {
+        frame_type: "token_expired",
+        reason: "token_expired",
+    }
+}
+
 fn build_resume_invalidated_gap_with_earliest(
     from_cursor: i64,
     last_seq: i64,
@@ -1038,6 +1165,14 @@ async fn send_gap(socket: &mut WebSocket, gap: &TailGapFrame) -> Result<(), ()> 
         .map_err(|_| ())
 }
 
+async fn send_token_expired(socket: &mut WebSocket) -> Result<(), ()> {
+    let message = serde_json::to_string(&build_token_expired_frame()).map_err(|_| ())?;
+    socket
+        .send(Message::Text(message.into()))
+        .await
+        .map_err(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -1045,8 +1180,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LifecycleOptions, TailOptions, build_resume_invalidated_gap, parse_archived_filter,
-        parse_events_options, parse_lifecycle_options, parse_list_options, parse_tail_options,
+        LifecycleOptions, TailOptions, build_resume_invalidated_gap, build_token_expired_frame,
+        parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
+        parse_tail_options,
     };
     use crate::model::ArchivedFilter;
 
@@ -1161,6 +1297,14 @@ mod tests {
         assert_eq!(gap.next_cursor, 2);
         assert_eq!(gap.committed_cursor, 2);
         assert_eq!(gap.earliest_available_cursor, 1);
+    }
+
+    #[test]
+    fn token_expired_frame_uses_public_shape() {
+        let frame = build_token_expired_frame();
+
+        assert_eq!(frame.frame_type, "token_expired");
+        assert_eq!(frame.reason, "token_expired");
     }
 
     #[test]

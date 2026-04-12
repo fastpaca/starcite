@@ -46,6 +46,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Lifecycle storage is still tenant-scoped under the hood, but the public lifecycle surface now exposes both tenant streams and dedicated session streams. When a tenant lifecycle stream uses `session_id`, gap detection is computed against that filtered session head rather than the full tenant head.
 - Raw WebSocket tail uses query params for `cursor` and `batch_size` because there is no channel join payload.
 - Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
+- In `unsafe_jwt` mode, raw tail and lifecycle sockets push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
 - Raw lifecycle sockets subscribe before replaying from Postgres, then reuse the same Postgres replay path when fanout lags.
 - Tail connections subscribe before replaying from Postgres, then receive in-process fanout updates; if the fanout buffer lags, the server replays from Postgres again to close the gap.
 - In-process fanout channels are demand-driven: broadcasts do not allocate dormant per-session or per-tenant channels, and idle channels are pruned once the last receiver disconnects.
@@ -239,6 +240,7 @@ The Prometheus surface is intentionally narrow. Right now it exports:
 - `starcite_session_create_total`, `starcite_session_freeze_total`, and `starcite_session_hydrate_total`
 - `starcite_process_uptime_seconds`
 
-The socket gauges reflect currently open raw and Phoenix transports. Raw tail and lifecycle
-handlers now keep reading the socket for close and ping frames, so those gauges clear promptly
-when a quiet client disconnects instead of waiting for the next broadcast.
+The socket gauges reflect currently open raw and Phoenix transports plus active raw stream
+subscriptions and Phoenix topic joins. Raw tail and lifecycle handlers now keep reading the socket
+for close and ping frames, so those gauges clear promptly when a quiet client disconnects instead
+of waiting for the next broadcast.

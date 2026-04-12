@@ -35,6 +35,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - lifecycle delivery arrives as `{"cursor": N, "inserted_at": "...", "event": {...}}` frames, with the inner event discriminator serialized as `kind`
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
+- in `unsafe_jwt` mode, raw lifecycle and tail sockets emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
@@ -83,10 +84,11 @@ instead of "every session ever touched by this process."
 
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
-plus lifecycle delivery timings, active socket connection and subscription gauges, and local
-session lifecycle counters with metric names aligned to the existing PromEx surface where that
-still makes sense. It still does not cover routing, replication, archive, or event-store
-invariants because those subsystems do not exist in this rewrite.
+plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
+socket connection gauges, and local session lifecycle counters with metric names aligned to the
+existing PromEx surface where that still makes sense. It still does not cover routing,
+replication, archive, or event-store invariants because those subsystems do not exist in this
+rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
