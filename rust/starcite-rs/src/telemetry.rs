@@ -12,7 +12,13 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
-use crate::{AppState, config::AuthMode};
+use crate::{
+    AppState,
+    config::AuthMode,
+    fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
+    ops::OpsSnapshot,
+    runtime::RuntimeSnapshot,
+};
 
 const DEFAULT_MS_BUCKETS: &[u64] = &[
     1, 2, 5, 10, 20, 30, 40, 50, 75, 100, 125, 150, 200, 300, 500, 1_000, 2_000,
@@ -539,6 +545,105 @@ impl Telemetry {
         out
     }
 
+    pub fn render_with_state(
+        &self,
+        ops: &OpsSnapshot,
+        runtime: &RuntimeSnapshot,
+        events: &SessionFanoutSnapshot,
+        lifecycle: &LifecycleFanoutSnapshot,
+    ) -> String {
+        let mut out = self.render();
+
+        if !self.enabled {
+            return out;
+        }
+
+        let node_labels = label_set(&[("node", self.node_name().to_string())]);
+        let draining_labels = label_set(&[
+            (
+                "drain_source",
+                ops.drain_source.unwrap_or("none").to_string(),
+            ),
+            ("node", self.node_name().to_string()),
+        ]);
+        let event_fanout_labels = label_set(&[
+            ("node", self.node_name().to_string()),
+            ("scope", "events_session".to_string()),
+        ]);
+        let tenant_lifecycle_labels = label_set(&[
+            ("node", self.node_name().to_string()),
+            ("scope", "lifecycle_tenant".to_string()),
+        ]);
+        let session_lifecycle_labels = label_set(&[
+            ("node", self.node_name().to_string()),
+            ("scope", "lifecycle_session".to_string()),
+        ]);
+
+        render_scalar_gauge(
+            &mut out,
+            "starcite_node_draining",
+            "Whether this process is currently draining",
+            &draining_labels,
+            i64::from(ops.draining),
+        );
+        render_scalar_gauge(
+            &mut out,
+            "starcite_runtime_active_sessions",
+            "Active runtime sessions currently tracked by this process",
+            &node_labels,
+            runtime.active_session_count as i64,
+        );
+        render_scalar_gauge_family(
+            &mut out,
+            "starcite_fanout_active_keys",
+            "Active fanout channel keys with at least one subscriber",
+            &[
+                (&event_fanout_labels, events.active_session_count as i64),
+                (
+                    &tenant_lifecycle_labels,
+                    lifecycle.active_tenant_count as i64,
+                ),
+                (
+                    &session_lifecycle_labels,
+                    lifecycle.active_session_count as i64,
+                ),
+            ],
+        );
+        render_scalar_gauge_family(
+            &mut out,
+            "starcite_fanout_subscribers",
+            "Total subscribers attached to fanout keys for this process",
+            &[
+                (
+                    &event_fanout_labels,
+                    events
+                        .sessions
+                        .iter()
+                        .map(|session| session.subscribers as i64)
+                        .sum::<i64>(),
+                ),
+                (
+                    &tenant_lifecycle_labels,
+                    lifecycle
+                        .tenants
+                        .iter()
+                        .map(|tenant| tenant.subscribers as i64)
+                        .sum::<i64>(),
+                ),
+                (
+                    &session_lifecycle_labels,
+                    lifecycle
+                        .sessions
+                        .iter()
+                        .map(|session| session.subscribers as i64)
+                        .sum::<i64>(),
+                ),
+            ],
+        );
+
+        out
+    }
+
     fn increment_counter(&self, name: &'static str, labels: LabelSet) {
         if !self.enabled {
             return;
@@ -612,12 +717,21 @@ impl Default for Telemetry {
 }
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
+    let ops = state.ops.snapshot();
+    let (runtime, events, lifecycle) = tokio::join!(
+        state.runtime.snapshot(),
+        state.fanout.snapshot(),
+        state.lifecycle.snapshot()
+    );
+
     (
         [(
             header::CONTENT_TYPE,
             "text/plain; version=0.0.4; charset=utf-8",
         )],
-        state.telemetry.render(),
+        state
+            .telemetry
+            .render_with_state(&ops, &runtime, &events, &lifecycle),
     )
 }
 
@@ -668,6 +782,28 @@ fn render_histogram_bucket(out: &mut String, name: &str, labels: &LabelSet, le: 
         value
     )
     .expect("write bucket");
+}
+
+fn render_scalar_gauge(out: &mut String, name: &str, help: &str, labels: &LabelSet, value: i64) {
+    writeln!(out).expect("newline");
+    writeln!(out, "# HELP {name} {help}").expect("write help");
+    writeln!(out, "# TYPE {name} gauge").expect("write type");
+    render_metric_line(out, name, labels, value);
+}
+
+fn render_scalar_gauge_family(
+    out: &mut String,
+    name: &str,
+    help: &str,
+    series: &[(&LabelSet, i64)],
+) {
+    writeln!(out).expect("newline");
+    writeln!(out, "# HELP {name} {help}").expect("write help");
+    writeln!(out, "# TYPE {name} gauge").expect("write type");
+
+    for (labels, value) in series {
+        render_metric_line(out, name, labels, *value);
+    }
 }
 
 fn render_labels(labels: &LabelSet) -> String {
@@ -816,7 +952,15 @@ fn socket_surface_label(surface: SocketSurface) -> &'static str {
 mod tests {
     use axum::http::StatusCode;
 
-    use crate::config::AuthMode;
+    use crate::{
+        config::AuthMode,
+        fanout::{
+            LifecycleFanoutSnapshot, SessionFanoutSnapshot, SessionSubscriptionSnapshot,
+            TenantSubscriptionSnapshot,
+        },
+        ops::OpsSnapshot,
+        runtime::RuntimeSnapshot,
+    };
 
     use super::{
         AuthOutcome, AuthSource, AuthStage, EdgeStage, IngestOperation, IngestOutcome,
@@ -931,6 +1075,74 @@ mod tests {
         );
         assert!(!rendered.contains(
             r#"starcite_socket_subscriptions{surface="tenant_lifecycle",transport="phoenix"} 1"#
+        ));
+    }
+
+    #[test]
+    fn render_with_state_includes_ops_runtime_and_fanout_gauges() {
+        let telemetry = Telemetry::new(true);
+        let rendered = telemetry.render_with_state(
+            &OpsSnapshot {
+                mode: "draining",
+                draining: true,
+                drain_source: Some("manual"),
+                shutdown_drain_timeout_ms: 4_000,
+            },
+            &RuntimeSnapshot {
+                idle_timeout_ms: 30_000,
+                active_session_count: 2,
+                sessions: vec![],
+            },
+            &SessionFanoutSnapshot {
+                active_session_count: 1,
+                sessions: vec![SessionSubscriptionSnapshot {
+                    session_id: "ses_demo".to_string(),
+                    subscribers: 3,
+                }],
+            },
+            &LifecycleFanoutSnapshot {
+                active_tenant_count: 1,
+                active_session_count: 2,
+                tenants: vec![TenantSubscriptionSnapshot {
+                    tenant_id: "acme".to_string(),
+                    subscribers: 4,
+                }],
+                sessions: vec![
+                    SessionSubscriptionSnapshot {
+                        session_id: "ses_a".to_string(),
+                        subscribers: 2,
+                    },
+                    SessionSubscriptionSnapshot {
+                        session_id: "ses_b".to_string(),
+                        subscribers: 1,
+                    },
+                ],
+            },
+        );
+
+        assert!(rendered.contains("starcite_node_draining"));
+        assert!(rendered.contains(r#"drain_source="manual""#));
+        assert!(rendered.contains("starcite_runtime_active_sessions"));
+        assert!(rendered.contains(r#"starcite_runtime_active_sessions{node="starcite-rs"} 2"#));
+        assert!(rendered.contains("starcite_fanout_active_keys"));
+        assert!(rendered.contains(
+            r#"starcite_fanout_active_keys{node="starcite-rs",scope="events_session"} 1"#
+        ));
+        assert!(rendered.contains(
+            r#"starcite_fanout_active_keys{node="starcite-rs",scope="lifecycle_tenant"} 1"#
+        ));
+        assert!(rendered.contains(
+            r#"starcite_fanout_active_keys{node="starcite-rs",scope="lifecycle_session"} 2"#
+        ));
+        assert!(rendered.contains("starcite_fanout_subscribers"));
+        assert!(rendered.contains(
+            r#"starcite_fanout_subscribers{node="starcite-rs",scope="events_session"} 3"#
+        ));
+        assert!(rendered.contains(
+            r#"starcite_fanout_subscribers{node="starcite-rs",scope="lifecycle_tenant"} 4"#
+        ));
+        assert!(rendered.contains(
+            r#"starcite_fanout_subscribers{node="starcite-rs",scope="lifecycle_session"} 3"#
         ));
     }
 }

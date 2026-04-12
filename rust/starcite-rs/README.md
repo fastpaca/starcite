@@ -35,7 +35,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
-- `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
+- `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, local session runtime counters, and dynamic gauges for node drain state plus runtime/fanout occupancy.
 - `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, emits `node_draining` to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
@@ -62,6 +62,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `DELETE /debug/drain` clears only a manual drain and returns the process to `ready`; it refuses to clear a real shutdown drain.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
+- `/metrics` now also exports `starcite_node_draining`, `starcite_runtime_active_sessions`, `starcite_fanout_active_keys`, and `starcite_fanout_subscribers`, so the metrics surface reflects the same local ops/runtime truth as `GET /debug/state`.
 - In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
 
 ## Run locally
@@ -154,6 +155,8 @@ curl "http://localhost:4001/v1/lifecycle/events?tenant_id=acme&session_id=ses_de
 curl "http://localhost:4002/health/ready"
 
 curl "http://localhost:4002/metrics"
+
+curl "http://localhost:4002/metrics" | rg 'starcite_(node_draining|runtime_active_sessions|fanout_active_keys|fanout_subscribers)'
 
 curl "http://localhost:4002/debug/state"
 

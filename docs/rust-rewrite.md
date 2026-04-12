@@ -110,10 +110,10 @@ ever touched by this process."
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
-socket connection gauges, and local session lifecycle counters with metric names aligned to the
-existing PromEx surface where that still makes sense. It still does not cover routing,
-replication, archive, or event-store invariants because those subsystems do not exist in this
-rewrite.
+socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
+state plus runtime/fanout occupancy, with metric names aligned to the existing PromEx surface
+where that still makes sense. It still does not cover routing, replication, archive, or
+event-store invariants because those subsystems do not exist in this rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
