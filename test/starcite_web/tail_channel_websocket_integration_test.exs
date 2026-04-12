@@ -145,15 +145,14 @@ defmodule StarciteWeb.TailChannelWebSocketIntegrationTest do
     live_messages =
       [message_one, message_two]
       |> Enum.filter(&(&1.event == "events"))
-      |> Enum.map(fn %{topic: topic, payload: %{"events" => [event]}} ->
-        {topic, event["seq"], event["payload"]}
+      |> Enum.into(%{}, fn %{topic: topic, payload: %{"events" => [event]}} ->
+        {topic, {event["seq"], event["payload"]}}
       end)
-      |> Enum.sort()
 
-    assert live_messages == [
-             {topic_a, 2, %{"state" => "running-a"}},
-             {topic_b, 2, %{"state" => "running-b"}}
-           ]
+    assert live_messages == %{
+             topic_a => {2, %{"state" => "running-a"}},
+             topic_b => {2, %{"state" => "running-b"}}
+           }
 
     :ok = :gen_tcp.close(socket)
   end

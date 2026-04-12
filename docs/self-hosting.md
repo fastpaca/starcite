@@ -241,7 +241,9 @@ topology migration — a more involved procedure. Don't mix it with routine roll
 **Single node failure:** This is the expected failure mode. The remaining replicas can
 continue serving sessions whose owners still have quorum, and lease expiry will
 authoritatively move ownership away from a catastrophically failed node. Clients may
-see a brief availability gap while ownership is reassigned.
+see a brief availability gap while ownership is reassigned. Fresh session claims
+continue on the surviving ready nodes once the failed node's lease expires; the
+replica set stays degraded until the node returns.
 
 **Two-node failure (3-node cluster):** In-memory replication quorum is lost for many
 sessions. Reads may still work from surviving local state, but new appends are

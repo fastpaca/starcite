@@ -512,6 +512,86 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     )
   end
 
+  test "fresh claims recover after a single node failure once the failed lease expires", %{
+    peers: peers
+  } do
+    [peer_a, peer_b, peer_c] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
+    active_cluster_nodes = [Node.self(), peer_a, peer_b]
+    original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
+    original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
+    original_ttl = Application.get_env(:starcite, :routing_lease_ttl_ms)
+    session_id = "ses-fresh-claim-after-failure-#{System.unique_integer([:positive, :monotonic])}"
+
+    on_exit(fn ->
+      restore_env(:cluster_node_ids, original_cluster_node_ids)
+      restore_env(:routing_replication_factor, original_replication_factor)
+      restore_env(:routing_lease_ttl_ms, original_ttl)
+
+      Enum.each([peer_a, peer_b, peer_c], fn peer_node ->
+        _ = restore_peer_env(peer_node, :cluster_node_ids, original_cluster_node_ids)
+        _ = restore_peer_env(peer_node, :routing_replication_factor, original_replication_factor)
+        _ = restore_peer_env(peer_node, :routing_lease_ttl_ms, original_ttl)
+      end)
+    end)
+
+    Application.put_env(:starcite, :cluster_node_ids, active_cluster_nodes)
+    Application.put_env(:starcite, :routing_replication_factor, 3)
+    Application.put_env(:starcite, :routing_lease_ttl_ms, 300)
+    assert :ok = Store.renew_local_lease()
+
+    Enum.each([peer_a, peer_b, peer_c], fn peer_node ->
+      assert :ok =
+               :rpc.call(
+                 peer_node,
+                 Application,
+                 :put_env,
+                 [:starcite, :cluster_node_ids, active_cluster_nodes],
+                 5_000
+               )
+
+      assert :ok =
+               :rpc.call(
+                 peer_node,
+                 Application,
+                 :put_env,
+                 [:starcite, :routing_replication_factor, 3],
+                 5_000
+               )
+
+      assert :ok =
+               :rpc.call(
+                 peer_node,
+                 Application,
+                 :put_env,
+                 [:starcite, :routing_lease_ttl_ms, 300],
+                 5_000
+               )
+
+      assert :ok = :rpc.call(peer_node, Store, :renew_local_lease, [], 5_000)
+    end)
+
+    assert :ok = stop_peer_data_plane(peer_a)
+
+    eventually(
+      fn ->
+        assert Enum.sort(Store.ready_nodes()) == Enum.sort([Node.self(), peer_b])
+      end,
+      timeout: 6_000,
+      interval: 50
+    )
+
+    assert {:ok, _session} = WritePath.create_session(id: session_id, tenant_id: "acme")
+    assert {:ok, append_reply} = WritePath.append_event(session_id, append_input(session_id, 1))
+    assert append_reply.seq == 1
+
+    assert {:ok, assignment} = Store.get_assignment(session_id, favor: :consistency)
+    assert assignment.owner in [Node.self(), peer_b]
+    assert assignment.status == :active
+    assert Enum.sort(assignment.replicas) == Enum.sort([Node.self(), peer_b])
+    refute peer_a in assignment.replicas
+    refute peer_c in assignment.replicas
+  end
+
   test "lease expiry promotes a moving target owner and preserves writes", %{peers: peers} do
     [peer_a, peer_b | _rest] = Enum.map(peers, fn {_peer_pid, peer_node} -> peer_node end)
     session_id = "ses-moving-failover-#{System.unique_integer([:positive, :monotonic])}"

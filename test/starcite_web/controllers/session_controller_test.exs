@@ -200,7 +200,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert is_binary(body["message"])
     end
 
-    test "returns 503 when in-memory replication quorum cannot be reached" do
+    test "returns 503 when too few ready nodes remain to claim a session" do
       original_cluster_node_ids = Application.get_env(:starcite, :cluster_node_ids)
       original_replication_factor = Application.get_env(:starcite, :routing_replication_factor)
 
@@ -209,8 +209,13 @@ defmodule StarciteWeb.SessionControllerTest do
         Application.put_env(:starcite, :routing_replication_factor, original_replication_factor)
       end)
 
-      Application.put_env(:starcite, :cluster_node_ids, [Node.self(), :"missing@127.0.0.1"])
-      Application.put_env(:starcite, :routing_replication_factor, 2)
+      Application.put_env(
+        :starcite,
+        :cluster_node_ids,
+        [Node.self(), :"missing-a@127.0.0.1", :"missing-b@127.0.0.1"]
+      )
+
+      Application.put_env(:starcite, :routing_replication_factor, 3)
 
       conn =
         json_conn(
@@ -224,7 +229,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
       assert conn.status == 503
       body = Jason.decode!(conn.resp_body)
-      assert body["error"] in ["owner_unavailable", "replication_unavailable"]
+      assert body["error"] == "owner_unavailable"
       assert is_binary(body["message"])
     end
 
