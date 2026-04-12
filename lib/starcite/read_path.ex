@@ -55,16 +55,8 @@ defmodule Starcite.ReadPath do
 
   def replay_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
-    with {:ok, normalized_cursor} <- Cursor.normalize(cursor),
-         {:ok, snapshot} <- fetch_cursor_snapshot_routed(id),
-         {:ok, earliest_available_seq} <- earliest_available_seq(id, snapshot.committed_seq) do
-      case replay_gap_reason(normalized_cursor, snapshot, earliest_available_seq) do
-        nil ->
-          do_replay_from_cursor(id, normalized_cursor, limit, snapshot, earliest_available_seq)
-
-        reason ->
-          {:gap, gap_signal(reason, normalized_cursor, snapshot, earliest_available_seq)}
-      end
+    with {:ok, normalized_cursor} <- Cursor.normalize(cursor) do
+      route_replay_read(id, normalized_cursor, limit)
     end
   end
 
@@ -105,6 +97,30 @@ defmodule Starcite.ReadPath do
              limit > 0 do
     do_get_events_from_cursor(id, cursor, limit)
   end
+
+  @doc false
+  def rpc_replay_from_cursor(id, cursor, limit)
+      when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
+    with {:ok, normalized_cursor} <- Cursor.normalize(cursor),
+         {:ok, snapshot} <- local_cursor_snapshot(id),
+         {:ok, earliest_available_seq} <- earliest_available_seq(id, snapshot.committed_seq) do
+      case replay_gap_reason(normalized_cursor, snapshot, earliest_available_seq) do
+        nil ->
+          do_replay_from_cursor_local(
+            id,
+            normalized_cursor,
+            limit,
+            snapshot,
+            earliest_available_seq
+          )
+
+        reason ->
+          {:gap, gap_signal(reason, normalized_cursor, snapshot, earliest_available_seq)}
+      end
+    end
+  end
+
+  def rpc_replay_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
   defp do_get_events_from_cursor(id, cursor, limit) do
     with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
@@ -193,10 +209,10 @@ defmodule Starcite.ReadPath do
     end
   end
 
-  defp do_replay_from_cursor(id, cursor, limit, snapshot, earliest_available_seq)
+  defp do_replay_from_cursor_local(id, cursor, limit, snapshot, earliest_available_seq)
        when is_binary(id) and is_map(cursor) and is_integer(limit) and limit > 0 and
               is_map(snapshot) do
-    case get_events_from_cursor(id, cursor.seq, limit) do
+    case do_get_events_from_cursor(id, cursor.seq, limit) do
       {:ok, events} ->
         {:ok, attach_epoch(events, snapshot.epoch)}
 
@@ -335,17 +351,29 @@ defmodule Starcite.ReadPath do
     end
   end
 
-  defp fetch_cursor_snapshot_routed(id) when is_binary(id) and id != "" do
+  defp local_cursor_snapshot(id) when is_binary(id) and id != "" do
+    with {:ok, %Session{} = session} <- SessionQuorum.get_session(id) do
+      {:ok,
+       %{
+         epoch: session.epoch,
+         last_seq: session.last_seq,
+         committed_seq: session.archived_seq
+       }}
+    end
+  end
+
+  defp route_replay_read(id, cursor, limit)
+       when is_binary(id) and id != "" and is_map(cursor) and is_integer(limit) and limit > 0 do
     SessionRouter.call(
       id,
-      SessionQuorum,
-      :fetch_cursor_snapshot,
-      [id],
-      SessionQuorum,
-      :fetch_cursor_snapshot,
-      [id],
-      prefer_leader: true,
-      defer_local_when_unconfirmed: true
+      __MODULE__,
+      :rpc_replay_from_cursor,
+      [id, cursor, limit],
+      __MODULE__,
+      :rpc_replay_from_cursor,
+      [id, cursor, limit],
+      prefer_leader: false,
+      defer_local_when_unconfirmed: false
     )
   end
 

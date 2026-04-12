@@ -778,6 +778,54 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
+  describe "replica reads" do
+    test "serves session, replay, and event reads from a follower when the owner is unavailable" do
+      id = unique_id("ses-replica-read")
+      missing_owner = :"missing-owner@127.0.0.1"
+      {:ok, _} = WritePath.create_session(id: id, tenant_id: "acme")
+
+      for n <- 1..5 do
+        {:ok, _} =
+          append_event(id, %{
+            type: "content",
+            payload: %{text: "m#{n}"},
+            actor: "agent:test"
+          })
+      end
+
+      cold_rows = EventStore.from_cursor(id, 0, 3)
+      insert_cold_rows(id, cold_rows)
+      assert {:ok, %{archived_seq: 3, trimmed: 3}} = WritePath.ack_archived(id, 3)
+      assert {:ok, %Session{epoch: epoch}} = ReadPath.get_session(id)
+
+      assert :ok =
+               put_assignment(id, %{
+                 owner: missing_owner,
+                 epoch: epoch,
+                 replicas: [missing_owner, Node.self()],
+                 status: :active,
+                 updated_at_ms: System.system_time(:millisecond)
+               })
+
+      true = :ets.delete(:starcite_routing_assignment_cache, id)
+
+      assert {:error, {:routing_rpc_failed, ^missing_owner, _reason}} =
+               ReadPath.get_session_routed(id, true)
+
+      assert {:ok, %Session{id: ^id, last_seq: 5, archived_seq: 3}} =
+               ReadPath.get_session_routed(id, false)
+
+      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10, false)
+      assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
+
+      assert {:ok, replay_events} =
+               ReadPath.replay_from_cursor(id, Starcite.Cursor.new(epoch, 2), 3)
+
+      assert Enum.map(replay_events, & &1.seq) == [3, 4, 5]
+      assert Enum.all?(replay_events, &(&1.epoch == epoch))
+    end
+  end
+
   describe "ack_archived/2" do
     test "is idempotent for the same archive cursor" do
       id = unique_id("ses")

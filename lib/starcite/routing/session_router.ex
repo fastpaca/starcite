@@ -46,26 +46,24 @@ defmodule Starcite.Routing.SessionRouter do
         emit_request_route_phase(route_opts, {:ok, :owner_selected}, route_started_at)
         dispatch_started_at = System.monotonic_time()
 
-        {result, refreshes} =
-          dispatch_to_owner(
+        {result, refreshes, target_node} =
+          dispatch_call(
             session_id,
-            assignment.owner,
+            assignment,
             remote_module,
             remote_fun,
             remote_args,
             local_module,
             local_fun,
             local_args,
-            route_opts,
-            1,
-            0
+            route_opts
           )
 
         emit_request_dispatch_phase(route_opts, result, dispatch_started_at)
 
         :ok =
           Telemetry.routing_result(
-            routing_target(assignment.owner, self_node),
+            routing_target(target_node, self_node),
             routing_telemetry_result(result),
             refreshes
           )
@@ -150,6 +148,55 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
+  defp dispatch_call(
+         session_id,
+         %{owner: owner} = assignment,
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args,
+         route_opts
+       )
+       when is_binary(session_id) and session_id != "" and is_atom(owner) and is_map(assignment) and
+              is_atom(remote_module) and
+              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
+              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) do
+    if Keyword.get(route_opts, :prefer_leader, true) do
+      {result, refreshes} =
+        dispatch_to_owner(
+          session_id,
+          owner,
+          remote_module,
+          remote_fun,
+          remote_args,
+          local_module,
+          local_fun,
+          local_args,
+          route_opts,
+          1,
+          0
+        )
+
+      {result, refreshes, owner}
+    else
+      dispatch_to_replicas(
+        session_id,
+        assignment,
+        remote_module,
+        remote_fun,
+        remote_args,
+        local_module,
+        local_fun,
+        local_args,
+        route_opts,
+        1,
+        0
+      )
+    end
+  end
+
   defp dispatch_to_owner(
          session_id,
          owner,
@@ -208,6 +255,212 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
+  defp dispatch_to_replicas(
+         session_id,
+         assignment,
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args,
+         route_opts,
+         refreshes_remaining,
+         refresh_count
+       )
+       when is_binary(session_id) and session_id != "" and is_map(assignment) and
+              is_atom(remote_module) and
+              is_atom(remote_fun) and is_list(remote_args) and is_atom(local_module) and
+              is_atom(local_fun) and is_list(local_args) and is_list(route_opts) and
+              is_integer(refreshes_remaining) and refreshes_remaining >= 0 and
+              is_integer(refresh_count) and refresh_count >= 0 do
+    case dispatch_to_replica_candidates(
+           replica_read_candidates(session_id, assignment, route_opts),
+           remote_module,
+           remote_fun,
+           remote_args,
+           local_module,
+           local_fun,
+           local_args,
+           route_opts,
+           []
+         ) do
+      {{:error, {:no_available_replicas, _failures}} = error, nil}
+      when refreshes_remaining > 0 ->
+        case refresh_assignment(session_id, route_opts) do
+          {:ok, refreshed_assignment} when is_map(refreshed_assignment) ->
+            dispatch_to_replicas(
+              session_id,
+              refreshed_assignment,
+              remote_module,
+              remote_fun,
+              remote_args,
+              local_module,
+              local_fun,
+              local_args,
+              route_opts,
+              refreshes_remaining - 1,
+              refresh_count + 1
+            )
+
+          {:error, _reason} ->
+            {error, refresh_count, nil}
+        end
+
+      {result, target_node} ->
+        {result, refresh_count, target_node}
+    end
+  end
+
+  defp dispatch_to_replica_candidates(
+         [],
+         _remote_module,
+         _remote_fun,
+         _remote_args,
+         _local_module,
+         _local_fun,
+         _local_args,
+         _route_opts,
+         failures
+       ) do
+    {{:error, {:no_available_replicas, Enum.reverse(failures)}}, nil}
+  end
+
+  defp dispatch_to_replica_candidates(
+         [candidate | rest],
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args,
+         route_opts,
+         failures
+       )
+       when is_atom(candidate) and is_atom(remote_module) and is_atom(remote_fun) and
+              is_list(remote_args) and is_atom(local_module) and is_atom(local_fun) and
+              is_list(local_args) and is_list(route_opts) and is_list(failures) do
+    case dispatch_to_candidate(
+           candidate,
+           remote_module,
+           remote_fun,
+           remote_args,
+           local_module,
+           local_fun,
+           local_args,
+           route_opts
+         ) do
+      {:retry, failure} ->
+        dispatch_to_replica_candidates(
+          rest,
+          remote_module,
+          remote_fun,
+          remote_args,
+          local_module,
+          local_fun,
+          local_args,
+          route_opts,
+          [failure | failures]
+        )
+
+      {:ok, result} ->
+        {result, candidate}
+    end
+  end
+
+  defp dispatch_to_candidate(
+         candidate,
+         remote_module,
+         remote_fun,
+         remote_args,
+         local_module,
+         local_fun,
+         local_args,
+         route_opts
+       )
+       when is_atom(candidate) and is_atom(remote_module) and is_atom(remote_fun) and
+              is_list(remote_args) and is_atom(local_module) and is_atom(local_fun) and
+              is_list(local_args) and is_list(route_opts) do
+    self_node = Keyword.get(route_opts, :self, Node.self())
+
+    result =
+      cond do
+        candidate == self_node ->
+          apply(local_module, local_fun, local_args)
+
+        Watcher.suspect?(candidate) ->
+          {:error, {:routing_rpc_failed, candidate, :suspect}}
+
+        true ->
+          case rpc_call(candidate, remote_module, remote_fun, remote_args, route_opts) do
+            {:badrpc, reason} -> {:error, {:routing_rpc_failed, candidate, reason}}
+            other -> other
+          end
+      end
+
+    if retryable_replica_result?(result) do
+      {:retry, {candidate, result}}
+    else
+      {:ok, result}
+    end
+  end
+
+  defp replica_read_candidates(session_id, assignment, route_opts)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) and
+              is_list(route_opts) do
+    self_node = Keyword.get(route_opts, :self, Node.self())
+    owner = Map.get(assignment, :owner)
+
+    replicas =
+      case Map.get(assignment, :replicas) do
+        replicas when is_list(replicas) and replicas != [] -> replicas
+        _other when is_atom(owner) -> [owner]
+        _other -> []
+      end
+
+    replicas = Enum.uniq(Enum.filter(replicas, &is_atom/1))
+
+    local =
+      if self_node in replicas do
+        [self_node]
+      else
+        []
+      end
+
+    remote_followers =
+      replicas
+      |> Enum.reject(&(&1 in [self_node, owner]))
+      |> rotate_replica_candidates(session_id, self_node)
+
+    remote_owner =
+      if is_atom(owner) and owner != self_node and owner in replicas do
+        [owner]
+      else
+        []
+      end
+
+    local ++ remote_followers ++ remote_owner
+  end
+
+  defp rotate_replica_candidates([], _session_id, _self_node), do: []
+
+  defp rotate_replica_candidates(candidates, session_id, self_node)
+       when is_list(candidates) and is_binary(session_id) and session_id != "" and
+              is_atom(self_node) do
+    offset = rem(:erlang.phash2({session_id, self_node}), length(candidates))
+    {prefix, suffix} = Enum.split(candidates, offset)
+    suffix ++ prefix
+  end
+
+  defp retryable_replica_result?({:timeout, _reason}), do: true
+  defp retryable_replica_result?({:error, {:timeout, _reason}}), do: true
+  defp retryable_replica_result?({:error, {:routing_rpc_failed, _node, _reason}}), do: true
+  defp retryable_replica_result?({:error, :session_log_unavailable}), do: true
+  defp retryable_replica_result?({:error, {:session_owner, _node}}), do: true
+  defp retryable_replica_result?({:error, {:not_leader, {:session_owner, _node}}}), do: true
+  defp retryable_replica_result?({:error, :not_leader}), do: true
+  defp retryable_replica_result?(_result), do: false
+
   defp reroute_to_assignment(
          session_id,
          previous_owner,
@@ -257,9 +510,12 @@ defmodule Starcite.Routing.SessionRouter do
     end
   end
 
-  defp routing_target(owner, self_node) when is_atom(owner) and is_atom(self_node) do
-    if owner == self_node, do: :local, else: :remote
+  defp routing_target(target_node, self_node)
+       when is_atom(target_node) and is_atom(self_node) do
+    if target_node == self_node, do: :local, else: :remote
   end
+
+  defp routing_target(_target_node, _self_node), do: :unassigned
 
   defp routing_telemetry_result({:timeout, _reason} = timeout), do: timeout
   defp routing_telemetry_result({:error, {:timeout, _reason}} = error), do: error

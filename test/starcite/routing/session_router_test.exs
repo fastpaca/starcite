@@ -102,6 +102,90 @@ defmodule Starcite.Routing.SessionRouterTest do
              )
   end
 
+  test "call/8 prefers the local follower when prefer_leader is false" do
+    session_id = "session-router-local-follower"
+    local_node = :local@cluster
+    owner = :owner@cluster
+
+    assert {:local, :ok} =
+             SessionRouter.call(
+               session_id,
+               __MODULE__,
+               :remote_echo,
+               [:ignored],
+               __MODULE__,
+               :local_echo,
+               [:ok],
+               assignment: %{owner: owner, epoch: 1, replicas: [owner, local_node]},
+               prefer_leader: false,
+               self: local_node
+             )
+  end
+
+  test "call/8 prefers a remote follower before the owner when prefer_leader is false" do
+    session_id = "session-router-remote-follower"
+    local_node = :local@cluster
+    owner = :owner@cluster
+    follower = :follower@cluster
+
+    rpc_fun = fn node, _module, _fun, _args ->
+      send(self(), {:rpc_called, node})
+      {:ok, {:routed, node}}
+    end
+
+    assert {:ok, {:routed, ^follower}} =
+             SessionRouter.call(
+               session_id,
+               __MODULE__,
+               :remote_echo,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: %{owner: owner, epoch: 1, replicas: [owner, follower]},
+               prefer_leader: false,
+               rpc_fun: rpc_fun,
+               self: local_node
+             )
+
+    assert_receive {:rpc_called, ^follower}
+    refute_receive {:rpc_called, ^owner}
+  end
+
+  test "call/8 falls back to the owner when follower replicas are unavailable" do
+    session_id = "session-router-owner-fallback"
+    local_node = :local@cluster
+    owner = :owner@cluster
+    follower = :follower@cluster
+
+    rpc_fun = fn node, _module, _fun, _args ->
+      send(self(), {:rpc_called, node})
+
+      case node do
+        ^follower -> {:badrpc, :nodedown}
+        ^owner -> {:ok, {:routed, owner}}
+      end
+    end
+
+    assert {:ok, {:routed, ^owner}} =
+             SessionRouter.call(
+               session_id,
+               __MODULE__,
+               :remote_echo,
+               [],
+               __MODULE__,
+               :local_echo,
+               [],
+               assignment: %{owner: owner, epoch: 1, replicas: [owner, follower]},
+               prefer_leader: false,
+               rpc_fun: rpc_fun,
+               self: local_node
+             )
+
+    assert_receive {:rpc_called, ^follower}
+    assert_receive {:rpc_called, ^owner}
+  end
+
   test "call/8 refreshes the authoritative assignment on redirect before rerouting" do
     session_id = "session-router-refresh"
     original_owner = :"owner-a@cluster"
