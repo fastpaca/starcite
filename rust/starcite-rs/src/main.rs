@@ -161,7 +161,10 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
         .route("/health/ready", get(web::ready))
         .route("/metrics", get(telemetry::metrics))
         .route("/debug/state", get(web::debug_state))
-        .route("/debug/drain", post(web::begin_drain))
+        .route(
+            "/debug/drain",
+            post(web::begin_drain).delete(web::clear_drain),
+        )
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,

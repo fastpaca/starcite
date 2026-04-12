@@ -72,6 +72,14 @@ impl OpsState {
         self.begin_drain(DrainSource::Manual);
     }
 
+    pub fn clear_drain(&self) {
+        self.drain_source.store(0, Ordering::SeqCst);
+
+        if self.draining.swap(false, Ordering::SeqCst) {
+            let _ = self.draining_tx.send(false);
+        }
+    }
+
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst)
     }
@@ -152,6 +160,23 @@ mod tests {
                 mode: "draining",
                 draining: true,
                 drain_source: Some("manual"),
+                shutdown_drain_timeout_ms: 5_000,
+            }
+        );
+    }
+
+    #[test]
+    fn clearing_manual_drain_restores_ready_snapshot() {
+        let ops = OpsState::new(5_000);
+        ops.begin_manual_drain();
+        ops.clear_drain();
+
+        assert_eq!(
+            ops.snapshot(),
+            OpsSnapshot {
+                mode: "ready",
+                draining: false,
+                drain_source: None,
                 shutdown_drain_timeout_ms: 5_000,
             }
         );

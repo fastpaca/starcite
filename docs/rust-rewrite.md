@@ -21,6 +21,7 @@ The goal is not feature parity in one shot. The goal is to test whether a saner 
 - `/health/live` and `/health/ready` on the same separate ops listener
 - local ops-state JSON on `GET /debug/state`
 - local manual drain on `POST /debug/drain`
+- local manual drain reset on `DELETE /debug/drain`
 - local shutdown drain with `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS`
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
 - tenant-scoped durable lifecycle replay through `GET /v1/lifecycle/events?tenant_id=...`
@@ -44,6 +45,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
+- `DELETE /debug/drain` clears only a manual drain and refuses to undo a real shutdown drain
 - `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
 - `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"` instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency

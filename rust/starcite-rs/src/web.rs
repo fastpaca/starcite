@@ -152,6 +152,18 @@ pub async fn begin_drain(State(state): State<AppState>) -> impl IntoResponse {
     (StatusCode::ACCEPTED, Json(state.ops.snapshot()))
 }
 
+pub async fn clear_drain(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
+    match state.ops.snapshot().drain_source {
+        None => Ok((StatusCode::OK, Json(state.ops.snapshot()))),
+        Some("manual") => {
+            state.ops.clear_drain();
+            tracing::info!("cleared local manual drain from ops endpoint");
+            Ok((StatusCode::OK, Json(state.ops.snapshot())))
+        }
+        Some(_) => Err(AppError::DrainResetForbidden),
+    }
+}
+
 pub async fn reject_when_draining(
     State(ops): State<crate::ops::OpsState>,
     request: Request<axum::body::Body>,

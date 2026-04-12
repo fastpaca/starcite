@@ -62,6 +62,8 @@ pub enum AppError {
     DatabaseUnavailable,
     #[error("node draining")]
     NodeDraining,
+    #[error("manual drain cannot clear shutdown drain")]
+    DrainResetForbidden,
     #[error("internal error")]
     Internal,
     #[error(transparent)]
@@ -96,6 +98,7 @@ impl AppError {
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
             Self::DatabaseUnavailable => "database_unavailable",
             Self::NodeDraining => "node_draining",
+            Self::DrainResetForbidden => "drain_reset_forbidden",
             Self::Internal | Self::Sqlx(_) => "internal_error",
         }
     }
@@ -124,7 +127,8 @@ impl AppError {
             | Self::ExpectedSeqConflict { .. }
             | Self::ExpectedVersionConflict { .. }
             | Self::ProducerReplayConflict
-            | Self::ProducerSeqConflict { .. } => StatusCode::CONFLICT,
+            | Self::ProducerSeqConflict { .. }
+            | Self::DrainResetForbidden => StatusCode::CONFLICT,
             Self::DatabaseUnavailable | Self::NodeDraining => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
@@ -216,6 +220,10 @@ impl AppError {
                 "error": self.error_code(),
                 "message": format!("Expected version {expected}, current version is {current}"),
                 "current_version": current
+            }),
+            Self::DrainResetForbidden => json!({
+                "error": self.error_code(),
+                "message": "Only manual drain can be cleared"
             }),
             Self::ProducerReplayConflict => json!({
                 "error": self.error_code(),

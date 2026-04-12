@@ -15,7 +15,7 @@ This is a parallel implementation inside the existing repo, not a drop-in replac
 - `GET /v1/sessions`
 - `GET /metrics` on the ops listener
 - `GET /debug/state` on the ops listener
-- `POST /debug/drain` on the ops listener
+- `POST /debug/drain` and `DELETE /debug/drain` on the ops listener
 - `GET /v1/lifecycle/events`
 - `GET /v1/lifecycle` over WebSocket
 - `GET /v1/socket/websocket` over WebSocket with Phoenix channel framing
@@ -59,6 +59,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining"}` once shutdown drain begins.
 - `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, drain source, runtime state, and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
 - `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
+- `DELETE /debug/drain` clears only a manual drain and returns the process to `ready`; it refuses to clear a real shutdown drain.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
 - In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
@@ -157,6 +158,8 @@ curl "http://localhost:4002/metrics"
 curl "http://localhost:4002/debug/state"
 
 curl -X POST "http://localhost:4002/debug/drain"
+
+curl -X DELETE "http://localhost:4002/debug/drain"
 ```
 
 To tail replay plus live events over WebSocket:
