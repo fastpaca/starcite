@@ -19,26 +19,22 @@ defmodule Starcite.ReadPath do
 
   def get_session(_id), do: {:error, :invalid_session_id}
 
-  @spec get_session_routed(String.t(), boolean()) ::
+  @spec get_session_routed(String.t()) ::
           {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
-  def get_session_routed(id, prefer_leader \\ true)
-
-  def get_session_routed(id, prefer_leader)
-      when is_binary(id) and id != "" and is_boolean(prefer_leader) do
-    SessionRouter.call(
-      id,
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      prefer_leader: prefer_leader,
-      defer_local_when_unconfirmed: prefer_leader
-    )
+  def get_session_routed(id) when is_binary(id) and id != "" do
+    route_session_read(id, true)
   end
 
-  def get_session_routed(_id, _prefer_leader), do: {:error, :invalid_session_id}
+  def get_session_routed(_id), do: {:error, :invalid_session_id}
+
+  @doc false
+  @spec get_session_replica(String.t()) ::
+          {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
+  def get_session_replica(id) when is_binary(id) and id != "" do
+    route_session_read(id, false)
+  end
+
+  def get_session_replica(_id), do: {:error, :invalid_session_id}
 
   @type gap_reason :: :cursor_expired | :epoch_stale | :rollback
   @type gap_signal :: %{
@@ -69,20 +65,21 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    get_events_from_cursor(id, cursor, limit, true)
+    route_events_read(id, cursor, limit, true)
   end
 
   def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
-  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer(), boolean()) ::
+  @doc false
+  @spec get_events_from_cursor_replica(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
-  def get_events_from_cursor(id, cursor, limit, prefer_leader)
+  def get_events_from_cursor_replica(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
-             limit > 0 and is_boolean(prefer_leader) do
-    route_events_read(id, cursor, limit, prefer_leader)
+             limit > 0 do
+    route_events_read(id, cursor, limit, false)
   end
 
-  def get_events_from_cursor(_id, _cursor, _limit, _prefer_leader), do: {:error, :invalid_cursor}
+  def get_events_from_cursor_replica(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
   @doc false
   def rpc_get_session(id) when is_binary(id) and id != "" do
@@ -362,6 +359,20 @@ defmodule Starcite.ReadPath do
     end
   end
 
+  defp route_session_read(id, prefer_leader)
+       when is_binary(id) and id != "" and is_boolean(prefer_leader) do
+    SessionRouter.call(
+      id,
+      __MODULE__,
+      :rpc_get_session,
+      [id],
+      __MODULE__,
+      :rpc_get_session,
+      [id],
+      prefer_leader: prefer_leader
+    )
+  end
+
   defp route_replay_read(id, cursor, limit)
        when is_binary(id) and id != "" and is_map(cursor) and is_integer(limit) and limit > 0 do
     SessionRouter.call(
@@ -372,8 +383,7 @@ defmodule Starcite.ReadPath do
       __MODULE__,
       :rpc_replay_from_cursor,
       [id, cursor, limit],
-      prefer_leader: false,
-      defer_local_when_unconfirmed: false
+      prefer_leader: false
     )
   end
 
@@ -388,8 +398,7 @@ defmodule Starcite.ReadPath do
       __MODULE__,
       :rpc_get_events_from_cursor,
       [id, cursor, limit],
-      prefer_leader: prefer_leader,
-      defer_local_when_unconfirmed: prefer_leader
+      prefer_leader: prefer_leader
     )
   end
 end

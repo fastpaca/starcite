@@ -64,7 +64,7 @@ defmodule Starcite.RuntimeTest do
       id = unique_id("ses")
       {:ok, _} = WritePath.create_session(id: id)
 
-      {:ok, session} = ReadPath.get_session_routed(id, true)
+      {:ok, session} = ReadPath.get_session_routed(id)
       assert session.id == id
       assert session.last_seq == 0
     end
@@ -810,12 +810,12 @@ defmodule Starcite.RuntimeTest do
       true = :ets.delete(:starcite_routing_assignment_cache, id)
 
       assert {:error, {:routing_rpc_failed, ^missing_owner, _reason}} =
-               ReadPath.get_session_routed(id, true)
+               ReadPath.get_session_routed(id)
 
       assert {:ok, %Session{id: ^id, last_seq: 5, archived_seq: 3}} =
-               ReadPath.get_session_routed(id, false)
+               ReadPath.get_session_replica(id)
 
-      assert {:ok, events} = ReadPath.get_events_from_cursor(id, 0, 10, false)
+      assert {:ok, events} = ReadPath.get_events_from_cursor_replica(id, 0, 10)
       assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5]
 
       assert {:ok, replay_events} =

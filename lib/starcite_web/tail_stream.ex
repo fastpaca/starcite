@@ -279,7 +279,7 @@ defmodule StarciteWeb.TailStream do
   defp read_event_from_storage(session_id, principal, tenant_id, seq, epoch)
        when is_binary(session_id) and session_id != "" and is_integer(seq) and seq > 0 and
               (is_struct(principal, Principal) or is_nil(principal)) do
-    case ReadPath.get_events_from_cursor(session_id, seq - 1, 1, false) do
+    case ReadPath.get_events_from_cursor_replica(session_id, seq - 1, 1) do
       {:ok, [%{seq: ^seq} = event]} ->
         Telemetry.tail_cursor_lookup(session_id, tenant_id, seq, :storage, :hit)
         {:ok, put_event_epoch(event, epoch)}

@@ -22,7 +22,7 @@ defmodule StarciteWeb.TailChannel do
     with :ok <- Context.ensure_current(auth),
          {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- TailParams.parse(params),
          :ok <- Policy.authorize_session_access(auth, session_id, :read),
-         {:ok, session} <- ReadPath.get_session_routed(session_id, false),
+         {:ok, session} <- ReadPath.get_session_replica(session_id),
          :ok <- Policy.authorize_session_resource(auth, session, :read),
          {:ok, state} <-
            TailStream.init(%{

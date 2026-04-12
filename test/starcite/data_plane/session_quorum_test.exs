@@ -881,7 +881,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
     end)
 
     Enum.each(all_session_ids, fn session_id ->
-      assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id, true)
+      assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id)
       assert session.last_seq == 1
 
       assert {:ok, reply} =
@@ -897,7 +897,7 @@ defmodule Starcite.DataPlane.SessionQuorumDistributedTest do
 
     eventually(fn ->
       Enum.each(all_session_ids, fn session_id ->
-        assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id, true)
+        assert {:ok, session} = Starcite.ReadPath.get_session_routed(session_id)
         assert session.last_seq == 2
 
         assert_hot_owner_sees_latest(session_id, 2)
