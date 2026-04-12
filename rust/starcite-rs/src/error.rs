@@ -60,6 +60,8 @@ pub enum AppError {
     },
     #[error("database unavailable")]
     DatabaseUnavailable,
+    #[error("node draining")]
+    NodeDraining,
     #[error("internal error")]
     Internal,
     #[error(transparent)]
@@ -93,6 +95,7 @@ impl AppError {
             Self::ProducerReplayConflict => "producer_replay_conflict",
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
             Self::DatabaseUnavailable => "database_unavailable",
+            Self::NodeDraining => "node_draining",
             Self::Internal | Self::Sqlx(_) => "internal_error",
         }
     }
@@ -122,7 +125,7 @@ impl AppError {
             | Self::ExpectedVersionConflict { .. }
             | Self::ProducerReplayConflict
             | Self::ProducerSeqConflict { .. } => StatusCode::CONFLICT,
-            Self::DatabaseUnavailable => StatusCode::SERVICE_UNAVAILABLE,
+            Self::DatabaseUnavailable | Self::NodeDraining => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -229,6 +232,10 @@ impl AppError {
             Self::DatabaseUnavailable => json!({
                 "error": self.error_code(),
                 "message": "Database is unavailable"
+            }),
+            Self::NodeDraining => json!({
+                "error": self.error_code(),
+                "message": "Node is draining"
             }),
             Self::Internal | Self::Sqlx(_) => json!({
                 "error": self.error_code(),

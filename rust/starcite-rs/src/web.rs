@@ -8,8 +8,9 @@ use axum::{
         rejection::JsonRejection,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{HeaderMap, Request, StatusCode},
+    middleware::Next,
+    response::{IntoResponse, Response},
 };
 use serde::Serialize;
 use tokio::{sync::broadcast, time::sleep};
@@ -24,6 +25,7 @@ use crate::{
         LifecycleEvent, LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest,
         parse_query_scalar,
     },
+    ops::OpsSnapshot,
     repository,
     runtime::RuntimeSnapshot,
     telemetry::{
@@ -54,6 +56,19 @@ struct TailEventsFrame {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct LiveResponse {
+    status: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct ReadyResponse {
+    status: &'static str,
+    mode: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<&'static str>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct TailGapFrame {
     #[serde(rename = "type")]
     frame_type: &'static str,
@@ -73,6 +88,7 @@ struct TokenExpiredFrame {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DebugStateResponse {
+    ops: OpsSnapshot,
     auth_mode: &'static str,
     telemetry_enabled: bool,
     runtime: RuntimeSnapshot,
@@ -86,33 +102,53 @@ struct DebugFanoutState {
 }
 
 pub async fn live() -> impl IntoResponse {
-    StatusCode::NO_CONTENT
+    (StatusCode::OK, Json(LiveResponse { status: "ok" }))
 }
 
 pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
+    let ops = state.ops.snapshot();
+
+    if ops.draining {
+        return ready_response(&ops, Some("draining")).into_response();
+    }
+
     match sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
         .fetch_one(&state.pool)
         .await
     {
-        Ok(_) => StatusCode::NO_CONTENT.into_response(),
+        Ok(_) => ready_response(&ops, None).into_response(),
         Err(error) => {
             tracing::error!(error = ?error, "readiness query failed");
-            AppError::DatabaseUnavailable.into_response()
+            ready_response(&ops, Some("database_unavailable")).into_response()
         }
     }
 }
 
 pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
+    let ops = state.ops.snapshot();
     let runtime = state.runtime.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
 
     Json(DebugStateResponse {
+        ops,
         auth_mode: auth_mode_name(state.auth_mode),
         telemetry_enabled: state.telemetry.enabled(),
         runtime,
         fanout: DebugFanoutState { events, lifecycle },
     })
+}
+
+pub async fn reject_when_draining(
+    State(ops): State<crate::ops::OpsState>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    if ops.is_draining() {
+        AppError::NodeDraining.into_response()
+    } else {
+        next.run(request).await
+    }
 }
 
 pub async fn create_session(
@@ -738,6 +774,26 @@ fn elapsed_ms(started_at: Instant) -> u64 {
     started_at.elapsed().as_millis() as u64
 }
 
+fn ready_response(
+    ops: &OpsSnapshot,
+    reason: Option<&'static str>,
+) -> (StatusCode, Json<ReadyResponse>) {
+    let status = if reason.is_some() {
+        StatusCode::SERVICE_UNAVAILABLE
+    } else {
+        StatusCode::OK
+    };
+
+    (
+        status,
+        Json(ReadyResponse {
+            status: if reason.is_some() { "starting" } else { "ok" },
+            mode: ops.mode,
+            reason,
+        }),
+    )
+}
+
 fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
     match auth_mode {
         crate::config::AuthMode::None => "none",
@@ -1218,14 +1274,15 @@ async fn send_token_expired(socket: &mut WebSocket) -> Result<(), ()> {
 mod tests {
     use std::collections::HashMap;
 
+    use axum::{Json, http::StatusCode};
     use serde_json::json;
 
     use super::{
         LifecycleOptions, TailOptions, build_resume_invalidated_gap, build_token_expired_frame,
         parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
-        parse_tail_options,
+        parse_tail_options, ready_response,
     };
-    use crate::model::ArchivedFilter;
+    use crate::{model::ArchivedFilter, ops::OpsState};
 
     #[test]
     fn list_query_supports_bracket_metadata_filters() {
@@ -1346,6 +1403,30 @@ mod tests {
 
         assert_eq!(frame.frame_type, "token_expired");
         assert_eq!(frame.reason, "token_expired");
+    }
+
+    #[test]
+    fn ready_response_reports_ready_mode() {
+        let ops = OpsState::new(30_000).snapshot();
+        let (status, Json(body)) = ready_response(&ops, None);
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body.status, "ok");
+        assert_eq!(body.mode, "ready");
+        assert_eq!(body.reason, None);
+    }
+
+    #[test]
+    fn ready_response_reports_draining_mode() {
+        let ops_state = OpsState::new(30_000);
+        ops_state.begin_shutdown_drain();
+        let ops = ops_state.snapshot();
+        let (status, Json(body)) = ready_response(&ops, Some("draining"));
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body.status, "starting");
+        assert_eq!(body.mode, "draining");
+        assert_eq!(body.reason, Some("draining"));
     }
 
     #[test]

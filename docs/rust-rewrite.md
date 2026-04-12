@@ -20,6 +20,7 @@ The goal is not feature parity in one shot. The goal is to test whether a saner 
 - Prometheus text metrics on a separate ops listener
 - `/health/live` and `/health/ready` on the same separate ops listener
 - local ops-state JSON on `GET /debug/state`
+- local shutdown drain with `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS`
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
 - tenant-scoped durable lifecycle replay through `GET /v1/lifecycle/events?tenant_id=...`
 - tenant-scoped replay-then-live lifecycle streaming through `GET /v1/lifecycle?tenant_id=...`
@@ -40,6 +41,8 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local runtime plus fanout state for this one process
+- `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
+- `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"` instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
@@ -76,6 +79,13 @@ one session, resume-gap detection is computed against that session head instead 
 head. `GET /debug/state` exposes that local runtime map directly, including the current generation
 per active session, so the rewrite now has one honest ops surface for "what this process thinks it
 owns right now."
+
+The rewrite now also has a minimal local drain story instead of pretending graceful shutdown is
+free. On `SIGTERM` or `Ctrl-C`, the process flips into `draining`, `/health/ready` returns `503`
+with `reason = "draining"`, new public HTTP requests and new WebSocket handshakes fail with
+`node_draining`, and the listeners stay up for `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` before the
+actual server shutdown future resolves. That is still much simpler than the Phoenix routing drain,
+but it gives the experiment an honest edge behavior during termination.
 
 Because this rewrite keeps the full event log in Postgres, it does not currently emit
 `cursor_expired` gaps. There is no hot-tail trimming boundary to fall behind.

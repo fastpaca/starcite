@@ -3,6 +3,7 @@ mod config;
 mod error;
 mod fanout;
 mod model;
+mod ops;
 mod phoenix;
 mod repository;
 mod runtime;
@@ -15,6 +16,7 @@ use axum::{
 };
 use config::Config;
 use fanout::{LifecycleFanout, SessionFanout};
+use ops::OpsState;
 use runtime::SessionRuntime;
 use sqlx::postgres::PgPoolOptions;
 use std::time::Duration;
@@ -29,6 +31,7 @@ pub struct AppState {
     pub fanout: SessionFanout,
     pub lifecycle: LifecycleFanout,
     pub runtime: SessionRuntime,
+    pub ops: OpsState,
     pub auth_mode: config::AuthMode,
     pub telemetry: Telemetry,
 }
@@ -61,6 +64,7 @@ async fn run() -> Result<(), String> {
 
     let lifecycle = LifecycleFanout::default();
     let telemetry = Telemetry::new(config.telemetry_enabled);
+    let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let runtime = SessionRuntime::new(
         Some(pool.clone()),
         lifecycle.clone(),
@@ -73,12 +77,13 @@ async fn run() -> Result<(), String> {
         fanout: SessionFanout::default(),
         lifecycle,
         runtime,
+        ops: ops_state.clone(),
         auth_mode: config.auth_mode,
         telemetry: telemetry.clone(),
     };
 
-    let app = build_public_router(telemetry.clone()).with_state(state.clone());
-    let ops = build_ops_router(telemetry).with_state(state);
+    let app = build_public_router(telemetry.clone(), ops_state.clone()).with_state(state.clone());
+    let ops_router = build_ops_router(telemetry).with_state(state);
 
     tracing::info!(
         public_listen_addr = %config.listen_addr,
@@ -93,19 +98,22 @@ async fn run() -> Result<(), String> {
         .await
         .map_err(|error| format!("failed to bind ops listener: {error}"))?;
 
-    let shutdown = shutdown_watch();
+    let shutdown = shutdown_watch(
+        ops_state,
+        Duration::from_millis(config.shutdown_drain_timeout_ms),
+    );
 
     let app_server =
         axum::serve(app_listener, app).with_graceful_shutdown(wait_for_shutdown(shutdown.clone()));
     let ops_server =
-        axum::serve(ops_listener, ops).with_graceful_shutdown(wait_for_shutdown(shutdown));
+        axum::serve(ops_listener, ops_router).with_graceful_shutdown(wait_for_shutdown(shutdown));
 
     tokio::try_join!(app_server, ops_server)
         .map(|_| ())
         .map_err(|error| format!("server error: {error}"))
 }
 
-fn build_public_router(telemetry: Telemetry) -> Router<AppState> {
+fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> {
     Router::new()
         .route("/v1/socket/websocket", get(phoenix::socket))
         .route("/v1/lifecycle", get(web::lifecycle_events))
@@ -131,6 +139,10 @@ fn build_public_router(telemetry: Telemetry) -> Router<AppState> {
         .route("/v1/sessions/{id}/tail", get(web::tail_events))
         .route("/v1/sessions/{id}/archive", post(web::archive_session))
         .route("/v1/sessions/{id}/unarchive", post(web::unarchive_session))
+        .layer(middleware::from_fn_with_state(
+            ops,
+            web::reject_when_draining,
+        ))
         .layer(middleware::from_fn_with_state(
             telemetry.clone(),
             telemetry::measure_edge_stage_entry,
@@ -187,11 +199,17 @@ async fn shutdown_signal() {
     }
 }
 
-fn shutdown_watch() -> watch::Receiver<bool> {
+fn shutdown_watch(ops: OpsState, shutdown_drain_timeout: Duration) -> watch::Receiver<bool> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tokio::spawn(async move {
         shutdown_signal().await;
+        ops.begin_shutdown_drain();
+
+        if !shutdown_drain_timeout.is_zero() {
+            tokio::time::sleep(shutdown_drain_timeout).await;
+        }
+
         let _ = shutdown_tx.send(true);
     });
 

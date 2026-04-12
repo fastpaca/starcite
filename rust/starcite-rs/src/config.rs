@@ -18,6 +18,7 @@ pub struct Config {
     pub migrate_on_boot: bool,
     pub auth_mode: AuthMode,
     pub telemetry_enabled: bool,
+    pub shutdown_drain_timeout_ms: u64,
     pub session_runtime_idle_timeout_ms: u64,
 }
 
@@ -58,6 +59,12 @@ impl Config {
             .transpose()?
             .unwrap_or(true);
 
+        let shutdown_drain_timeout_ms = env::var("STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS", &raw))
+            .transpose()?
+            .unwrap_or(30_000);
+
         let session_runtime_idle_timeout_ms = env::var("SESSION_RUNTIME_IDLE_TIMEOUT_MS")
             .ok()
             .map(|raw| parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", &raw))
@@ -72,6 +79,7 @@ impl Config {
             migrate_on_boot,
             auth_mode,
             telemetry_enabled,
+            shutdown_drain_timeout_ms,
             session_runtime_idle_timeout_ms,
         })
     }
@@ -147,7 +155,7 @@ fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_listener_addrs;
+    use super::{parse_listener_addrs, parse_positive_u64};
 
     #[test]
     fn defaults_ops_port_to_public_port_plus_one() {
@@ -181,5 +189,20 @@ mod tests {
             .expect_err("collision should fail");
 
         assert!(error.contains("ops listen address must differ"));
+    }
+
+    #[test]
+    fn parses_positive_u64_values() {
+        assert_eq!(
+            parse_positive_u64("STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS", "5000")
+                .expect("positive integer should parse"),
+            5_000
+        );
+    }
+
+    #[test]
+    fn rejects_non_positive_u64_values() {
+        assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "0").is_err());
+        assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "-1").is_err());
     }
 }

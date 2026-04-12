@@ -35,6 +35,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
+- `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, waits the configured drain window, and only then shuts the listeners down.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
@@ -52,7 +53,9 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Tail connections subscribe before replaying from Postgres, then receive in-process fanout updates; if the fanout buffer lags, the server replays from Postgres again to close the gap.
 - In-process fanout channels are demand-driven: broadcasts do not allocate dormant per-session or per-tenant channels, and idle channels are pruned when the last receiver disconnects instead of waiting for the next broadcast.
 - `/health/live`, `/health/ready`, and `/metrics` now live on `STARCITE_OPS_PORT` instead of the public API port, matching the Phoenix deployment shape more closely.
-- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local runtime and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
+- `GET /health/live` returns `{"status":"ok"}` and stays live during shutdown drain.
+- `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining"}` once shutdown drain begins.
+- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, runtime state, and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
 - In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
@@ -74,6 +77,7 @@ DATABASE_MAX_CONNECTIONS=20
 MIGRATE_ON_BOOT=true
 STARCITE_AUTH_MODE=none
 STARCITE_ENABLE_TELEMETRY=true
+STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
 RUST_LOG=info
 ```
