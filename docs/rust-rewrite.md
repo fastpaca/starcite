@@ -20,6 +20,7 @@ The goal is not feature parity in one shot. The goal is to test whether a saner 
 - Prometheus text metrics on a separate ops listener
 - `/health/live` and `/health/ready` on the same separate ops listener
 - local ops-state JSON on `GET /debug/state`
+- local manual drain on `POST /debug/drain`
 - local shutdown drain with `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS`
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
 - tenant-scoped durable lifecycle replay through `GET /v1/lifecycle/events?tenant_id=...`
@@ -38,9 +39,11 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
 - in `unsafe_jwt` mode, raw lifecycle and tail sockets emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
+- when local shutdown drain begins, raw lifecycle and tail sockets emit `{"type":"node_draining","reason":"node_draining"}` before the connection closes
 - the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local runtime plus fanout state for this one process
+- `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
 - `GET /health/live` returns a small JSON body and stays healthy during shutdown drain
 - `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"` instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
@@ -50,7 +53,8 @@ The Phoenix-compatible socket is explicitly incomplete but useful. It supports `
 `[join_ref, ref, topic, event, payload]`, replies with `phx_reply`, accepts `cursor` plus
 optional `session_id` on the operator `lifecycle` topic, accepts plain `cursor` on
 `lifecycle:<session_id>` joins, and pushes `token_expired` when an active socket outlives an
-`unsafe_jwt` token.
+`unsafe_jwt` token. During local shutdown drain it also pushes `node_draining` on active joined
+topics before the socket closes.
 
 Auth is now explicit instead of hand-waved:
 
@@ -83,9 +87,13 @@ owns right now."
 The rewrite now also has a minimal local drain story instead of pretending graceful shutdown is
 free. On `SIGTERM` or `Ctrl-C`, the process flips into `draining`, `/health/ready` returns `503`
 with `reason = "draining"`, new public HTTP requests and new WebSocket handshakes fail with
-`node_draining`, and the listeners stay up for `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` before the
-actual server shutdown future resolves. That is still much simpler than the Phoenix routing drain,
-but it gives the experiment an honest edge behavior during termination.
+`node_draining`, existing raw sockets emit a terminal `node_draining` frame and then close with
+code `1012`, existing Phoenix topic subscriptions receive a `node_draining` push and then the
+socket closes with code `1012`, and the listeners stay up for
+`STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` before the actual server shutdown future resolves. The same
+local drain state can be triggered manually through `POST /debug/drain` on the ops listener for
+local drills without terminating the process. That is still much simpler than the Phoenix routing
+drain, but it gives the experiment an honest edge behavior during termination.
 
 Because this rewrite keeps the full event log in Postgres, it does not currently emit
 `cursor_expired` gaps. There is no hot-tail trimming boundary to fall behind.

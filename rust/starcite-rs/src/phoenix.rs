@@ -4,7 +4,7 @@ use std::time::Instant;
 use axum::{
     extract::{
         Query, State,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     response::IntoResponse,
 };
@@ -93,11 +93,24 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
         .expiry_delay()
         .map(|delay| Box::pin(sleep(delay)));
 
+    if state.ops.is_draining() {
+        let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
+        return;
+    }
+
     loop {
         if let Some(expires_at) = expiry.as_mut() {
             tokio::select! {
                 _ = expires_at => {
                     let _ = send_token_expired_frames(&mut socket, &subscriptions).await;
+                    break;
+                }
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        topic_count = subscriptions.len(),
+                        "closing phoenix socket because node is draining"
+                    );
+                    let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
                     break;
                 }
                 outbound = outbound_rx.recv() => {
@@ -139,6 +152,14 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
             }
         } else {
             tokio::select! {
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        topic_count = subscriptions.len(),
+                        "closing phoenix socket because node is draining"
+                    );
+                    let _ = send_node_draining_frames(&mut socket, &subscriptions).await;
+                    break;
+                }
                 outbound = outbound_rx.recv() => {
                     match outbound {
                         Some(frame) => {
@@ -1018,7 +1039,55 @@ async fn send_token_expired_frames(
         .await?;
     }
 
-    Ok(())
+    send_socket_close(socket, close_code::POLICY, "token_expired").await
+}
+
+async fn send_node_draining_frames(
+    socket: &mut WebSocket,
+    subscriptions: &HashMap<String, TopicSubscription>,
+) -> Result<(), ()> {
+    for (topic, subscription) in subscriptions {
+        send_frame(
+            socket,
+            &push_frame(
+                subscription.join_ref.clone(),
+                topic.clone(),
+                "node_draining",
+                json!({"reason": "node_draining"}),
+            ),
+        )
+        .await?;
+    }
+
+    send_socket_close(socket, close_code::RESTART, "node_draining").await
+}
+
+async fn wait_for_drain(ops: &crate::ops::OpsState) {
+    if ops.is_draining() {
+        return;
+    }
+
+    loop {
+        sleep(std::time::Duration::from_millis(100)).await;
+
+        if ops.is_draining() {
+            return;
+        }
+    }
+}
+
+async fn send_socket_close(
+    socket: &mut WebSocket,
+    code: u16,
+    reason: &'static str,
+) -> Result<(), ()> {
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: code.into(),
+            reason: reason.into(),
+        })))
+        .await
+        .map_err(|_| ())
 }
 
 fn parse_lifecycle_join_payload(payload: &Value) -> Result<LifecycleOptions, AppError> {

@@ -4,10 +4,12 @@ use std::sync::{
 };
 
 use serde::Serialize;
+use tokio::sync::watch;
 
 #[derive(Debug, Clone)]
 pub struct OpsState {
     draining: Arc<AtomicBool>,
+    draining_tx: watch::Sender<bool>,
     shutdown_drain_timeout_ms: u64,
 }
 
@@ -21,18 +23,31 @@ pub struct OpsSnapshot {
 
 impl OpsState {
     pub fn new(shutdown_drain_timeout_ms: u64) -> Self {
+        let (draining_tx, _) = watch::channel(false);
+
         Self {
             draining: Arc::new(AtomicBool::new(false)),
+            draining_tx,
             shutdown_drain_timeout_ms,
         }
     }
 
     pub fn begin_shutdown_drain(&self) {
-        self.draining.store(true, Ordering::SeqCst);
+        if self
+            .draining
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+        {
+            let _ = self.draining_tx.send(true);
+        }
     }
 
     pub fn is_draining(&self) -> bool {
         self.draining.load(Ordering::SeqCst)
+    }
+
+    pub fn subscribe_draining(&self) -> watch::Receiver<bool> {
+        self.draining_tx.subscribe()
     }
 
     pub fn snapshot(&self) -> OpsSnapshot {
@@ -80,5 +95,18 @@ mod tests {
                 shutdown_drain_timeout_ms: 5_000,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn draining_subscribers_observe_shutdown_drain() {
+        let ops = OpsState::new(5_000);
+        let mut draining = ops.subscribe_draining();
+
+        assert!(!*draining.borrow());
+
+        ops.begin_shutdown_drain();
+        draining.changed().await.expect("drain change");
+
+        assert!(*draining.borrow());
     }
 }

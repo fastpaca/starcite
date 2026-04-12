@@ -15,6 +15,7 @@ This is a parallel implementation inside the existing repo, not a drop-in replac
 - `GET /v1/sessions`
 - `GET /metrics` on the ops listener
 - `GET /debug/state` on the ops listener
+- `POST /debug/drain` on the ops listener
 - `GET /v1/lifecycle/events`
 - `GET /v1/lifecycle` over WebSocket
 - `GET /v1/socket/websocket` over WebSocket with Phoenix channel framing
@@ -35,7 +36,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
-- `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, waits the configured drain window, and only then shuts the listeners down.
+- `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, emits `node_draining` to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
@@ -49,6 +50,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Raw WebSocket tail uses query params for `cursor` and `batch_size` because there is no channel join payload.
 - Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
 - In `unsafe_jwt` mode, raw tail and lifecycle sockets push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
+- When local shutdown drain begins, raw tail and lifecycle sockets push `{"type":"node_draining","reason":"node_draining"}` before the process closes the connection.
 - Raw lifecycle sockets subscribe before replaying from Postgres, then reuse the same Postgres replay path when fanout lags.
 - Tail connections subscribe before replaying from Postgres, then receive in-process fanout updates; if the fanout buffer lags, the server replays from Postgres again to close the gap.
 - In-process fanout channels are demand-driven: broadcasts do not allocate dormant per-session or per-tenant channels, and idle channels are pruned when the last receiver disconnects instead of waiting for the next broadcast.
@@ -56,6 +58,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `GET /health/live` returns `{"status":"ok"}` and stays live during shutdown drain.
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining"}` once shutdown drain begins.
 - `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, runtime state, and fanout state for this process only, including active runtime sessions plus per-session and per-tenant subscriber counts.
+- `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next read or append on that cold session emits `session.hydrating` then `session.activated`.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
 - In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
@@ -152,6 +155,8 @@ curl "http://localhost:4002/health/ready"
 curl "http://localhost:4002/metrics"
 
 curl "http://localhost:4002/debug/state"
+
+curl -X POST "http://localhost:4002/debug/drain"
 ```
 
 To tail replay plus live events over WebSocket:
@@ -188,7 +193,9 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 With the default runtime settings, that socket will see `session.activated` immediately on create,
 `session.created` after the row is stored, and `session.freezing` plus `session.frozen` once a
 session has been idle for `SESSION_RUNTIME_IDLE_TIMEOUT_MS`. The next read, tail, or append on a
-frozen session emits `session.hydrating` and then `session.activated`.
+frozen session emits `session.hydrating` and then `session.activated`. When drain starts, an
+already-open raw lifecycle or tail socket receives `{"type":"node_draining","reason":"node_draining"}`
+and then closes with code `1012`.
 
 In `unsafe_jwt` mode, use a `token` query param instead of `tenant_id` and let the token principal
 derive the tenant:
@@ -218,9 +225,11 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 That Phoenix-compatible socket currently supports `heartbeat`, `phx_join`, and `phx_leave`
 for the operator `lifecycle` topic plus `lifecycle:<session_id>` and `tail:<session_id>` topics.
 It keeps the normal Phoenix frame array shape `[join_ref, ref, topic, event, payload]`, replies
-with `phx_reply`, pushes `lifecycle`, `events`, `gap`, and `token_expired`, lets one socket
+with `phx_reply`, pushes `lifecycle`, `events`, `gap`, `token_expired`, and `node_draining`, lets one socket
 multiplex many session streams, and accepts either `cursor` plus optional `session_id` on the
 operator `lifecycle` topic or plain `cursor` on `lifecycle:<session_id>` joins.
+When drain starts, active Phoenix topic subscriptions receive a `node_draining` push and then the
+socket closes with code `1012`.
 
 In `unsafe_jwt` mode, pass the token on the socket URL instead of `tenant_id`:
 

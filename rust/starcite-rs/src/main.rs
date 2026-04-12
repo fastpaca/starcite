@@ -161,6 +161,7 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
         .route("/health/ready", get(web::ready))
         .route("/metrics", get(telemetry::metrics))
         .route("/debug/state", get(web::debug_state))
+        .route("/debug/drain", post(web::begin_drain))
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,
@@ -205,11 +206,16 @@ fn shutdown_watch(ops: OpsState, shutdown_drain_timeout: Duration) -> watch::Rec
     tokio::spawn(async move {
         shutdown_signal().await;
         ops.begin_shutdown_drain();
+        tracing::info!(
+            shutdown_drain_timeout_ms = shutdown_drain_timeout.as_millis() as u64,
+            "starting local shutdown drain"
+        );
 
         if !shutdown_drain_timeout.is_zero() {
             tokio::time::sleep(shutdown_drain_timeout).await;
         }
 
+        tracing::info!("completing local shutdown drain");
         let _ = shutdown_tx.send(true);
     });
 

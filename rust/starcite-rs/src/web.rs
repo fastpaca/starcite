@@ -6,7 +6,7 @@ use axum::{
     extract::{
         Path, Query, State,
         rejection::JsonRejection,
-        ws::{Message, WebSocket, WebSocketUpgrade},
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
     http::{HeaderMap, Request, StatusCode},
     middleware::Next,
@@ -87,6 +87,13 @@ struct TokenExpiredFrame {
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+struct NodeDrainingFrame {
+    #[serde(rename = "type")]
+    frame_type: &'static str,
+    reason: &'static str,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct DebugStateResponse {
     ops: OpsSnapshot,
     auth_mode: &'static str,
@@ -137,6 +144,12 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         runtime,
         fanout: DebugFanoutState { events, lifecycle },
     })
+}
+
+pub async fn begin_drain(State(state): State<AppState>) -> impl IntoResponse {
+    state.ops.begin_shutdown_drain();
+    tracing::info!("triggered local drain from ops endpoint");
+    (StatusCode::ACCEPTED, Json(state.ops.snapshot()))
 }
 
 pub async fn reject_when_draining(
@@ -830,6 +843,11 @@ async fn run_tail_session(
     let mut cursor = tail.cursor;
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
+    if state.ops.is_draining() {
+        let _ = send_node_draining(&mut socket).await;
+        return;
+    }
+
     match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
         Ok(next_cursor) => cursor = next_cursor,
         Err(error) => {
@@ -843,6 +861,14 @@ async fn run_tail_session(
             tokio::select! {
                 _ = expires_at => {
                     let _ = send_token_expired(&mut socket).await;
+                    return;
+                }
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "closing raw tail socket because node is draining"
+                    );
+                    let _ = send_node_draining(&mut socket).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -883,6 +909,14 @@ async fn run_tail_session(
             }
         } else {
             tokio::select! {
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        session_id = %session_id,
+                        "closing raw tail socket because node is draining"
+                    );
+                    let _ = send_node_draining(&mut socket).await;
+                    return;
+                }
                 incoming = socket.recv() => {
                     if !handle_socket_message(&mut socket, incoming).await {
                         return;
@@ -1001,6 +1035,11 @@ async fn run_lifecycle_session(
     let mut cursor = lifecycle.cursor;
     let mut expiry = expiry_delay.map(|delay| Box::pin(sleep(delay)));
 
+    if state.ops.is_draining() {
+        let _ = send_node_draining(&mut socket).await;
+        return;
+    }
+
     match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
         Ok(next_cursor) => cursor = next_cursor,
         Err(error) => {
@@ -1018,6 +1057,15 @@ async fn run_lifecycle_session(
             tokio::select! {
                 _ = expires_at => {
                     let _ = send_token_expired(&mut socket).await;
+                    return;
+                }
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        tenant_id = %lifecycle.tenant_id,
+                        session_id = ?lifecycle.session_id,
+                        "closing raw lifecycle socket because node is draining"
+                    );
+                    let _ = send_node_draining(&mut socket).await;
                     return;
                 }
                 incoming = socket.recv() => {
@@ -1070,6 +1118,15 @@ async fn run_lifecycle_session(
             }
         } else {
             tokio::select! {
+                _ = wait_for_drain(&state.ops) => {
+                    tracing::info!(
+                        tenant_id = %lifecycle.tenant_id,
+                        session_id = ?lifecycle.session_id,
+                        "closing raw lifecycle socket because node is draining"
+                    );
+                    let _ = send_node_draining(&mut socket).await;
+                    return;
+                }
                 incoming = socket.recv() => {
                     if !handle_socket_message(&mut socket, incoming).await {
                         return;
@@ -1220,6 +1277,13 @@ fn build_token_expired_frame() -> TokenExpiredFrame {
     }
 }
 
+fn build_node_draining_frame() -> NodeDrainingFrame {
+    NodeDrainingFrame {
+        frame_type: "node_draining",
+        reason: "node_draining",
+    }
+}
+
 fn build_resume_invalidated_gap_with_earliest(
     from_cursor: i64,
     last_seq: i64,
@@ -1264,10 +1328,45 @@ async fn send_gap(socket: &mut WebSocket, gap: &TailGapFrame) -> Result<(), ()> 
 
 async fn send_token_expired(socket: &mut WebSocket) -> Result<(), ()> {
     let message = serde_json::to_string(&build_token_expired_frame()).map_err(|_| ())?;
+    send_terminal_message(socket, message, close_code::POLICY, "token_expired").await
+}
+
+async fn send_node_draining(socket: &mut WebSocket) -> Result<(), ()> {
+    let message = serde_json::to_string(&build_node_draining_frame()).map_err(|_| ())?;
+    send_terminal_message(socket, message, close_code::RESTART, "node_draining").await
+}
+
+async fn send_terminal_message(
+    socket: &mut WebSocket,
+    message: String,
+    code: u16,
+    reason: &'static str,
+) -> Result<(), ()> {
     socket
         .send(Message::Text(message.into()))
         .await
+        .map_err(|_| ())?;
+    socket
+        .send(Message::Close(Some(CloseFrame {
+            code: code.into(),
+            reason: reason.into(),
+        })))
+        .await
         .map_err(|_| ())
+}
+
+async fn wait_for_drain(ops: &crate::ops::OpsState) {
+    if ops.is_draining() {
+        return;
+    }
+
+    loop {
+        sleep(Duration::from_millis(100)).await;
+
+        if ops.is_draining() {
+            return;
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1278,9 +1377,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LifecycleOptions, TailOptions, build_resume_invalidated_gap, build_token_expired_frame,
-        parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
-        parse_tail_options, ready_response,
+        LifecycleOptions, TailOptions, build_node_draining_frame, build_resume_invalidated_gap,
+        build_token_expired_frame, parse_archived_filter, parse_events_options,
+        parse_lifecycle_options, parse_list_options, parse_tail_options, ready_response,
     };
     use crate::{model::ArchivedFilter, ops::OpsState};
 
@@ -1403,6 +1502,14 @@ mod tests {
 
         assert_eq!(frame.frame_type, "token_expired");
         assert_eq!(frame.reason, "token_expired");
+    }
+
+    #[test]
+    fn node_draining_frame_uses_public_shape() {
+        let frame = build_node_draining_frame();
+
+        assert_eq!(frame.frame_type, "node_draining");
+        assert_eq!(frame.reason, "node_draining");
     }
 
     #[test]
