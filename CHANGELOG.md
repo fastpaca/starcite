@@ -7,8 +7,7 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
-As of 2026-04-10, these entries cover work merged after the latest release tag,
-`v0.0.1`, cut on 2026-02-18.
+## [0.0.2] - 2026-04-12
 
 ### Added
 
