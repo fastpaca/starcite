@@ -81,12 +81,12 @@ not create dormant channels for untouched sessions or tenants, and a stale chann
 the last receiver disconnects. That keeps the local memory story closer to "active sockets only"
 instead of "every session ever touched by this process."
 
-Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP, auth,
-ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket
-connection and subscription gauges, and local session lifecycle counters with metric names aligned
-to the existing PromEx surface where that still makes sense. It still does not cover routing,
-replication, archive, or event-store invariants because those subsystems do not exist in this
-rewrite.
+Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
+controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
+plus lifecycle delivery timings, active socket connection and subscription gauges, and local
+session lifecycle counters with metric names aligned to the existing PromEx surface where that
+still makes sense. It still does not cover routing, replication, archive, or event-store
+invariants because those subsystems do not exist in this rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge

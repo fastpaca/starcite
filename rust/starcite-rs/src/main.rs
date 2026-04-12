@@ -132,6 +132,10 @@ fn build_public_router(telemetry: Telemetry) -> Router<AppState> {
         .route("/v1/sessions/{id}/archive", post(web::archive_session))
         .route("/v1/sessions/{id}/unarchive", post(web::unarchive_session))
         .layer(middleware::from_fn_with_state(
+            telemetry.clone(),
+            telemetry::measure_edge_stage_entry,
+        ))
+        .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,
         ))

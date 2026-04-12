@@ -65,6 +65,10 @@ const COUNTERS: &[CounterSpec] = &[
         help: "HTTP requests observed at the Rust endpoint boundary",
     },
     CounterSpec {
+        name: "starcite_edge_stage_total",
+        help: "Explicit edge-stage observations before controller timing",
+    },
+    CounterSpec {
         name: "starcite_auth_total",
         help: "Authentication-stage outcomes",
     },
@@ -112,6 +116,11 @@ const HISTOGRAMS: &[HistogramSpec] = &[
         buckets: DEFAULT_MS_BUCKETS,
     },
     HistogramSpec {
+        name: "starcite_edge_stage_duration_ms",
+        help: "Explicit edge-stage duration in milliseconds",
+        buckets: DEFAULT_MS_BUCKETS,
+    },
+    HistogramSpec {
         name: "starcite_auth_duration_ms",
         help: "Authentication-stage duration in milliseconds",
         buckets: DEFAULT_MS_BUCKETS,
@@ -131,6 +140,11 @@ const HISTOGRAMS: &[HistogramSpec] = &[
 #[derive(Debug, Clone, Copy)]
 pub enum AuthStage {
     Plug,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum EdgeStage {
+    ControllerEntry,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -263,6 +277,16 @@ impl Telemetry {
 
         self.increment_counter("starcite_edge_http_total", labels.clone());
         self.observe_histogram("starcite_edge_http_duration_ms", labels, duration_ms);
+    }
+
+    pub fn record_edge_stage(&self, stage: EdgeStage, method: &str, duration_ms: u64) {
+        let labels = label_set(&[
+            ("stage", edge_stage_label(stage).to_string()),
+            ("method", method.to_string()),
+        ]);
+
+        self.increment_counter("starcite_edge_stage_total", labels.clone());
+        self.observe_histogram("starcite_edge_stage_duration_ms", labels, duration_ms);
     }
 
     pub fn record_auth(
@@ -610,6 +634,16 @@ pub async fn measure_http(
     response
 }
 
+pub async fn measure_edge_stage_entry(
+    State(telemetry): State<Telemetry>,
+    request: Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let method = request.method().as_str().to_string();
+    telemetry.record_edge_stage(EdgeStage::ControllerEntry, &method, 0);
+    next.run(request).await
+}
+
 fn render_metric_line<T: std::fmt::Display>(
     out: &mut String,
     name: &str,
@@ -661,6 +695,12 @@ fn label_set(labels: &[(&'static str, String)]) -> LabelSet {
 fn auth_stage_label(stage: AuthStage) -> &'static str {
     match stage {
         AuthStage::Plug => "plug",
+    }
+}
+
+fn edge_stage_label(stage: EdgeStage) -> &'static str {
+    match stage {
+        EdgeStage::ControllerEntry => "controller_entry",
     }
 }
 
@@ -779,9 +819,9 @@ mod tests {
     use crate::config::AuthMode;
 
     use super::{
-        AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, ReadOperation,
-        ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase, SessionOutcome,
-        SessionReason, SocketSurface, SocketTransport, Telemetry,
+        AuthOutcome, AuthSource, AuthStage, EdgeStage, IngestOperation, IngestOutcome,
+        ReadOperation, ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase,
+        SessionOutcome, SessionReason, SocketSurface, SocketTransport, Telemetry,
     };
 
     #[test]
@@ -789,6 +829,7 @@ mod tests {
         let telemetry = Telemetry::new(true);
 
         telemetry.record_edge_http("GET", StatusCode::CREATED, 12);
+        telemetry.record_edge_stage(EdgeStage::ControllerEntry, "POST", 0);
         telemetry.record_auth(
             AuthStage::Plug,
             AuthMode::UnsafeJwt,
@@ -827,6 +868,8 @@ mod tests {
         let rendered = telemetry.render();
 
         assert!(rendered.contains("starcite_edge_http_total"));
+        assert!(rendered.contains("starcite_edge_stage_total"));
+        assert!(rendered.contains(r#"stage="controller_entry""#));
         assert!(rendered.contains(r#"method="GET""#));
         assert!(rendered.contains(r#"status_class="2xx""#));
         assert!(rendered.contains("starcite_auth_total"));
@@ -850,11 +893,13 @@ mod tests {
         let telemetry = Telemetry::new(false);
 
         telemetry.record_edge_http("GET", StatusCode::OK, 1);
+        telemetry.record_edge_stage(EdgeStage::ControllerEntry, "GET", 0);
 
         let rendered = telemetry.render();
 
         assert!(rendered.contains("starcite_process_uptime_seconds"));
         assert!(!rendered.contains("starcite_edge_http_total{"));
+        assert!(!rendered.contains("starcite_edge_stage_total{"));
     }
 
     #[test]

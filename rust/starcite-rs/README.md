@@ -33,7 +33,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
-- `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
+- `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, and local session runtime counters.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
@@ -230,6 +230,7 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 The Prometheus surface is intentionally narrow. Right now it exports:
 
 - `starcite_edge_http_total` and `starcite_edge_http_duration_ms`
+- `starcite_edge_stage_total` and `starcite_edge_stage_duration_ms`
 - `starcite_auth_total` and `starcite_auth_duration_ms`
 - `starcite_ingest_edge_total`
 - `starcite_request_total` and `starcite_request_duration_ms`
