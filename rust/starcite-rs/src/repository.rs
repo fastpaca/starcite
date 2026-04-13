@@ -683,15 +683,27 @@ pub async fn acquire_session_lease(
 ) -> Result<SessionLeaseRow, AppError> {
     sqlx::query_as::<_, SessionLeaseRow>(
         r#"
-        WITH candidate AS (
+        WITH standby_load AS (
           SELECT
-            node_id,
-            ops_url
-          FROM control_nodes
-          WHERE node_id <> $2
-            AND draining = FALSE
+            standby_node_id,
+            COUNT(*) AS active_lease_count
+          FROM session_leases
+          WHERE standby_node_id IS NOT NULL
             AND expires_at > now()
-          ORDER BY node_id ASC
+          GROUP BY standby_node_id
+        ),
+        candidate AS (
+          SELECT
+            control_nodes.node_id
+          FROM control_nodes
+          LEFT JOIN standby_load
+            ON standby_load.standby_node_id = control_nodes.node_id
+          WHERE control_nodes.node_id <> $2
+            AND control_nodes.draining = FALSE
+            AND control_nodes.expires_at > now()
+          ORDER BY
+            COALESCE(standby_load.active_lease_count, 0) ASC,
+            control_nodes.node_id ASC
           LIMIT 1
         ),
         upserted AS (
@@ -732,6 +744,17 @@ pub async fn acquire_session_lease(
               ELSE session_leases.expires_at
             END,
             standby_node_id = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+                AND session_leases.expires_at > now()
+                AND EXISTS (
+                  SELECT 1
+                  FROM control_nodes AS standby_control
+                  WHERE standby_control.node_id = session_leases.standby_node_id
+                    AND standby_control.node_id <> EXCLUDED.owner_id
+                    AND standby_control.draining = FALSE
+                    AND standby_control.expires_at > now()
+                )
+              THEN session_leases.standby_node_id
               WHEN session_leases.owner_id = EXCLUDED.owner_id
                 OR session_leases.expires_at <= now()
               THEN (SELECT node_id FROM candidate)
