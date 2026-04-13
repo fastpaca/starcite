@@ -7,6 +7,8 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+## [0.0.3] - 2026-04-13
+
 ### Fixed
 
 - Fresh session claims now recover on the surviving ready nodes after a
