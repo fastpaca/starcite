@@ -77,6 +77,7 @@ struct SessionSnapshotRow {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ArchiveState {
+    pub tenant_id: String,
     pub last_seq: i64,
     pub archived_seq: i64,
 }
@@ -341,6 +342,7 @@ pub async fn get_archive_state(pool: &PgPool, session_id: &str) -> Result<Archiv
     sqlx::query_as::<_, ArchiveState>(
         r#"
         SELECT
+          tenant_id,
           last_seq,
           archived_seq
         FROM sessions
@@ -368,6 +370,7 @@ pub async fn mark_archived_seq(
         SET archived_seq = GREATEST(archived_seq, LEAST(last_seq, $2))
         WHERE id = $1
         RETURNING
+          tenant_id,
           last_seq,
           archived_seq
         "#,
@@ -385,6 +388,7 @@ pub async fn publish_archive_progress(
     pool: &PgPool,
     emitter_id: &str,
     session_id: &str,
+    tenant_id: &str,
     archived_seq: i64,
 ) -> Result<(), AppError> {
     sqlx::query("SELECT pg_notify($1, $2)")
@@ -393,6 +397,7 @@ pub async fn publish_archive_progress(
             serde_json::to_string(&ArchiveNotification {
                 emitter_id: emitter_id.to_string(),
                 session_id: session_id.to_string(),
+                tenant_id: tenant_id.to_string(),
                 archived_seq,
             })
             .map_err(|_| AppError::Internal)?,

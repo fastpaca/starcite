@@ -95,6 +95,7 @@ impl ArchiveWorker {
             &self.pool,
             self.instance_id.as_ref(),
             session_id,
+            &state.tenant_id,
             archived_seq,
         )
         .await?;

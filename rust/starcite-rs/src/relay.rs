@@ -33,6 +33,7 @@ pub struct LifecycleNotification {
 pub struct ArchiveNotification {
     pub emitter_id: String,
     pub session_id: String,
+    pub tenant_id: String,
     pub archived_seq: i64,
 }
 
@@ -217,6 +218,9 @@ async fn handle_notification(
             }
 
             session_store
+                .put_tenant(&payload.session_id, &payload.tenant_id)
+                .await;
+            session_store
                 .update_archived_seq(&payload.session_id, payload.archived_seq)
                 .await;
             hot_store
@@ -285,6 +289,7 @@ mod tests {
         let payload = serde_json::to_string(&ArchiveNotification {
             emitter_id: "node-a".to_string(),
             session_id: "ses_demo".to_string(),
+            tenant_id: "acme".to_string(),
             archived_seq: 4,
         })
         .expect("serialize archive notification");
@@ -294,6 +299,7 @@ mod tests {
 
         assert_eq!(decoded.emitter_id, "node-a");
         assert_eq!(decoded.session_id, "ses_demo");
+        assert_eq!(decoded.tenant_id, "acme");
         assert_eq!(decoded.archived_seq, 4);
     }
 
