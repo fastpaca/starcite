@@ -199,6 +199,11 @@ that session and instead return the standby as the owner hint. That keeps acknow
 `local_async` state biased toward the node that already holds the replicated hot copy, while still
 falling back to any live node once the designated standby disappears.
 
+Replica fencing now follows that handoff too. Once a standby takes over with a newer epoch, it
+clears stale pending replica state from the older owner epoch and rejects any later prepare or
+commit requests from that stale epoch. That prevents delayed internal replica traffic from
+re-applying pre-takeover state after the session has already moved forward locally.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The

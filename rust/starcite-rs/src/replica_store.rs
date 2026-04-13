@@ -104,6 +104,17 @@ impl ReplicaStore {
         Ok(sessions.remove(session_id).map(|pending| pending.event))
     }
 
+    pub async fn discard_before_epoch(&self, session_id: &str, epoch: i64) {
+        let mut sessions = self.sessions.write().await;
+        let should_remove = sessions
+            .get(session_id)
+            .is_some_and(|pending| pending.epoch < epoch);
+
+        if should_remove {
+            sessions.remove(session_id);
+        }
+    }
+
     pub async fn snapshot(&self) -> ReplicaStoreSnapshot {
         let sessions = self.sessions.read().await;
         let mut snapshot = sessions
@@ -201,5 +212,18 @@ mod tests {
             .expect_err("conflicting seq");
 
         assert_eq!(error, ReplicaStoreError::ConflictingSeq);
+    }
+
+    #[tokio::test]
+    async fn discard_before_epoch_prunes_stale_pending_replica() {
+        let store = ReplicaStore::new();
+        store
+            .prepare("node-a", 7, event("ses_demo", 11))
+            .await
+            .expect("prepare");
+
+        store.discard_before_epoch("ses_demo", 8).await;
+
+        assert_eq!(store.snapshot().await.pending_session_count, 0);
     }
 }

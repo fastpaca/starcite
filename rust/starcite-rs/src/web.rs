@@ -226,6 +226,7 @@ pub async fn prepare_replica(
 ) -> Result<impl IntoResponse, AppError> {
     reject_internal_replication_when_unavailable(&state)?;
     let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+    reject_stale_replica_epoch(&state, &request.event.session_id, request.epoch).await?;
 
     state
         .replica_store
@@ -250,6 +251,7 @@ pub async fn commit_replica(
 ) -> Result<impl IntoResponse, AppError> {
     reject_internal_replication_when_unavailable(&state)?;
     let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+    reject_stale_replica_epoch(&state, &request.session_id, request.epoch).await?;
 
     let event = state
         .replica_store
@@ -1177,6 +1179,28 @@ fn reject_internal_replication_when_unavailable(state: &AppState) -> Result<(), 
     }
 
     Ok(())
+}
+
+async fn reject_stale_replica_epoch(
+    state: &AppState,
+    session_id: &str,
+    epoch: i64,
+) -> Result<(), AppError> {
+    let Some(owned_epoch) = state.ownership.owned_epoch(session_id).await else {
+        return Ok(());
+    };
+
+    if owned_epoch <= epoch {
+        return Ok(());
+    }
+
+    let owner_public_url = state.control_plane.snapshot().public_url;
+
+    Err(AppError::SessionNotOwned {
+        owner_id: state.instance_id.to_string(),
+        owner_public_url,
+        epoch: owned_epoch,
+    })
 }
 
 async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {

@@ -139,6 +139,7 @@ async fn run() -> Result<(), String> {
         pending_flush.clone(),
         session_store.clone(),
         ownership.clone(),
+        replica_store.clone(),
         replication.clone(),
         ops_state.clone(),
         config.commit_mode,

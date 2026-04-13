@@ -160,6 +160,14 @@ impl OwnershipManager {
         }
     }
 
+    pub async fn owned_epoch(&self, session_id: &str) -> Option<i64> {
+        let now = Instant::now();
+        let leases = self.leases.lock().await;
+        let lease = leases.get(session_id)?;
+
+        (lease.expires_at > now).then_some(lease.epoch)
+    }
+
     async fn cached_lease(&self, session_id: &str) -> Option<LocalLease> {
         let now = Instant::now();
         let leases = self.leases.lock().await;

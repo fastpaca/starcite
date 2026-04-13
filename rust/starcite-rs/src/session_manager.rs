@@ -25,6 +25,7 @@ use crate::{
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
     ops::OpsState,
     ownership::OwnershipManager,
+    replica_store::ReplicaStore,
     replication::ReplicationCoordinator,
     repository::{self, AppendOutcome, ProducerSequenceCheck},
     session_store::{HotSessionStore, resolve_session_last_seq},
@@ -42,6 +43,7 @@ pub struct SessionManager {
     pending_flush: PendingFlushQueue,
     session_store: HotSessionStore,
     ownership: OwnershipManager,
+    replica_store: ReplicaStore,
     replication: ReplicationCoordinator,
     ops: OpsState,
     commit_mode: CommitMode,
@@ -84,6 +86,7 @@ impl SessionManager {
         pending_flush: PendingFlushQueue,
         session_store: HotSessionStore,
         ownership: OwnershipManager,
+        replica_store: ReplicaStore,
         replication: ReplicationCoordinator,
         ops: OpsState,
         commit_mode: CommitMode,
@@ -99,6 +102,7 @@ impl SessionManager {
             pending_flush,
             session_store,
             ownership,
+            replica_store,
             replication,
             ops,
             commit_mode,
@@ -284,6 +288,9 @@ impl SessionManager {
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let lease = self.ownership.ensure_owned(session_id).await?;
+        self.replica_store
+            .discard_before_epoch(session_id, lease.epoch)
+            .await;
         let last_seq =
             resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
 
@@ -469,8 +476,8 @@ mod tests {
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
         flush_queue::PendingFlushQueue, hot_store::HotEventStore, ops::OpsState,
-        ownership::OwnershipManager, replication::ReplicationCoordinator,
-        session_store::HotSessionStore,
+        ownership::OwnershipManager, replica_store::ReplicaStore,
+        replication::ReplicationCoordinator, session_store::HotSessionStore,
     };
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
@@ -493,6 +500,7 @@ mod tests {
                 Arc::<str>::from("node-a"),
                 Duration::from_secs(5),
             ),
+            ReplicaStore::new(),
             ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
                 false,
