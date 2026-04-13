@@ -173,7 +173,10 @@ What it does have now is explicit single-writer ownership per active session: a 
 Postgres-backed lease while its local session worker is alive, non-owner nodes reject event-path
 appends and replay with `409 session_not_owned`, and the next node can take over once the worker
 idles out or the lease expires. That makes the branch honest about who may serve the hot event
-path without pretending it already has Raft-style ownership transfer.
+path without pretending it already has Raft-style ownership transfer. Lease acquisition no longer
+lets the first requester pin ownership accidentally either: Postgres deterministically designates a
+live owner from the current node set, while a live standby still keeps takeover preference for an
+expired lease.
 
 There is now one more real hot-path slice on top of that lease model: `local_async` can replicate
 to one synchronous standby over the ops listener, and Postgres now acts as the durable control

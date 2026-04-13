@@ -683,7 +683,51 @@ pub async fn acquire_session_lease(
 ) -> Result<SessionLeaseRow, AppError> {
     sqlx::query_as::<_, SessionLeaseRow>(
         r#"
-        WITH standby_load AS (
+        WITH live_nodes AS (
+          SELECT
+            node_id,
+            public_url,
+            ops_url
+          FROM control_nodes
+          WHERE draining = FALSE
+            AND expires_at > now()
+        ),
+        existing_lease AS (
+          SELECT
+            session_leases.owner_id,
+            session_leases.epoch,
+            session_leases.expires_at,
+            session_leases.standby_node_id,
+            live_standby.node_id AS live_standby_node_id
+          FROM session_leases
+          LEFT JOIN live_nodes AS live_standby
+            ON live_standby.node_id = session_leases.standby_node_id
+          WHERE session_leases.session_id = $1
+        ),
+        designated_owner AS (
+          SELECT node_id
+          FROM live_nodes
+          ORDER BY md5($1 || ':' || node_id), node_id
+          LIMIT 1
+        ),
+        target_owner AS (
+          SELECT COALESCE(
+            (
+              SELECT CASE
+                WHEN existing_lease.owner_id = $2 THEN $2
+                WHEN existing_lease.expires_at <= now()
+                  AND existing_lease.live_standby_node_id = $2
+                THEN $2
+                WHEN existing_lease.expires_at <= now()
+                THEN COALESCE((SELECT node_id FROM designated_owner), $2)
+                ELSE $2
+              END
+              FROM existing_lease
+            ),
+            COALESCE((SELECT node_id FROM designated_owner), $2)
+          ) AS node_id
+        ),
+        standby_load AS (
           SELECT
             standby_node_id,
             COUNT(*) AS active_lease_count
@@ -692,18 +736,16 @@ pub async fn acquire_session_lease(
             AND expires_at > now()
           GROUP BY standby_node_id
         ),
-        candidate AS (
+        candidate_standby AS (
           SELECT
-            control_nodes.node_id
-          FROM control_nodes
+            live_nodes.node_id
+          FROM live_nodes
           LEFT JOIN standby_load
-            ON standby_load.standby_node_id = control_nodes.node_id
-          WHERE control_nodes.node_id <> $2
-            AND control_nodes.draining = FALSE
-            AND control_nodes.expires_at > now()
+            ON standby_load.standby_node_id = live_nodes.node_id
+          WHERE live_nodes.node_id <> (SELECT node_id FROM target_owner)
           ORDER BY
             COALESCE(standby_load.active_lease_count, 0) ASC,
-            control_nodes.node_id ASC
+            live_nodes.node_id ASC
           LIMIT 1
         ),
         upserted AS (
@@ -716,52 +758,50 @@ pub async fn acquire_session_lease(
           )
           VALUES (
             $1,
-            $2,
+            (SELECT node_id FROM target_owner),
             1,
             now() + ($3 * interval '1 millisecond'),
-            (SELECT node_id FROM candidate)
+            (SELECT node_id FROM candidate_standby)
           )
           ON CONFLICT (session_id)
           DO UPDATE
           SET
             owner_id = CASE
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
                 OR session_leases.expires_at <= now()
-              THEN EXCLUDED.owner_id
+              THEN (SELECT node_id FROM target_owner)
               ELSE session_leases.owner_id
             END,
             epoch = CASE
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
               THEN session_leases.epoch
               WHEN session_leases.expires_at <= now()
               THEN session_leases.epoch + 1
               ELSE session_leases.epoch
             END,
             expires_at = CASE
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
                 OR session_leases.expires_at <= now()
               THEN now() + ($3 * interval '1 millisecond')
               ELSE session_leases.expires_at
             END,
             standby_node_id = CASE
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
                 AND session_leases.expires_at > now()
                 AND EXISTS (
                   SELECT 1
-                  FROM control_nodes AS standby_control
+                  FROM live_nodes AS standby_control
                   WHERE standby_control.node_id = session_leases.standby_node_id
-                    AND standby_control.node_id <> EXCLUDED.owner_id
-                    AND standby_control.draining = FALSE
-                    AND standby_control.expires_at > now()
+                    AND standby_control.node_id <> (SELECT node_id FROM target_owner)
                 )
               THEN session_leases.standby_node_id
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
                 OR session_leases.expires_at <= now()
-              THEN (SELECT node_id FROM candidate)
+              THEN (SELECT node_id FROM candidate_standby)
               ELSE session_leases.standby_node_id
             END,
             updated_at = CASE
-              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              WHEN session_leases.owner_id = $2
                 OR session_leases.expires_at <= now()
               THEN now()
               ELSE session_leases.updated_at
@@ -778,12 +818,12 @@ pub async fn acquire_session_lease(
           upserted.epoch,
           upserted.expires_at,
           upserted.standby_node_id,
-          control_nodes.ops_url AS standby_ops_url
+          standby_control.ops_url AS standby_ops_url
         FROM upserted
         LEFT JOIN control_nodes AS owner_control
           ON owner_control.node_id = upserted.owner_id
-        LEFT JOIN control_nodes
-          ON control_nodes.node_id = upserted.standby_node_id
+        LEFT JOIN control_nodes AS standby_control
+          ON standby_control.node_id = upserted.standby_node_id
         "#,
     )
     .bind(session_id)
