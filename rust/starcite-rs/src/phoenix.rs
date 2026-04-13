@@ -18,9 +18,10 @@ use tokio::{
 use crate::{
     AppState,
     auth::{self, AuthContext},
-    config::{AuthMode, MAX_LIST_LIMIT},
+    config::{AuthMode, CommitMode, MAX_LIST_LIMIT},
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
+    owner_proxy::build_phoenix_socket_ws_url,
     read_path, repository,
     runtime::RuntimeTouchReason,
     session_store::{resolve_session_last_seq, resolve_session_tenant_id},
@@ -492,9 +493,22 @@ async fn handle_join(
                     frame.ref_id,
                     frame.topic,
                     false,
-                    json!({"reason": reason_for_error(&error)}),
+                    tail_join_error_payload(&error),
                 ));
                 return;
+            }
+
+            if state.commit_mode == CommitMode::LocalAsync {
+                if let Err(error) = state.ownership.ensure_owned(&session_id).await {
+                    let _ = outbound_tx.send(reply_frame(
+                        frame.join_ref,
+                        frame.ref_id,
+                        frame.topic,
+                        false,
+                        tail_join_error_payload(&error),
+                    ));
+                    return;
+                }
             }
 
             state
@@ -1279,6 +1293,25 @@ fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> Value {
     })
 }
 
+fn tail_join_error_payload(error: &AppError) -> Value {
+    match error {
+        AppError::SessionNotOwned {
+            owner_id,
+            owner_public_url,
+            epoch,
+        } => json!({
+            "reason": reason_for_error(error),
+            "owner_id": owner_id,
+            "owner_url": owner_public_url,
+            "owner_socket_url": owner_public_url
+                .as_deref()
+                .and_then(build_phoenix_socket_ws_url),
+            "epoch": epoch
+        }),
+        _ => json!({"reason": reason_for_error(error)}),
+    }
+}
+
 fn reason_for_error(error: &AppError) -> &'static str {
     match error {
         AppError::MissingBearerToken => "missing_bearer_token",
@@ -1293,6 +1326,7 @@ fn reason_for_error(error: &AppError) -> &'static str {
         AppError::InvalidCursor => "invalid_cursor",
         AppError::InvalidTailBatchSize => "invalid_tail_batch_size",
         AppError::SessionNotFound => "session_not_found",
+        AppError::SessionNotOwned { .. } => "session_not_owned",
         _ => "internal_error",
     }
 }
@@ -1305,8 +1339,9 @@ mod tests {
         PhoenixFrame, SocketContext, build_node_draining_payload, parse_client_frame,
         parse_lifecycle_join_payload, parse_session_lifecycle_join_payload,
         parse_tail_join_payload, push_frame, reply_frame, resolve_lifecycle_tenant_id,
+        tail_join_error_payload,
     };
-    use crate::{auth::AuthContext, config::AuthMode, ops::OpsSnapshot};
+    use crate::{auth::AuthContext, config::AuthMode, error::AppError, ops::OpsSnapshot};
 
     #[test]
     fn parses_client_frame_from_protocol_array() {
@@ -1335,6 +1370,23 @@ mod tests {
     #[test]
     fn tail_join_payload_rejects_non_integer_cursor() {
         assert!(parse_tail_join_payload(&json!({"cursor": "4"})).is_err());
+    }
+
+    #[test]
+    fn tail_join_error_payload_includes_owner_socket_url() {
+        let payload = tail_join_error_payload(&AppError::SessionNotOwned {
+            owner_id: "node-a".to_string(),
+            owner_public_url: Some("https://owner.example:4443".to_string()),
+            epoch: 9,
+        });
+
+        assert_eq!(payload["reason"], "session_not_owned");
+        assert_eq!(payload["owner_url"], "https://owner.example:4443");
+        assert_eq!(
+            payload["owner_socket_url"],
+            "wss://owner.example:4443/v1/socket/websocket"
+        );
+        assert_eq!(payload["epoch"], 9);
     }
 
     #[test]

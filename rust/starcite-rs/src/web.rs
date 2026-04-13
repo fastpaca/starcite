@@ -8,7 +8,7 @@ use axum::{
         rejection::JsonRejection,
         ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
     },
-    http::{HeaderMap, Request, StatusCode},
+    http::{HeaderMap, HeaderValue, Request, StatusCode, header},
     middleware::Next,
     response::{IntoResponse, Response},
 };
@@ -31,6 +31,7 @@ use crate::{
         parse_query_scalar,
     },
     ops::OpsSnapshot,
+    owner_proxy::build_tail_ws_url,
     ownership::OwnershipSnapshot,
     read_path,
     replica_store::ReplicaStoreSnapshot,
@@ -708,7 +709,7 @@ pub async fn tail_events(
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     websocket: WebSocketUpgrade,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
 
     let auth = authenticate_socket(&state, &params)?;
@@ -717,16 +718,76 @@ pub async fn tail_events(
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    require_local_owner_for_event_path(&state, &session_id).await?;
+    match require_local_owner_for_event_path(&state, &session_id).await {
+        Ok(()) => {}
+        Err(AppError::SessionNotOwned {
+            owner_id,
+            owner_public_url: Some(owner_public_url),
+            epoch,
+        }) => {
+            if let Some(owner_ws_url) = build_tail_ws_url(&owner_public_url, &session_id, &params) {
+                return Ok(tail_owner_redirect_response(
+                    &owner_id,
+                    &owner_public_url,
+                    epoch,
+                    &owner_ws_url,
+                ));
+            }
+
+            return Err(AppError::SessionNotOwned {
+                owner_id,
+                owner_public_url: Some(owner_public_url),
+                epoch,
+            });
+        }
+        Err(error) => return Err(error),
+    }
     state
         .runtime
         .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::RawTail)
         .await;
     let receiver = state.fanout.subscribe(&session_id).await;
 
-    Ok(websocket.on_upgrade(move |socket| async move {
-        run_tail_session(socket, state, session_id, tail, receiver, expiry).await;
-    }))
+    Ok(websocket
+        .on_upgrade(move |socket| async move {
+            run_tail_session(socket, state, session_id, tail, receiver, expiry).await;
+        })
+        .into_response())
+}
+
+fn tail_owner_redirect_response(
+    owner_id: &str,
+    owner_public_url: &str,
+    epoch: i64,
+    owner_ws_url: &str,
+) -> Response {
+    let mut response = (
+        StatusCode::TEMPORARY_REDIRECT,
+        Json(serde_json::json!({
+            "error": "session_not_owned",
+            "message": "Session is not owned by this node",
+            "owner_id": owner_id,
+            "owner_url": owner_public_url,
+            "owner_ws_url": owner_ws_url,
+            "epoch": epoch
+        })),
+    )
+        .into_response();
+
+    if let Ok(value) = HeaderValue::from_str(owner_public_url) {
+        response
+            .headers_mut()
+            .insert(error::OWNER_URL_HEADER.clone(), value);
+    }
+
+    if let Ok(value) = HeaderValue::from_str(owner_ws_url) {
+        response
+            .headers_mut()
+            .insert(error::OWNER_WEBSOCKET_URL_HEADER.clone(), value.clone());
+        response.headers_mut().insert(header::LOCATION, value);
+    }
+
+    response
 }
 
 fn validate_session_id(session_id: &str) -> Result<(), AppError> {
@@ -1683,15 +1744,23 @@ async fn wait_for_drain(ops: &crate::ops::OpsState) {
 mod tests {
     use std::collections::HashMap;
 
-    use axum::{Json, http::StatusCode};
+    use axum::{
+        Json, body,
+        http::{StatusCode, header},
+    };
     use serde_json::json;
 
     use super::{
         LifecycleOptions, TailOptions, build_node_draining_frame, build_resume_invalidated_gap,
         build_token_expired_frame, parse_archived_filter, parse_events_options,
         parse_lifecycle_options, parse_list_options, parse_tail_options, ready_response,
+        tail_owner_redirect_response,
     };
-    use crate::{model::ArchivedFilter, ops::OpsState};
+    use crate::{
+        error::{OWNER_URL_HEADER, OWNER_WEBSOCKET_URL_HEADER},
+        model::ArchivedFilter,
+        ops::OpsState,
+    };
 
     #[test]
     fn list_query_supports_bracket_metadata_filters() {
@@ -1747,6 +1816,49 @@ mod tests {
     fn tail_query_rejects_invalid_batch_size() {
         let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
         assert!(parse_tail_options(params).is_err());
+    }
+
+    #[tokio::test]
+    async fn tail_owner_redirect_sets_headers_and_body() {
+        let response = tail_owner_redirect_response(
+            "node-a",
+            "http://127.0.0.1:4191",
+            7,
+            "ws://127.0.0.1:4191/v1/sessions/ses_demo/tail?cursor=2&batch_size=8",
+        );
+
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        assert_eq!(
+            response
+                .headers()
+                .get(&OWNER_URL_HEADER)
+                .expect("owner URL"),
+            "http://127.0.0.1:4191"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get(&OWNER_WEBSOCKET_URL_HEADER)
+                .expect("owner websocket URL"),
+            "ws://127.0.0.1:4191/v1/sessions/ses_demo/tail?cursor=2&batch_size=8"
+        );
+        assert_eq!(
+            response.headers().get(header::LOCATION).expect("location"),
+            "ws://127.0.0.1:4191/v1/sessions/ses_demo/tail?cursor=2&batch_size=8"
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("body json");
+
+        assert_eq!(json_body["error"], "session_not_owned");
+        assert_eq!(json_body["owner_url"], "http://127.0.0.1:4191");
+        assert_eq!(
+            json_body["owner_ws_url"],
+            "ws://127.0.0.1:4191/v1/sessions/ses_demo/tail?cursor=2&batch_size=8"
+        );
+        assert_eq!(json_body["epoch"], 7);
     }
 
     #[test]

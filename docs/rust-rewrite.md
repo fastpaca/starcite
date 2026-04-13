@@ -181,8 +181,10 @@ future edge proxy to reroute requests without guessing.
 
 That edge proxying story has now started inside the Rust service itself for plain HTTP event-path
 requests. Wrong-node `GET /events` and `POST /append` calls can forward to the current owner using
-the Postgres control-plane hint instead of forcing the client to retry manually. WebSocket tail is
-still explicit-owner only for now, so the routing model is not complete yet.
+the Postgres control-plane hint instead of forcing the client to retry manually. Tail now enforces
+that same ownership boundary too: a wrong-node raw tail handshake returns `307` with an owner
+WebSocket target, and a wrong-node Phoenix `tail:<session_id>` join fails explicitly with
+`session_not_owned` plus `owner_socket_url` so the client can reconnect to the correct node.
 
 The local worker lifecycle now also matches the ownership story more closely. A live worker renews
 its Postgres lease in the background instead of only on incoming event-path requests, so ownership

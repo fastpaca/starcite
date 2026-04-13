@@ -14,6 +14,8 @@ use crate::ops::OpsSnapshot;
 pub const DRAIN_SOURCE_HEADER: HeaderName = HeaderName::from_static("x-starcite-drain-source");
 pub const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("x-starcite-retry-after-ms");
 pub const OWNER_URL_HEADER: HeaderName = HeaderName::from_static("x-starcite-owner-url");
+pub const OWNER_WEBSOCKET_URL_HEADER: HeaderName =
+    HeaderName::from_static("x-starcite-owner-websocket-url");
 
 #[derive(Debug, Error)]
 pub enum AppError {

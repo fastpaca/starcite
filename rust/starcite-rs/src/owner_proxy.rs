@@ -19,6 +19,12 @@ pub struct OwnerProxy {
     public_url: Option<Arc<str>>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BaseUrlScheme {
+    Http,
+    Https,
+}
+
 #[derive(Debug, Clone)]
 struct HttpPeer {
     authority: String,
@@ -210,6 +216,31 @@ fn build_events_path(session_id: &str, params: &HashMap<String, String>) -> Stri
     path
 }
 
+pub fn build_tail_ws_url(
+    owner_url: &str,
+    session_id: &str,
+    params: &HashMap<String, String>,
+) -> Option<String> {
+    let base = websocket_base_url(owner_url)?;
+    let mut path = format!(
+        "{base}/v1/sessions/{}/tail",
+        percent_encode_component(session_id)
+    );
+    let query = encode_query(params);
+
+    if !query.is_empty() {
+        path.push('?');
+        path.push_str(&query);
+    }
+
+    Some(path)
+}
+
+pub fn build_phoenix_socket_ws_url(owner_url: &str) -> Option<String> {
+    let base = websocket_base_url(owner_url)?;
+    Some(format!("{base}/v1/socket/websocket"))
+}
+
 fn build_request(
     method: &str,
     path: &str,
@@ -284,18 +315,56 @@ fn hex(value: u8) -> char {
 }
 
 fn parse_http_peer(raw: &str) -> Result<HttpPeer, String> {
+    let (_, authority) = parse_base_url(raw, false)?;
+    let (host, port) = split_host_port(&authority, raw)?;
+    let connect_addr = format!("{host}:{port}");
+
+    Ok(HttpPeer {
+        authority,
+        connect_addr,
+    })
+}
+
+fn websocket_base_url(raw: &str) -> Option<String> {
+    let (scheme, authority) = parse_base_url(raw, true).ok()?;
+    let ws_scheme = match scheme {
+        BaseUrlScheme::Http => "ws",
+        BaseUrlScheme::Https => "wss",
+    };
+
+    Some(format!("{ws_scheme}://{authority}"))
+}
+
+fn parse_base_url(raw: &str, allow_https: bool) -> Result<(BaseUrlScheme, String), String> {
     let trimmed = raw.trim().trim_end_matches('/');
-    let Some(rest) = trimmed.strip_prefix("http://") else {
+    let (scheme, authority) = if let Some(rest) = trimmed.strip_prefix("http://") {
+        (BaseUrlScheme::Http, rest)
+    } else if allow_https {
+        match trimmed.strip_prefix("https://") {
+            Some(rest) => (BaseUrlScheme::Https, rest),
+            None => {
+                return Err(format!(
+                    "owner URL must start with http:// or https://: {raw}"
+                ));
+            }
+        }
+    } else {
         return Err(format!("owner URL must start with http://: {raw}"));
     };
 
-    if rest.is_empty() || rest.contains('/') {
+    if authority.is_empty() || authority.contains('/') {
         return Err(format!(
-            "owner URL must be a bare http host:port base URL: {raw}"
+            "owner URL must be a bare host:port base URL: {raw}"
         ));
     }
 
-    let Some((host, port_raw)) = rest.rsplit_once(':') else {
+    split_host_port(authority, raw)?;
+
+    Ok((scheme, authority.to_string()))
+}
+
+fn split_host_port<'a>(authority: &'a str, raw: &str) -> Result<(&'a str, u16), String> {
+    let Some((host, port_raw)) = authority.rsplit_once(':') else {
         return Err(format!("owner URL must include a port: {raw}"));
     };
 
@@ -311,10 +380,7 @@ fn parse_http_peer(raw: &str) -> Result<HttpPeer, String> {
         return Err(format!("owner URL has invalid port: {raw}"));
     }
 
-    Ok(HttpPeer {
-        authority: rest.to_string(),
-        connect_addr: format!("{host}:{port}"),
-    })
+    Ok((host, port))
 }
 
 fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, ProxyError> {
@@ -345,7 +411,7 @@ fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, ProxyError> {
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnerProxy, parse_http_peer};
+    use super::{OwnerProxy, build_phoenix_socket_ws_url, build_tail_ws_url, parse_http_peer};
     use crate::{error::OWNER_URL_HEADER, model::AppendEventRequest};
     use axum::{
         body,
@@ -363,6 +429,29 @@ mod tests {
         let peer = parse_http_peer("http://127.0.0.1:4191").expect("peer");
         assert_eq!(peer.authority, "127.0.0.1:4191");
         assert_eq!(peer.connect_addr, "127.0.0.1:4191");
+    }
+
+    #[test]
+    fn builds_tail_websocket_url_from_owner_public_url() {
+        let params = HashMap::from([
+            ("batch_size".to_string(), "32".to_string()),
+            ("cursor".to_string(), "8".to_string()),
+        ]);
+
+        let url = build_tail_ws_url("https://owner.example:4443/", "ses demo", &params)
+            .expect("websocket URL");
+
+        assert_eq!(
+            url,
+            "wss://owner.example:4443/v1/sessions/ses%20demo/tail?batch_size=32&cursor=8"
+        );
+    }
+
+    #[test]
+    fn builds_phoenix_socket_url_from_owner_public_url() {
+        let url = build_phoenix_socket_ws_url("http://127.0.0.1:4191").expect("socket URL");
+
+        assert_eq!(url, "ws://127.0.0.1:4191/v1/socket/websocket");
     }
 
     #[tokio::test]
