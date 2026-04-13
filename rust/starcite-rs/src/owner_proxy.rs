@@ -236,9 +236,20 @@ pub fn build_tail_ws_url(
     Some(path)
 }
 
-pub fn build_phoenix_socket_ws_url(owner_url: &str) -> Option<String> {
+pub fn build_phoenix_socket_ws_url(
+    owner_url: &str,
+    params: &HashMap<String, String>,
+) -> Option<String> {
     let base = websocket_base_url(owner_url)?;
-    Some(format!("{base}/v1/socket/websocket"))
+    let mut path = format!("{base}/v1/socket/websocket");
+    let query = encode_query(params);
+
+    if !query.is_empty() {
+        path.push('?');
+        path.push_str(&query);
+    }
+
+    Some(path)
 }
 
 fn build_request(
@@ -449,9 +460,17 @@ mod tests {
 
     #[test]
     fn builds_phoenix_socket_url_from_owner_public_url() {
-        let url = build_phoenix_socket_ws_url("http://127.0.0.1:4191").expect("socket URL");
+        let params = HashMap::from([
+            ("token".to_string(), "jwt-token".to_string()),
+            ("vsn".to_string(), "2.0.0".to_string()),
+        ]);
+        let url =
+            build_phoenix_socket_ws_url("http://127.0.0.1:4191", &params).expect("socket URL");
 
-        assert_eq!(url, "ws://127.0.0.1:4191/v1/socket/websocket");
+        assert_eq!(
+            url,
+            "ws://127.0.0.1:4191/v1/socket/websocket?token=jwt-token&vsn=2.0.0"
+        );
     }
 
     #[tokio::test]

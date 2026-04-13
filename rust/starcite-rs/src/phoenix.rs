@@ -49,6 +49,7 @@ struct LifecycleOptions {
 struct SocketContext {
     auth: AuthContext,
     tenant_id: Option<String>,
+    connect_params: HashMap<String, String>,
 }
 
 #[derive(Debug)]
@@ -78,6 +79,7 @@ pub async fn socket(
             .get("tenant_id")
             .filter(|value| !value.is_empty())
             .cloned(),
+        connect_params: params,
     };
 
     Ok(websocket.on_upgrade(move |socket| async move {
@@ -493,7 +495,7 @@ async fn handle_join(
                     frame.ref_id,
                     frame.topic,
                     false,
-                    tail_join_error_payload(&error),
+                    tail_join_error_payload(&error, &context),
                 ));
                 return;
             }
@@ -505,7 +507,7 @@ async fn handle_join(
                         frame.ref_id,
                         frame.topic,
                         false,
-                        tail_join_error_payload(&error),
+                        tail_join_error_payload(&error, &context),
                     ));
                     return;
                 }
@@ -1293,7 +1295,7 @@ fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> Value {
     })
 }
 
-fn tail_join_error_payload(error: &AppError) -> Value {
+fn tail_join_error_payload(error: &AppError, context: &SocketContext) -> Value {
     match error {
         AppError::SessionNotOwned {
             owner_id,
@@ -1305,7 +1307,7 @@ fn tail_join_error_payload(error: &AppError) -> Value {
             "owner_url": owner_public_url,
             "owner_socket_url": owner_public_url
                 .as_deref()
-                .and_then(build_phoenix_socket_ws_url),
+                .and_then(|owner_url| build_phoenix_socket_ws_url(owner_url, &context.connect_params)),
             "epoch": epoch
         }),
         _ => json!({"reason": reason_for_error(error)}),
@@ -1333,6 +1335,8 @@ fn reason_for_error(error: &AppError) -> &'static str {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use serde_json::json;
 
     use super::{
@@ -1374,17 +1378,27 @@ mod tests {
 
     #[test]
     fn tail_join_error_payload_includes_owner_socket_url() {
-        let payload = tail_join_error_payload(&AppError::SessionNotOwned {
-            owner_id: "node-a".to_string(),
-            owner_public_url: Some("https://owner.example:4443".to_string()),
-            epoch: 9,
-        });
+        let payload = tail_join_error_payload(
+            &AppError::SessionNotOwned {
+                owner_id: "node-a".to_string(),
+                owner_public_url: Some("https://owner.example:4443".to_string()),
+                epoch: 9,
+            },
+            &SocketContext {
+                auth: AuthContext::none(),
+                tenant_id: Some("acme".to_string()),
+                connect_params: HashMap::from([
+                    ("token".to_string(), "jwt-token".to_string()),
+                    ("vsn".to_string(), "2.0.0".to_string()),
+                ]),
+            },
+        );
 
         assert_eq!(payload["reason"], "session_not_owned");
         assert_eq!(payload["owner_url"], "https://owner.example:4443");
         assert_eq!(
             payload["owner_socket_url"],
-            "wss://owner.example:4443/v1/socket/websocket"
+            "wss://owner.example:4443/v1/socket/websocket?token=jwt-token&vsn=2.0.0"
         );
         assert_eq!(payload["epoch"], 9);
     }
@@ -1427,6 +1441,7 @@ mod tests {
         let context = SocketContext {
             auth: AuthContext::none(),
             tenant_id: Some("acme".to_string()),
+            connect_params: HashMap::new(),
         };
 
         assert_eq!(
@@ -1438,6 +1453,7 @@ mod tests {
         let context = SocketContext {
             auth: AuthContext::none(),
             tenant_id: None,
+            connect_params: HashMap::new(),
         };
 
         assert_eq!(
@@ -1462,6 +1478,7 @@ mod tests {
                 expires_at: Some(4_102_444_800_i64),
             },
             tenant_id: Some("other".to_string()),
+            connect_params: HashMap::new(),
         };
 
         assert_eq!(

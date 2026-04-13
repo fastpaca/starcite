@@ -184,7 +184,8 @@ requests. Wrong-node `GET /events` and `POST /append` calls can forward to the c
 the Postgres control-plane hint instead of forcing the client to retry manually. Tail now enforces
 that same ownership boundary too: a wrong-node raw tail handshake returns `307` with an owner
 WebSocket target, and a wrong-node Phoenix `tail:<session_id>` join fails explicitly with
-`session_not_owned` plus `owner_socket_url` so the client can reconnect to the correct node.
+`session_not_owned` plus `owner_socket_url` so the client can reconnect to the correct node using
+the same socket query params.
 
 The local worker lifecycle now also matches the ownership story more closely. A live worker renews
 its Postgres lease in the background instead of only on incoming event-path requests, so ownership
