@@ -1157,7 +1157,7 @@ async fn require_local_owner_for_event_path(
     session_id: &str,
 ) -> Result<(), AppError> {
     if state.commit_mode == CommitMode::LocalAsync {
-        state.ownership.ensure_owned(session_id).await?;
+        state.ownership.live_or_renew_owned(session_id).await?;
     }
 
     Ok(())

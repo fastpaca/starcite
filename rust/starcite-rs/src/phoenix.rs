@@ -501,7 +501,7 @@ async fn handle_join(
             }
 
             if state.commit_mode == CommitMode::LocalAsync {
-                if let Err(error) = state.ownership.ensure_owned(&session_id).await {
+                if let Err(error) = state.ownership.live_or_renew_owned(&session_id).await {
                     let _ = outbound_tx.send(reply_frame(
                         frame.join_ref,
                         frame.ref_id,

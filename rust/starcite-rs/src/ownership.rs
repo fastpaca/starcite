@@ -118,7 +118,15 @@ impl OwnershipManager {
         })
     }
 
-    pub async fn live_owned_lease(&self, session_id: &str) -> Option<OwnedLease> {
+    pub async fn live_or_renew_owned(&self, session_id: &str) -> Result<OwnedLease, AppError> {
+        if let Some(lease) = self.live_owned_lease(session_id).await {
+            return Ok(lease);
+        }
+
+        self.ensure_owned(session_id).await
+    }
+
+    async fn live_owned_lease(&self, session_id: &str) -> Option<OwnedLease> {
         self.live_cached_lease(session_id)
             .await
             .map(|lease| OwnedLease {
@@ -395,6 +403,30 @@ mod tests {
 
         assert_eq!(lease.epoch, 4);
         assert!(manager.cached_lease("ses_a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_or_renew_owned_prefers_live_cached_lease() {
+        let manager = manager(Duration::from_secs(10));
+        let now = Instant::now();
+        {
+            let mut leases = manager.leases.lock().await;
+            leases.insert(
+                "ses_a".to_string(),
+                LocalLease {
+                    epoch: 4,
+                    expires_at: now + Duration::from_secs(2),
+                    standby: None,
+                },
+            );
+        }
+
+        let lease = manager
+            .live_or_renew_owned("ses_a")
+            .await
+            .expect("owned lease");
+
+        assert_eq!(lease.epoch, 4);
     }
 
     #[tokio::test]
