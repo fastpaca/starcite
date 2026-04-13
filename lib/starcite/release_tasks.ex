@@ -2,7 +2,6 @@ defmodule Starcite.ReleaseTasks do
   @moduledoc false
 
   @app :starcite
-  alias Starcite.Storage.EventArchive.S3.{Config, SchemaControl}
 
   def migrate do
     load_app()
@@ -11,18 +10,6 @@ defmodule Starcite.ReleaseTasks do
     |> Enum.each(fn repo ->
       {:ok, _, _} = Ecto.Migrator.with_repo(repo, &Ecto.Migrator.run(&1, :up, all: true))
     end)
-
-    ensure_s3_client_apps_started!()
-    runtime_opts = Application.get_env(@app, :event_archive_opts, [])
-    config = Config.build!(runtime_opts, [])
-
-    case SchemaControl.migrate(config, actor: "release") do
-      {:ok, _stats} ->
-        :ok
-
-      {:error, reason} ->
-        raise "S3 schema migration failed during release boot: #{inspect(reason)}"
-    end
 
     :ok
   end
@@ -33,17 +20,5 @@ defmodule Starcite.ReleaseTasks do
 
   defp repos do
     Application.fetch_env!(@app, :ecto_repos)
-  end
-
-  defp ensure_s3_client_apps_started! do
-    Enum.each([:req, :ex_aws_s3], fn app ->
-      case Application.ensure_all_started(app) do
-        {:ok, _started_apps} ->
-          :ok
-
-        {:error, reason} ->
-          raise "failed to start #{app} for S3 schema migration: #{inspect(reason)}"
-      end
-    end)
   end
 end

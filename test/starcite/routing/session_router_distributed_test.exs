@@ -226,7 +226,6 @@ defmodule Starcite.Routing.SessionRouterDistributedTest do
   defp configure_peer(peer_node, cluster_nodes, routing_store_dir)
        when is_atom(peer_node) and is_list(cluster_nodes) and is_binary(routing_store_dir) do
     routing_lease_ttl_ms = Application.get_env(:starcite, :routing_lease_ttl_ms, 5_000)
-    event_archive_opts = Application.get_env(:starcite, :event_archive_opts, [])
 
     assert :ok =
              :rpc.call(
@@ -258,14 +257,6 @@ defmodule Starcite.Routing.SessionRouterDistributedTest do
                Application,
                :put_env,
                [:starcite, :routing_lease_ttl_ms, routing_lease_ttl_ms]
-             )
-
-    assert :ok =
-             :rpc.call(
-               peer_node,
-               Application,
-               :put_env,
-               [:starcite, :event_archive_opts, event_archive_opts]
              )
 
     :ok

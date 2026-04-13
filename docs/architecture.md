@@ -109,13 +109,13 @@ sets `last_seq = archived_seq`, and gets `epoch` from routing.
 ```mermaid
 graph LR
     E["Event Store (hot)"] -- "pull pending events" --> AR["Archiver"]
-    AR -- "write archived events" --> S["S3 Event Archive"]
+    AR -- "insert archived events" --> P["Postgres Event Archive"]
     AR -- "bulk update archived_seq" --> C["Postgres Session Catalog"]
     AR -- "ack_archived" --> O["Session Owner Log"]
 ```
 
-A background worker periodically flushes committed hot events to the S3 event archive
-and then bulk-updates `archived_seq` in the Postgres session catalog. After a
+A background worker periodically flushes committed hot events to the Postgres event
+archive and then bulk-updates `archived_seq` in the Postgres session catalog. After a
 successful flush, it calls archive ack on the local session log, which advances
 `archived_seq` and evicts archived hot entries.
 

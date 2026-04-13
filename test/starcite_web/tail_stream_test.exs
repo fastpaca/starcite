@@ -3,7 +3,9 @@ defmodule StarciteWeb.TailStreamTest do
 
   alias Starcite.Auth.Principal
   alias Starcite.DataPlane.{CursorUpdate, EventStore}
+  alias Starcite.Session.Header
   alias Starcite.Storage.EventArchive
+  alias Starcite.Storage.SessionCatalog
   alias Starcite.WritePath
   alias StarciteWeb.Auth.Context
   alias StarciteWeb.TailStream
@@ -267,7 +269,11 @@ defmodule StarciteWeb.TailStreamTest do
     end
   end
 
-  defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+  defp insert_cold_rows(session_id, [%{} | _] = events) when is_binary(session_id) do
+    tenant_id = events |> List.first() |> event_tenant_id!()
+
+    assert :ok = SessionCatalog.persist_created(Header.new(session_id, tenant_id: tenant_id))
+
     rows =
       Enum.map(events, fn event ->
         %{

@@ -160,8 +160,6 @@ defmodule Mix.Tasks.Bench.HotPath do
   end
 
   defp print_config(config) do
-    event_archive_opts = Application.get_env(:starcite, :event_archive_opts, [])
-
     IO.puts("Hot-path Benchee config:")
     IO.puts("  routing_store_dir: #{config.routing_store_dir}")
     IO.puts("  clean_routing_store_dir: #{config.clean_routing_store_dir}")
@@ -174,10 +172,8 @@ defmodule Mix.Tasks.Bench.HotPath do
     IO.puts("  parallel: #{config.parallel}")
     IO.puts("  warmup_seconds: #{config.warmup_seconds}")
     IO.puts("  time_seconds: #{config.time_seconds}")
-    IO.puts("  event_archive: #{inspect(Starcite.Storage.EventArchive.S3)}")
+    IO.puts("  event_archive: #{inspect(Starcite.Storage.EventArchive)}")
     IO.puts("  archive_flush_interval_ms: #{config.archive_flush_interval_ms}")
-    IO.puts("  archive_s3_endpoint: #{inspect(Keyword.get(event_archive_opts, :endpoint))}")
-    IO.puts("  archive_s3_bucket: #{inspect(Keyword.get(event_archive_opts, :bucket))}")
 
     if max_bytes = Application.get_env(:starcite, :event_store_max_bytes) do
       IO.puts("  event_store_max_bytes: #{inspect(max_bytes)}")

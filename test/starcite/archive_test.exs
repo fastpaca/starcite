@@ -1,16 +1,26 @@
 defmodule Starcite.ArchiveTest do
   use ExUnit.Case, async: false
 
-  alias Starcite.{ReadPath, WritePath}
+  import Ecto.Query
+
+  alias Starcite.{ReadPath, Repo, WritePath}
   alias Starcite.DataPlane.EventStore
-  alias Starcite.TestSupport.EventArchiveClient
 
   setup do
-    # Ensure clean raft data for isolation
     Starcite.Runtime.TestHelper.reset()
-    :ok = EventArchiveClient.reset()
+    ensure_repo_sandbox()
     Process.put(:producer_seq_counters, %{})
-    :ok
+    {handler_id, collector} = start_archive_batch_collector()
+
+    on_exit(fn ->
+      :telemetry.detach(handler_id)
+
+      if Process.alive?(collector) do
+        Agent.stop(collector)
+      end
+    end)
+
+    {:ok, archive_batch_collector: collector}
   end
 
   test "flush archives and advances cursor via ack" do
@@ -28,40 +38,64 @@ defmodule Starcite.ArchiveTest do
         })
     end
 
-    # Wait until archived_seq catches up
     eventually(
       fn ->
         {:ok, session} = ReadPath.get_session(session_id)
         assert session.archived_seq == session.last_seq
         assert EventStore.session_size(session_id) == 0
+        assert archived_seqs(session_id) == [1, 2, 3, 4, 5]
       end,
       timeout: 2_000
     )
   end
 
-  test "archive process fails loud on persistence write errors" do
+  test "archive process fails loud on invalid archive batch state" do
     {:ok, pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
 
     ref = Process.monitor(pid)
 
     session_id = "ses-arch-fail-#{System.unique_integer([:positive, :monotonic])}"
-    {:ok, _} = WritePath.create_session(id: session_id)
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
 
-    {:ok, _} =
-      append_event(session_id, %{
+    :ok =
+      EventStore.put_event(session_id, "acme", %{
+        seq: 1,
         type: "content",
         payload: %{text: "m1"},
-        actor: "agent:test"
+        actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 1,
+        tenant_id: "acme",
+        source: nil,
+        metadata: %{},
+        refs: %{},
+        idempotency_key: nil,
+        inserted_at: NaiveDateTime.utc_now()
       })
 
-    :ok = EventArchiveClient.set_write_mode(:unavailable)
+    :ok =
+      EventStore.put_event(session_id, "acme", %{
+        seq: 2,
+        type: "content",
+        payload: %{text: "m2"},
+        actor: "agent:test",
+        producer_id: "writer:test",
+        producer_seq: 2,
+        tenant_id: "beta",
+        source: nil,
+        metadata: %{},
+        refs: %{},
+        idempotency_key: nil,
+        inserted_at: NaiveDateTime.utc_now()
+      })
+
     send(pid, :flush_tick)
 
     assert_receive {:DOWN, ^ref, :process, ^pid, {%RuntimeError{}, _}}, 2_000
   end
 
   describe "archive idempotency" do
-    test "duplicate writes are idempotent" do
+    test "duplicate flushes stay idempotent" do
       {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 50})
 
       session_id = "ses-idem-#{System.unique_integer([:positive, :monotonic])}"
@@ -76,32 +110,19 @@ defmodule Starcite.ArchiveTest do
           })
       end
 
-      # Wait for first flush
       eventually(
         fn ->
-          writes = EventArchiveClient.writes()
-          assert length(writes) >= 3
+          assert archived_seqs(session_id) == [1, 2, 3]
         end,
         timeout: 2_000
       )
 
-      _first_count = length(EventArchiveClient.writes())
-
-      # Trigger another flush cycle by waiting
       Process.sleep(100)
 
-      # The adapter should have the same unique events (idempotent)
       eventually(
         fn ->
-          writes = EventArchiveClient.writes()
-
-          unique_keys =
-            writes
-            |> Enum.map(fn row -> {row.session_id, row.seq} end)
-            |> Enum.uniq()
-
-          # Should have exactly 3 unique events regardless of flush count
-          assert length(unique_keys) == 3
+          assert archived_seqs(session_id) == [1, 2, 3]
+          assert archived_event_count(session_id) == 3
         end,
         timeout: 1_000
       )
@@ -113,7 +134,6 @@ defmodule Starcite.ArchiveTest do
       session_id = "ses-retry-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
 
-      # Append same logical event multiple times (simulating retry scenario)
       {:ok, _} =
         append_event(session_id, %{
           type: "content",
@@ -123,16 +143,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          writes = EventArchiveClient.writes()
-
-          matching =
-            Enum.filter(writes, fn row ->
-              row.session_id == session_id and row.seq == 1
-            end)
-
-          # Should have exactly one event with seq=1 for this session
-          unique_matching = Enum.uniq_by(matching, fn row -> {row.session_id, row.seq} end)
-          assert length(unique_matching) == 1
+          assert archived_seqs(session_id) == [1]
+          assert archived_event_count(session_id) == 1
         end,
         timeout: 2_000
       )
@@ -144,7 +156,6 @@ defmodule Starcite.ArchiveTest do
       session_id = "ses-order-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
 
-      # Append events in order
       for i <- 1..5 do
         {:ok, _} =
           append_event(session_id, %{
@@ -156,16 +167,7 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          writes = EventArchiveClient.writes()
-
-          session_writes =
-            writes
-            |> Enum.filter(fn row -> row.session_id == session_id end)
-            |> Enum.sort_by(fn row -> row.seq end)
-
-          seqs = Enum.map(session_writes, & &1.seq)
-          # Should have sequences 1-5 in order
-          assert Enum.take(Enum.uniq(seqs), 5) == [1, 2, 3, 4, 5]
+          assert archived_seqs(session_id) == [1, 2, 3, 4, 5]
         end,
         timeout: 2_000
       )
@@ -173,10 +175,10 @@ defmodule Starcite.ArchiveTest do
   end
 
   describe "pull-mode behavior" do
-    test "interleaves flush order across tenants within a tick" do
+    test "interleaves flush order across tenants within a tick", %{
+      archive_batch_collector: collector
+    } do
       {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
-
-      :ok = EventArchiveClient.reset()
 
       acme_a = "ses-acme-a-#{System.unique_integer([:positive, :monotonic])}"
       acme_b = "ses-acme-b-#{System.unique_integer([:positive, :monotonic])}"
@@ -206,15 +208,15 @@ defmodule Starcite.ArchiveTest do
       eventually(
         fn ->
           first_batches =
-            EventArchiveClient.write_batches()
+            archive_batches(collector)
             |> Enum.take(4)
 
           assert length(first_batches) == 4
-          assert Enum.all?(first_batches, &(length(&1) == 1))
+          assert Enum.all?(first_batches, &(&1.batch_rows == 1))
 
           tenant_sequence =
             first_batches
-            |> Enum.map(fn [row] -> Map.fetch!(tenant_by_session, row.session_id) end)
+            |> Enum.map(fn batch -> Map.fetch!(tenant_by_session, batch.session_id) end)
 
           assert tenant_sequence == ["acme", "beta", "acme", "beta"]
         end,
@@ -222,10 +224,10 @@ defmodule Starcite.ArchiveTest do
       )
     end
 
-    test "archives pending work across multiple sessions in one scan loop" do
+    test "archives pending work across multiple sessions in one scan loop", %{
+      archive_batch_collector: collector
+    } do
       {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
-
-      :ok = EventArchiveClient.reset()
 
       session_a = "ses-pull-a-#{System.unique_integer([:positive, :monotonic])}"
       session_b = "ses-pull-b-#{System.unique_integer([:positive, :monotonic])}"
@@ -259,8 +261,12 @@ defmodule Starcite.ArchiveTest do
           assert session_a_state.archived_seq == session_a_state.last_seq
           assert session_b_state.archived_seq == session_b_state.last_seq
 
-          writes = EventArchiveClient.writes()
-          written_sessions = writes |> Enum.map(& &1.session_id) |> Enum.uniq() |> Enum.sort()
+          written_sessions =
+            collector
+            |> archive_batches()
+            |> Enum.map(& &1.session_id)
+            |> Enum.uniq()
+            |> Enum.sort()
 
           assert written_sessions == Enum.sort([session_a, session_b])
         end,
@@ -268,7 +274,9 @@ defmodule Starcite.ArchiveTest do
       )
     end
 
-    test "respects archive batch size per flush tick and converges over repeated ticks" do
+    test "respects archive batch size per flush tick and converges over repeated ticks", %{
+      archive_batch_collector: collector
+    } do
       old_batch_size = Application.get_env(:starcite, :archive_batch_size)
       Application.put_env(:starcite, :archive_batch_size, 2)
 
@@ -281,8 +289,6 @@ defmodule Starcite.ArchiveTest do
       end)
 
       {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
-
-      :ok = EventArchiveClient.reset()
 
       session_id = "ses-batch-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -300,8 +306,8 @@ defmodule Starcite.ArchiveTest do
 
       eventually(
         fn ->
-          [first_batch | _] = EventArchiveClient.write_batches()
-          assert length(first_batch) == 2
+          [first_batch | _rest] = archive_batches(collector)
+          assert first_batch.batch_rows == 2
         end,
         timeout: 1_500
       )
@@ -315,8 +321,9 @@ defmodule Starcite.ArchiveTest do
           assert session.archived_seq == session.last_seq
 
           batch_sizes =
-            EventArchiveClient.write_batches()
-            |> Enum.map(&length/1)
+            collector
+            |> archive_batches()
+            |> Enum.map(& &1.batch_rows)
 
           assert batch_sizes == [2, 2, 1]
         end,
@@ -326,8 +333,6 @@ defmodule Starcite.ArchiveTest do
 
     test "continues archiving new writes after a full ETS compaction" do
       {:ok, _pid} = start_supervised({Starcite.Archive, flush_interval_ms: 10_000})
-
-      :ok = EventArchiveClient.reset()
 
       session_id = "ses-resume-#{System.unique_integer([:positive, :monotonic])}"
       {:ok, _} = WritePath.create_session(id: session_id)
@@ -366,15 +371,7 @@ defmodule Starcite.ArchiveTest do
           {:ok, session} = ReadPath.get_session(session_id)
           assert session.archived_seq == 4
           assert EventStore.session_size(session_id) == 0
-
-          seqs =
-            EventArchiveClient.writes()
-            |> Enum.filter(fn row -> row.session_id == session_id end)
-            |> Enum.map(& &1.seq)
-            |> Enum.uniq()
-            |> Enum.sort()
-
-          assert seqs == [1, 2, 3, 4]
+          assert archived_seqs(session_id) == [1, 2, 3, 4]
         end,
         timeout: 2_000
       )
@@ -402,7 +399,68 @@ defmodule Starcite.ArchiveTest do
     seq
   end
 
-  # Helper to wait for condition
+  defp archived_seqs(session_id) when is_binary(session_id) and session_id != "" do
+    Repo.all(
+      from(event in "events",
+        where: event.session_id == ^session_id,
+        order_by: [asc: event.seq],
+        select: event.seq
+      )
+    )
+  end
+
+  defp archived_event_count(session_id) when is_binary(session_id) and session_id != "" do
+    Repo.aggregate(
+      from(event in "events", where: event.session_id == ^session_id),
+      :count,
+      :seq
+    )
+  end
+
+  defp start_archive_batch_collector do
+    {:ok, collector} = Agent.start_link(fn -> [] end)
+    handler_id = "archive-batch-#{System.unique_integer([:positive, :monotonic])}"
+
+    :ok =
+      :telemetry.attach(
+        handler_id,
+        [:starcite, :archive, :batch],
+        fn _event, measurements, metadata, pid ->
+          Agent.update(pid, fn batches ->
+            [
+              %{session_id: metadata.session_id, tenant_id: metadata.tenant_id}
+              |> Map.merge(measurements)
+              | batches
+            ]
+          end)
+        end,
+        collector
+      )
+
+    {handler_id, collector}
+  end
+
+  defp archive_batches(collector) when is_pid(collector) do
+    collector
+    |> Agent.get(& &1)
+    |> Enum.reverse()
+  end
+
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
+  end
+
   defp eventually(fun, opts) when is_function(fun, 0) do
     timeout = Keyword.get(opts, :timeout, 1_000)
     interval = Keyword.get(opts, :interval, 50)
@@ -419,7 +477,15 @@ defmodule Starcite.ArchiveTest do
           Process.sleep(interval)
           do_eventually(fun, deadline, interval)
         else
-          fun.()
+          raise "condition not met before timeout"
+        end
+    catch
+      :exit, _reason ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(interval)
+          do_eventually(fun, deadline, interval)
+        else
+          raise "condition not met before timeout"
         end
     end
   end

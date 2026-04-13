@@ -1,17 +1,9 @@
 defmodule Starcite.Storage.EventArchive.S3.Layout do
   @moduledoc """
-  Computes S3 keys and chunk boundaries for event archive storage.
-
-  Layout is intentionally simple and fixed:
-  - Event chunks: `<prefix>/events/v1/<base64url(tenant_id)>/<base64url(session_id)>/<chunk_start>.ndjson`
-  - One object is one cache-line chunk.
-
-  Chunk boundaries are sequence-based. For a chunk size of `256`, sequence
-  `1..256` maps to `1.ndjson`, `257..512` maps to `257.ndjson`, and so on.
+  Computes S3 keys and chunk boundaries for legacy archive storage.
   """
 
   @events_prefix "events/v1"
-  @schema_prefix "schema"
 
   @spec group_event_rows([map()], pos_integer()) ::
           %{{String.t(), String.t(), pos_integer()} => [map()]}
@@ -29,15 +21,6 @@ defmodule Starcite.Storage.EventArchive.S3.Layout do
   @spec legacy_event_chunk_key(map(), String.t(), pos_integer()) :: String.t()
   def legacy_event_chunk_key(%{prefix: prefix}, session_id, chunk_start),
     do: "#{prefix}/#{@events_prefix}/#{encode(session_id)}/#{chunk_start}.ndjson"
-
-  @spec event_prefix(map()) :: String.t()
-  def event_prefix(%{prefix: prefix}), do: "#{prefix}/#{@events_prefix}/"
-
-  @spec schema_prefix(map()) :: String.t()
-  def schema_prefix(%{prefix: prefix}), do: "#{prefix}/#{@schema_prefix}/"
-
-  @spec schema_meta_key(map()) :: String.t()
-  def schema_meta_key(%{prefix: prefix}), do: "#{prefix}/#{@schema_prefix}/meta.json"
 
   @spec chunk_starts_for_range(pos_integer(), pos_integer(), pos_integer()) :: [pos_integer()]
   def chunk_starts_for_range(from_seq, to_seq, chunk_size) do

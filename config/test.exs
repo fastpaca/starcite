@@ -24,10 +24,6 @@ config :starcite,
   routing_replication_factor: 1,
   cluster_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
+  archive_legacy_s3_opts: [],
   archive_name: Starcite.Runtime.Archive,
-  event_archive_opts: [
-    bucket: "starcite-test-archive",
-    prefix: "starcite-test",
-    client_mod: Starcite.TestSupport.EventArchiveClient
-  ],
   archive_flush_interval_ms: 3_600_000

@@ -1,54 +1,19 @@
 defmodule Starcite.Storage.EventArchive.S3 do
   @moduledoc """
-  S3-backed event archive.
+  Legacy S3 archive support used during the Postgres cutover window.
 
-  Storage layout:
-  - Events: `<prefix>/events/v1/<base64url(tenant_id)>/<base64url(session_id)>/<chunk_start>.ndjson`
-
-  Event objects are newline-delimited JSON (NDJSON), one event per line, with
-  one object per cache-line chunk.
-
-  Writes are idempotent by `(session_id, seq)` via read/merge/conditional-write
-  using ETag preconditions.
+  Reads support both the tenant-scoped layout and the older tenantless layout.
+  Writes always use the current tenant-scoped layout.
   """
 
-  use GenServer
+  alias __MODULE__.{Config, Layout, Schema}
 
-  alias __MODULE__.{Config, Layout, Schema, SchemaControl}
+  @spec write_events([map()], keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def write_events([], _opts), do: {:ok, 0}
 
-  @config_key {__MODULE__, :config}
+  def write_events(rows, opts) when is_list(rows) and is_list(opts) do
+    config = Config.build!(opts)
 
-  def start_link(opts), do: GenServer.start_link(__MODULE__, opts, name: __MODULE__)
-
-  @impl true
-  def init(opts) do
-    runtime_opts = Application.get_env(:starcite, :event_archive_opts, [])
-    config = Config.build!(runtime_opts, opts)
-
-    case SchemaControl.ensure_startup_compatibility(config) do
-      :ok ->
-        :persistent_term.put(@config_key, config)
-        {:ok, config}
-
-      {:error, reason} ->
-        {:stop, {:schema_control_failed, reason}}
-    end
-  end
-
-  @impl true
-  def terminate(_reason, _state) do
-    _ = :persistent_term.erase(@config_key)
-    :ok
-  end
-
-  def write_events(rows), do: write_events(rows, config!())
-
-  def read_events(session_id, tenant_id, from_seq, to_seq),
-    do: read_events(session_id, tenant_id, from_seq, to_seq, config!())
-
-  defp write_events([], _config), do: {:ok, 0}
-
-  defp write_events(rows, config) do
     with :ok <- validate_session_tenants(rows) do
       rows
       |> Layout.group_event_rows(config.chunk_size)
@@ -60,6 +25,30 @@ defmodule Starcite.Storage.EventArchive.S3 do
         end
       end)
     end
+  rescue
+    _ -> {:error, :archive_write_unavailable}
+  end
+
+  @spec read_events(String.t(), String.t(), pos_integer(), pos_integer(), keyword()) ::
+          {:ok, [map()]} | {:error, term()}
+  def read_events(session_id, tenant_id, from_seq, to_seq, opts)
+      when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and tenant_id != "" and
+             is_integer(from_seq) and from_seq > 0 and is_integer(to_seq) and to_seq >= from_seq and
+             is_list(opts) do
+    config = Config.build!(opts)
+    chunk_starts = Layout.chunk_starts_for_range(from_seq, to_seq, config.chunk_size)
+
+    with {:ok, chunks} <- read_chunks(session_id, tenant_id, chunk_starts, config) do
+      events =
+        chunks
+        |> List.flatten()
+        |> Enum.filter(fn %{seq: seq} -> seq >= from_seq and seq <= to_seq end)
+        |> Enum.sort_by(& &1.seq)
+
+      {:ok, events}
+    end
+  rescue
+    _ -> {:error, :archive_read_unavailable}
   end
 
   defp write_chunk(tenant_id, session_id, chunk_start, rows, config, attempt) do
@@ -177,21 +166,6 @@ defmodule Starcite.Storage.EventArchive.S3 do
     end
   end
 
-  defp read_events(session_id, tenant_id, from_seq, to_seq, config)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" do
-    chunk_starts = Layout.chunk_starts_for_range(from_seq, to_seq, config.chunk_size)
-
-    with {:ok, chunks} <- read_chunks(session_id, tenant_id, chunk_starts, config) do
-      events =
-        chunks
-        |> List.flatten()
-        |> Enum.filter(fn event -> event.seq >= from_seq and event.seq <= to_seq end)
-
-      {:ok, events}
-    end
-  end
-
   defp read_chunks(session_id, tenant_id, chunk_starts, config) do
     chunk_starts
     |> Enum.reduce_while({:ok, []}, fn chunk_start, {:ok, acc} ->
@@ -207,7 +181,8 @@ defmodule Starcite.Storage.EventArchive.S3 do
   end
 
   defp fetch_chunk(session_id, tenant_id, chunk_start, config)
-       when is_binary(session_id) and is_integer(chunk_start) and chunk_start > 0 do
+       when is_binary(session_id) and session_id != "" and is_integer(chunk_start) and
+              chunk_start > 0 do
     keys = event_chunk_keys(config, session_id, tenant_id, chunk_start)
     fetch_chunk_for_keys(keys, tenant_id, config)
   end
@@ -233,23 +208,15 @@ defmodule Starcite.Storage.EventArchive.S3 do
   defp event_chunk_keys(config, session_id, tenant_id, chunk_start)
        when is_binary(session_id) and session_id != "" and is_integer(chunk_start) and
               chunk_start > 0 do
-    case tenant_id do
-      tenant_id when is_binary(tenant_id) and tenant_id != "" ->
-        [
-          Layout.event_chunk_key(config, tenant_id, session_id, chunk_start),
-          Layout.legacy_event_chunk_key(config, session_id, chunk_start)
-        ]
-
-      _ ->
-        [Layout.legacy_event_chunk_key(config, session_id, chunk_start)]
-    end
+    [
+      Layout.event_chunk_key(config, tenant_id, session_id, chunk_start),
+      Layout.legacy_event_chunk_key(config, session_id, chunk_start)
+    ]
   end
 
   defp event_put_opts(nil), do: [content_type: "application/x-ndjson", if_none_match: "*"]
   defp event_put_opts(etag), do: [content_type: "application/x-ndjson", if_match: etag]
 
   defp event_from_row(row), do: Map.delete(row, :session_id)
-
-  defp config!, do: :persistent_term.get(@config_key)
   defp client(%{client_mod: client_mod}), do: client_mod
 end

@@ -1,9 +1,10 @@
 defmodule Starcite.Storage.EventArchive.S3.Schema do
   @moduledoc """
-  Versioned object schema for S3 archive blobs.
+  Versioned object schema for legacy S3 archive blobs.
 
   Legacy blobs without an explicit `schema_version` are treated as v1 and can be
-  decoded for backward compatibility. New writes use the current schema version.
+  decoded for backward compatibility. New cutover writes keep using the current
+  tenant-scoped schema so the cutover window remains reversible.
   """
 
   @event_schema_version 2
@@ -113,29 +114,23 @@ defmodule Starcite.Storage.EventArchive.S3.Schema do
          expected_tenant_id
        ) do
     with {:ok, tenant_id, tenant_migration_required} <-
-           normalize_event_tenant(decoded, expected_tenant_id) do
-      event = %{
-        seq: seq,
-        type: type,
-        payload: payload,
-        actor: actor,
-        producer_id: producer_id,
-        producer_seq: producer_seq,
-        source: source,
-        metadata: metadata,
-        refs: refs,
-        idempotency_key: idempotency_key,
-        inserted_at: inserted_at
-      }
-
-      normalized_event =
-        if is_binary(tenant_id) and tenant_id != "" do
-          Map.put(event, :tenant_id, tenant_id)
-        else
-          event
-        end
-
-      {:ok, normalized_event, tenant_migration_required}
+           normalize_event_tenant(decoded, expected_tenant_id),
+         {:ok, parsed_inserted_at} <- parse_inserted_at(inserted_at) do
+      {:ok,
+       %{
+         seq: seq,
+         type: type,
+         payload: payload,
+         actor: actor,
+         producer_id: producer_id,
+         producer_seq: producer_seq,
+         tenant_id: tenant_id,
+         source: source,
+         metadata: metadata,
+         refs: refs,
+         idempotency_key: idempotency_key,
+         inserted_at: parsed_inserted_at
+       }, tenant_migration_required}
     else
       {:error, _reason} = error -> error
     end
@@ -164,10 +159,29 @@ defmodule Starcite.Storage.EventArchive.S3.Schema do
         {:ok, tenant_id, false}
 
       tenant_id when tenant_id in [nil, ""] ->
-        {:ok, nil, false}
+        {:error, :archive_read_unavailable}
 
       _invalid_tenant_id ->
         {:error, :archive_read_unavailable}
     end
   end
+
+  defp parse_inserted_at(inserted_at) when is_binary(inserted_at) do
+    inserted_at
+    |> NaiveDateTime.from_iso8601()
+    |> case do
+      {:ok, parsed} -> {:ok, NaiveDateTime.truncate(parsed, :second)}
+      _ -> {:error, :archive_read_unavailable}
+    end
+  end
+
+  defp parse_inserted_at(%NaiveDateTime{} = inserted_at) do
+    {:ok, NaiveDateTime.truncate(inserted_at, :second)}
+  end
+
+  defp parse_inserted_at(%DateTime{} = inserted_at) do
+    {:ok, inserted_at |> DateTime.to_naive() |> NaiveDateTime.truncate(:second)}
+  end
+
+  defp parse_inserted_at(_inserted_at), do: {:error, :archive_read_unavailable}
 end

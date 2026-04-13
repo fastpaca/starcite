@@ -104,7 +104,7 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
     :ok = start_process({Store, []})
     :ok = start_process({Watcher, []})
     :ok = start_process({SessionStore, []})
-    :ok = start_process({EventArchive, event_archive_opts()})
+    :ok = start_process({EventArchive, []})
     :ok = start_process({EventStore, []})
     :ok
   end
@@ -139,10 +139,6 @@ defmodule Starcite.TestSupport.DistributedPeerDataPlane do
   defp start_child({SessionStore, opts}), do: SessionStore.start_link(opts)
   defp start_child({EventArchive, opts}), do: EventArchive.start_link(opts)
   defp start_child({EventStore, opts}), do: EventStore.start_link(opts)
-
-  defp event_archive_opts do
-    Application.get_env(:starcite, :event_archive_opts, [])
-  end
 
   defp stop_process(name) when is_atom(name) do
     case Process.whereis(name) do

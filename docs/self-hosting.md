@@ -9,11 +9,11 @@
 Starcite runs as a cluster of Starcite nodes (typically 3 or 5). When a client appends
 an event, the event is replicated to an in-memory group before the client gets an
 acknowledgment. That improves failover safety, but only durability comes from your
-configured persistent stores.
+configured Postgres database.
 
-A background archiver flushes committed events to S3 every few seconds and advances
-`archived_seq` in the Postgres session catalog. This is fully asynchronous — it never
-touches the hot path, so storage performance doesn't affect append latency.
+A background archiver flushes committed events to Postgres every few seconds and
+advances `archived_seq` in the durable session catalog. This is fully asynchronous —
+it never touches the hot path, so archive writes do not affect append latency.
 
 Sessions are distributed across the cluster automatically. Clients don't need to know
 which node owns a session — any node can route the request to the active owner.
@@ -23,44 +23,24 @@ For the full picture of how sharding, replication, and recovery work internally,
 
 ## Persistent storage
 
-Starcite now has an opinionated split:
-
-- Postgres stores the durable session catalog
-- S3 stores archived event payloads
-
-The session catalog is one row per session. It stores static metadata plus the mutable
-`archived_seq` frontier used for cold hydrate. S3 stores immutable archived event
-chunks only.
-
-This split matters because:
-
-- cold hydrate reads metadata in `O(1)` from Postgres
-- archived event storage stays blob-friendly
-- we do not scan S3 prefixes to discover archive progress
-- we do not rewrite session metadata blobs on every archive flush
-
-### S3 event archive
-
-Works with any S3-compatible storage: AWS S3, MinIO, Cloudflare R2, Google Cloud
-Storage (via interop), etc.
-
-S3 is used only for archived event chunks:
-
-- archive writes are async, so S3 latency does not affect append ack latency
-- cold reads for old history tolerate blob-store latency
-- the storage layout is append-friendly and operationally simple
-
-### Postgres session catalog
-
-Postgres is required for durable session metadata and archive progress:
+Postgres is the only durable store Starcite needs:
 
 - session headers
 - tenant lookup
 - `archived_seq`
+- archived event rows
 - session listing/filtering
 
-This is not the archived event store. It is the metadata store that makes cold
-rehydrate and queryable session listing cheap.
+The session catalog is one row per session. It stores static metadata plus the
+mutable `archived_seq` frontier used for cold hydrate. Archived event rows live
+in the same database and are written asynchronously by the archiver.
+
+This matters because:
+
+- cold hydrate still reads metadata in `O(1)`
+- archived reads and session listing share one operational dependency
+- archive writes remain off the append ack path
+- standard Ecto migrations cover both metadata and archived events
 
 ## Configuration
 
@@ -108,24 +88,28 @@ read those variables, so they are intentionally omitted here.
 | `STARCITE_AUTH_JWKS_REFRESH_MS` | Background JWKS refresh cadence. Default `60000`. |
 | `STARCITE_AUTH_JWKS_HARD_EXPIRY_MS` | Maximum age of cached JWKS data without a successful refresh. Defaults to `STARCITE_AUTH_JWKS_REFRESH_MS`. |
 
-### Archive backend
+### Database and archiver
 
 | Variable | Purpose |
 | --- | --- |
-| `STARCITE_ARCHIVE_ADAPTER` | `s3` (default) or `postgres`. |
 | `STARCITE_ARCHIVE_FLUSH_INTERVAL_MS` | Archive flush cadence. Default `5000`. |
-| `DATABASE_URL` | Postgres archive URL. Required in `postgres` mode unless you set `STARCITE_POSTGRES_URL` instead. |
-| `STARCITE_POSTGRES_URL` | Alternate Postgres archive URL. |
-| `DB_POOL_SIZE` | Ecto pool size for the Postgres archive adapter. Default `10`. |
-| `STARCITE_S3_BUCKET` | Required in `s3` mode in prod. |
-| `STARCITE_S3_PREFIX` | Optional object prefix. |
-| `STARCITE_S3_REGION` | Optional S3 region override. |
-| `STARCITE_S3_ACCESS_KEY_ID` | Optional S3 credential override. |
-| `STARCITE_S3_SECRET_ACCESS_KEY` | Optional S3 secret override. |
-| `STARCITE_S3_SESSION_TOKEN` | Optional session token for temporary credentials. |
-| `STARCITE_S3_ENDPOINT` | Optional custom S3 endpoint for MinIO/R2/etc. |
-| `STARCITE_S3_PATH_STYLE` | Optional path-style toggle. |
-| `STARCITE_S3_MAX_WRITE_RETRIES` | Optional archive write retry limit. |
+| `STARCITE_ARCHIVE_DB_WRITE_BATCH_SIZE` | Maximum rows per Postgres archive insert statement before the archiver splits the batch. Default `1000`, further clamped below Postgres parameter limits. |
+| `STARCITE_ARCHIVE_DB_READ_BATCH_SIZE` | Maximum rows per Postgres archived-read query before replay splits the range. Default `1000`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_ENABLED` | Enables the temporary legacy-S3 cutover path that double-writes archive batches to Postgres and S3, and falls back to S3 for cold reads when Postgres is incomplete. Default `false`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_BOOT_BACKFILL_ENABLED` | Starts a one-node boot sweep that backfills archived sessions from legacy S3 into Postgres when legacy-S3 cutover is enabled. Default `false`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_BATCH_SIZE` | Maximum rows read from legacy S3 per session backfill batch during lazy reads and boot backfills. Default `1000`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_BUCKET` | Legacy archive bucket used only during cutover. Required when legacy-S3 cutover is enabled. |
+| `STARCITE_ARCHIVE_LEGACY_S3_PREFIX` | Archive prefix inside the legacy bucket. Default `starcite`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_REGION` | Region for the legacy archive bucket. |
+| `STARCITE_ARCHIVE_LEGACY_S3_ACCESS_KEY_ID` | Access key for the legacy archive bucket. |
+| `STARCITE_ARCHIVE_LEGACY_S3_SECRET_ACCESS_KEY` | Secret key for the legacy archive bucket. |
+| `STARCITE_ARCHIVE_LEGACY_S3_SESSION_TOKEN` | Optional session token for temporary credentials. |
+| `STARCITE_ARCHIVE_LEGACY_S3_ENDPOINT` | Optional S3-compatible endpoint such as MinIO. |
+| `STARCITE_ARCHIVE_LEGACY_S3_PATH_STYLE` | Enables path-style requests for S3-compatible endpoints. Default `true`. |
+| `STARCITE_ARCHIVE_LEGACY_S3_MAX_WRITE_RETRIES` | Maximum optimistic retry count per S3 chunk write during the cutover window. Default `4`. |
+| `DATABASE_URL` | Primary Postgres URL. Required in prod unless you set `STARCITE_POSTGRES_URL` instead. |
+| `STARCITE_POSTGRES_URL` | Alternate Postgres URL. |
+| `DB_POOL_SIZE` | Ecto pool size. Default `10`. |
 
 ### Runtime storage and cache tuning
 
@@ -141,18 +125,56 @@ read those variables, so they are intentionally omitted here.
 | `STARCITE_SESSION_STORE_COMPRESSED` | Enables compressed session-store entries. Default `true`. |
 | `STARCITE_SESSION_STORE_TOUCH_ON_READ` | Refreshes session-store TTL on reads. Default `true`. |
 
-### S3 schema migration
+Archive schema changes now ship through the normal Ecto migration path.
 
-When upgrading S3 archive payload schemas, run:
+## Migrating legacy S3 archives
 
-- `mise exec -- mix starcite.archive.migrate_s3_schema --dry-run`
-- `mise exec -- mix starcite.archive.migrate_s3_schema`
+For a clean rolling cutover, use one temporary legacy-S3 cutover release and keep the
+offline importer as an optional bulk accelerator.
 
-Run on one node at a time during a maintenance window.
+### Rolling legacy-S3 cutover release
 
-Startup never auto-migrates S3 schema. It validates `<prefix>/schema/meta.json`
-and returns startup errors when migration is required or schema versions are
-unsupported.
+1. Deploy a cutover release with `STARCITE_ARCHIVE_LEGACY_S3_ENABLED=true` and
+   the legacy S3 connection variables populated.
+2. Optionally enable `STARCITE_ARCHIVE_LEGACY_S3_BOOT_BACKFILL_ENABLED=true` so one
+   node sweeps archived sessions on startup and backfills Postgres from S3. The
+   sweep is guarded by a Postgres advisory lock, so only one node runs it at a
+   time.
+3. While this cutover release is live:
+   archive writes succeed only after both Postgres and S3 are updated
+   archived reads try Postgres first
+   if Postgres is missing archived rows for a session, the read falls back to
+   S3, migrates that session’s full archived prefix into Postgres, and then
+   serves the requested range
+4. Keep the cutover release live through your cold window and for the burn-in
+   period you want for stragglers or long-tail sessions.
+5. Before removing S3, verify that Postgres now contains every archived prefix:
+   `mise exec -- mix starcite.archive.verify_cutover`
+6. Deploy the Postgres-only release with the legacy-S3 env vars removed.
+7. Keep the old archive bucket until you have validated the rollout and no
+   rollback path is needed.
+
+### Optional offline bulk backfill
+
+If you want a faster initial catch-up than lazy reads and boot sweep alone,
+export the legacy archive prefix to local disk with your usual S3 tooling, then
+run the importer against that export:
+
+`aws s3 sync s3://<bucket>/<prefix> /tmp/starcite-archive-export`
+`mc cp --recursive local/<bucket>/<prefix> /tmp/starcite-archive-export`
+`mise exec -- mix starcite.archive.import_s3_export --root /tmp/starcite-archive-export --dry-run`
+`mise exec -- mix starcite.archive.import_s3_export --root /tmp/starcite-archive-export`
+
+The importer is idempotent on `(session_id, seq)`, so reruns are safe. It only
+copies archive rows into Postgres; it does not mutate `sessions.archived_seq`.
+That makes it safe to run alongside the cutover release or ahead of it.
+
+`mix starcite.archive.reconcile_progress` remains available for offline
+migrations into a fresh database or for repairing catalog metadata, but you
+should not need it for the rolling cutover path because the live session catalog
+already owns `archived_seq`. `verify_cutover` is the final guardrail before you
+switch to the Postgres-only release. None of the offline tasks talk to S3
+directly; they read exported NDJSON files from disk.
 
 ## Bootstrap
 

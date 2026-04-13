@@ -1,12 +1,9 @@
 defmodule Starcite.Storage.EventArchive.S3.Config do
   @moduledoc """
-  Thin config builder for the S3 event archive.
+  Thin config builder for legacy S3 archive access during cutover.
 
-  Runtime env parsing/coercion happens in `runtime.exs`; this module only merges
-  options and shapes them for ExAws.
-
-  Chunk size is fixed to `:event_store_cache_chunk_size` so each S3 object maps
-  to one cache line.
+  Runtime env parsing/coercion happens in `runtime.exs`; this module only
+  validates and shapes options for archive reads and writes.
   """
 
   @default_prefix "starcite"
@@ -15,10 +12,8 @@ defmodule Starcite.Storage.EventArchive.S3.Config do
   @default_path_style true
   @default_client_mod Starcite.Storage.EventArchive.S3.Client
 
-  @spec build!(keyword(), keyword()) :: map()
-  def build!(runtime_opts, start_opts) when is_list(runtime_opts) and is_list(start_opts) do
-    opts = runtime_opts |> Keyword.merge(start_opts) |> Keyword.new()
-
+  @spec build!(keyword()) :: map()
+  def build!(opts) when is_list(opts) do
     %{
       bucket: required_bucket!(opts),
       prefix: normalize_prefix(Keyword.get(opts, :prefix, @default_prefix)),
@@ -55,13 +50,13 @@ defmodule Starcite.Storage.EventArchive.S3.Config do
 
       _ ->
         raise ArgumentError,
-              "invalid :endpoint for S3 event archive: #{inspect(endpoint)} (expected http(s)://host[:port])"
+              "invalid :endpoint for archive legacy S3 access: #{inspect(endpoint)} (expected http(s)://host[:port])"
     end
   end
 
   defp endpoint_opts(endpoint) do
     raise ArgumentError,
-          "invalid :endpoint for S3 event archive: #{inspect(endpoint)} (expected http(s)://host[:port])"
+          "invalid :endpoint for archive legacy S3 access: #{inspect(endpoint)} (expected http(s)://host[:port])"
   end
 
   defp required_bucket!(opts) do
@@ -71,7 +66,7 @@ defmodule Starcite.Storage.EventArchive.S3.Config do
 
       value ->
         raise ArgumentError,
-              "missing required :bucket for S3 event archive (got: #{inspect(value)})"
+              "missing required :bucket for archive legacy S3 access (got: #{inspect(value)})"
     end
   end
 
@@ -94,7 +89,7 @@ defmodule Starcite.Storage.EventArchive.S3.Config do
 
       value ->
         raise ArgumentError,
-              "invalid :#{key} for S3 event archive: #{inspect(value)} (expected positive integer)"
+              "invalid :#{key} for archive legacy S3 access: #{inspect(value)} (expected positive integer)"
     end
   end
 end
