@@ -172,8 +172,10 @@ Postgres synchronously in this experiment.
 There is now an experimental commit-mode split behind that worker boundary. The default
 `sync_postgres` mode keeps the current durable append path. `local_async` instead acknowledges
 from local hot state, puts the event into a pending-flush backlog, and lets a background flusher
-persist it to Postgres and emit `NOTIFY` later. That is the first real cut at moving Postgres off
-the append ack path in this branch. It is intentionally honest about the remaining gap: without
+persist it to Postgres and emit `NOTIFY` later. That flusher now persists each pending session
+batch in one Postgres transaction instead of one transaction per event. That is the first real cut
+at moving Postgres off the append ack path in this branch. It is intentionally honest about the
+remaining gap: without
 quorum replication yet, `local_async` is still not a production-safe multi-node commit model.
 What it does have now is explicit single-writer ownership per active session: a Rust node renews a
 Postgres-backed lease while its local session worker is alive, non-owner nodes reject event-path

@@ -997,114 +997,127 @@ pub async fn load_event_for_producer_seq(
     row.map(EventResponse::try_from).transpose()
 }
 
-pub async fn persist_flushed_event(
+pub async fn persist_flushed_events(
     pool: &PgPool,
-    event: &EventResponse,
+    events: &[EventResponse],
     emitter_id: &str,
 ) -> Result<(), AppError> {
+    let Some(first_event) = events.first() else {
+        return Ok(());
+    };
+
     let mut tx = pool.begin().await?;
-    let session = load_session_row_tx(&mut tx, &event.session_id).await?;
+    let session = load_session_row_tx(&mut tx, &first_event.session_id).await?;
+    let tenant_id = session.tenant_id.clone();
+    let mut last_seq = session.last_seq;
+    let mut inserted_event_seqs = Vec::new();
 
-    if session.tenant_id != event.tenant_id {
-        return Err(AppError::Internal);
-    }
+    for event in events {
+        if event.session_id != first_event.session_id || event.tenant_id != tenant_id {
+            return Err(AppError::Internal);
+        }
 
-    if session.last_seq >= event.seq {
-        let existing = load_event_by_seq_tx(&mut tx, &event.session_id, event.seq).await?;
+        if last_seq >= event.seq {
+            let existing = load_event_by_seq_tx(&mut tx, &event.session_id, event.seq).await?;
 
-        return match existing {
-            Some(existing) if matches_event_response(&existing, event)? => {
-                tx.commit().await?;
-                Ok(())
+            match existing {
+                Some(existing) if matches_event_response(&existing, event)? => continue,
+                _ => return Err(AppError::Internal),
             }
-            _ => Err(AppError::Internal),
-        };
-    }
+        }
 
-    if session.last_seq + 1 != event.seq {
-        return Err(AppError::Internal);
-    }
+        if last_seq + 1 != event.seq {
+            return Err(AppError::Internal);
+        }
 
-    let inserted_at = parse_inserted_at(&event.inserted_at)?;
+        let inserted_at = parse_inserted_at(&event.inserted_at)?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO events (
-          session_id,
-          seq,
-          type,
-          payload,
-          actor,
-          source,
-          metadata,
-          refs,
-          idempotency_key,
-          producer_id,
-          producer_seq,
-          tenant_id,
-          inserted_at
+        sqlx::query(
+            r#"
+            INSERT INTO events (
+              session_id,
+              seq,
+              type,
+              payload,
+              actor,
+              source,
+              metadata,
+              refs,
+              idempotency_key,
+              producer_id,
+              producer_seq,
+              tenant_id,
+              inserted_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            "#,
         )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
-        "#,
-    )
-    .bind(&event.session_id)
-    .bind(event.seq)
-    .bind(&event.event_type)
-    .bind(serde_json::Value::Object(event.payload.clone()))
-    .bind(&event.actor)
-    .bind(&event.source)
-    .bind(serde_json::Value::Object(event.metadata.clone()))
-    .bind(serde_json::Value::Object(event.refs.clone()))
-    .bind(&event.idempotency_key)
-    .bind(&event.producer_id)
-    .bind(event.producer_seq)
-    .bind(&event.tenant_id)
-    .bind(inserted_at)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO session_producers (
-          session_id,
-          producer_id,
-          last_producer_seq
-        )
-        VALUES ($1, $2, $3)
-        ON CONFLICT (session_id, producer_id)
-        DO UPDATE
-        SET
-          last_producer_seq = GREATEST(
-            session_producers.last_producer_seq,
-            EXCLUDED.last_producer_seq
-          ),
-          updated_at = now()
-        "#,
-    )
-    .bind(&event.session_id)
-    .bind(&event.producer_id)
-    .bind(event.producer_seq)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
         .bind(&event.session_id)
         .bind(event.seq)
+        .bind(&event.event_type)
+        .bind(serde_json::Value::Object(event.payload.clone()))
+        .bind(&event.actor)
+        .bind(&event.source)
+        .bind(serde_json::Value::Object(event.metadata.clone()))
+        .bind(serde_json::Value::Object(event.refs.clone()))
+        .bind(&event.idempotency_key)
+        .bind(&event.producer_id)
+        .bind(event.producer_seq)
+        .bind(&event.tenant_id)
+        .bind(inserted_at)
         .execute(&mut *tx)
         .await?;
 
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(EVENT_NOTIFICATION_CHANNEL)
-        .bind(
-            serde_json::to_string(&EventNotification {
-                emitter_id: emitter_id.to_string(),
-                session_id: event.session_id.clone(),
-                seq: event.seq,
-            })
-            .map_err(|_| AppError::Internal)?,
+        sqlx::query(
+            r#"
+            INSERT INTO session_producers (
+              session_id,
+              producer_id,
+              last_producer_seq
+            )
+            VALUES ($1, $2, $3)
+            ON CONFLICT (session_id, producer_id)
+            DO UPDATE
+            SET
+              last_producer_seq = GREATEST(
+                session_producers.last_producer_seq,
+                EXCLUDED.last_producer_seq
+              ),
+              updated_at = now()
+            "#,
         )
+        .bind(&event.session_id)
+        .bind(&event.producer_id)
+        .bind(event.producer_seq)
         .execute(&mut *tx)
         .await?;
+
+        last_seq = event.seq;
+        inserted_event_seqs.push(event.seq);
+    }
+
+    if last_seq > session.last_seq {
+        sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
+            .bind(&first_event.session_id)
+            .bind(last_seq)
+            .execute(&mut *tx)
+            .await?;
+    }
+
+    for seq in inserted_event_seqs {
+        sqlx::query("SELECT pg_notify($1, $2)")
+            .bind(EVENT_NOTIFICATION_CHANNEL)
+            .bind(
+                serde_json::to_string(&EventNotification {
+                    emitter_id: emitter_id.to_string(),
+                    session_id: first_event.session_id.clone(),
+                    seq,
+                })
+                .map_err(|_| AppError::Internal)?,
+            )
+            .execute(&mut *tx)
+            .await?;
+    }
 
     tx.commit().await?;
     Ok(())

@@ -64,12 +64,17 @@ impl FlushWorker {
     async fn flush_session(&self, session_id: &str) -> Result<(), AppError> {
         let events = self.queue.session_events(session_id).await;
 
-        for event in events {
-            repository::persist_flushed_event(&self.pool, &event, &self.instance_id).await?;
-            self.queue.mark_flushed(session_id, event.seq).await;
-            self.archive_queue.enqueue(session_id).await;
+        if events.is_empty() {
+            return Ok(());
         }
 
+        let last_seq = events
+            .last()
+            .map(|event| event.seq)
+            .ok_or(AppError::Internal)?;
+        repository::persist_flushed_events(&self.pool, &events, &self.instance_id).await?;
+        self.queue.mark_flushed(session_id, last_seq).await;
+        self.archive_queue.enqueue(session_id).await;
         Ok(())
     }
 }
