@@ -5,8 +5,10 @@ Starcite is a clustered Phoenix application that provides durable, low-latency s
 ## Ground Rules
 
 - Use the pinned local toolchain from `.mise.toml`. Run `mise install` after
-  cloning, then either activate `mise` in your shell or prefix local project
-  commands with `mise exec --`.
+  cloning, then `mise trust .mise.toml`, then either activate `mise` in your
+  shell or prefix local project commands with `mise exec --`.
+- Run `mise exec -- mix deps.get` in fresh worktrees before compile, test, or
+  precommit commands.
 - Run `mise exec -- mix precommit` before you hand work back unless your shell
   already has `mise` activated. It compiles with warnings-as-errors, formats,
   and runs tests.
