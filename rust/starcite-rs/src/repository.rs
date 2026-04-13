@@ -748,6 +748,27 @@ pub async fn acquire_session_lease(
             live_nodes.node_id ASC
           LIMIT 1
         ),
+        preferred_standby AS (
+          SELECT COALESCE(
+            (
+              SELECT existing_lease.owner_id
+              FROM existing_lease
+              JOIN live_nodes AS live_owner
+                ON live_owner.node_id = existing_lease.owner_id
+              WHERE existing_lease.owner_id <> (SELECT node_id FROM target_owner)
+              LIMIT 1
+            ),
+            (
+              SELECT existing_lease.standby_node_id
+              FROM existing_lease
+              JOIN live_nodes AS live_standby
+                ON live_standby.node_id = existing_lease.standby_node_id
+              WHERE existing_lease.standby_node_id <> (SELECT node_id FROM target_owner)
+              LIMIT 1
+            ),
+            (SELECT node_id FROM candidate_standby)
+          ) AS node_id
+        ),
         upserted AS (
           INSERT INTO session_leases (
             session_id,
@@ -761,7 +782,7 @@ pub async fn acquire_session_lease(
             (SELECT node_id FROM target_owner),
             1,
             now() + ($3 * interval '1 millisecond'),
-            (SELECT node_id FROM candidate_standby)
+            (SELECT node_id FROM preferred_standby)
           )
           ON CONFLICT (session_id)
           DO UPDATE
@@ -787,17 +808,8 @@ pub async fn acquire_session_lease(
             END,
             standby_node_id = CASE
               WHEN session_leases.owner_id = $2
-                AND session_leases.expires_at > now()
-                AND EXISTS (
-                  SELECT 1
-                  FROM live_nodes AS standby_control
-                  WHERE standby_control.node_id = session_leases.standby_node_id
-                    AND standby_control.node_id <> (SELECT node_id FROM target_owner)
-                )
-              THEN session_leases.standby_node_id
-              WHEN session_leases.owner_id = $2
                 OR session_leases.expires_at <= now()
-              THEN (SELECT node_id FROM candidate_standby)
+              THEN (SELECT node_id FROM preferred_standby)
               ELSE session_leases.standby_node_id
             END,
             updated_at = CASE

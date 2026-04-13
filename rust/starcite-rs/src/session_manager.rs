@@ -66,6 +66,7 @@ struct AppendCommand {
 struct SessionWorkerState {
     last_seq: Option<i64>,
     producer_cursors: HashMap<String, i64>,
+    flush_seeded: bool,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -98,6 +99,10 @@ impl SessionWorkerState {
             .entry(producer_id.to_string())
             .and_modify(|current| *current = (*current).max(producer_seq))
             .or_insert(producer_seq);
+    }
+
+    fn mark_flush_seeded(&mut self) {
+        self.flush_seeded = true;
     }
 }
 
@@ -140,23 +145,27 @@ impl SessionManager {
         tenant_id: &str,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
-        let (reply_tx, reply_rx) = oneshot::channel();
-        let mut command = AppendCommand {
-            tenant_id: tenant_id.to_string(),
-            input,
-            reply_tx,
-        };
+        let tenant_id = tenant_id.to_string();
+        let input = input;
 
         for _attempt in 0..2 {
+            let (reply_tx, reply_rx) = oneshot::channel();
             let handle = self.worker_for(session_id).await;
+            let command = AppendCommand {
+                tenant_id: tenant_id.clone(),
+                input: input.clone(),
+                reply_tx,
+            };
 
             match handle.sender.send(command).await {
-                Ok(()) => {
-                    return reply_rx.await.unwrap_or(Err(AppError::Internal));
-                }
-                Err(error) => {
+                Ok(()) => match reply_rx.await {
+                    Ok(result) => return result,
+                    Err(_error) => {
+                        self.prune_worker(session_id, handle.worker_id).await;
+                    }
+                },
+                Err(_error) => {
                     self.prune_worker(session_id, handle.worker_id).await;
-                    command = error.0;
                 }
             }
         }
@@ -327,6 +336,10 @@ impl SessionManager {
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let lease = self.ownership.ensure_owned(session_id).await?;
+        if !state.flush_seeded {
+            self.seed_pending_flush(session_id).await;
+            state.mark_flush_seeded();
+        }
         let last_seq = match state.last_seq {
             Some(last_seq) => last_seq,
             None => {
@@ -415,7 +428,7 @@ impl SessionManager {
             .await?;
         state.remember_last_seq(next_seq);
         state.remember_producer_seq(&event.producer_id, event.producer_seq);
-        self.apply_local_async_commit(event.clone()).await;
+        self.apply_local_async_owner_commit(event.clone()).await;
 
         Ok(AppendOutcome {
             reply: AppendReply {
@@ -489,7 +502,15 @@ impl SessionManager {
             .await
     }
 
-    pub async fn apply_local_async_commit(&self, event: EventResponse) {
+    async fn seed_pending_flush(&self, session_id: &str) {
+        let events = self.hot_store.from_cursor(session_id, 0, u32::MAX).await;
+
+        for event in events {
+            self.pending_flush.enqueue(event).await;
+        }
+    }
+
+    pub async fn apply_local_async_owner_commit(&self, event: EventResponse) {
         self.session_store
             .put_tenant(&event.session_id, &event.tenant_id)
             .await;
@@ -506,6 +527,25 @@ impl SessionManager {
             .await;
         self.hot_store.put_event(event.clone()).await;
         self.pending_flush.enqueue(event.clone()).await;
+        self.fanout.broadcast(event).await;
+    }
+
+    pub async fn apply_local_async_replica_commit(&self, event: EventResponse) {
+        self.session_store
+            .put_tenant(&event.session_id, &event.tenant_id)
+            .await;
+        self.session_store
+            .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
+            .await;
+        self.session_store
+            .bump_producer_seq(
+                &event.session_id,
+                &event.tenant_id,
+                &event.producer_id,
+                event.producer_seq,
+            )
+            .await;
+        self.hot_store.put_event(event.clone()).await;
         self.fanout.broadcast(event).await;
     }
 
@@ -689,11 +729,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_local_async_commit_tracks_producer_cursor_in_session_store() {
+    async fn owner_commit_tracks_producer_cursor_and_enqueues_flush() {
         let manager = manager(Duration::from_secs(1));
 
         manager
-            .apply_local_async_commit(sample_event("ses_demo", 4, 9))
+            .apply_local_async_owner_commit(sample_event("ses_demo", 4, 9))
             .await;
 
         assert_eq!(
@@ -702,6 +742,31 @@ mod tests {
                 .get_last_producer_seq("ses_demo", "writer-1")
                 .await,
             Some(9)
+        );
+        assert_eq!(
+            manager.pending_flush.snapshot().await.pending_event_count,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn replica_commit_tracks_producer_cursor_without_enqueuing_flush() {
+        let manager = manager(Duration::from_secs(1));
+
+        manager
+            .apply_local_async_replica_commit(sample_event("ses_demo", 4, 9))
+            .await;
+
+        assert_eq!(
+            manager
+                .session_store
+                .get_last_producer_seq("ses_demo", "writer-1")
+                .await,
+            Some(9)
+        );
+        assert_eq!(
+            manager.pending_flush.snapshot().await.pending_event_count,
+            0
         );
     }
 }

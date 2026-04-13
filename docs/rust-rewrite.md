@@ -199,8 +199,9 @@ to one synchronous standby over the ops listener, and Postgres now acts as the d
 plane for which standby is assigned to a given owned session. Nodes that set
 `LOCAL_ASYNC_NODE_OPS_URL` heartbeat themselves into `control_nodes`, session lease acquisition
 selects one live non-draining peer as `standby_node_id`, spreads new assignments across the least-
-loaded live standbys in Postgres, and keeps a healthy assigned standby stable across routine owner
-renewals. The owner now sends one append control request to that assigned standby before it applies
+renewals. When ownership does move, lease acquisition now prefers the previous live owner as the
+new standby before it falls back to a cold peer, so acknowledged sessions keep a warm quorum pair
+through renewals and takeover. The owner now sends one append control request to that assigned standby before it applies
 the event locally and replies to the client, instead of paying separate prepare and commit round
 trips on the critical path. If no assigned standby is available, append fails with
 `503 quorum_unavailable` instead of silently falling back to single-node ack.
@@ -245,14 +246,15 @@ internal replica traffic fails loudly instead of silently re-applying or skippin
 takeover.
 
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
-queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
-`sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
+queue. Owner commits enqueue the touched session, the worker advances `sessions.archived_seq`, and
+hot in-memory events are pruned once they are considered archived. The
 periodic tick is now only a fallback nudge if no new work arrives. In this branch that worker is
 still transitional: the event rows already exist in Postgres before the flush, so it restores
-hot/cold tier behavior without yet removing Postgres from the append ack path. Because standby
-commits feed that same queue, a standby can prune its hot copy soon after Postgres catches up, so
-long-idle failover replay may already be on the cold path even though the commit itself was
-standby-replicated in memory.
+hot/cold tier behavior without yet removing Postgres from the append ack path. Standby commits no
+longer feed that queue. They keep only the committed hot copy in memory, and when a worker first
+becomes owner it seeds the flush backlog from that retained hot state before it starts
+acknowledging new appends. That keeps steady-state standby quorum commits off the Postgres flush
+path while preserving a durable catch-up path after failover.
 
 Archive progress now also relays over Postgres `NOTIFY`, so other Rust nodes can advance cached
 `archived_seq` state and prune stale hot copies without waiting for a cold session refresh.

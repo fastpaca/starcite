@@ -267,7 +267,7 @@ pub async fn append_replica(
 
     state
         .session_manager
-        .apply_local_async_commit(request.event)
+        .apply_local_async_replica_commit(request.event)
         .await;
 
     Ok((
