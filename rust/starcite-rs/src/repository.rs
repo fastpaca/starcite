@@ -60,6 +60,22 @@ pub struct SessionSnapshot {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+struct SessionSnapshotRow {
+    id: String,
+    title: Option<String>,
+    tenant_id: String,
+    creator_id: Option<String>,
+    creator_type: Option<String>,
+    metadata: serde_json::Value,
+    last_seq: i64,
+    archived_seq: i64,
+    archived: bool,
+    created_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    version: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ArchiveState {
     pub last_seq: i64,
     pub archived_seq: i64,
@@ -186,13 +202,26 @@ pub async fn get_session_snapshot(
     pool: &PgPool,
     session_id: &str,
 ) -> Result<SessionSnapshot, AppError> {
-    let row = load_session_row(pool, session_id).await?;
+    let row = load_session_snapshot_row(pool, session_id).await?;
     let tenant_id = row.tenant_id.clone();
-    let archived_seq = get_archive_state(pool, session_id).await?.archived_seq;
+    let archived_seq = row.archived_seq;
+    let session = SessionResponse::try_from(SessionRow {
+        id: row.id,
+        title: row.title,
+        tenant_id: row.tenant_id,
+        creator_id: row.creator_id,
+        creator_type: row.creator_type,
+        metadata: row.metadata,
+        last_seq: row.last_seq,
+        archived: row.archived,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        version: row.version,
+    })?;
 
     Ok(SessionSnapshot {
         tenant_id,
-        session: row.try_into()?,
+        session,
         archived_seq,
     })
 }
@@ -1108,6 +1137,36 @@ async fn load_session_row(pool: &PgPool, session_id: &str) -> Result<SessionRow,
           creator_type,
           metadata,
           last_seq,
+          archived,
+          created_at,
+          updated_at,
+          version
+        FROM sessions
+        WHERE id = $1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?;
+
+    row.ok_or(AppError::SessionNotFound)
+}
+
+async fn load_session_snapshot_row(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<SessionSnapshotRow, AppError> {
+    let row = sqlx::query_as::<_, SessionSnapshotRow>(
+        r#"
+        SELECT
+          id,
+          title,
+          tenant_id,
+          creator_id,
+          creator_type,
+          metadata,
+          last_seq,
+          archived_seq,
           archived,
           created_at,
           updated_at,
