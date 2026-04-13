@@ -228,6 +228,10 @@ does not silently drift after a quiet period. When drain begins, that worker exi
 lease promptly, which lets another node take over reads without waiting for the old TTL to burn
 down.
 
+That active worker now also keeps the session head and producer cursors in local memory while the
+session stays hot. First touch still hydrates from the shared cache or Postgres, but repeated
+owner-path appends no longer re-read the shared hot-session store before every quorum replicate.
+
 Lease handoff now also respects the assigned standby on expiry. When a session lease has expired
 but Postgres still shows a live non-draining `standby_node_id`, non-standby nodes stop stealing
 that session and instead return the standby as the owner hint. That keeps acknowledged

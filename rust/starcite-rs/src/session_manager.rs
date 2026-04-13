@@ -62,6 +62,12 @@ struct AppendCommand {
     reply_tx: oneshot::Sender<Result<AppendOutcome, AppError>>,
 }
 
+#[derive(Debug, Default)]
+struct SessionWorkerState {
+    last_seq: Option<i64>,
+    producer_cursors: HashMap<String, i64>,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct SessionManagerSnapshot {
     pub idle_timeout_ms: u64,
@@ -73,6 +79,26 @@ pub struct SessionManagerSnapshot {
 pub struct SessionWorkerSnapshot {
     pub session_id: String,
     pub worker_id: u64,
+}
+
+impl SessionWorkerState {
+    fn remember_last_seq(&mut self, last_seq: i64) {
+        self.last_seq = Some(
+            self.last_seq
+                .map_or(last_seq, |current| current.max(last_seq)),
+        );
+    }
+
+    fn producer_seq(&self, producer_id: &str) -> Option<i64> {
+        self.producer_cursors.get(producer_id).copied()
+    }
+
+    fn remember_producer_seq(&mut self, producer_id: &str, producer_seq: i64) {
+        self.producer_cursors
+            .entry(producer_id.to_string())
+            .and_modify(|current| *current = (*current).max(producer_seq))
+            .or_insert(producer_seq);
+    }
 }
 
 impl SessionManager {
@@ -199,6 +225,7 @@ impl SessionManager {
     ) {
         let mut idle = Box::pin(sleep(self.idle_timeout));
         let mut draining = self.ops.subscribe_draining();
+        let mut state = SessionWorkerState::default();
         let mut renew_tick = interval_at(
             TokioInstant::now() + self.ownership.renew_interval(),
             self.ownership.renew_interval(),
@@ -236,7 +263,7 @@ impl SessionManager {
                         .reset(TokioInstant::now() + self.idle_timeout);
 
                     let result = self
-                        .handle_append(&session_id, &command.tenant_id, command.input)
+                        .handle_append(&session_id, &command.tenant_id, &mut state, command.input)
                         .await;
                     let _ = command.reply_tx.send(result);
                 }
@@ -248,27 +275,34 @@ impl SessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         match self.commit_mode {
-            CommitMode::SyncPostgres => self.append_sync(session_id, input).await,
-            CommitMode::LocalAsync => self.append_local_async(session_id, tenant_id, input).await,
+            CommitMode::SyncPostgres => self.append_sync(session_id, state, input).await,
+            CommitMode::LocalAsync => {
+                self.append_local_async(session_id, tenant_id, state, input)
+                    .await
+            }
         }
     }
 
     async fn append_sync(
         &self,
         session_id: &str,
+        state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let outcome =
             repository::append_event(&self.pool, session_id, input, &self.instance_id).await?;
+        state.remember_last_seq(outcome.reply.last_seq);
 
         self.session_store
             .bump_last_seq(session_id, &outcome.tenant_id, outcome.reply.last_seq)
             .await;
 
         if let Some(event) = outcome.event.clone() {
+            state.remember_producer_seq(&event.producer_id, event.producer_seq);
             self.session_store
                 .bump_producer_seq(
                     &event.session_id,
@@ -289,11 +323,19 @@ impl SessionManager {
         &self,
         session_id: &str,
         tenant_id: &str,
+        state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let lease = self.ownership.ensure_owned(session_id).await?;
-        let last_seq =
-            resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
+        let last_seq = match state.last_seq {
+            Some(last_seq) => last_seq,
+            None => {
+                let last_seq =
+                    resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
+                state.remember_last_seq(last_seq);
+                last_seq
+            }
+        };
 
         if let Some(expected_seq) = input.expected_seq
             && last_seq != expected_seq
@@ -305,7 +347,7 @@ impl SessionManager {
         }
 
         let last_producer_seq = self
-            .resolve_producer_cursor(session_id, &input.producer_id, last_seq)
+            .resolve_producer_cursor(state, session_id, &input.producer_id, last_seq)
             .await?;
 
         match repository::classify_producer_sequence(last_producer_seq, input.producer_seq) {
@@ -319,6 +361,7 @@ impl SessionManager {
 
                 return match existing {
                     Some(existing) if matches_local_event(&existing, &input, tenant_id) => {
+                        state.remember_producer_seq(&producer_id, current);
                         Ok(AppendOutcome {
                             reply: AppendReply {
                                 seq: existing.seq,
@@ -370,6 +413,8 @@ impl SessionManager {
         self.replication
             .replicate(lease.epoch, &event, lease.standby.as_ref())
             .await?;
+        state.remember_last_seq(next_seq);
+        state.remember_producer_seq(&event.producer_id, event.producer_seq);
         self.apply_local_async_commit(event.clone()).await;
 
         Ok(AppendOutcome {
@@ -387,15 +432,21 @@ impl SessionManager {
 
     async fn resolve_producer_cursor(
         &self,
+        state: &mut SessionWorkerState,
         session_id: &str,
         producer_id: &str,
         last_seq: i64,
     ) -> Result<Option<i64>, AppError> {
+        if let Some(last_producer_seq) = state.producer_seq(producer_id) {
+            return Ok(Some(last_producer_seq));
+        }
+
         if let Some(last_producer_seq) = self
             .session_store
             .get_last_producer_seq(session_id, producer_id)
             .await
         {
+            state.remember_producer_seq(producer_id, last_producer_seq);
             return Ok(Some(last_producer_seq));
         }
 
@@ -404,6 +455,7 @@ impl SessionManager {
             .last_producer_seq(session_id, producer_id)
             .await
         {
+            state.remember_producer_seq(producer_id, last_producer_seq);
             return Ok(Some(last_producer_seq));
         }
 
@@ -411,7 +463,12 @@ impl SessionManager {
             return Ok(None);
         }
 
-        repository::load_producer_cursor(&self.pool, session_id, producer_id).await
+        let last_producer_seq =
+            repository::load_producer_cursor(&self.pool, session_id, producer_id).await?;
+        if let Some(last_producer_seq) = last_producer_seq {
+            state.remember_producer_seq(producer_id, last_producer_seq);
+        }
+        Ok(last_producer_seq)
     }
 
     async fn resolve_existing_event(
@@ -489,7 +546,7 @@ fn matches_local_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionManager, SessionWorkerHandle};
+    use super::{SessionManager, SessionWorkerHandle, SessionWorkerState};
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
         flush_queue::PendingFlushQueue, hot_store::HotEventStore, model::EventResponse,
@@ -530,6 +587,19 @@ mod tests {
             Arc::<str>::from("node-a"),
             idle_timeout,
         )
+    }
+
+    #[test]
+    fn worker_state_tracks_monotonic_cursors() {
+        let mut state = SessionWorkerState::default();
+
+        state.remember_last_seq(3);
+        state.remember_last_seq(2);
+        state.remember_producer_seq("writer-1", 4);
+        state.remember_producer_seq("writer-1", 3);
+
+        assert_eq!(state.last_seq, Some(3));
+        assert_eq!(state.producer_seq("writer-1"), Some(4));
     }
 
     fn sample_event(session_id: &str, seq: i64, producer_seq: i64) -> EventResponse {
