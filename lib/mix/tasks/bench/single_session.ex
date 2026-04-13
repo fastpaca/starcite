@@ -320,7 +320,7 @@ defmodule Mix.Tasks.Bench.SingleSession do
   end
 
   defp get_session_routed!(session_id) when is_binary(session_id) and session_id != "" do
-    case ReadPath.get_session_routed(session_id, true) do
+    case ReadPath.get_session_routed(session_id) do
       {:ok, _session} ->
         :ok
 
