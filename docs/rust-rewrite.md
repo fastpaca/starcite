@@ -69,8 +69,11 @@ docker compose -f docker-compose.rust.cluster.yml -p rustcluster down -v --remov
 
 That compose file advertises each node on the internal Docker network (`http://nodeN:4001` and
 `http://nodeN:4002`) so owner hints and owner-proxy forwarding work correctly from the bundled k6
-container. If you drive the cluster directly from the host instead of the in-network k6 service,
-override the `LOCAL_ASYNC_NODE_PUBLIC_URL` values to host-reachable addresses first.
+container. The k6 service intentionally does not depend on the Rust nodes at the Compose layer, so
+`docker compose run k6 ...` does not recreate the cluster you are measuring; the script's own
+ready check handles startup ordering instead. If you drive the cluster directly from the host
+instead of the in-network k6 service, override the `LOCAL_ASYNC_NODE_PUBLIC_URL` values to
+host-reachable addresses first.
 
 When the point of the run is owner-path latency rather than wrong-node forwarding behavior, set
 `SESSION_ROUTE_MODE=designated_owner` in the k6 container too. Leaving the default

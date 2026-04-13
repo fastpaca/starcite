@@ -63,13 +63,6 @@ services:
   k6:
     image: grafana/k6:0.50.0
     profiles: ["tools"]
-    depends_on:
-      node1:
-        condition: service_started
-      node2:
-        condition: service_started
-      node3:
-        condition: service_started
     working_dir: /bench
     entrypoint: ["k6"]
     environment:
