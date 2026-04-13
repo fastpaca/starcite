@@ -20,6 +20,7 @@ use crate::{
     archive_queue::ArchiveQueueSnapshot,
     auth,
     config::{CommitMode, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
+    control_plane::ControlPlaneSnapshot,
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     flush_queue::PendingFlushSnapshot,
@@ -122,6 +123,7 @@ struct DebugStateResponse {
     auth_mode: &'static str,
     commit_mode: &'static str,
     telemetry_enabled: bool,
+    control_plane: ControlPlaneSnapshot,
     runtime: RuntimeSnapshot,
     hot_store: HotEventStoreSnapshot,
     session_store: HotSessionStoreSnapshot,
@@ -167,6 +169,7 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
 
 pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
+    let control_plane = state.control_plane.snapshot();
     let runtime = state.runtime.snapshot().await;
     let hot_store = state.hot_store.snapshot().await;
     let session_store = state.session_store.snapshot().await;
@@ -184,6 +187,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         auth_mode: auth_mode_name(state.auth_mode),
         commit_mode: commit_mode_name(state.commit_mode),
         telemetry_enabled: state.telemetry.enabled(),
+        control_plane,
         runtime,
         hot_store,
         session_store,

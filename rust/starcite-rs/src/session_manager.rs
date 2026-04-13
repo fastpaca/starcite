@@ -320,7 +320,9 @@ impl SessionManager {
             cursor: next_seq,
         };
 
-        self.replication.replicate(lease.epoch, &event).await?;
+        self.replication
+            .replicate(lease.epoch, &event, lease.standby.as_ref())
+            .await?;
         self.apply_local_async_commit(event.clone()).await;
 
         Ok(AppendOutcome {
@@ -453,6 +455,7 @@ mod tests {
             ),
             ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
+                false,
                 None,
                 Duration::from_millis(500),
             )

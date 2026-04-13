@@ -15,6 +15,7 @@ const COMMIT_PATH: &str = "/internal/replication/commit";
 #[derive(Debug, Clone)]
 pub struct ReplicationCoordinator {
     standby: Option<ControlPeer>,
+    require_standby: bool,
     instance_id: Arc<str>,
     timeout: Duration,
 }
@@ -29,8 +30,15 @@ struct ControlPeer {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReplicationSnapshot {
     pub enabled: bool,
+    pub standby_required: bool,
     pub standby_url: Option<String>,
     pub timeout_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ReplicationPeer {
+    pub node_id: String,
+    pub ops_url: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -83,6 +91,7 @@ impl ReplicationClientError {
 impl ReplicationCoordinator {
     pub fn new(
         instance_id: Arc<str>,
+        require_standby: bool,
         standby_url: Option<String>,
         timeout: Duration,
     ) -> Result<Self, String> {
@@ -90,20 +99,26 @@ impl ReplicationCoordinator {
 
         Ok(Self {
             standby,
+            require_standby,
             instance_id,
             timeout,
         })
     }
 
-    pub async fn replicate(&self, epoch: i64, event: &EventResponse) -> Result<(), AppError> {
-        let Some(standby) = self.standby.as_ref() else {
+    pub async fn replicate(
+        &self,
+        epoch: i64,
+        event: &EventResponse,
+        assigned_standby: Option<&ReplicationPeer>,
+    ) -> Result<(), AppError> {
+        let Some(standby) = self.control_peer(assigned_standby)? else {
             return Ok(());
         };
 
         let owner_id = self.instance_id.to_string();
 
         self.post_json(
-            standby,
+            &standby,
             PREPARE_PATH,
             &PrepareReplicaRequest {
                 owner_id: owner_id.clone(),
@@ -112,10 +127,10 @@ impl ReplicationCoordinator {
             },
         )
         .await
-        .map_err(|error| self.quorum_error(error, standby, "prepare", event))?;
+        .map_err(|error| self.quorum_error(error, &standby, "prepare", event))?;
 
         self.post_json(
-            standby,
+            &standby,
             COMMIT_PATH,
             &CommitReplicaRequest {
                 owner_id,
@@ -125,14 +140,15 @@ impl ReplicationCoordinator {
             },
         )
         .await
-        .map_err(|error| self.quorum_error(error, standby, "commit", event))?;
+        .map_err(|error| self.quorum_error(error, &standby, "commit", event))?;
 
         Ok(())
     }
 
     pub fn snapshot(&self) -> ReplicationSnapshot {
         ReplicationSnapshot {
-            enabled: self.standby.is_some(),
+            enabled: self.require_standby || self.standby.is_some(),
+            standby_required: self.require_standby,
             standby_url: self.standby.as_ref().map(|peer| peer.base_url.clone()),
             timeout_ms: self.timeout.as_millis().min(u64::MAX as u128) as u64,
         }
@@ -158,6 +174,33 @@ impl ReplicationCoordinator {
         AppError::QuorumUnavailable {
             required: 2,
             acknowledged: 1,
+        }
+    }
+
+    fn control_peer(
+        &self,
+        assigned_standby: Option<&ReplicationPeer>,
+    ) -> Result<Option<ControlPeer>, AppError> {
+        if let Some(assigned_standby) = assigned_standby {
+            return parse_control_peer(&assigned_standby.ops_url)
+                .map(Some)
+                .map_err(|_| AppError::QuorumUnavailable {
+                    required: 2,
+                    acknowledged: 1,
+                });
+        }
+
+        if let Some(standby) = self.standby.clone() {
+            return Ok(Some(standby));
+        }
+
+        if self.require_standby {
+            Err(AppError::QuorumUnavailable {
+                required: 2,
+                acknowledged: 1,
+            })
+        } else {
+            Ok(None)
         }
     }
 

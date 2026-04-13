@@ -2,6 +2,7 @@ mod archive;
 mod archive_queue;
 mod auth;
 mod config;
+mod control_plane;
 mod error;
 mod fanout;
 mod flush_queue;
@@ -29,6 +30,7 @@ use axum::{
     routing::{get, post},
 };
 use config::Config;
+use control_plane::ControlPlaneState;
 use fanout::{LifecycleFanout, SessionFanout};
 use flush_queue::PendingFlushQueue;
 use flusher::FlushWorker;
@@ -59,6 +61,7 @@ pub struct AppState {
     pub session_store: HotSessionStore,
     pub session_manager: SessionManager,
     pub ownership: OwnershipManager,
+    pub control_plane: ControlPlaneState,
     pub replica_store: ReplicaStore,
     pub replication: ReplicationCoordinator,
     pub runtime: SessionRuntime,
@@ -104,6 +107,10 @@ async fn run() -> Result<(), String> {
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
+    let control_plane = ControlPlaneState::new(
+        config.local_async_node_ops_url.clone(),
+        Duration::from_millis(config.local_async_node_ttl_ms),
+    );
     let replica_store = ReplicaStore::new();
     let ownership = OwnershipManager::new(
         pool.clone(),
@@ -112,6 +119,7 @@ async fn run() -> Result<(), String> {
     );
     let replication = ReplicationCoordinator::new(
         instance_id.clone(),
+        control_plane.enabled(),
         config.local_async_standby_url.clone(),
         Duration::from_millis(config.local_async_replication_timeout_ms),
     )?;
@@ -146,6 +154,7 @@ async fn run() -> Result<(), String> {
         session_store: session_store.clone(),
         session_manager,
         ownership,
+        control_plane: control_plane.clone(),
         replica_store,
         replication,
         runtime,
@@ -172,6 +181,8 @@ async fn run() -> Result<(), String> {
         Duration::from_millis(config.archive_flush_interval_ms),
     )
     .spawn();
+
+    control_plane.spawn(pool.clone(), state.instance_id.clone(), ops_state.clone());
 
     relay::spawn(
         pool,

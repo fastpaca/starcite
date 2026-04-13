@@ -9,7 +9,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-use crate::{error::AppError, repository};
+use crate::{error::AppError, replication::ReplicationPeer, repository};
 
 #[derive(Debug, Clone)]
 pub struct OwnershipManager {
@@ -24,6 +24,7 @@ pub struct OwnershipManager {
 struct LocalLease {
     epoch: i64,
     expires_at: Instant,
+    standby: Option<ReplicationPeer>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -39,11 +40,13 @@ pub struct OwnershipSessionSnapshot {
     pub session_id: String,
     pub epoch: i64,
     pub expires_in_ms: u64,
+    pub standby_node_id: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedLease {
     pub epoch: i64,
+    pub standby: Option<ReplicationPeer>,
 }
 
 impl OwnershipManager {
@@ -59,7 +62,10 @@ impl OwnershipManager {
 
     pub async fn ensure_owned(&self, session_id: &str) -> Result<OwnedLease, AppError> {
         if let Some(lease) = self.cached_lease(session_id).await {
-            return Ok(OwnedLease { epoch: lease.epoch });
+            return Ok(OwnedLease {
+                epoch: lease.epoch,
+                standby: lease.standby,
+            });
         }
 
         let row = repository::acquire_session_lease(
@@ -80,13 +86,20 @@ impl OwnershipManager {
         let lease = LocalLease {
             epoch: row.epoch,
             expires_at: lease_deadline(row.expires_at),
+            standby: row
+                .standby_node_id
+                .zip(row.standby_ops_url)
+                .map(|(node_id, ops_url)| ReplicationPeer { node_id, ops_url }),
         };
         self.leases
             .lock()
             .await
             .insert(session_id.to_string(), lease.clone());
 
-        Ok(OwnedLease { epoch: lease.epoch })
+        Ok(OwnedLease {
+            epoch: lease.epoch,
+            standby: lease.standby,
+        })
     }
 
     pub async fn release(&self, session_id: &str) {
@@ -114,6 +127,10 @@ impl OwnershipManager {
                     .saturating_duration_since(now)
                     .as_millis()
                     .min(u64::MAX as u128) as u64,
+                standby_node_id: lease
+                    .standby
+                    .as_ref()
+                    .map(|standby| standby.node_id.clone()),
             })
             .collect::<Vec<_>>();
 
@@ -196,6 +213,7 @@ mod tests {
                 LocalLease {
                     epoch: 2,
                     expires_at: now + Duration::from_secs(5),
+                    standby: None,
                 },
             );
             leases.insert(
@@ -203,6 +221,7 @@ mod tests {
                 LocalLease {
                     epoch: 1,
                     expires_at: now + Duration::from_secs(5),
+                    standby: None,
                 },
             );
         }

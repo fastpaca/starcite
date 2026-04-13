@@ -25,6 +25,8 @@ pub struct SessionLeaseRow {
     pub owner_id: String,
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
+    pub standby_node_id: Option<String>,
+    pub standby_ops_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -613,51 +615,81 @@ pub async fn acquire_session_lease(
 ) -> Result<SessionLeaseRow, AppError> {
     sqlx::query_as::<_, SessionLeaseRow>(
         r#"
-        INSERT INTO session_leases (
-          session_id,
-          owner_id,
-          epoch,
-          expires_at
+        WITH candidate AS (
+          SELECT
+            node_id,
+            ops_url
+          FROM control_nodes
+          WHERE node_id <> $2
+            AND draining = FALSE
+            AND expires_at > now()
+          ORDER BY node_id ASC
+          LIMIT 1
+        ),
+        upserted AS (
+          INSERT INTO session_leases (
+            session_id,
+            owner_id,
+            epoch,
+            expires_at,
+            standby_node_id
+          )
+          VALUES (
+            $1,
+            $2,
+            1,
+            now() + ($3 * interval '1 millisecond'),
+            (SELECT node_id FROM candidate)
+          )
+          ON CONFLICT (session_id)
+          DO UPDATE
+          SET
+            owner_id = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+                OR session_leases.expires_at <= now()
+              THEN EXCLUDED.owner_id
+              ELSE session_leases.owner_id
+            END,
+            epoch = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+              THEN session_leases.epoch
+              WHEN session_leases.expires_at <= now()
+              THEN session_leases.epoch + 1
+              ELSE session_leases.epoch
+            END,
+            expires_at = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+                OR session_leases.expires_at <= now()
+              THEN now() + ($3 * interval '1 millisecond')
+              ELSE session_leases.expires_at
+            END,
+            standby_node_id = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+                OR session_leases.expires_at <= now()
+              THEN (SELECT node_id FROM candidate)
+              ELSE session_leases.standby_node_id
+            END,
+            updated_at = CASE
+              WHEN session_leases.owner_id = EXCLUDED.owner_id
+                OR session_leases.expires_at <= now()
+              THEN now()
+              ELSE session_leases.updated_at
+            END
+          RETURNING
+            owner_id,
+            epoch,
+            expires_at,
+            standby_node_id
         )
-        VALUES (
-          $1,
-          $2,
-          1,
-          now() + ($3 * interval '1 millisecond')
-        )
-        ON CONFLICT (session_id)
-        DO UPDATE
-        SET
-          owner_id = CASE
-            WHEN session_leases.owner_id = EXCLUDED.owner_id
-              OR session_leases.expires_at <= now()
-            THEN EXCLUDED.owner_id
-            ELSE session_leases.owner_id
-          END,
-          epoch = CASE
-            WHEN session_leases.owner_id = EXCLUDED.owner_id
-            THEN session_leases.epoch
-            WHEN session_leases.expires_at <= now()
-            THEN session_leases.epoch + 1
-            ELSE session_leases.epoch
-          END,
-          expires_at = CASE
-            WHEN session_leases.owner_id = EXCLUDED.owner_id
-              OR session_leases.expires_at <= now()
-            THEN now() + ($3 * interval '1 millisecond')
-            ELSE session_leases.expires_at
-          END,
-          updated_at = CASE
-            WHEN session_leases.owner_id = EXCLUDED.owner_id
-              OR session_leases.expires_at <= now()
-            THEN now()
-            ELSE session_leases.updated_at
-          END
-        RETURNING
-          session_id,
-          owner_id,
-          epoch,
-          expires_at
+        SELECT
+          upserted.owner_id,
+          upserted.epoch,
+          upserted.expires_at,
+          upserted.standby_node_id,
+          control_nodes.ops_url AS standby_ops_url
+        FROM upserted
+        LEFT JOIN control_nodes
+          ON control_nodes.node_id = upserted.standby_node_id
         "#,
     )
     .bind(session_id)
@@ -685,6 +717,51 @@ pub async fn release_session_lease(
     )
     .bind(session_id)
     .bind(owner_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn upsert_control_node(
+    pool: &PgPool,
+    node_id: &str,
+    ops_url: &str,
+    draining: bool,
+    ttl_ms: i64,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        WITH pruned AS (
+          DELETE FROM control_nodes
+          WHERE node_id <> $1
+            AND expires_at <= now()
+        )
+        INSERT INTO control_nodes (
+          node_id,
+          ops_url,
+          draining,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          $3,
+          now() + ($4 * interval '1 millisecond')
+        )
+        ON CONFLICT (node_id)
+        DO UPDATE
+        SET
+          ops_url = EXCLUDED.ops_url,
+          draining = EXCLUDED.draining,
+          expires_at = EXCLUDED.expires_at,
+          updated_at = now()
+        "#,
+    )
+    .bind(node_id)
+    .bind(ops_url)
+    .bind(draining)
+    .bind(ttl_ms)
     .execute(pool)
     .await?;
 

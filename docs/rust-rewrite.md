@@ -15,7 +15,7 @@ The experiment here asked what falls out when Starcite is modeled as:
 - one Postgres-backed write path
 - one Postgres-backed replay path
 - no S3 archive adapter
-- no in-memory Raft ownership layer
+- no in-memory Raft ownership layer; Postgres is now carrying the lease and standby-assignment control plane in this experiment
 
 ## Included in the experiment
 
@@ -163,11 +163,15 @@ idles out or the lease expires. That makes the branch honest about who may serve
 path without pretending it already has Raft-style ownership transfer.
 
 There is now one more real hot-path slice on top of that lease model: `local_async` can replicate
-to one synchronous standby over the ops listener with `LOCAL_ASYNC_STANDBY_URL`. The owner sends a
-prepare then commit control request, waits for the standby to commit the in-memory replica, and
-only then applies the event locally and replies to the client. If that standby is unavailable, the
-append fails with `503 quorum_unavailable` instead of silently falling back to single-node ack.
-That is still only a narrow 2-of-2 experiment, not a full Raft group or routed topology.
+to one synchronous standby over the ops listener, and Postgres now acts as the durable control
+plane for which standby is assigned to a given owned session. Nodes that set
+`LOCAL_ASYNC_NODE_OPS_URL` heartbeat themselves into `control_nodes`, session lease acquisition
+selects one live non-draining peer as `standby_node_id`, and the owner sends prepare then commit
+control requests to that assigned standby before it applies the event locally and replies to the
+client. If no assigned standby is available, append fails with `503 quorum_unavailable` instead of
+silently falling back to single-node ack. `LOCAL_ASYNC_STANDBY_URL` remains as a static fallback
+for local drills when Postgres-backed node registration is not enabled. That is still only a narrow
+2-of-2 experiment, not a full Raft group or routed topology.
 
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
@@ -199,11 +203,16 @@ One runtime fix landed too: resume lifecycle persistence is no longer awaited on
 A cold-session HTTP read or tail join updates local runtime state immediately and then persists the
 runtime lifecycle in the background instead of blocking on Postgres before returning.
 
+`GET /debug/state` now also exposes the local control-plane heartbeat config next to ownership and
+replication state, so it is possible to tell whether a node is only running the hot path locally or
+is actually participating in Postgres-backed standby assignment.
+
 ## Deliberate gaps
 
 - no signature-verified JWT or JWKS flow yet; `unsafe_jwt` is claim parsing only
 - no full quorum replication or topology routing behind the runtime lifecycle; `local_async` has
-  only Postgres-backed single-writer session leases plus one optional synchronous standby
+  only Postgres-backed single-writer session leases plus one synchronous standby chosen by the
+  Postgres control plane or a static fallback URL
 - no routing/replication/archive telemetry parity with the Phoenix service
 
 ## Why this shape
