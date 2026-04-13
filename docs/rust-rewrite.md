@@ -58,6 +58,19 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
 - the existing hot-path k6 bench can target the split public and ops listeners by keeping `CLUSTER_NODES` on the public `/v1` URLs and setting `CLUSTER_READY_NODES` to the matching ops base URLs
 
+There is now a dedicated three-node Rust benchmark harness too:
+
+```bash
+docker compose -f docker-compose.rust.cluster.yml -p rustcluster up -d --build
+docker compose -f docker-compose.rust.cluster.yml -p rustcluster --profile tools run --rm k6 run /bench/k6-hot-path-throughput.js
+docker compose -f docker-compose.rust.cluster.yml -p rustcluster down -v --remove-orphans
+```
+
+That compose file advertises each node on the internal Docker network (`http://nodeN:4001` and
+`http://nodeN:4002`) so owner hints and owner-proxy forwarding work correctly from the bundled k6
+container. If you drive the cluster directly from the host instead of the in-network k6 service,
+override the `LOCAL_ASYNC_NODE_PUBLIC_URL` values to host-reachable addresses first.
+
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
 `phx_join`, and `phx_leave` with the usual Phoenix frame array shape
 `[join_ref, ref, topic, event, payload]`, replies with `phx_reply`, accepts `cursor` plus

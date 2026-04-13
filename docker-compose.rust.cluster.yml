@@ -1,0 +1,100 @@
+x-rust-node-env: &rust-node-env
+  PORT: 4001
+  STARCITE_OPS_PORT: 4002
+  DATABASE_URL: postgres://postgres:postgres@db:5432/${STARCITE_RS_CLUSTER_DB_NAME:-starcite_rust_cluster}
+  MIGRATE_ON_BOOT: "false"
+  STARCITE_AUTH_MODE: ${STARCITE_AUTH_MODE:-none}
+  STARCITE_COMMIT_MODE: ${STARCITE_COMMIT_MODE:-local_async}
+  STARCITE_ENABLE_TELEMETRY: ${STARCITE_ENABLE_TELEMETRY:-true}
+  STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS: ${STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS:-30000}
+  SESSION_RUNTIME_IDLE_TIMEOUT_MS: ${SESSION_RUNTIME_IDLE_TIMEOUT_MS:-30000}
+  COMMIT_FLUSH_INTERVAL_MS: ${COMMIT_FLUSH_INTERVAL_MS:-100}
+  LOCAL_ASYNC_LEASE_TTL_MS: ${LOCAL_ASYNC_LEASE_TTL_MS:-5000}
+  LOCAL_ASYNC_NODE_TTL_MS: ${LOCAL_ASYNC_NODE_TTL_MS:-2000}
+  LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS: ${LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS:-1000}
+  LOCAL_ASYNC_REPLICATION_TIMEOUT_MS: ${LOCAL_ASYNC_REPLICATION_TIMEOUT_MS:-500}
+  ARCHIVE_FLUSH_INTERVAL_MS: ${ARCHIVE_FLUSH_INTERVAL_MS:-5000}
+  RUST_LOG: ${RUST_LOG:-info}
+
+x-rust-node: &rust-node
+  image: ${STARCITE_RS_CLUSTER_IMAGE:-starcite-rs-cluster:local}
+  build:
+    context: ./rust/starcite-rs
+  depends_on:
+    db:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  node1:
+    <<: *rust-node
+    hostname: node1
+    environment:
+      <<: *rust-node-env
+      MIGRATE_ON_BOOT: "true"
+      LOCAL_ASYNC_NODE_PUBLIC_URL: http://node1:4001
+      LOCAL_ASYNC_NODE_OPS_URL: http://node1:4002
+    ports:
+      - "${RUST_NODE1_PORT:-4111}:4001"
+      - "${RUST_NODE1_OPS_PORT:-4211}:4002"
+
+  node2:
+    <<: *rust-node
+    hostname: node2
+    environment:
+      <<: *rust-node-env
+      LOCAL_ASYNC_NODE_PUBLIC_URL: http://node2:4001
+      LOCAL_ASYNC_NODE_OPS_URL: http://node2:4002
+    ports:
+      - "${RUST_NODE2_PORT:-4112}:4001"
+      - "${RUST_NODE2_OPS_PORT:-4212}:4002"
+
+  node3:
+    <<: *rust-node
+    hostname: node3
+    environment:
+      <<: *rust-node-env
+      LOCAL_ASYNC_NODE_PUBLIC_URL: http://node3:4001
+      LOCAL_ASYNC_NODE_OPS_URL: http://node3:4002
+    ports:
+      - "${RUST_NODE3_PORT:-4113}:4001"
+      - "${RUST_NODE3_OPS_PORT:-4213}:4002"
+
+  k6:
+    image: grafana/k6:0.50.0
+    profiles: ["tools"]
+    depends_on:
+      node1:
+        condition: service_started
+      node2:
+        condition: service_started
+      node3:
+        condition: service_started
+    working_dir: /bench
+    entrypoint: ["k6"]
+    environment:
+      CLUSTER_NODES: http://node1:4001/v1,http://node2:4001/v1,http://node3:4001/v1
+      CLUSTER_READY_NODES: http://node1:4002,http://node2:4002,http://node3:4002
+    volumes:
+      - ./bench:/bench:ro
+
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: ${STARCITE_RS_CLUSTER_DB_NAME:-starcite_rust_cluster}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "pg_isready",
+          "-U",
+          "postgres",
+          "-d",
+          "${STARCITE_RS_CLUSTER_DB_NAME:-starcite_rust_cluster}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
