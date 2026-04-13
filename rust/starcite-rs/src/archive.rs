@@ -3,12 +3,16 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::{archive_queue::ArchiveQueue, error::AppError, hot_store::HotEventStore, repository};
+use crate::{
+    archive_queue::ArchiveQueue, error::AppError, hot_store::HotEventStore, repository,
+    session_store::HotSessionStore,
+};
 
 #[derive(Debug, Clone)]
 pub struct ArchiveWorker {
     pool: PgPool,
     hot_store: HotEventStore,
+    session_store: HotSessionStore,
     queue: ArchiveQueue,
     flush_interval: Duration,
 }
@@ -17,12 +21,14 @@ impl ArchiveWorker {
     pub fn new(
         pool: PgPool,
         hot_store: HotEventStore,
+        session_store: HotSessionStore,
         queue: ArchiveQueue,
         flush_interval: Duration,
     ) -> Self {
         Self {
             pool,
             hot_store,
+            session_store,
             queue,
             flush_interval,
         }
@@ -69,6 +75,9 @@ impl ArchiveWorker {
 
         let archived_seq =
             repository::mark_archived_seq(&self.pool, session_id, target_seq).await?;
+        self.session_store
+            .update_archived_seq(session_id, archived_seq)
+            .await;
         let prune_floor = archived_seq.saturating_add(1);
         let deleted = self.hot_store.delete_below(session_id, prune_floor).await;
 

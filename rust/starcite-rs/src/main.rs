@@ -187,6 +187,7 @@ async fn run() -> Result<(), String> {
     ArchiveWorker::new(
         pool.clone(),
         state.hot_store.clone(),
+        state.session_store.clone(),
         state.archive_queue.clone(),
         Duration::from_millis(config.archive_flush_interval_ms),
     )

@@ -56,6 +56,7 @@ pub struct ArchiveStateOutcome {
 pub struct SessionSnapshot {
     pub tenant_id: String,
     pub session: SessionResponse,
+    pub archived_seq: i64,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -187,10 +188,12 @@ pub async fn get_session_snapshot(
 ) -> Result<SessionSnapshot, AppError> {
     let row = load_session_row(pool, session_id).await?;
     let tenant_id = row.tenant_id.clone();
+    let archived_seq = get_archive_state(pool, session_id).await?.archived_seq;
 
     Ok(SessionSnapshot {
         tenant_id,
         session: row.try_into()?,
+        archived_seq,
     })
 }
 

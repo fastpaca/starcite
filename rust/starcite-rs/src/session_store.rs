@@ -19,6 +19,7 @@ pub struct HotSessionStore {
 struct SessionCacheEntry {
     tenant_id: String,
     last_seq: i64,
+    archived_seq: i64,
     session: Option<SessionResponse>,
 }
 
@@ -35,6 +36,7 @@ pub struct HotSessionSnapshot {
     pub session_id: String,
     pub tenant_id: String,
     pub last_seq: i64,
+    pub archived_seq: i64,
     pub has_session: bool,
     pub archived: Option<bool>,
     pub version: Option<i64>,
@@ -45,18 +47,27 @@ impl HotSessionStore {
         Self::default()
     }
 
-    pub async fn put_session(&self, tenant_id: &str, mut session: SessionResponse) {
+    pub async fn put_session(
+        &self,
+        tenant_id: &str,
+        mut session: SessionResponse,
+        archived_seq: Option<i64>,
+    ) {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
             .entry(session.id.clone())
             .or_insert_with(|| SessionCacheEntry {
                 tenant_id: tenant_id.to_string(),
                 last_seq: session.last_seq,
+                archived_seq: archived_seq.unwrap_or_default(),
                 session: None,
             });
 
         entry.tenant_id = tenant_id.to_string();
         entry.last_seq = entry.last_seq.max(session.last_seq);
+        if let Some(archived_seq) = archived_seq {
+            entry.archived_seq = entry.archived_seq.max(archived_seq);
+        }
         session.last_seq = entry.last_seq;
         entry.session = Some(session);
     }
@@ -68,6 +79,7 @@ impl HotSessionStore {
             .or_insert_with(|| SessionCacheEntry {
                 tenant_id: tenant_id.to_string(),
                 last_seq: 0,
+                archived_seq: 0,
                 session: None,
             });
 
@@ -81,6 +93,7 @@ impl HotSessionStore {
             .or_insert_with(|| SessionCacheEntry {
                 tenant_id: tenant_id.to_string(),
                 last_seq,
+                archived_seq: 0,
                 session: None,
             });
 
@@ -99,6 +112,7 @@ impl HotSessionStore {
             .or_insert_with(|| SessionCacheEntry {
                 tenant_id: event.tenant_id().to_string(),
                 last_seq: 0,
+                archived_seq: 0,
                 session: None,
             });
 
@@ -165,6 +179,15 @@ impl HotSessionStore {
         sessions.get(session_id).map(|entry| entry.last_seq)
     }
 
+    pub async fn update_archived_seq(&self, session_id: &str, archived_seq: i64) {
+        let mut sessions = self.sessions.write().await;
+        let Some(entry) = sessions.get_mut(session_id) else {
+            return;
+        };
+
+        entry.archived_seq = entry.archived_seq.max(archived_seq);
+    }
+
     pub async fn snapshot(&self) -> HotSessionStoreSnapshot {
         let sessions = self.sessions.read().await;
         let mut full_session_count = 0_usize;
@@ -179,6 +202,7 @@ impl HotSessionStore {
                     session_id: session_id.clone(),
                     tenant_id: entry.tenant_id.clone(),
                     last_seq: entry.last_seq,
+                    archived_seq: entry.archived_seq,
                     has_session: entry.session.is_some(),
                     archived: entry.session.as_ref().map(|session| session.archived),
                     version: entry.session.as_ref().map(|session| session.version),
@@ -209,7 +233,11 @@ pub async fn resolve_session(
     let snapshot = repository::get_session_snapshot(pool, session_id).await?;
     let session = snapshot.session.clone();
     store
-        .put_session(&snapshot.tenant_id, snapshot.session)
+        .put_session(
+            &snapshot.tenant_id,
+            snapshot.session,
+            Some(snapshot.archived_seq),
+        )
         .await;
     Ok(session)
 }
@@ -225,7 +253,9 @@ pub async fn resolve_session_tenant_id(
 
     let snapshot = repository::get_session_snapshot(pool, session_id).await?;
     let tenant_id = snapshot.tenant_id.clone();
-    store.put_session(&tenant_id, snapshot.session).await;
+    store
+        .put_session(&tenant_id, snapshot.session, Some(snapshot.archived_seq))
+        .await;
     Ok(tenant_id)
 }
 
@@ -241,7 +271,11 @@ pub async fn resolve_session_last_seq(
     let snapshot = repository::get_session_snapshot(pool, session_id).await?;
     let last_seq = snapshot.session.last_seq;
     store
-        .put_session(&snapshot.tenant_id, snapshot.session)
+        .put_session(
+            &snapshot.tenant_id,
+            snapshot.session,
+            Some(snapshot.archived_seq),
+        )
         .await;
     Ok(last_seq)
 }
@@ -256,7 +290,11 @@ pub async fn refresh_from_lifecycle(
     if is_catalog_event(&event.event) {
         let snapshot = repository::get_session_snapshot(pool, event.event.session_id()).await?;
         store
-            .put_session(&snapshot.tenant_id, snapshot.session)
+            .put_session(
+                &snapshot.tenant_id,
+                snapshot.session,
+                Some(snapshot.archived_seq),
+            )
             .await;
     }
 
@@ -300,7 +338,7 @@ mod tests {
     #[tokio::test]
     async fn bump_last_seq_updates_cached_full_session() {
         let store = HotSessionStore::new();
-        store.put_session("acme", sample_session()).await;
+        store.put_session("acme", sample_session(), Some(2)).await;
 
         store.bump_last_seq("ses_demo", "acme", 4).await;
 
@@ -314,7 +352,7 @@ mod tests {
     #[tokio::test]
     async fn lifecycle_hint_updates_existing_cached_session() {
         let store = HotSessionStore::new();
-        store.put_session("acme", sample_session()).await;
+        store.put_session("acme", sample_session(), Some(1)).await;
 
         store
             .apply_lifecycle_hint(&LifecycleEvent::SessionUpdated {
@@ -349,7 +387,7 @@ mod tests {
     #[tokio::test]
     async fn snapshot_reports_full_and_partial_entries() {
         let store = HotSessionStore::new();
-        store.put_session("acme", sample_session()).await;
+        store.put_session("acme", sample_session(), Some(2)).await;
         store.put_tenant("ses_other", "acme").await;
         store.bump_last_seq("ses_other", "acme", 3).await;
 
@@ -360,8 +398,21 @@ mod tests {
         assert_eq!(snapshot.partial_session_count, 1);
         assert_eq!(snapshot.sessions[0].session_id, "ses_demo");
         assert!(snapshot.sessions[0].has_session);
+        assert_eq!(snapshot.sessions[0].archived_seq, 2);
         assert_eq!(snapshot.sessions[1].session_id, "ses_other");
         assert_eq!(snapshot.sessions[1].last_seq, 3);
+        assert_eq!(snapshot.sessions[1].archived_seq, 0);
         assert!(!snapshot.sessions[1].has_session);
+    }
+
+    #[tokio::test]
+    async fn archived_seq_updates_cached_entry() {
+        let store = HotSessionStore::new();
+        store.put_session("acme", sample_session(), Some(1)).await;
+
+        store.update_archived_seq("ses_demo", 4).await;
+
+        let snapshot = store.snapshot().await;
+        assert_eq!(snapshot.sessions[0].archived_seq, 4);
     }
 }

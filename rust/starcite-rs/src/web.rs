@@ -322,7 +322,7 @@ pub async fn create_session(
         let session = repository::create_session(&state.pool, validated.clone()).await?;
         state
             .session_store
-            .put_session(&validated.tenant_id, session.clone())
+            .put_session(&validated.tenant_id, session.clone(), Some(0))
             .await;
 
         state
@@ -397,7 +397,7 @@ pub async fn update_session(
             repository::update_session(&state.pool, &session_id, request.validate()?).await?;
         state
             .session_store
-            .put_session(&tenant_id, session.clone())
+            .put_session(&tenant_id, session.clone(), None)
             .await;
 
         publish_lifecycle(&state, LifecycleEvent::updated(tenant_id.clone(), &session)).await;
@@ -427,7 +427,7 @@ pub async fn archive_session(
     let outcome = repository::set_archive_state(&state.pool, &session_id, true).await?;
     state
         .session_store
-        .put_session(&outcome.tenant_id, outcome.session.clone())
+        .put_session(&outcome.tenant_id, outcome.session.clone(), None)
         .await;
 
     if outcome.changed {
@@ -458,7 +458,7 @@ pub async fn unarchive_session(
     let outcome = repository::set_archive_state(&state.pool, &session_id, false).await?;
     state
         .session_store
-        .put_session(&outcome.tenant_id, outcome.session.clone())
+        .put_session(&outcome.tenant_id, outcome.session.clone(), None)
         .await;
 
     if outcome.changed {
