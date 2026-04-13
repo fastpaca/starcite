@@ -30,6 +30,14 @@ pub struct SessionLeaseRow {
     pub standby_ops_url: Option<String>,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SessionLeaseTakeoverHint {
+    pub epoch: i64,
+    pub expires_at: DateTime<Utc>,
+    pub live_standby_node_id: Option<String>,
+    pub live_standby_public_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProducerSequenceCheck {
     AcceptFirst,
@@ -761,6 +769,30 @@ pub async fn acquire_session_lease(
     .fetch_one(pool)
     .await
     .map_err(AppError::from)
+}
+
+pub async fn load_session_lease_takeover_hint(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<Option<SessionLeaseTakeoverHint>, AppError> {
+    Ok(sqlx::query_as::<_, SessionLeaseTakeoverHint>(
+        r#"
+        SELECT
+          session_leases.epoch,
+          session_leases.expires_at,
+          standby_control.node_id AS live_standby_node_id,
+          standby_control.public_url AS live_standby_public_url
+        FROM session_leases
+        LEFT JOIN control_nodes AS standby_control
+          ON standby_control.node_id = session_leases.standby_node_id
+         AND standby_control.draining = FALSE
+         AND standby_control.expires_at > now()
+        WHERE session_leases.session_id = $1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?)
 }
 
 pub async fn release_session_lease(

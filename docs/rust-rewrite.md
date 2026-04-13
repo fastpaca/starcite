@@ -193,6 +193,12 @@ does not silently drift after a quiet period. When drain begins, that worker exi
 lease promptly, which lets another node take over reads without waiting for the old TTL to burn
 down.
 
+Lease handoff now also respects the assigned standby on expiry. When a session lease has expired
+but Postgres still shows a live non-draining `standby_node_id`, non-standby nodes stop stealing
+that session and instead return the standby as the owner hint. That keeps acknowledged
+`local_async` state biased toward the node that already holds the replicated hot copy, while still
+falling back to any live node once the designated standby disappears.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The

@@ -9,7 +9,11 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::Mutex;
 
-use crate::{error::AppError, replication::ReplicationPeer, repository};
+use crate::{
+    error::AppError,
+    replication::ReplicationPeer,
+    repository::{self, SessionLeaseTakeoverHint},
+};
 
 #[derive(Debug, Clone)]
 pub struct OwnershipManager {
@@ -65,6 +69,17 @@ impl OwnershipManager {
             return Ok(OwnedLease {
                 epoch: lease.epoch,
                 standby: lease.standby,
+            });
+        }
+
+        if let Some(hint) =
+            repository::load_session_lease_takeover_hint(&self.pool, session_id).await?
+            && let Some(redirect) = preferred_takeover_owner(&hint, self.instance_id.as_ref())
+        {
+            return Err(AppError::SessionNotOwned {
+                owner_id: redirect.owner_id,
+                owner_public_url: redirect.owner_public_url,
+                epoch: redirect.epoch,
             });
         }
 
@@ -162,6 +177,33 @@ impl OwnershipManager {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TakeoverRedirect {
+    owner_id: String,
+    owner_public_url: Option<String>,
+    epoch: i64,
+}
+
+fn preferred_takeover_owner(
+    hint: &SessionLeaseTakeoverHint,
+    requester_id: &str,
+) -> Option<TakeoverRedirect> {
+    if hint.expires_at > Utc::now() {
+        return None;
+    }
+
+    let standby_id = hint.live_standby_node_id.as_ref()?;
+    if standby_id == requester_id {
+        return None;
+    }
+
+    Some(TakeoverRedirect {
+        owner_id: standby_id.clone(),
+        owner_public_url: hint.live_standby_public_url.clone(),
+        epoch: hint.epoch.saturating_add(1),
+    })
+}
+
 fn renew_before(lease_ttl: Duration) -> Duration {
     let ttl_ms = lease_ttl.as_millis().min(u64::MAX as u128) as u64;
     Duration::from_millis((ttl_ms / 2).max(1))
@@ -184,13 +226,18 @@ fn lease_deadline(expires_at: chrono::DateTime<Utc>) -> Instant {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalLease, OwnershipManager, lease_deadline, renew_before, renew_interval};
+    use super::{
+        LocalLease, OwnershipManager, lease_deadline, preferred_takeover_owner, renew_before,
+        renew_interval,
+    };
     use chrono::{Duration as ChronoDuration, Utc};
     use sqlx::postgres::PgPoolOptions;
     use std::{
         sync::Arc,
         time::{Duration, Instant},
     };
+
+    use crate::repository::SessionLeaseTakeoverHint;
 
     fn manager(lease_ttl: Duration) -> OwnershipManager {
         let pool = PgPoolOptions::new()
@@ -216,6 +263,57 @@ mod tests {
     fn lease_deadline_clamps_expired_rows_to_now() {
         let deadline = lease_deadline(Utc::now() - ChronoDuration::seconds(1));
         assert!(deadline <= Instant::now());
+    }
+
+    #[test]
+    fn expired_lease_redirects_non_standby_to_live_standby() {
+        let redirect = preferred_takeover_owner(
+            &SessionLeaseTakeoverHint {
+                epoch: 7,
+                expires_at: Utc::now() - ChronoDuration::seconds(1),
+                live_standby_node_id: Some("node-b".to_string()),
+                live_standby_public_url: Some("http://node-b:4001".to_string()),
+            },
+            "node-c",
+        )
+        .expect("redirect");
+
+        assert_eq!(redirect.owner_id, "node-b");
+        assert_eq!(
+            redirect.owner_public_url.as_deref(),
+            Some("http://node-b:4001")
+        );
+        assert_eq!(redirect.epoch, 8);
+    }
+
+    #[test]
+    fn expired_lease_allows_live_standby_to_claim() {
+        let redirect = preferred_takeover_owner(
+            &SessionLeaseTakeoverHint {
+                epoch: 7,
+                expires_at: Utc::now() - ChronoDuration::seconds(1),
+                live_standby_node_id: Some("node-b".to_string()),
+                live_standby_public_url: Some("http://node-b:4001".to_string()),
+            },
+            "node-b",
+        );
+
+        assert_eq!(redirect, None);
+    }
+
+    #[test]
+    fn expired_lease_without_live_standby_does_not_redirect() {
+        let redirect = preferred_takeover_owner(
+            &SessionLeaseTakeoverHint {
+                epoch: 7,
+                expires_at: Utc::now() - ChronoDuration::seconds(1),
+                live_standby_node_id: None,
+                live_standby_public_url: None,
+            },
+            "node-c",
+        );
+
+        assert_eq!(redirect, None);
     }
 
     #[tokio::test]
