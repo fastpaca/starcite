@@ -29,6 +29,7 @@ pub struct Config {
     pub shutdown_drain_timeout_ms: u64,
     pub session_runtime_idle_timeout_ms: u64,
     pub commit_flush_interval_ms: u64,
+    pub local_async_lease_ttl_ms: u64,
 }
 
 impl Config {
@@ -98,6 +99,12 @@ impl Config {
             .transpose()?
             .unwrap_or(100);
 
+        let local_async_lease_ttl_ms = env::var("LOCAL_ASYNC_LEASE_TTL_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("LOCAL_ASYNC_LEASE_TTL_MS", &raw))
+            .transpose()?
+            .unwrap_or(5_000);
+
         Ok(Self {
             listen_addr,
             ops_listen_addr,
@@ -111,6 +118,7 @@ impl Config {
             shutdown_drain_timeout_ms,
             session_runtime_idle_timeout_ms,
             commit_flush_interval_ms,
+            local_async_lease_ttl_ms,
         })
     }
 }

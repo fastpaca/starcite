@@ -9,6 +9,7 @@ mod flusher;
 mod hot_store;
 mod model;
 mod ops;
+mod ownership;
 mod phoenix;
 mod read_path;
 mod relay;
@@ -31,6 +32,7 @@ use flush_queue::PendingFlushQueue;
 use flusher::FlushWorker;
 use hot_store::HotEventStore;
 use ops::OpsState;
+use ownership::OwnershipManager;
 use runtime::SessionRuntime;
 use session_manager::SessionManager;
 use session_store::HotSessionStore;
@@ -52,6 +54,7 @@ pub struct AppState {
     pub pending_flush: PendingFlushQueue,
     pub session_store: HotSessionStore,
     pub session_manager: SessionManager,
+    pub ownership: OwnershipManager,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
@@ -95,6 +98,11 @@ async fn run() -> Result<(), String> {
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
+    let ownership = OwnershipManager::new(
+        pool.clone(),
+        instance_id.clone(),
+        Duration::from_millis(config.local_async_lease_ttl_ms),
+    );
     let session_manager = SessionManager::new(
         pool.clone(),
         fanout.clone(),
@@ -102,6 +110,7 @@ async fn run() -> Result<(), String> {
         archive_queue.clone(),
         pending_flush.clone(),
         session_store.clone(),
+        ownership.clone(),
         config.commit_mode,
         instance_id.clone(),
         Duration::from_millis(config.session_runtime_idle_timeout_ms),
@@ -123,6 +132,7 @@ async fn run() -> Result<(), String> {
         pending_flush: pending_flush.clone(),
         session_store: session_store.clone(),
         session_manager,
+        ownership,
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,

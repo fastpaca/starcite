@@ -20,6 +20,13 @@ struct ProducerCursorRow {
     last_producer_seq: i64,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct SessionLeaseRow {
+    pub owner_id: String,
+    pub epoch: i64,
+    pub expires_at: DateTime<Utc>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ProducerSequenceCheck {
     AcceptFirst,
@@ -596,6 +603,92 @@ pub async fn load_event_by_seq(
     .await?;
 
     row.map(EventResponse::try_from).transpose()
+}
+
+pub async fn acquire_session_lease(
+    pool: &PgPool,
+    session_id: &str,
+    owner_id: &str,
+    ttl_ms: i64,
+) -> Result<SessionLeaseRow, AppError> {
+    sqlx::query_as::<_, SessionLeaseRow>(
+        r#"
+        INSERT INTO session_leases (
+          session_id,
+          owner_id,
+          epoch,
+          expires_at
+        )
+        VALUES (
+          $1,
+          $2,
+          1,
+          now() + ($3 * interval '1 millisecond')
+        )
+        ON CONFLICT (session_id)
+        DO UPDATE
+        SET
+          owner_id = CASE
+            WHEN session_leases.owner_id = EXCLUDED.owner_id
+              OR session_leases.expires_at <= now()
+            THEN EXCLUDED.owner_id
+            ELSE session_leases.owner_id
+          END,
+          epoch = CASE
+            WHEN session_leases.owner_id = EXCLUDED.owner_id
+            THEN session_leases.epoch
+            WHEN session_leases.expires_at <= now()
+            THEN session_leases.epoch + 1
+            ELSE session_leases.epoch
+          END,
+          expires_at = CASE
+            WHEN session_leases.owner_id = EXCLUDED.owner_id
+              OR session_leases.expires_at <= now()
+            THEN now() + ($3 * interval '1 millisecond')
+            ELSE session_leases.expires_at
+          END,
+          updated_at = CASE
+            WHEN session_leases.owner_id = EXCLUDED.owner_id
+              OR session_leases.expires_at <= now()
+            THEN now()
+            ELSE session_leases.updated_at
+          END
+        RETURNING
+          session_id,
+          owner_id,
+          epoch,
+          expires_at
+        "#,
+    )
+    .bind(session_id)
+    .bind(owner_id)
+    .bind(ttl_ms)
+    .fetch_one(pool)
+    .await
+    .map_err(AppError::from)
+}
+
+pub async fn release_session_lease(
+    pool: &PgPool,
+    session_id: &str,
+    owner_id: &str,
+) -> Result<(), AppError> {
+    sqlx::query(
+        r#"
+        UPDATE session_leases
+        SET
+          expires_at = now(),
+          updated_at = now()
+        WHERE session_id = $1
+          AND owner_id = $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(owner_id)
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }
 
 pub async fn load_producer_cursor(

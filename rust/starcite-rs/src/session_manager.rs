@@ -23,6 +23,7 @@ use crate::{
     flush_queue::PendingFlushQueue,
     hot_store::HotEventStore,
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
+    ownership::OwnershipManager,
     repository::{self, AppendOutcome, ProducerSequenceCheck},
     session_store::{HotSessionStore, resolve_session_last_seq},
 };
@@ -38,6 +39,7 @@ pub struct SessionManager {
     archive_queue: ArchiveQueue,
     pending_flush: PendingFlushQueue,
     session_store: HotSessionStore,
+    ownership: OwnershipManager,
     commit_mode: CommitMode,
     instance_id: Arc<str>,
     idle_timeout: Duration,
@@ -77,6 +79,7 @@ impl SessionManager {
         archive_queue: ArchiveQueue,
         pending_flush: PendingFlushQueue,
         session_store: HotSessionStore,
+        ownership: OwnershipManager,
         commit_mode: CommitMode,
         instance_id: Arc<str>,
         idle_timeout: Duration,
@@ -89,6 +92,7 @@ impl SessionManager {
             archive_queue,
             pending_flush,
             session_store,
+            ownership,
             commit_mode,
             instance_id,
             idle_timeout,
@@ -236,6 +240,7 @@ impl SessionManager {
         tenant_id: &str,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
+        let _lease = self.ownership.ensure_owned(session_id).await?;
         let last_seq =
             resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
 
@@ -372,13 +377,21 @@ impl SessionManager {
     }
 
     async fn prune_worker(&self, session_id: &str, worker_id: u64) {
-        let mut workers = self.workers.lock().await;
+        let removed = {
+            let mut workers = self.workers.lock().await;
 
-        if workers
-            .get(session_id)
-            .is_some_and(|handle| handle.worker_id == worker_id)
-        {
-            workers.remove(session_id);
+            if workers
+                .get(session_id)
+                .is_some_and(|handle| handle.worker_id == worker_id)
+            {
+                workers.remove(session_id).is_some()
+            } else {
+                false
+            }
+        };
+
+        if removed && self.commit_mode == CommitMode::LocalAsync {
+            self.ownership.release(session_id).await;
         }
     }
 }
@@ -403,7 +416,8 @@ mod tests {
     use super::{SessionManager, SessionWorkerHandle};
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
-        flush_queue::PendingFlushQueue, hot_store::HotEventStore, session_store::HotSessionStore,
+        flush_queue::PendingFlushQueue, hot_store::HotEventStore, ownership::OwnershipManager,
+        session_store::HotSessionStore,
     };
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
@@ -415,12 +429,17 @@ mod tests {
             .expect("lazy pool");
 
         SessionManager::new(
-            pool,
+            pool.clone(),
             SessionFanout::default(),
             HotEventStore::new(),
             ArchiveQueue::new(),
             PendingFlushQueue::new(),
             HotSessionStore::new(),
+            OwnershipManager::new(
+                pool.clone(),
+                Arc::<str>::from("node-a"),
+                Duration::from_secs(5),
+            ),
             CommitMode::SyncPostgres,
             Arc::<str>::from("node-a"),
             idle_timeout,

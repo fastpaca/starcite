@@ -155,8 +155,12 @@ There is now an experimental commit-mode split behind that worker boundary. The 
 from local hot state, puts the event into a pending-flush backlog, and lets a background flusher
 persist it to Postgres and emit `NOTIFY` later. That is the first real cut at moving Postgres off
 the append ack path in this branch. It is intentionally honest about the remaining gap: without
-distributed ownership or quorum replication yet, `local_async` is only a same-process hot-path
-experiment, not a production-safe multi-node commit model.
+quorum replication yet, `local_async` is still not a production-safe multi-node commit model.
+What it does have now is explicit single-writer ownership per active session: a Rust node renews a
+Postgres-backed lease while its local session worker is alive, non-owner nodes reject event-path
+appends and replay with `409 session_not_owned`, and the next node can take over once the worker
+idles out or the lease expires. That makes the branch honest about who may serve the hot event
+path without pretending it already has Raft-style ownership transfer.
 
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
@@ -172,9 +176,9 @@ socket connection gauges, local session lifecycle counters, and dynamic gauges f
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
 now exposes that same local runtime map plus hot event-store state, hot session-store state,
-archive-queue backlog, and remaining idle time per active session. It still does not cover routing,
-replication, archive, or full event-store invariants because those subsystems do not exist in this
-rewrite.
+archive-queue backlog, local lease ownership state, and remaining idle time per active session. It
+still does not cover routing, replication, archive, or full event-store invariants because those
+subsystems do not exist in this rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
@@ -187,7 +191,8 @@ runtime lifecycle in the background instead of blocking on Postgres before retur
 ## Deliberate gaps
 
 - no signature-verified JWT or JWKS flow yet; `unsafe_jwt` is claim parsing only
-- no distributed ownership, quorum replication, or topology routing behind the runtime lifecycle
+- no quorum replication or topology routing behind the runtime lifecycle; `local_async` only has
+  Postgres-backed single-writer session leases
 - no routing/replication/archive telemetry parity with the Phoenix service
 
 ## Why this shape

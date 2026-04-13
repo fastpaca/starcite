@@ -68,6 +68,8 @@ pub enum AppError {
     },
     #[error("database unavailable")]
     DatabaseUnavailable,
+    #[error("session is not owned by this node")]
+    SessionNotOwned { owner_id: String, epoch: i64 },
     #[error("node draining")]
     NodeDraining {
         drain_source: Option<&'static str>,
@@ -115,6 +117,7 @@ impl AppError {
             Self::ProducerReplayConflict => "producer_replay_conflict",
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
             Self::DatabaseUnavailable => "database_unavailable",
+            Self::SessionNotOwned { .. } => "session_not_owned",
             Self::NodeDraining { .. } => "node_draining",
             Self::DrainResetForbidden => "drain_reset_forbidden",
             Self::Internal | Self::Sqlx(_) => "internal_error",
@@ -146,6 +149,7 @@ impl AppError {
             | Self::ExpectedVersionConflict { .. }
             | Self::ProducerReplayConflict
             | Self::ProducerSeqConflict { .. }
+            | Self::SessionNotOwned { .. }
             | Self::DrainResetForbidden => StatusCode::CONFLICT,
             Self::DatabaseUnavailable | Self::NodeDraining { .. } => {
                 StatusCode::SERVICE_UNAVAILABLE
@@ -260,6 +264,12 @@ impl AppError {
             Self::DatabaseUnavailable => json!({
                 "error": self.error_code(),
                 "message": "Database is unavailable"
+            }),
+            Self::SessionNotOwned { owner_id, epoch } => json!({
+                "error": self.error_code(),
+                "message": "Session is not owned by this node",
+                "owner_id": owner_id,
+                "epoch": epoch
             }),
             Self::NodeDraining {
                 drain_source,

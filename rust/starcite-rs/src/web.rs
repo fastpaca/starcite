@@ -30,6 +30,7 @@ use crate::{
         parse_query_scalar,
     },
     ops::OpsSnapshot,
+    ownership::OwnershipSnapshot,
     read_path, repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     session_manager::SessionManagerSnapshot,
@@ -120,6 +121,7 @@ struct DebugStateResponse {
     hot_store: HotEventStoreSnapshot,
     session_store: HotSessionStoreSnapshot,
     session_manager: SessionManagerSnapshot,
+    ownership: OwnershipSnapshot,
     pending_flush: PendingFlushSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
@@ -162,6 +164,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let hot_store = state.hot_store.snapshot().await;
     let session_store = state.session_store.snapshot().await;
     let session_manager = state.session_manager.snapshot().await;
+    let ownership = state.ownership.snapshot().await;
     let pending_flush = state.pending_flush.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
@@ -176,6 +179,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         hot_store,
         session_store,
         session_manager,
+        ownership,
         pending_flush,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
@@ -554,6 +558,7 @@ pub async fn read_events(
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
+    require_local_owner_for_event_path(&state, &session_id).await?;
     let page = read_path::read_events(
         &state.hot_store,
         &state.pool,
@@ -584,6 +589,7 @@ pub async fn tail_events(
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
+    require_local_owner_for_event_path(&state, &session_id).await?;
     state
         .runtime
         .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::RawTail)
@@ -961,6 +967,17 @@ fn commit_mode_name(commit_mode: crate::config::CommitMode) -> &'static str {
     }
 }
 
+async fn require_local_owner_for_event_path(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), AppError> {
+    if state.commit_mode == crate::config::CommitMode::LocalAsync {
+        state.ownership.ensure_owned(session_id).await?;
+    }
+
+    Ok(())
+}
+
 async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {
     match repository::append_lifecycle_event(&state.pool, event, &state.instance_id).await {
         Ok(event) => {
@@ -1112,6 +1129,7 @@ async fn sync_tail(
     cursor: i64,
     batch_size: u32,
 ) -> Result<i64, AppError> {
+    require_local_owner_for_event_path(state, session_id).await?;
     let next_cursor = replay_tail(socket, state, session_id, cursor, batch_size).await?;
 
     if next_cursor != cursor {
