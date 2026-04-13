@@ -777,6 +777,16 @@ pub async fn upsert_control_node(
     Ok(())
 }
 
+pub async fn control_plane_table_exists(pool: &PgPool) -> Result<bool, AppError> {
+    Ok(sqlx::query_scalar::<_, bool>(
+        r#"
+        SELECT to_regclass('public.control_nodes') IS NOT NULL
+        "#,
+    )
+    .fetch_one(pool)
+    .await?)
+}
+
 pub async fn load_producer_cursor(
     pool: &PgPool,
     session_id: &str,

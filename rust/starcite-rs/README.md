@@ -159,8 +159,8 @@ with its own `LOCAL_ASYNC_NODE_PUBLIC_URL=http://host:public_port` plus
 `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port`. That lets Postgres assign live standbys without
 hard-coding one peer per process, and it gives non-owner nodes enough metadata to return an owner
 hint instead of a blind `409`. Keep `LOCAL_ASYNC_STANDBY_URL` empty unless you want the older
-static 2-node fallback. On a fresh database, run migrations on one node before starting the rest so
-the heartbeat loop does not race the initial schema boot.
+static 2-node fallback. On a fresh database, non-migrator nodes will now wait for the
+`control_nodes` table to appear before they start heartbeating into the Postgres control plane.
 
 ## Example
 

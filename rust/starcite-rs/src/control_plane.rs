@@ -41,10 +41,27 @@ impl ControlPlaneState {
         let public_url = self.public_url.clone();
 
         let heartbeat_interval = refresh_interval(self.node_ttl);
+        let bootstrap_interval = bootstrap_interval(self.node_ttl);
         let ttl_ms = self.node_ttl.as_millis().min(i64::MAX as u128) as i64;
 
         tokio::spawn(async move {
             loop {
+                match repository::control_plane_table_exists(&pool).await {
+                    Ok(false) => {
+                        sleep(bootstrap_interval).await;
+                        continue;
+                    }
+                    Ok(true) => {}
+                    Err(error) => {
+                        tracing::warn!(
+                            error = ?error,
+                            "failed to check control-plane schema readiness"
+                        );
+                        sleep(heartbeat_interval).await;
+                        continue;
+                    }
+                }
+
                 let draining = ops.snapshot().draining;
 
                 if let Err(error) = repository::upsert_control_node(
@@ -84,15 +101,25 @@ fn refresh_interval(node_ttl: Duration) -> Duration {
     Duration::from_millis((ttl_ms / 2).max(1))
 }
 
+fn bootstrap_interval(node_ttl: Duration) -> Duration {
+    refresh_interval(node_ttl).min(Duration::from_millis(500))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ControlPlaneState, refresh_interval};
+    use super::{ControlPlaneState, bootstrap_interval, refresh_interval};
     use std::time::Duration;
 
     #[test]
     fn heartbeat_interval_uses_half_ttl() {
         assert_eq!(refresh_interval(Duration::from_millis(10)).as_millis(), 5);
         assert_eq!(refresh_interval(Duration::from_millis(1)).as_millis(), 1);
+    }
+
+    #[test]
+    fn bootstrap_interval_caps_wait_time() {
+        assert_eq!(bootstrap_interval(Duration::from_secs(10)).as_millis(), 500);
+        assert_eq!(bootstrap_interval(Duration::from_millis(10)).as_millis(), 5);
     }
 
     #[test]
