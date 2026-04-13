@@ -35,9 +35,7 @@ use crate::{
     ownership::OwnershipSnapshot,
     read_path,
     replica_store::ReplicaStoreSnapshot,
-    replication::{
-        CommitReplicaRequest, PrepareReplicaRequest, ReplicationAck, ReplicationSnapshot,
-    },
+    replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
     repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     session_manager::SessionManagerSnapshot,
@@ -220,50 +218,49 @@ pub async fn clear_drain(State(state): State<AppState>) -> Result<impl IntoRespo
     }
 }
 
-pub async fn prepare_replica(
+pub async fn append_replica(
     State(state): State<AppState>,
-    body: Result<Json<PrepareReplicaRequest>, JsonRejection>,
+    body: Result<Json<AppendReplicaRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     reject_internal_replication_when_unavailable(&state)?;
     let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
     reject_stale_replica_epoch(&state, &request.event.session_id, request.epoch).await?;
 
+    let last_seq = state
+        .session_store
+        .get_last_seq(&request.event.session_id)
+        .await
+        .unwrap_or(0);
+
+    if last_seq >= request.event.seq {
+        return Ok((
+            StatusCode::OK,
+            Json(ReplicationAck {
+                status: "already_committed".to_string(),
+            }),
+        ));
+    }
+
     state
         .replica_store
-        .prepare(&request.owner_id, request.epoch, request.event)
+        .prepare(&request.owner_id, request.epoch, request.event.clone())
         .await
         .map_err(|error| {
-            tracing::warn!(error = ?error, "replica prepare rejected");
+            tracing::warn!(error = ?error, "replica append rejected during prepare");
             AppError::Internal
         })?;
-
-    Ok((
-        StatusCode::ACCEPTED,
-        Json(ReplicationAck {
-            status: "prepared".to_string(),
-        }),
-    ))
-}
-
-pub async fn commit_replica(
-    State(state): State<AppState>,
-    body: Result<Json<CommitReplicaRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, AppError> {
-    reject_internal_replication_when_unavailable(&state)?;
-    let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
-    reject_stale_replica_epoch(&state, &request.session_id, request.epoch).await?;
 
     let event = state
         .replica_store
         .commit(
             &request.owner_id,
             request.epoch,
-            &request.session_id,
-            request.seq,
+            &request.event.session_id,
+            request.event.seq,
         )
         .await
         .map_err(|error| {
-            tracing::warn!(error = ?error, "replica commit rejected");
+            tracing::warn!(error = ?error, "replica append rejected during commit");
             AppError::Internal
         })?;
 
@@ -271,20 +268,14 @@ pub async fn commit_replica(
         Some(event) => {
             state.session_manager.apply_local_async_commit(event).await;
             Ok((
-                StatusCode::OK,
+                StatusCode::ACCEPTED,
                 Json(ReplicationAck {
                     status: "committed".to_string(),
                 }),
             ))
         }
         None => {
-            let last_seq = state
-                .session_store
-                .get_last_seq(&request.session_id)
-                .await
-                .unwrap_or(0);
-
-            if last_seq >= request.seq {
+            if last_seq >= request.event.seq {
                 Ok((
                     StatusCode::OK,
                     Json(ReplicationAck {

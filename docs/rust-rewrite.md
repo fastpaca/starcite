@@ -200,9 +200,10 @@ plane for which standby is assigned to a given owned session. Nodes that set
 `LOCAL_ASYNC_NODE_OPS_URL` heartbeat themselves into `control_nodes`, session lease acquisition
 selects one live non-draining peer as `standby_node_id`, spreads new assignments across the least-
 loaded live standbys in Postgres, and keeps a healthy assigned standby stable across routine owner
-renewals. The owner sends prepare then commit control requests to that assigned standby before it
-applies the event locally and replies to the client. If no assigned standby is available, append
-fails with `503 quorum_unavailable` instead of silently falling back to single-node ack.
+renewals. The owner now sends one append control request to that assigned standby before it applies
+the event locally and replies to the client, instead of paying separate prepare and commit round
+trips on the critical path. If no assigned standby is available, append fails with
+`503 quorum_unavailable` instead of silently falling back to single-node ack.
 `LOCAL_ASYNC_STANDBY_URL` remains as a static fallback for local drills when Postgres-backed node
 registration is not enabled. That is still only a narrow 2-of-2 experiment, not a full Raft group
 or routed topology.

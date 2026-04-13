@@ -290,8 +290,7 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
             "/debug/drain",
             post(web::begin_drain).delete(web::clear_drain),
         )
-        .route("/internal/replication/prepare", post(web::prepare_replica))
-        .route("/internal/replication/commit", post(web::commit_replica))
+        .route("/internal/replication/append", post(web::append_replica))
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,

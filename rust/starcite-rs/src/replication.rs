@@ -9,8 +9,7 @@ use tokio::{
 
 use crate::{error::AppError, model::EventResponse};
 
-const PREPARE_PATH: &str = "/internal/replication/prepare";
-const COMMIT_PATH: &str = "/internal/replication/commit";
+const APPEND_PATH: &str = "/internal/replication/append";
 
 #[derive(Debug, Clone)]
 pub struct ReplicationCoordinator {
@@ -42,18 +41,10 @@ pub struct ReplicationPeer {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct PrepareReplicaRequest {
+pub struct AppendReplicaRequest {
     pub owner_id: String,
     pub epoch: i64,
     pub event: EventResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct CommitReplicaRequest {
-    pub owner_id: String,
-    pub epoch: i64,
-    pub session_id: String,
-    pub seq: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,32 +106,17 @@ impl ReplicationCoordinator {
             return Ok(());
         };
 
-        let owner_id = self.instance_id.to_string();
-
         self.post_json(
             &standby,
-            PREPARE_PATH,
-            &PrepareReplicaRequest {
-                owner_id: owner_id.clone(),
+            APPEND_PATH,
+            &AppendReplicaRequest {
+                owner_id: self.instance_id.to_string(),
                 epoch,
                 event: event.clone(),
             },
         )
         .await
-        .map_err(|error| self.quorum_error(error, &standby, "prepare", event))?;
-
-        self.post_json(
-            &standby,
-            COMMIT_PATH,
-            &CommitReplicaRequest {
-                owner_id,
-                epoch,
-                session_id: event.session_id.clone(),
-                seq: event.seq,
-            },
-        )
-        .await
-        .map_err(|error| self.quorum_error(error, &standby, "commit", event))?;
+        .map_err(|error| self.quorum_error(error, &standby, "append", event))?;
 
         Ok(())
     }
@@ -298,7 +274,7 @@ fn parse_http_response(bytes: &[u8]) -> Result<(u16, String), ReplicationClientE
 
 #[cfg(test)]
 mod tests {
-    use super::{CommitReplicaRequest, PrepareReplicaRequest, parse_control_peer};
+    use super::{AppendReplicaRequest, parse_control_peer};
     use crate::model::EventResponse;
     use serde_json::Map;
 
@@ -338,28 +314,16 @@ mod tests {
 
     #[test]
     fn replica_requests_round_trip_through_json() {
-        let prepare = PrepareReplicaRequest {
+        let append = AppendReplicaRequest {
             owner_id: "node-a".to_string(),
             epoch: 2,
             event: event(),
         };
-        let commit = CommitReplicaRequest {
-            owner_id: "node-a".to_string(),
-            epoch: 2,
-            session_id: "ses_demo".to_string(),
-            seq: 1,
-        };
-
-        let prepare_json = serde_json::to_string(&prepare).expect("prepare json");
-        let commit_json = serde_json::to_string(&commit).expect("commit json");
+        let append_json = serde_json::to_string(&append).expect("append json");
 
         assert_eq!(
-            serde_json::from_str::<PrepareReplicaRequest>(&prepare_json).expect("prepare decode"),
-            prepare
-        );
-        assert_eq!(
-            serde_json::from_str::<CommitReplicaRequest>(&commit_json).expect("commit decode"),
-            commit
+            serde_json::from_str::<AppendReplicaRequest>(&append_json).expect("append decode"),
+            append
         );
     }
 }
