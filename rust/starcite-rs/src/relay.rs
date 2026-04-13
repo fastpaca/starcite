@@ -6,6 +6,7 @@ use tokio::time::sleep;
 
 use crate::{
     fanout::{LifecycleFanout, SessionFanout},
+    hot_store::HotEventStore,
     repository,
 };
 
@@ -29,10 +30,11 @@ pub fn spawn(
     pool: PgPool,
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
+    hot_store: HotEventStore,
     instance_id: Arc<str>,
 ) {
     tokio::spawn(async move {
-        run_listener_loop(pool, fanout, lifecycle, instance_id).await;
+        run_listener_loop(pool, fanout, lifecycle, hot_store, instance_id).await;
     });
 }
 
@@ -40,6 +42,7 @@ async fn run_listener_loop(
     pool: PgPool,
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
+    hot_store: HotEventStore,
     instance_id: Arc<str>,
 ) {
     loop {
@@ -52,9 +55,11 @@ async fn run_listener_loop(
             }
         };
 
-        if let Err(error) =
-            listen_all(&mut listener, [EVENT_NOTIFICATION_CHANNEL, LIFECYCLE_NOTIFICATION_CHANNEL])
-                .await
+        if let Err(error) = listen_all(
+            &mut listener,
+            [EVENT_NOTIFICATION_CHANNEL, LIFECYCLE_NOTIFICATION_CHANNEL],
+        )
+        .await
         {
             tracing::error!(error = ?error, "failed to subscribe postgres relay channels");
             sleep(Duration::from_secs(1)).await;
@@ -68,6 +73,7 @@ async fn run_listener_loop(
                         &pool,
                         &fanout,
                         &lifecycle,
+                        &hot_store,
                         instance_id.as_ref(),
                         notification.channel(),
                         notification.payload(),
@@ -89,6 +95,7 @@ async fn handle_notification(
     pool: &PgPool,
     fanout: &SessionFanout,
     lifecycle: &LifecycleFanout,
+    hot_store: &HotEventStore,
     instance_id: &str,
     channel: &str,
     payload: &str,
@@ -109,6 +116,7 @@ async fn handle_notification(
 
             match repository::load_event_by_seq(pool, &payload.session_id, payload.seq).await {
                 Ok(Some(event)) => {
+                    hot_store.put_event(event.clone()).await;
                     fanout.broadcast(event).await;
                 }
                 Ok(None) => {
@@ -141,7 +149,10 @@ async fn handle_notification(
                     lifecycle.broadcast(event).await;
                 }
                 Ok(None) => {
-                    tracing::warn!(cursor = payload.cursor, "lifecycle relay referenced missing row");
+                    tracing::warn!(
+                        cursor = payload.cursor,
+                        "lifecycle relay referenced missing row"
+                    );
                 }
                 Err(error) => {
                     tracing::error!(error = ?error, "failed to load relayed lifecycle event");

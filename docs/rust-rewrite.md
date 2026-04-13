@@ -130,15 +130,23 @@ committed row from Postgres and rebroadcasts it into local fanout. That means a 
 one Rust node can still receive live events or lifecycle updates produced by another Rust node
 sharing the same database, without adding Redis or a separate broker.
 
+One read-path parity slice has landed too: each Rust process now keeps a local in-memory hot event
+store populated by local appends and relayed remote commits. HTTP event reads and tail catch-up
+replay consult that hot store first and only fall back to Postgres when the requested range is not
+locally contiguous. That moves replay shape closer to the Elixir `EventStore` and `ReadPath`
+contracts, even though append ack is still incorrectly paying the Postgres commit path in this
+experiment.
+
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
 socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
-now exposes that same local runtime map with tenant, generation, last touch reason, and remaining
-idle time per active session. It still does not cover routing, replication, archive, or
-event-store invariants because those subsystems do not exist in this rewrite.
+now exposes that same local runtime map plus hot event-store state with tenant, generation, last
+touch reason, and remaining idle time per active session. It still does not cover routing,
+replication, archive, or full event-store invariants because those subsystems do not exist in this
+rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge

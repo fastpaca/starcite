@@ -2,9 +2,11 @@ mod auth;
 mod config;
 mod error;
 mod fanout;
+mod hot_store;
 mod model;
 mod ops;
 mod phoenix;
+mod read_path;
 mod relay;
 mod repository;
 mod runtime;
@@ -17,6 +19,7 @@ use axum::{
 };
 use config::Config;
 use fanout::{LifecycleFanout, SessionFanout};
+use hot_store::HotEventStore;
 use ops::OpsState;
 use runtime::SessionRuntime;
 use sqlx::postgres::PgPoolOptions;
@@ -32,6 +35,7 @@ pub struct AppState {
     pub pool: sqlx::PgPool,
     pub fanout: SessionFanout,
     pub lifecycle: LifecycleFanout,
+    pub hot_store: HotEventStore,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
@@ -67,6 +71,7 @@ async fn run() -> Result<(), String> {
 
     let lifecycle = LifecycleFanout::default();
     let fanout = SessionFanout::default();
+    let hot_store = HotEventStore::new();
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
@@ -82,6 +87,7 @@ async fn run() -> Result<(), String> {
         pool: pool.clone(),
         fanout: fanout.clone(),
         lifecycle,
+        hot_store: hot_store.clone(),
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
@@ -89,7 +95,13 @@ async fn run() -> Result<(), String> {
         instance_id: instance_id.clone(),
     };
 
-    relay::spawn(pool, fanout, state.lifecycle.clone(), instance_id);
+    relay::spawn(
+        pool,
+        fanout,
+        state.lifecycle.clone(),
+        hot_store,
+        instance_id,
+    );
 
     let app = build_public_router(telemetry.clone(), ops_state.clone()).with_state(state.clone());
     let ops_router = build_ops_router(telemetry).with_state(state);

@@ -20,13 +20,14 @@ use crate::{
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
+    hot_store::HotEventStoreSnapshot,
     model::{
         AppendEventRequest, ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions,
         LifecycleEvent, LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest,
         parse_query_scalar,
     },
     ops::OpsSnapshot,
-    repository,
+    read_path, repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, ReadOperation,
@@ -107,6 +108,7 @@ struct DebugStateResponse {
     auth_mode: &'static str,
     telemetry_enabled: bool,
     runtime: RuntimeSnapshot,
+    hot_store: HotEventStoreSnapshot,
     fanout: DebugFanoutState,
 }
 
@@ -144,6 +146,7 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
 pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
     let runtime = state.runtime.snapshot().await;
+    let hot_store = state.hot_store.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
 
@@ -152,6 +155,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         auth_mode: auth_mode_name(state.auth_mode),
         telemetry_enabled: state.telemetry.enabled(),
         runtime,
+        hot_store,
         fanout: DebugFanoutState { events, lifecycle },
     })
 }
@@ -347,8 +351,7 @@ pub async fn append_event(
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
         let outcome =
-            repository::append_event(&state.pool, &session_id, validated, &state.instance_id)
-                .await;
+            repository::append_event(&state.pool, &session_id, validated, &state.instance_id).await;
         record_request_result(
             &state,
             RequestPhase::Ack,
@@ -367,6 +370,7 @@ pub async fn append_event(
             .await;
 
         if let Some(event) = outcome.event.clone() {
+            state.hot_store.put_event(event.clone()).await;
             state.fanout.broadcast(event).await;
         }
 
@@ -509,8 +513,13 @@ pub async fn read_events(
     let auth = authenticate_http(&state, &headers)?;
     let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    let page =
-        repository::read_events(&state.pool, &session_id, parse_events_options(params)?).await?;
+    let page = read_path::read_events(
+        &state.hot_store,
+        &state.pool,
+        &session_id,
+        parse_events_options(params)?,
+    )
+    .await?;
 
     state
         .runtime
@@ -1079,7 +1088,8 @@ async fn replay_tail(
     batch_size: u32,
 ) -> Result<i64, AppError> {
     loop {
-        let page = repository::read_events(
+        let page = read_path::read_events(
+            &state.hot_store,
             &state.pool,
             session_id,
             EventsOptions {
