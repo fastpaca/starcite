@@ -14,6 +14,7 @@ use axum::{
 
 use crate::{
     AppState,
+    archive_queue::ArchiveQueueSnapshot,
     config::AuthMode,
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     ops::OpsSnapshot,
@@ -549,6 +550,7 @@ impl Telemetry {
         &self,
         ops: &OpsSnapshot,
         runtime: &RuntimeSnapshot,
+        archive_queue: &ArchiveQueueSnapshot,
         events: &SessionFanoutSnapshot,
         lifecycle: &LifecycleFanoutSnapshot,
     ) -> String {
@@ -592,6 +594,13 @@ impl Telemetry {
             "Active runtime sessions currently tracked by this process",
             &node_labels,
             runtime.active_session_count as i64,
+        );
+        render_scalar_gauge(
+            &mut out,
+            "starcite_archive_queue_pending_sessions",
+            "Sessions currently pending archive progress flush on this process",
+            &node_labels,
+            archive_queue.pending_session_count as i64,
         );
         let runtime_reason_labels = runtime
             .sessions
@@ -749,8 +758,9 @@ impl Default for Telemetry {
 
 pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
-    let (runtime, events, lifecycle) = tokio::join!(
+    let (runtime, archive_queue, events, lifecycle) = tokio::join!(
         state.runtime.snapshot(),
+        state.archive_queue.snapshot(),
         state.fanout.snapshot(),
         state.lifecycle.snapshot()
     );
@@ -762,7 +772,7 @@ pub async fn metrics(State(state): State<AppState>) -> impl IntoResponse {
         )],
         state
             .telemetry
-            .render_with_state(&ops, &runtime, &events, &lifecycle),
+            .render_with_state(&ops, &runtime, &archive_queue, &events, &lifecycle),
     )
 }
 
@@ -997,6 +1007,7 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::{
+        archive_queue::ArchiveQueueSnapshot,
         config::AuthMode,
         fanout::{
             LifecycleFanoutSnapshot, SessionFanoutSnapshot, SessionSubscriptionSnapshot,
@@ -1153,6 +1164,10 @@ mod tests {
                     },
                 ],
             },
+            &ArchiveQueueSnapshot {
+                pending_session_count: 2,
+                sessions: vec!["ses_a".to_string(), "ses_b".to_string()],
+            },
             &SessionFanoutSnapshot {
                 active_session_count: 1,
                 sessions: vec![SessionSubscriptionSnapshot {
@@ -1184,6 +1199,10 @@ mod tests {
         assert!(rendered.contains(r#"drain_source="manual""#));
         assert!(rendered.contains("starcite_runtime_active_sessions"));
         assert!(rendered.contains(r#"starcite_runtime_active_sessions{node="starcite-rs"} 2"#));
+        assert!(rendered.contains("starcite_archive_queue_pending_sessions"));
+        assert!(
+            rendered.contains(r#"starcite_archive_queue_pending_sessions{node="starcite-rs"} 2"#)
+        );
         assert!(rendered.contains("starcite_runtime_active_sessions_by_reason"));
         assert!(rendered.contains(
             r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="http_lifecycle"} 1"#

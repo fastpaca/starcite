@@ -5,6 +5,7 @@ use sqlx::{PgPool, postgres::PgListener};
 use tokio::time::sleep;
 
 use crate::{
+    archive_queue::ArchiveQueue,
     fanout::{LifecycleFanout, SessionFanout},
     hot_store::HotEventStore,
     repository,
@@ -31,10 +32,19 @@ pub fn spawn(
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
+    archive_queue: ArchiveQueue,
     instance_id: Arc<str>,
 ) {
     tokio::spawn(async move {
-        run_listener_loop(pool, fanout, lifecycle, hot_store, instance_id).await;
+        run_listener_loop(
+            pool,
+            fanout,
+            lifecycle,
+            hot_store,
+            archive_queue,
+            instance_id,
+        )
+        .await;
     });
 }
 
@@ -43,6 +53,7 @@ async fn run_listener_loop(
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
+    archive_queue: ArchiveQueue,
     instance_id: Arc<str>,
 ) {
     loop {
@@ -74,6 +85,7 @@ async fn run_listener_loop(
                         &fanout,
                         &lifecycle,
                         &hot_store,
+                        &archive_queue,
                         instance_id.as_ref(),
                         notification.channel(),
                         notification.payload(),
@@ -96,6 +108,7 @@ async fn handle_notification(
     fanout: &SessionFanout,
     lifecycle: &LifecycleFanout,
     hot_store: &HotEventStore,
+    archive_queue: &ArchiveQueue,
     instance_id: &str,
     channel: &str,
     payload: &str,
@@ -117,6 +130,7 @@ async fn handle_notification(
             match repository::load_event_by_seq(pool, &payload.session_id, payload.seq).await {
                 Ok(Some(event)) => {
                     hot_store.put_event(event.clone()).await;
+                    archive_queue.enqueue(&event.session_id).await;
                     fanout.broadcast(event).await;
                 }
                 Ok(None) => {

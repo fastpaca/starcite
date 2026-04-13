@@ -1,4 +1,5 @@
 mod archive;
+mod archive_queue;
 mod auth;
 mod config;
 mod error;
@@ -15,6 +16,7 @@ mod telemetry;
 mod web;
 
 use archive::ArchiveWorker;
+use archive_queue::ArchiveQueue;
 use axum::{
     Router, middleware,
     routing::{get, post},
@@ -38,6 +40,7 @@ pub struct AppState {
     pub fanout: SessionFanout,
     pub lifecycle: LifecycleFanout,
     pub hot_store: HotEventStore,
+    pub archive_queue: ArchiveQueue,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
@@ -74,6 +77,7 @@ async fn run() -> Result<(), String> {
     let lifecycle = LifecycleFanout::default();
     let fanout = SessionFanout::default();
     let hot_store = HotEventStore::new();
+    let archive_queue = ArchiveQueue::new();
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
@@ -90,6 +94,7 @@ async fn run() -> Result<(), String> {
         fanout: fanout.clone(),
         lifecycle,
         hot_store: hot_store.clone(),
+        archive_queue: archive_queue.clone(),
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
@@ -100,6 +105,7 @@ async fn run() -> Result<(), String> {
     ArchiveWorker::new(
         pool.clone(),
         state.hot_store.clone(),
+        state.archive_queue.clone(),
         Duration::from_millis(config.archive_flush_interval_ms),
     )
     .spawn();
@@ -109,6 +115,7 @@ async fn run() -> Result<(), String> {
         fanout,
         state.lifecycle.clone(),
         hot_store,
+        archive_queue,
         instance_id,
     );
 

@@ -16,7 +16,9 @@ use serde::Serialize;
 use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
-    AppState, auth,
+    AppState,
+    archive_queue::ArchiveQueueSnapshot,
+    auth,
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
@@ -109,6 +111,7 @@ struct DebugStateResponse {
     telemetry_enabled: bool,
     runtime: RuntimeSnapshot,
     hot_store: HotEventStoreSnapshot,
+    archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
 }
 
@@ -147,6 +150,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
     let runtime = state.runtime.snapshot().await;
     let hot_store = state.hot_store.snapshot().await;
+    let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
 
@@ -156,6 +160,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         telemetry_enabled: state.telemetry.enabled(),
         runtime,
         hot_store,
+        archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
     })
 }
@@ -371,6 +376,7 @@ pub async fn append_event(
 
         if let Some(event) = outcome.event.clone() {
             state.hot_store.put_event(event.clone()).await;
+            state.archive_queue.enqueue(&session_id).await;
             state.fanout.broadcast(event).await;
         }
 

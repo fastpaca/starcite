@@ -137,11 +137,12 @@ locally contiguous. That moves replay shape closer to the Elixir `EventStore` an
 contracts, even though append ack is still incorrectly paying the Postgres commit path in this
 experiment.
 
-The rewrite now also has a background archive-progress worker. It advances `sessions.archived_seq`
-on a periodic tick and prunes hot in-memory events once they are considered archived, so local
-memory behaves more like a flush-driven hot tier instead of a permanent cache. In this branch that
-worker is still transitional: the event rows already exist in Postgres before the flush tick, so it
-restores hot/cold tier behavior without yet removing Postgres from the append ack path.
+The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
+queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
+`sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
+periodic tick is now only a fallback nudge if no new work arrives. In this branch that worker is
+still transitional: the event rows already exist in Postgres before the flush, so it restores
+hot/cold tier behavior without yet removing Postgres from the append ack path.
 
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
@@ -149,8 +150,8 @@ plus lifecycle delivery timings, active raw stream subscriptions and Phoenix top
 socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
-now exposes that same local runtime map plus hot event-store state with tenant, generation, last
-touch reason, and remaining idle time per active session. It still does not cover routing,
+now exposes that same local runtime map plus hot event-store state, archive-queue backlog, and
+remaining idle time per active session. It still does not cover routing,
 replication, archive, or full event-store invariants because those subsystems do not exist in this
 rewrite.
 

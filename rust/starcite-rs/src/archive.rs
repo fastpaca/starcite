@@ -3,20 +3,27 @@ use std::time::Duration;
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::{error::AppError, hot_store::HotEventStore, repository};
+use crate::{archive_queue::ArchiveQueue, error::AppError, hot_store::HotEventStore, repository};
 
 #[derive(Debug, Clone)]
 pub struct ArchiveWorker {
     pool: PgPool,
     hot_store: HotEventStore,
+    queue: ArchiveQueue,
     flush_interval: Duration,
 }
 
 impl ArchiveWorker {
-    pub fn new(pool: PgPool, hot_store: HotEventStore, flush_interval: Duration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        hot_store: HotEventStore,
+        queue: ArchiveQueue,
+        flush_interval: Duration,
+    ) -> Self {
         Self {
             pool,
             hot_store,
+            queue,
             flush_interval,
         }
     }
@@ -29,17 +36,21 @@ impl ArchiveWorker {
 
     async fn run(self) {
         loop {
-            sleep(self.flush_interval).await;
+            tokio::select! {
+                _ = sleep(self.flush_interval) => {},
+                _ = self.queue.wait() => {},
+            }
             self.flush_once().await;
         }
     }
 
     async fn flush_once(&self) {
-        let session_ids = self.hot_store.session_ids().await;
+        let session_ids = self.queue.drain().await;
 
         for session_id in session_ids {
             if let Err(error) = self.flush_session(&session_id).await {
                 tracing::warn!(error = ?error, session_id, "archive flush tick failed");
+                self.queue.enqueue(&session_id).await;
             }
         }
     }
