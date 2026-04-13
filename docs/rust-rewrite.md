@@ -137,6 +137,12 @@ locally contiguous. That moves replay shape closer to the Elixir `EventStore` an
 contracts, even though append ack is still incorrectly paying the Postgres commit path in this
 experiment.
 
+The rewrite now also has a background archive-progress worker. It advances `sessions.archived_seq`
+on a periodic tick and prunes hot in-memory events once they are considered archived, so local
+memory behaves more like a flush-driven hot tier instead of a permanent cache. In this branch that
+worker is still transitional: the event rows already exist in Postgres before the flush tick, so it
+restores hot/cold tier behavior without yet removing Postgres from the append ack path.
+
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active

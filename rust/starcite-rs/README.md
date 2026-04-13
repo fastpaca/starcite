@@ -41,6 +41,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
 - The rewrite now keeps a local in-memory hot event store per process. Local appends and relayed remote commits both populate that hot store, and `GET /v1/sessions/:id/events` plus tail catch-up replay read hot state first and only fall back to Postgres when the requested range is not locally contiguous.
+- A local archive worker now advances `sessions.archived_seq` on a background cadence and prunes hot in-memory events once they are considered archived. In this transitional branch the backend rows already exist in Postgres before that flush tick, so the worker is modeling the hot/cold boundary and eviction behavior rather than removing Postgres from the ack path yet.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
 - In `unsafe_jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
@@ -88,6 +89,7 @@ STARCITE_AUTH_MODE=none
 STARCITE_ENABLE_TELEMETRY=true
 STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
+ARCHIVE_FLUSH_INTERVAL_MS=5000
 RUST_LOG=info
 ```
 

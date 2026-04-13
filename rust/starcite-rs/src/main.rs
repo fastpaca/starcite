@@ -1,3 +1,4 @@
+mod archive;
 mod auth;
 mod config;
 mod error;
@@ -13,6 +14,7 @@ mod runtime;
 mod telemetry;
 mod web;
 
+use archive::ArchiveWorker;
 use axum::{
     Router, middleware,
     routing::{get, post},
@@ -94,6 +96,13 @@ async fn run() -> Result<(), String> {
         telemetry: telemetry.clone(),
         instance_id: instance_id.clone(),
     };
+
+    ArchiveWorker::new(
+        pool.clone(),
+        state.hot_store.clone(),
+        Duration::from_millis(config.archive_flush_interval_ms),
+    )
+    .spawn();
 
     relay::spawn(
         pool,

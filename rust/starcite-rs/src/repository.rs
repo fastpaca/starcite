@@ -41,6 +41,12 @@ pub struct ArchiveStateOutcome {
     pub changed: bool,
 }
 
+#[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ArchiveState {
+    pub last_seq: i64,
+    pub archived_seq: i64,
+}
+
 pub async fn create_session(
     pool: &PgPool,
     input: ValidatedCreateSession,
@@ -276,6 +282,50 @@ pub async fn set_archive_state(
         tenant_id,
         changed: true,
     })
+}
+
+pub async fn get_archive_state(pool: &PgPool, session_id: &str) -> Result<ArchiveState, AppError> {
+    sqlx::query_as::<_, ArchiveState>(
+        r#"
+        SELECT
+          last_seq,
+          archived_seq
+        FROM sessions
+        WHERE id = $1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::SessionNotFound)
+}
+
+pub async fn mark_archived_seq(
+    pool: &PgPool,
+    session_id: &str,
+    upto_seq: i64,
+) -> Result<i64, AppError> {
+    if upto_seq < 0 {
+        return Err(AppError::Internal);
+    }
+
+    let row = sqlx::query_as::<_, ArchiveState>(
+        r#"
+        UPDATE sessions
+        SET archived_seq = GREATEST(archived_seq, LEAST(last_seq, $2))
+        WHERE id = $1
+        RETURNING
+          last_seq,
+          archived_seq
+        "#,
+    )
+    .bind(session_id)
+    .bind(upto_seq)
+    .fetch_optional(pool)
+    .await?
+    .ok_or(AppError::SessionNotFound)?;
+
+    Ok(row.archived_seq)
 }
 
 pub async fn append_event(

@@ -15,6 +15,7 @@ pub struct Config {
     pub ops_listen_addr: SocketAddr,
     pub database_url: String,
     pub max_connections: u32,
+    pub archive_flush_interval_ms: u64,
     pub migrate_on_boot: bool,
     pub auth_mode: AuthMode,
     pub telemetry_enabled: bool,
@@ -40,6 +41,12 @@ impl Config {
             .map(|raw| parse_positive_u32("DATABASE_MAX_CONNECTIONS", &raw))
             .transpose()?
             .unwrap_or(20);
+
+        let archive_flush_interval_ms = env::var("ARCHIVE_FLUSH_INTERVAL_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("ARCHIVE_FLUSH_INTERVAL_MS", &raw))
+            .transpose()?
+            .unwrap_or(5_000);
 
         let migrate_on_boot = env::var("MIGRATE_ON_BOOT")
             .ok()
@@ -76,6 +83,7 @@ impl Config {
             ops_listen_addr,
             database_url,
             max_connections,
+            archive_flush_interval_ms,
             migrate_on_boot,
             auth_mode,
             telemetry_enabled,
@@ -197,6 +205,12 @@ mod tests {
             parse_positive_u64("STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS", "5000")
                 .expect("positive integer should parse"),
             5_000
+        );
+
+        assert_eq!(
+            parse_positive_u64("ARCHIVE_FLUSH_INTERVAL_MS", "250")
+                .expect("positive integer should parse"),
+            250
         );
     }
 
