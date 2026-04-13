@@ -1,4 +1,4 @@
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 use sqlx::PgPool;
 use tokio::time::sleep;
@@ -15,6 +15,7 @@ pub struct ArchiveWorker {
     session_store: HotSessionStore,
     queue: ArchiveQueue,
     flush_interval: Duration,
+    instance_id: Arc<str>,
 }
 
 impl ArchiveWorker {
@@ -24,6 +25,7 @@ impl ArchiveWorker {
         session_store: HotSessionStore,
         queue: ArchiveQueue,
         flush_interval: Duration,
+        instance_id: Arc<str>,
     ) -> Self {
         Self {
             pool,
@@ -31,6 +33,7 @@ impl ArchiveWorker {
             session_store,
             queue,
             flush_interval,
+            instance_id,
         }
     }
 
@@ -87,6 +90,14 @@ impl ArchiveWorker {
             deleted_hot_events = deleted,
             "archive worker pruned local hot events"
         );
+
+        repository::publish_archive_progress(
+            &self.pool,
+            self.instance_id.as_ref(),
+            session_id,
+            archived_seq,
+        )
+        .await?;
 
         Ok(())
     }

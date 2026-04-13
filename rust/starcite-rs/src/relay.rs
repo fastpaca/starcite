@@ -14,6 +14,7 @@ use crate::{
 
 pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";
 pub const LIFECYCLE_NOTIFICATION_CHANNEL: &str = "starcite_lifecycle_fanout";
+pub const ARCHIVE_NOTIFICATION_CHANNEL: &str = "starcite_archive_progress";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventNotification {
@@ -26,6 +27,13 @@ pub struct EventNotification {
 pub struct LifecycleNotification {
     pub emitter_id: String,
     pub cursor: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ArchiveNotification {
+    pub emitter_id: String,
+    pub session_id: String,
+    pub archived_seq: i64,
 }
 
 pub fn spawn(
@@ -72,7 +80,11 @@ async fn run_listener_loop(
 
         if let Err(error) = listen_all(
             &mut listener,
-            [EVENT_NOTIFICATION_CHANNEL, LIFECYCLE_NOTIFICATION_CHANNEL],
+            [
+                EVENT_NOTIFICATION_CHANNEL,
+                LIFECYCLE_NOTIFICATION_CHANNEL,
+                ARCHIVE_NOTIFICATION_CHANNEL,
+            ],
         )
         .await
         {
@@ -187,6 +199,30 @@ async fn handle_notification(
                 }
             }
         }
+        ARCHIVE_NOTIFICATION_CHANNEL => {
+            let payload = match serde_json::from_str::<ArchiveNotification>(payload) {
+                Ok(payload) => payload,
+                Err(error) => {
+                    tracing::warn!(
+                        error = ?error,
+                        payload,
+                        "failed to decode archive relay payload"
+                    );
+                    return;
+                }
+            };
+
+            if should_ignore_emitter(instance_id, &payload.emitter_id) {
+                return;
+            }
+
+            session_store
+                .update_archived_seq(&payload.session_id, payload.archived_seq)
+                .await;
+            hot_store
+                .delete_below(&payload.session_id, payload.archived_seq.saturating_add(1))
+                .await;
+        }
         _ => {}
     }
 }
@@ -208,7 +244,9 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{EventNotification, LifecycleNotification, should_ignore_emitter};
+    use super::{
+        ArchiveNotification, EventNotification, LifecycleNotification, should_ignore_emitter,
+    };
 
     #[test]
     fn event_notification_round_trips() {
@@ -240,6 +278,23 @@ mod tests {
 
         assert_eq!(decoded.emitter_id, "node-a");
         assert_eq!(decoded.cursor, 17);
+    }
+
+    #[test]
+    fn archive_notification_round_trips() {
+        let payload = serde_json::to_string(&ArchiveNotification {
+            emitter_id: "node-a".to_string(),
+            session_id: "ses_demo".to_string(),
+            archived_seq: 4,
+        })
+        .expect("serialize archive notification");
+
+        let decoded: ArchiveNotification =
+            serde_json::from_str(&payload).expect("deserialize archive notification");
+
+        assert_eq!(decoded.emitter_id, "node-a");
+        assert_eq!(decoded.session_id, "ses_demo");
+        assert_eq!(decoded.archived_seq, 4);
     }
 
     #[test]

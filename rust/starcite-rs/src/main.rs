@@ -190,6 +190,7 @@ async fn run() -> Result<(), String> {
         state.session_store.clone(),
         state.archive_queue.clone(),
         Duration::from_millis(config.archive_flush_interval_ms),
+        state.instance_id.clone(),
     )
     .spawn();
 

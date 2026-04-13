@@ -10,8 +10,8 @@ use crate::{
         ValidatedUpdateSession, merge_metadata,
     },
     relay::{
-        EVENT_NOTIFICATION_CHANNEL, EventNotification, LIFECYCLE_NOTIFICATION_CHANNEL,
-        LifecycleNotification,
+        ARCHIVE_NOTIFICATION_CHANNEL, ArchiveNotification, EVENT_NOTIFICATION_CHANNEL,
+        EventNotification, LIFECYCLE_NOTIFICATION_CHANNEL, LifecycleNotification,
     },
 };
 
@@ -379,6 +379,28 @@ pub async fn mark_archived_seq(
     .ok_or(AppError::SessionNotFound)?;
 
     Ok(row.archived_seq)
+}
+
+pub async fn publish_archive_progress(
+    pool: &PgPool,
+    emitter_id: &str,
+    session_id: &str,
+    archived_seq: i64,
+) -> Result<(), AppError> {
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(ARCHIVE_NOTIFICATION_CHANNEL)
+        .bind(
+            serde_json::to_string(&ArchiveNotification {
+                emitter_id: emitter_id.to_string(),
+                session_id: session_id.to_string(),
+                archived_seq,
+            })
+            .map_err(|_| AppError::Internal)?,
+        )
+        .execute(pool)
+        .await?;
+
+    Ok(())
 }
 
 pub async fn append_event(

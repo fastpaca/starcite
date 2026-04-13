@@ -203,6 +203,9 @@ commits feed that same queue, a standby can prune its hot copy soon after Postgr
 long-idle failover replay may already be on the cold path even though the commit itself was
 standby-replicated in memory.
 
+Archive progress now also relays over Postgres `NOTIFY`, so other Rust nodes can advance cached
+`archived_seq` state and prune stale hot copies without waiting for a cold session refresh.
+
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
 plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
