@@ -2,7 +2,14 @@
 
 This branch adds a parallel Rust implementation under [rust/starcite-rs](/Users/selund/git/fastpaca/starcite/.worktrees/refactor-radical-re/rust/starcite-rs).
 
-The goal is not feature parity in one shot. The goal is to test whether a saner core falls out when Starcite is modeled as:
+This branch started as a deliberate architecture experiment. It is not a
+faithful rewrite of the existing Starcite hot path, and it should not be used
+as the target design for low-tail parity work.
+
+The actual parity target for a Rust rewrite is documented in
+[rust-parity-plan.md](/Users/selund/git/fastpaca/starcite/.worktrees/refactor-radical-re/docs/rust-parity-plan.md).
+
+The experiment here asked what falls out when Starcite is modeled as:
 
 - Axum handlers with typed request validation
 - one Postgres-backed write path
