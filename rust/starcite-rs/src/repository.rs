@@ -429,12 +429,14 @@ pub async fn append_event(
 
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(EVENT_NOTIFICATION_CHANNEL)
-        .bind(serde_json::to_string(&EventNotification {
-            emitter_id: emitter_id.to_string(),
-            session_id: session_id.to_string(),
-            seq: next_seq,
-        })
-        .map_err(|_| AppError::Internal)?)
+        .bind(
+            serde_json::to_string(&EventNotification {
+                emitter_id: emitter_id.to_string(),
+                session_id: session_id.to_string(),
+                seq: next_seq,
+            })
+            .map_err(|_| AppError::Internal)?,
+        )
         .execute(&mut *tx)
         .await?;
 
@@ -568,11 +570,13 @@ pub async fn append_lifecycle_event(
 
     sqlx::query("SELECT pg_notify($1, $2)")
         .bind(LIFECYCLE_NOTIFICATION_CHANNEL)
-        .bind(serde_json::to_string(&LifecycleNotification {
-            emitter_id: emitter_id.to_string(),
-            cursor: response.cursor,
-        })
-        .map_err(|_| AppError::Internal)?)
+        .bind(
+            serde_json::to_string(&LifecycleNotification {
+                emitter_id: emitter_id.to_string(),
+                cursor: response.cursor,
+            })
+            .map_err(|_| AppError::Internal)?,
+        )
         .execute(&mut *tx)
         .await?;
 

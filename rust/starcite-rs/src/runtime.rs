@@ -158,12 +158,12 @@ impl SessionRuntime {
         match &self.pool {
             Some(pool) => {
                 match repository::append_lifecycle_event(pool, event, &self.instance_id).await {
-                Ok(event) => {
-                    self.lifecycle.broadcast(event).await;
-                }
-                Err(error) => {
-                    tracing::error!(error = ?error, "failed to persist runtime lifecycle event");
-                }
+                    Ok(event) => {
+                        self.lifecycle.broadcast(event).await;
+                    }
+                    Err(error) => {
+                        tracing::error!(error = ?error, "failed to persist runtime lifecycle event");
+                    }
                 }
             }
             None => {
