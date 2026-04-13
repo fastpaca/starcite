@@ -13,6 +13,7 @@ use crate::ops::OpsSnapshot;
 
 pub const DRAIN_SOURCE_HEADER: HeaderName = HeaderName::from_static("x-starcite-drain-source");
 pub const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("x-starcite-retry-after-ms");
+pub const OWNER_URL_HEADER: HeaderName = HeaderName::from_static("x-starcite-owner-url");
 
 #[derive(Debug, Error)]
 pub enum AppError {
@@ -69,7 +70,11 @@ pub enum AppError {
     #[error("database unavailable")]
     DatabaseUnavailable,
     #[error("session is not owned by this node")]
-    SessionNotOwned { owner_id: String, epoch: i64 },
+    SessionNotOwned {
+        owner_id: String,
+        owner_public_url: Option<String>,
+        epoch: i64,
+    },
     #[error("append quorum unavailable")]
     QuorumUnavailable { required: u32, acknowledged: u32 },
     #[error("node draining")]
@@ -268,10 +273,15 @@ impl AppError {
                 "error": self.error_code(),
                 "message": "Database is unavailable"
             }),
-            Self::SessionNotOwned { owner_id, epoch } => json!({
+            Self::SessionNotOwned {
+                owner_id,
+                owner_public_url,
+                epoch,
+            } => json!({
                 "error": self.error_code(),
                 "message": "Session is not owned by this node",
                 "owner_id": owner_id,
+                "owner_url": owner_public_url,
                 "epoch": epoch
             }),
             Self::QuorumUnavailable {
@@ -330,12 +340,22 @@ impl IntoResponse for AppError {
 
         let mut response = (self.status_code(), Json(self.body())).into_response();
 
-        if let Self::NodeDraining {
-            drain_source,
-            retry_after_ms,
-        } = self
-        {
-            apply_drain_headers(response.headers_mut(), drain_source, retry_after_ms);
+        match &self {
+            Self::NodeDraining {
+                drain_source,
+                retry_after_ms,
+            } => {
+                apply_drain_headers(response.headers_mut(), *drain_source, *retry_after_ms);
+            }
+            Self::SessionNotOwned {
+                owner_public_url: Some(owner_public_url),
+                ..
+            } => {
+                if let Ok(value) = HeaderValue::from_str(owner_public_url) {
+                    response.headers_mut().insert(OWNER_URL_HEADER, value);
+                }
+            }
+            _ => {}
         }
 
         response
@@ -347,7 +367,7 @@ mod tests {
     use axum::{body, http::StatusCode, response::IntoResponse};
     use serde_json::json;
 
-    use super::{AppError, DRAIN_SOURCE_HEADER, RETRY_AFTER_MS_HEADER};
+    use super::{AppError, DRAIN_SOURCE_HEADER, OWNER_URL_HEADER, RETRY_AFTER_MS_HEADER};
     use crate::ops::OpsSnapshot;
 
     #[tokio::test]
@@ -441,6 +461,38 @@ mod tests {
                 "message": "Append quorum is unavailable",
                 "required": 2,
                 "acknowledged": 1
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn session_not_owned_response_includes_owner_hint() {
+        let response = AppError::SessionNotOwned {
+            owner_id: "node-a".to_string(),
+            owner_public_url: Some("http://127.0.0.1:4191".to_string()),
+            epoch: 7,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response.headers().get(&OWNER_URL_HEADER).unwrap(),
+            "http://127.0.0.1:4191"
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+
+        assert_eq!(
+            json_body,
+            json!({
+                "error": "session_not_owned",
+                "message": "Session is not owned by this node",
+                "owner_id": "node-a",
+                "owner_url": "http://127.0.0.1:4191",
+                "epoch": 7
             })
         );
     }

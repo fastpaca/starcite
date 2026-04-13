@@ -23,6 +23,7 @@ struct ProducerCursorRow {
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SessionLeaseRow {
     pub owner_id: String,
+    pub owner_public_url: Option<String>,
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
     pub standby_node_id: Option<String>,
@@ -683,11 +684,14 @@ pub async fn acquire_session_lease(
         )
         SELECT
           upserted.owner_id,
+          owner_control.public_url AS owner_public_url,
           upserted.epoch,
           upserted.expires_at,
           upserted.standby_node_id,
           control_nodes.ops_url AS standby_ops_url
         FROM upserted
+        LEFT JOIN control_nodes AS owner_control
+          ON owner_control.node_id = upserted.owner_id
         LEFT JOIN control_nodes
           ON control_nodes.node_id = upserted.standby_node_id
         "#,
@@ -726,6 +730,7 @@ pub async fn release_session_lease(
 pub async fn upsert_control_node(
     pool: &PgPool,
     node_id: &str,
+    public_url: Option<&str>,
     ops_url: &str,
     draining: bool,
     ttl_ms: i64,
@@ -739,6 +744,7 @@ pub async fn upsert_control_node(
         )
         INSERT INTO control_nodes (
           node_id,
+          public_url,
           ops_url,
           draining,
           expires_at
@@ -747,11 +753,13 @@ pub async fn upsert_control_node(
           $1,
           $2,
           $3,
-          now() + ($4 * interval '1 millisecond')
+          $4,
+          now() + ($5 * interval '1 millisecond')
         )
         ON CONFLICT (node_id)
         DO UPDATE
         SET
+          public_url = EXCLUDED.public_url,
           ops_url = EXCLUDED.ops_url,
           draining = EXCLUDED.draining,
           expires_at = EXCLUDED.expires_at,
@@ -759,6 +767,7 @@ pub async fn upsert_control_node(
         "#,
     )
     .bind(node_id)
+    .bind(public_url)
     .bind(ops_url)
     .bind(draining)
     .bind(ttl_ms)

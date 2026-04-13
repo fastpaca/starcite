@@ -108,6 +108,7 @@ async fn run() -> Result<(), String> {
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
     let control_plane = ControlPlaneState::new(
+        config.local_async_node_public_url.clone(),
         config.local_async_node_ops_url.clone(),
         Duration::from_millis(config.local_async_node_ttl_ms),
     );

@@ -1,5 +1,6 @@
 CREATE TABLE control_nodes (
   node_id TEXT PRIMARY KEY,
+  public_url TEXT,
   ops_url TEXT NOT NULL,
   draining BOOLEAN NOT NULL DEFAULT FALSE,
   expires_at TIMESTAMPTZ NOT NULL,

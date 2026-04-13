@@ -173,6 +173,12 @@ silently falling back to single-node ack. `LOCAL_ASYNC_STANDBY_URL` remains as a
 for local drills when Postgres-backed node registration is not enabled. That is still only a narrow
 2-of-2 experiment, not a full Raft group or routed topology.
 
+The control-plane heartbeat can now also carry a node's public base URL. That does not implement
+full routed ownership yet, but it does make the current `409 session_not_owned` response less
+opaque: when the owner has registered a public URL, non-owner nodes include it as `owner_url` in
+the body and `x-starcite-owner-url` in the headers. That is enough for manual drills and for a
+future edge proxy to reroute requests without guessing.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The

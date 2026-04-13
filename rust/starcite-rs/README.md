@@ -46,6 +46,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Appends now route through a local per-session worker boundary before they hit the repository layer. That gets append ordering off the HTTP task and onto one explicit session-local queue per process, which is closer to the eventual runtime/quorum shape even though the worker still calls Postgres synchronously in this branch.
 - In `local_async` commit mode, that same session worker now has a real local commit path: it updates hot in-memory session and event state, broadcasts live fanout, and queues the event for a background Postgres flusher. Same-node reads can keep working while Postgres is briefly unavailable, but flushed durability and cross-node visibility trail the ack.
 - `local_async` now also carries explicit single-writer ownership. The owner node renews a Postgres-backed session lease while its local worker is active, exposes that lease state on `GET /debug/state`, and rejects event-path reads or appends on non-owner nodes with `409 session_not_owned` until the worker idles out or the lease expires.
+- When nodes also register `LOCAL_ASYNC_NODE_PUBLIC_URL`, that `409 session_not_owned` response includes `owner_url` in the JSON body and `x-starcite-owner-url` in the headers so a caller or future edge proxy can reroute directly to the current owner.
 - `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port` registers the node in Postgres as a live standby candidate. When that is enabled, the session lease path assigns one live non-draining standby per owned session and append treats standby replication as required for quorum.
 - `LOCAL_ASYNC_STANDBY_URL=http://host:ops_port` remains as a static fallback for local drills when you do not want Postgres-backed node registration.
 - A local archive worker now drains an explicit dirty-session queue, advances `sessions.archived_seq`, and prunes hot in-memory events once they are considered archived. The periodic tick is now only a fallback nudge, not the primary discovery path. In this transitional branch the backend rows already exist in Postgres before that flush, so the worker is modeling the hot/cold boundary and eviction behavior rather than removing Postgres from the ack path yet.
@@ -101,6 +102,7 @@ STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
 COMMIT_FLUSH_INTERVAL_MS=100
 LOCAL_ASYNC_LEASE_TTL_MS=5000
+LOCAL_ASYNC_NODE_PUBLIC_URL=
 LOCAL_ASYNC_NODE_OPS_URL=
 LOCAL_ASYNC_NODE_TTL_MS=2000
 LOCAL_ASYNC_STANDBY_URL=
@@ -146,10 +148,12 @@ STARCITE_RS_HOST_PORT=4011 STARCITE_RS_OPS_HOST_PORT=4012 STARCITE_RS_DB_HOST_PO
 ```
 
 For multi-node `local_async` drills, leave the single-node compose file as-is and start each Rust node
-with its own `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port`. That lets Postgres assign live
-standbys without hard-coding one peer per process. Keep `LOCAL_ASYNC_STANDBY_URL` empty unless you
-want the older static 2-node fallback. On a fresh database, run migrations on one node before
-starting the rest so the heartbeat loop does not race the initial schema boot.
+with its own `LOCAL_ASYNC_NODE_PUBLIC_URL=http://host:public_port` plus
+`LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port`. That lets Postgres assign live standbys without
+hard-coding one peer per process, and it gives non-owner nodes enough metadata to return an owner
+hint instead of a blind `409`. Keep `LOCAL_ASYNC_STANDBY_URL` empty unless you want the older
+static 2-node fallback. On a fresh database, run migrations on one node before starting the rest so
+the heartbeat loop does not race the initial schema boot.
 
 ## Example
 

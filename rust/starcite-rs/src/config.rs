@@ -30,6 +30,7 @@ pub struct Config {
     pub session_runtime_idle_timeout_ms: u64,
     pub commit_flush_interval_ms: u64,
     pub local_async_lease_ttl_ms: u64,
+    pub local_async_node_public_url: Option<String>,
     pub local_async_node_ops_url: Option<String>,
     pub local_async_node_ttl_ms: u64,
     pub local_async_standby_url: Option<String>,
@@ -109,6 +110,11 @@ impl Config {
             .transpose()?
             .unwrap_or(5_000);
 
+        let local_async_node_public_url = env::var("LOCAL_ASYNC_NODE_PUBLIC_URL")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|value| !value.is_empty());
+
         let local_async_node_ops_url = env::var("LOCAL_ASYNC_NODE_OPS_URL")
             .ok()
             .map(|raw| raw.trim().to_string())
@@ -145,6 +151,7 @@ impl Config {
             session_runtime_idle_timeout_ms,
             commit_flush_interval_ms,
             local_async_lease_ttl_ms,
+            local_async_node_public_url,
             local_async_node_ops_url,
             local_async_node_ttl_ms,
             local_async_standby_url,

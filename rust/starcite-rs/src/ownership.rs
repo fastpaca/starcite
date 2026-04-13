@@ -79,6 +79,7 @@ impl OwnershipManager {
         if row.owner_id != self.instance_id.as_ref() {
             return Err(AppError::SessionNotOwned {
                 owner_id: row.owner_id,
+                owner_public_url: row.owner_public_url,
                 epoch: row.epoch,
             });
         }
