@@ -707,7 +707,7 @@ pub async fn acquire_session_lease(
         designated_owner AS (
           SELECT node_id
           FROM live_nodes
-          ORDER BY md5($1 || ':' || node_id), node_id
+          ORDER BY md5($1 || ':' || COALESCE(public_url, node_id)), node_id
           LIMIT 1
         ),
         target_owner AS (

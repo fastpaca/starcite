@@ -57,6 +57,7 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - `GET /health/ready` now reports `mode = "ready"` or `mode = "draining"`, plus drain metadata during shutdown drain, instead of only exposing probe status code
 - `GET /metrics` exports in-process Prometheus text without introducing a separate metrics service or crate dependency
 - the existing hot-path k6 bench can target the split public and ops listeners by keeping `CLUSTER_NODES` on the public `/v1` URLs and setting `CLUSTER_READY_NODES` to the matching ops base URLs
+- the same k6 bench now also accepts `SESSION_ROUTE_MODE=designated_owner`, which hashes each session onto the same owner key Postgres uses for lease selection (`LOCAL_ASYNC_NODE_PUBLIC_URL` when present, otherwise the node id) so the load test can hit the intended owner directly instead of paying proxy hops on purpose
 
 There is now a dedicated three-node Rust benchmark harness too:
 
@@ -70,6 +71,11 @@ That compose file advertises each node on the internal Docker network (`http://n
 `http://nodeN:4002`) so owner hints and owner-proxy forwarding work correctly from the bundled k6
 container. If you drive the cluster directly from the host instead of the in-network k6 service,
 override the `LOCAL_ASYNC_NODE_PUBLIC_URL` values to host-reachable addresses first.
+
+When the point of the run is owner-path latency rather than wrong-node forwarding behavior, set
+`SESSION_ROUTE_MODE=designated_owner` in the k6 container too. Leaving the default
+`round_robin` mode in place is still useful, but it now measures the extra proxy hop and routing
+behavior across the cluster instead of the designated owner's append hot path.
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
 `phx_join`, and `phx_leave` with the usual Phoenix frame array shape

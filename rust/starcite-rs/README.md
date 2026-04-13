@@ -163,6 +163,10 @@ hard-coding one peer per process, and it gives non-owner nodes enough metadata t
 hint instead of a blind `409`. Keep `LOCAL_ASYNC_STANDBY_URL` empty unless you want the older
 static 2-node fallback. On a fresh database, non-migrator nodes will now wait for the
 `control_nodes` table to appear before they start heartbeating into the Postgres control plane.
+When you benchmark that multi-node shape with the existing k6 hot-path script, set
+`SESSION_ROUTE_MODE=designated_owner` if you want the script to hash each session onto the same
+owner key Postgres uses for lease selection. Leave it at the default `round_robin` mode when you
+want to measure wrong-node proxy behavior instead.
 
 ## Example
 

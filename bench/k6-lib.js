@@ -6,6 +6,7 @@
 
 import http from 'k6/http';
 import { check, sleep } from 'k6';
+import crypto from 'k6/crypto';
 
 function parseClusterNodes(value) {
   if (!value) return [];
@@ -26,6 +27,12 @@ if (readyNodes.length === 0) {
   readyNodes.push(...clusterNodes.map((url) => url.replace(/\/v1$/, '')));
 }
 
+const sessionRouteMode = (__ENV.SESSION_ROUTE_MODE || 'round_robin').trim().toLowerCase();
+const routeNodes = clusterNodes.map((url) => ({
+  apiUrl: url,
+  ownerKey: url.replace(/\/v1$/, ''),
+}));
+
 let nodeIndex = 0;
 
 function getNextNode() {
@@ -39,6 +46,7 @@ export const config = {
   getNextNode,
   clusterNodes,
   readyNodes,
+  sessionRouteMode,
   runId: __ENV.RUN_ID || `${Date.now()}-${Math.floor(Math.random() * 10000)}`,
 };
 
@@ -65,13 +73,53 @@ export const jsonHeaders = {
 };
 
 function buildUrl(path, params = {}, useLoadBalancer = true) {
+  return buildUrlForBase(
+    useLoadBalancer && clusterNodes.length > 1 ? getNextNode() : config.apiUrl,
+    path,
+    params
+  );
+}
+
+function buildSessionUrl(sessionId, path, params = {}) {
+  if (sessionRouteMode !== 'designated_owner' || routeNodes.length <= 1) {
+    return buildUrl(path, params);
+  }
+
+  const baseUrl = designatedOwnerApiUrl(sessionId);
+  return buildUrlForBase(baseUrl, path, params);
+}
+
+function buildUrlForBase(baseUrl, path, params = {}) {
   const query = Object.entries(params)
     .filter(([, value]) => value !== undefined && value !== null && value !== '')
     .map(([key, value]) => `${encodeURIComponent(key)}=${encodeURIComponent(value)}`)
     .join('&');
 
-  const baseUrl = useLoadBalancer && clusterNodes.length > 1 ? getNextNode() : config.apiUrl;
   return query ? `${baseUrl}${path}?${query}` : `${baseUrl}${path}`;
+}
+
+function designatedOwnerApiUrl(sessionId) {
+  let selected = routeNodes[0];
+  let selectedHash = ownerHash(sessionId, selected.ownerKey);
+
+  for (let index = 1; index < routeNodes.length; index++) {
+    const candidate = routeNodes[index];
+    const candidateHash = ownerHash(sessionId, candidate.ownerKey);
+
+    if (
+      candidateHash < selectedHash ||
+      (candidateHash === selectedHash && candidate.apiUrl < selected.apiUrl)
+    ) {
+      selected = candidate;
+      selectedHash = candidateHash;
+    }
+  }
+
+  return selected.apiUrl;
+}
+
+function ownerHash(sessionId, ownerKey) {
+  return crypto.md5(`${sessionId}:${ownerKey}`, 'hex');
 }
 
 export function waitForClusterReady(timeoutSeconds = 60) {
@@ -155,7 +203,11 @@ export function appendEvent(id, event, opts = {}) {
   if (event.idempotency_key !== undefined) payload.idempotency_key = event.idempotency_key;
   if (opts.expectedSeq !== undefined && opts.expectedSeq !== null) payload.expected_seq = opts.expectedSeq;
 
-  const res = http.post(buildUrl(`/sessions/${id}/append`), JSON.stringify(payload), jsonHeaders);
+  const res = http.post(
+    buildSessionUrl(id, `/sessions/${id}/append`),
+    JSON.stringify(payload),
+    jsonHeaders
+  );
 
   return {
     res,
