@@ -67,6 +67,8 @@ pub enum AppError {
         expected: i64,
         current: i64,
     },
+    #[error("session owner proxy unavailable")]
+    OwnerProxyUnavailable { owner_url: String },
     #[error("database unavailable")]
     DatabaseUnavailable,
     #[error("session is not owned by this node")]
@@ -123,6 +125,7 @@ impl AppError {
             Self::ExpectedVersionConflict { .. } => "expected_version_conflict",
             Self::ProducerReplayConflict => "producer_replay_conflict",
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
+            Self::OwnerProxyUnavailable { .. } => "owner_proxy_unavailable",
             Self::DatabaseUnavailable => "database_unavailable",
             Self::SessionNotOwned { .. } => "session_not_owned",
             Self::QuorumUnavailable { .. } => "quorum_unavailable",
@@ -160,6 +163,7 @@ impl AppError {
             | Self::SessionNotOwned { .. }
             | Self::DrainResetForbidden => StatusCode::CONFLICT,
             Self::DatabaseUnavailable
+            | Self::OwnerProxyUnavailable { .. }
             | Self::QuorumUnavailable { .. }
             | Self::NodeDraining { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
@@ -269,6 +273,11 @@ impl AppError {
                 "error": self.error_code(),
                 "message": format!("Producer {producer_id} expected seq {expected}, got {current}")
             }),
+            Self::OwnerProxyUnavailable { owner_url } => json!({
+                "error": self.error_code(),
+                "message": "Session owner is unavailable",
+                "owner_url": owner_url
+            }),
             Self::DatabaseUnavailable => json!({
                 "error": self.error_code(),
                 "message": "Database is unavailable"
@@ -346,6 +355,11 @@ impl IntoResponse for AppError {
                 retry_after_ms,
             } => {
                 apply_drain_headers(response.headers_mut(), *drain_source, *retry_after_ms);
+            }
+            Self::OwnerProxyUnavailable { owner_url } => {
+                if let Ok(value) = HeaderValue::from_str(owner_url) {
+                    response.headers_mut().insert(OWNER_URL_HEADER, value);
+                }
             }
             Self::SessionNotOwned {
                 owner_public_url: Some(owner_public_url),
@@ -493,6 +507,34 @@ mod tests {
                 "owner_id": "node-a",
                 "owner_url": "http://127.0.0.1:4191",
                 "epoch": 7
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn owner_proxy_unavailable_includes_owner_hint() {
+        let response = AppError::OwnerProxyUnavailable {
+            owner_url: "http://127.0.0.1:4191".to_string(),
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(
+            response.headers().get(&OWNER_URL_HEADER).unwrap(),
+            "http://127.0.0.1:4191"
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+
+        assert_eq!(
+            json_body,
+            json!({
+                "error": "owner_proxy_unavailable",
+                "message": "Session owner is unavailable",
+                "owner_url": "http://127.0.0.1:4191"
             })
         );
     }

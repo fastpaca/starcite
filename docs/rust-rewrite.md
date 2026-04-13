@@ -179,6 +179,11 @@ opaque: when the owner has registered a public URL, non-owner nodes include it a
 the body and `x-starcite-owner-url` in the headers. That is enough for manual drills and for a
 future edge proxy to reroute requests without guessing.
 
+That edge proxying story has now started inside the Rust service itself for plain HTTP event-path
+requests. Wrong-node `GET /events` and `POST /append` calls can forward to the current owner using
+the Postgres control-plane hint instead of forcing the client to retry manually. WebSocket tail is
+still explicit-owner only for now, so the routing model is not complete yet.
+
 The local worker lifecycle now also matches the ownership story more closely. A live worker renews
 its Postgres lease in the background instead of only on incoming event-path requests, so ownership
 does not silently drift after a quiet period. When drain begins, that worker exits and releases the

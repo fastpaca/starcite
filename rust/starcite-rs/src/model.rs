@@ -142,7 +142,7 @@ impl UpdateSessionRequest {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppendEventRequest {
     #[serde(rename = "type")]
     pub event_type: String,

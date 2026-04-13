@@ -476,40 +476,60 @@ pub async fn append_event(
     headers: HeaderMap,
     Path(session_id): Path<String>,
     body: Result<Json<AppendEventRequest>, JsonRejection>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
     let started_at = Instant::now();
     let mut tenant_id = "unknown".to_string();
-    let result: Result<(StatusCode, Json<crate::model::AppendReply>), AppError> = async {
+    let result: Result<Response, AppError> = async {
         let auth = authenticate_http(&state, &headers)?;
         let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
         tenant_id =
             resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
-        let validated = auth::validate_append_request(request, &auth)?;
+        let validated = auth::validate_append_request(request.clone(), &auth)?;
         let ack_started_at = Instant::now();
         let outcome = state
             .session_manager
             .append(&session_id, &tenant_id, validated)
             .await;
+        let response = match outcome {
+            Ok(outcome) => {
+                state
+                    .runtime
+                    .touch_existing(
+                        &session_id,
+                        &outcome.tenant_id,
+                        RuntimeTouchReason::HttpWrite,
+                    )
+                    .await;
+
+                Ok((StatusCode::CREATED, Json(outcome.reply)).into_response())
+            }
+            Err(AppError::SessionNotOwned {
+                owner_public_url: Some(owner_public_url),
+                ..
+            }) => {
+                state.session_manager.drop_worker_handle(&session_id).await;
+                state
+                    .owner_proxy
+                    .forward_append(
+                        &owner_public_url,
+                        &session_id,
+                        &request,
+                        headers.get(axum::http::header::AUTHORIZATION),
+                    )
+                    .await
+            }
+            Err(error) => Err(error),
+        };
         record_request_result(
             &state,
             RequestPhase::Ack,
             ack_started_at,
-            outcome.as_ref().map(|_| ()),
+            response.as_ref().map(|_| ()),
         );
-        let outcome = outcome?;
 
-        state
-            .runtime
-            .touch_existing(
-                &session_id,
-                &outcome.tenant_id,
-                RuntimeTouchReason::HttpWrite,
-            )
-            .await;
-
-        Ok((StatusCode::CREATED, Json(outcome.reply)))
+        response
     }
     .await;
 
@@ -643,13 +663,30 @@ pub async fn read_events(
     headers: HeaderMap,
     Path(session_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<crate::model::EventsPage>, AppError> {
+) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
     let auth = authenticate_http(&state, &headers)?;
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    require_local_owner_for_event_path(&state, &session_id).await?;
+    match require_local_owner_for_event_path(&state, &session_id).await {
+        Ok(()) => {}
+        Err(AppError::SessionNotOwned {
+            owner_public_url: Some(owner_public_url),
+            ..
+        }) => {
+            return state
+                .owner_proxy
+                .forward_read_events(
+                    &owner_public_url,
+                    &session_id,
+                    &params,
+                    headers.get(axum::http::header::AUTHORIZATION),
+                )
+                .await;
+        }
+        Err(error) => return Err(error),
+    }
     let page = read_path::read_events(
         &state.hot_store,
         &state.pool,
@@ -663,7 +700,7 @@ pub async fn read_events(
         .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpRead)
         .await;
 
-    Ok(Json(page))
+    Ok(Json(page).into_response())
 }
 
 pub async fn tail_events(

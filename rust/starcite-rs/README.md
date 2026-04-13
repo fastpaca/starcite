@@ -48,6 +48,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `local_async` now also carries explicit single-writer ownership. The owner node renews a Postgres-backed session lease while its local worker is active, exposes that lease state on `GET /debug/state`, and rejects event-path reads or appends on non-owner nodes with `409 session_not_owned` until the worker idles out or the lease expires.
 - When local drain begins, active session workers now exit and release their leases instead of holding ownership until the TTL runs out. That lets another node take over read ownership immediately while writes still require a healthy standby quorum.
 - When nodes also register `LOCAL_ASYNC_NODE_PUBLIC_URL`, that `409 session_not_owned` response includes `owner_url` in the JSON body and `x-starcite-owner-url` in the headers so a caller or future edge proxy can reroute directly to the current owner.
+- HTTP `GET /v1/sessions/:id/events` and `POST /v1/sessions/:id/append` now use that owner hint directly. A wrong-node request is proxied to the current owner over plain HTTP instead of forcing the client to retry manually. If the owner cannot be reached, the edge returns `503 owner_proxy_unavailable` with the same owner hint.
 - `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port` registers the node in Postgres as a live standby candidate. When that is enabled, the session lease path assigns one live non-draining standby per owned session and append treats standby replication as required for quorum.
 - `LOCAL_ASYNC_STANDBY_URL=http://host:ops_port` remains as a static fallback for local drills when you do not want Postgres-backed node registration.
 - A local archive worker now drains an explicit dirty-session queue, advances `sessions.archived_seq`, and prunes hot in-memory events once they are considered archived. The periodic tick is now only a fallback nudge, not the primary discovery path. In this transitional branch the backend rows already exist in Postgres before that flush, so the worker is modeling the hot/cold boundary and eviction behavior rather than removing Postgres from the ack path yet.
@@ -106,6 +107,7 @@ LOCAL_ASYNC_LEASE_TTL_MS=5000
 LOCAL_ASYNC_NODE_PUBLIC_URL=
 LOCAL_ASYNC_NODE_OPS_URL=
 LOCAL_ASYNC_NODE_TTL_MS=2000
+LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS=1000
 LOCAL_ASYNC_STANDBY_URL=
 LOCAL_ASYNC_REPLICATION_TIMEOUT_MS=500
 ARCHIVE_FLUSH_INTERVAL_MS=5000

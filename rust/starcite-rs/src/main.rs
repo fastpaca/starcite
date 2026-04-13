@@ -10,6 +10,7 @@ mod flusher;
 mod hot_store;
 mod model;
 mod ops;
+mod owner_proxy;
 mod ownership;
 mod phoenix;
 mod read_path;
@@ -36,6 +37,7 @@ use flush_queue::PendingFlushQueue;
 use flusher::FlushWorker;
 use hot_store::HotEventStore;
 use ops::OpsState;
+use owner_proxy::OwnerProxy;
 use ownership::OwnershipManager;
 use replica_store::ReplicaStore;
 use replication::ReplicationCoordinator;
@@ -62,6 +64,7 @@ pub struct AppState {
     pub session_manager: SessionManager,
     pub ownership: OwnershipManager,
     pub control_plane: ControlPlaneState,
+    pub owner_proxy: OwnerProxy,
     pub replica_store: ReplicaStore,
     pub replication: ReplicationCoordinator,
     pub runtime: SessionRuntime,
@@ -113,6 +116,10 @@ async fn run() -> Result<(), String> {
         Duration::from_millis(config.local_async_node_ttl_ms),
     );
     let replica_store = ReplicaStore::new();
+    let owner_proxy = OwnerProxy::new(
+        Duration::from_millis(config.local_async_owner_proxy_timeout_ms),
+        config.local_async_node_public_url.clone(),
+    );
     let ownership = OwnershipManager::new(
         pool.clone(),
         instance_id.clone(),
@@ -157,6 +164,7 @@ async fn run() -> Result<(), String> {
         session_manager,
         ownership,
         control_plane: control_plane.clone(),
+        owner_proxy,
         replica_store,
         replication,
         runtime,

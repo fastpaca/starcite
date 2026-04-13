@@ -33,6 +33,7 @@ pub struct Config {
     pub local_async_node_public_url: Option<String>,
     pub local_async_node_ops_url: Option<String>,
     pub local_async_node_ttl_ms: u64,
+    pub local_async_owner_proxy_timeout_ms: u64,
     pub local_async_standby_url: Option<String>,
     pub local_async_replication_timeout_ms: u64,
 }
@@ -126,6 +127,12 @@ impl Config {
             .transpose()?
             .unwrap_or(2_000);
 
+        let local_async_owner_proxy_timeout_ms = env::var("LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS", &raw))
+            .transpose()?
+            .unwrap_or(1_000);
+
         let local_async_standby_url = env::var("LOCAL_ASYNC_STANDBY_URL")
             .ok()
             .map(|raw| raw.trim().to_string())
@@ -154,6 +161,7 @@ impl Config {
             local_async_node_public_url,
             local_async_node_ops_url,
             local_async_node_ttl_ms,
+            local_async_owner_proxy_timeout_ms,
             local_async_standby_url,
             local_async_replication_timeout_ms,
         })

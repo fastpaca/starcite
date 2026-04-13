@@ -157,6 +157,10 @@ impl SessionManager {
         }
     }
 
+    pub async fn drop_worker_handle(&self, session_id: &str) {
+        self.workers.lock().await.remove(session_id);
+    }
+
     async fn worker_for(&self, session_id: &str) -> SessionWorkerHandle {
         let mut workers = self.workers.lock().await;
 
