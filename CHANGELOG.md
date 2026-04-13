@@ -7,6 +7,16 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+### Breaking
+
+- Archive durability now uses Postgres as the primary store. Operators must run
+  the Postgres-backed cutover release shape: keep
+  `STARCITE_ARCHIVE_LEGACY_S3_ENABLED=true` during rollout if historical archive
+  data still lives in S3, use the `STARCITE_ARCHIVE_LEGACY_S3_*` settings for
+  that temporary bridge, and move archive batch tuning to
+  `STARCITE_ARCHIVE_DB_WRITE_BATCH_SIZE` and
+  `STARCITE_ARCHIVE_DB_READ_BATCH_SIZE`.
+
 ### Added
 
 - Postgres-backed archived event persistence, archive batching limits, and
