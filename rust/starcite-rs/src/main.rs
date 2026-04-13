@@ -13,6 +13,8 @@ mod ownership;
 mod phoenix;
 mod read_path;
 mod relay;
+mod replica_store;
+mod replication;
 mod repository;
 mod runtime;
 mod session_manager;
@@ -33,6 +35,8 @@ use flusher::FlushWorker;
 use hot_store::HotEventStore;
 use ops::OpsState;
 use ownership::OwnershipManager;
+use replica_store::ReplicaStore;
+use replication::ReplicationCoordinator;
 use runtime::SessionRuntime;
 use session_manager::SessionManager;
 use session_store::HotSessionStore;
@@ -55,6 +59,8 @@ pub struct AppState {
     pub session_store: HotSessionStore,
     pub session_manager: SessionManager,
     pub ownership: OwnershipManager,
+    pub replica_store: ReplicaStore,
+    pub replication: ReplicationCoordinator,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
@@ -98,11 +104,17 @@ async fn run() -> Result<(), String> {
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
+    let replica_store = ReplicaStore::new();
     let ownership = OwnershipManager::new(
         pool.clone(),
         instance_id.clone(),
         Duration::from_millis(config.local_async_lease_ttl_ms),
     );
+    let replication = ReplicationCoordinator::new(
+        instance_id.clone(),
+        config.local_async_standby_url.clone(),
+        Duration::from_millis(config.local_async_replication_timeout_ms),
+    )?;
     let session_manager = SessionManager::new(
         pool.clone(),
         fanout.clone(),
@@ -111,6 +123,7 @@ async fn run() -> Result<(), String> {
         pending_flush.clone(),
         session_store.clone(),
         ownership.clone(),
+        replication.clone(),
         config.commit_mode,
         instance_id.clone(),
         Duration::from_millis(config.session_runtime_idle_timeout_ms),
@@ -133,6 +146,8 @@ async fn run() -> Result<(), String> {
         session_store: session_store.clone(),
         session_manager,
         ownership,
+        replica_store,
+        replication,
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
@@ -251,6 +266,8 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
             "/debug/drain",
             post(web::begin_drain).delete(web::clear_drain),
         )
+        .route("/internal/replication/prepare", post(web::prepare_replica))
+        .route("/internal/replication/commit", post(web::commit_replica))
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,

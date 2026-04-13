@@ -24,6 +24,7 @@ use crate::{
     hot_store::HotEventStore,
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
     ownership::OwnershipManager,
+    replication::ReplicationCoordinator,
     repository::{self, AppendOutcome, ProducerSequenceCheck},
     session_store::{HotSessionStore, resolve_session_last_seq},
 };
@@ -40,6 +41,7 @@ pub struct SessionManager {
     pending_flush: PendingFlushQueue,
     session_store: HotSessionStore,
     ownership: OwnershipManager,
+    replication: ReplicationCoordinator,
     commit_mode: CommitMode,
     instance_id: Arc<str>,
     idle_timeout: Duration,
@@ -80,6 +82,7 @@ impl SessionManager {
         pending_flush: PendingFlushQueue,
         session_store: HotSessionStore,
         ownership: OwnershipManager,
+        replication: ReplicationCoordinator,
         commit_mode: CommitMode,
         instance_id: Arc<str>,
         idle_timeout: Duration,
@@ -93,6 +96,7 @@ impl SessionManager {
             pending_flush,
             session_store,
             ownership,
+            replication,
             commit_mode,
             instance_id,
             idle_timeout,
@@ -240,7 +244,7 @@ impl SessionManager {
         tenant_id: &str,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
-        let _lease = self.ownership.ensure_owned(session_id).await?;
+        let lease = self.ownership.ensure_owned(session_id).await?;
         let last_seq =
             resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
 
@@ -316,13 +320,8 @@ impl SessionManager {
             cursor: next_seq,
         };
 
-        self.session_store.put_tenant(session_id, tenant_id).await;
-        self.session_store
-            .bump_last_seq(session_id, tenant_id, next_seq)
-            .await;
-        self.hot_store.put_event(event.clone()).await;
-        self.pending_flush.enqueue(event.clone()).await;
-        self.fanout.broadcast(event.clone()).await;
+        self.replication.replicate(lease.epoch, &event).await?;
+        self.apply_local_async_commit(event.clone()).await;
 
         Ok(AppendOutcome {
             reply: AppendReply {
@@ -376,6 +375,18 @@ impl SessionManager {
             .await
     }
 
+    pub async fn apply_local_async_commit(&self, event: EventResponse) {
+        self.session_store
+            .put_tenant(&event.session_id, &event.tenant_id)
+            .await;
+        self.session_store
+            .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
+            .await;
+        self.hot_store.put_event(event.clone()).await;
+        self.pending_flush.enqueue(event.clone()).await;
+        self.fanout.broadcast(event).await;
+    }
+
     async fn prune_worker(&self, session_id: &str, worker_id: u64) {
         let removed = {
             let mut workers = self.workers.lock().await;
@@ -417,7 +428,7 @@ mod tests {
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
         flush_queue::PendingFlushQueue, hot_store::HotEventStore, ownership::OwnershipManager,
-        session_store::HotSessionStore,
+        replication::ReplicationCoordinator, session_store::HotSessionStore,
     };
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
@@ -440,6 +451,12 @@ mod tests {
                 Arc::<str>::from("node-a"),
                 Duration::from_secs(5),
             ),
+            ReplicationCoordinator::new(
+                Arc::<str>::from("node-a"),
+                None,
+                Duration::from_millis(500),
+            )
+            .expect("replication"),
             CommitMode::SyncPostgres,
             Arc::<str>::from("node-a"),
             idle_timeout,

@@ -316,7 +316,7 @@ impl TryFrom<SessionRow> for SessionResponse {
     }
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct EventResponse {
     pub session_id: String,
     pub seq: i64,

@@ -70,6 +70,8 @@ pub enum AppError {
     DatabaseUnavailable,
     #[error("session is not owned by this node")]
     SessionNotOwned { owner_id: String, epoch: i64 },
+    #[error("append quorum unavailable")]
+    QuorumUnavailable { required: u32, acknowledged: u32 },
     #[error("node draining")]
     NodeDraining {
         drain_source: Option<&'static str>,
@@ -118,6 +120,7 @@ impl AppError {
             Self::ProducerSeqConflict { .. } => "producer_seq_conflict",
             Self::DatabaseUnavailable => "database_unavailable",
             Self::SessionNotOwned { .. } => "session_not_owned",
+            Self::QuorumUnavailable { .. } => "quorum_unavailable",
             Self::NodeDraining { .. } => "node_draining",
             Self::DrainResetForbidden => "drain_reset_forbidden",
             Self::Internal | Self::Sqlx(_) => "internal_error",
@@ -151,9 +154,9 @@ impl AppError {
             | Self::ProducerSeqConflict { .. }
             | Self::SessionNotOwned { .. }
             | Self::DrainResetForbidden => StatusCode::CONFLICT,
-            Self::DatabaseUnavailable | Self::NodeDraining { .. } => {
-                StatusCode::SERVICE_UNAVAILABLE
-            }
+            Self::DatabaseUnavailable
+            | Self::QuorumUnavailable { .. }
+            | Self::NodeDraining { .. } => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal | Self::Sqlx(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -270,6 +273,15 @@ impl AppError {
                 "message": "Session is not owned by this node",
                 "owner_id": owner_id,
                 "epoch": epoch
+            }),
+            Self::QuorumUnavailable {
+                required,
+                acknowledged,
+            } => json!({
+                "error": self.error_code(),
+                "message": "Append quorum is unavailable",
+                "required": required,
+                "acknowledged": acknowledged
             }),
             Self::NodeDraining {
                 drain_source,
@@ -404,6 +416,32 @@ mod tests {
                 .headers()
                 .get(axum::http::header::RETRY_AFTER)
                 .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn quorum_unavailable_response_is_explicit() {
+        let response = AppError::QuorumUnavailable {
+            required: 2,
+            acknowledged: 1,
+        }
+        .into_response();
+
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+
+        assert_eq!(
+            json_body,
+            json!({
+                "error": "quorum_unavailable",
+                "message": "Append quorum is unavailable",
+                "required": 2,
+                "acknowledged": 1
+            })
         );
     }
 }

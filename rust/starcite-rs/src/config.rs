@@ -30,6 +30,8 @@ pub struct Config {
     pub session_runtime_idle_timeout_ms: u64,
     pub commit_flush_interval_ms: u64,
     pub local_async_lease_ttl_ms: u64,
+    pub local_async_standby_url: Option<String>,
+    pub local_async_replication_timeout_ms: u64,
 }
 
 impl Config {
@@ -105,6 +107,17 @@ impl Config {
             .transpose()?
             .unwrap_or(5_000);
 
+        let local_async_standby_url = env::var("LOCAL_ASYNC_STANDBY_URL")
+            .ok()
+            .map(|raw| raw.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let local_async_replication_timeout_ms = env::var("LOCAL_ASYNC_REPLICATION_TIMEOUT_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("LOCAL_ASYNC_REPLICATION_TIMEOUT_MS", &raw))
+            .transpose()?
+            .unwrap_or(500);
+
         Ok(Self {
             listen_addr,
             ops_listen_addr,
@@ -119,6 +132,8 @@ impl Config {
             session_runtime_idle_timeout_ms,
             commit_flush_interval_ms,
             local_async_lease_ttl_ms,
+            local_async_standby_url,
+            local_async_replication_timeout_ms,
         })
     }
 }

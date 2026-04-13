@@ -19,7 +19,7 @@ use crate::{
     AppState,
     archive_queue::ArchiveQueueSnapshot,
     auth,
-    config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
+    config::{CommitMode, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     flush_queue::PendingFlushSnapshot,
@@ -31,7 +31,12 @@ use crate::{
     },
     ops::OpsSnapshot,
     ownership::OwnershipSnapshot,
-    read_path, repository,
+    read_path,
+    replica_store::ReplicaStoreSnapshot,
+    replication::{
+        CommitReplicaRequest, PrepareReplicaRequest, ReplicationAck, ReplicationSnapshot,
+    },
+    repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     session_manager::SessionManagerSnapshot,
     session_store::{
@@ -122,6 +127,8 @@ struct DebugStateResponse {
     session_store: HotSessionStoreSnapshot,
     session_manager: SessionManagerSnapshot,
     ownership: OwnershipSnapshot,
+    replication: ReplicationSnapshot,
+    replica_store: ReplicaStoreSnapshot,
     pending_flush: PendingFlushSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
@@ -165,6 +172,8 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let session_store = state.session_store.snapshot().await;
     let session_manager = state.session_manager.snapshot().await;
     let ownership = state.ownership.snapshot().await;
+    let replication = state.replication.snapshot();
+    let replica_store = state.replica_store.snapshot().await;
     let pending_flush = state.pending_flush.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
@@ -180,6 +189,8 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         session_store,
         session_manager,
         ownership,
+        replication,
+        replica_store,
         pending_flush,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
@@ -201,6 +212,82 @@ pub async fn clear_drain(State(state): State<AppState>) -> Result<impl IntoRespo
             Ok((StatusCode::OK, Json(state.ops.snapshot())))
         }
         Some(_) => Err(AppError::DrainResetForbidden),
+    }
+}
+
+pub async fn prepare_replica(
+    State(state): State<AppState>,
+    body: Result<Json<PrepareReplicaRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    reject_internal_replication_when_unavailable(&state)?;
+    let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+
+    state
+        .replica_store
+        .prepare(&request.owner_id, request.epoch, request.event)
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "replica prepare rejected");
+            AppError::Internal
+        })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ReplicationAck {
+            status: "prepared".to_string(),
+        }),
+    ))
+}
+
+pub async fn commit_replica(
+    State(state): State<AppState>,
+    body: Result<Json<CommitReplicaRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    reject_internal_replication_when_unavailable(&state)?;
+    let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+
+    let event = state
+        .replica_store
+        .commit(
+            &request.owner_id,
+            request.epoch,
+            &request.session_id,
+            request.seq,
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(error = ?error, "replica commit rejected");
+            AppError::Internal
+        })?;
+
+    match event {
+        Some(event) => {
+            state.session_manager.apply_local_async_commit(event).await;
+            Ok((
+                StatusCode::OK,
+                Json(ReplicationAck {
+                    status: "committed".to_string(),
+                }),
+            ))
+        }
+        None => {
+            let last_seq = state
+                .session_store
+                .get_last_seq(&request.session_id)
+                .await
+                .unwrap_or(0);
+
+            if last_seq >= request.seq {
+                Ok((
+                    StatusCode::OK,
+                    Json(ReplicationAck {
+                        status: "already_committed".to_string(),
+                    }),
+                ))
+            } else {
+                Err(AppError::Internal)
+            }
+        }
     }
 }
 
@@ -962,8 +1049,8 @@ fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
 
 fn commit_mode_name(commit_mode: crate::config::CommitMode) -> &'static str {
     match commit_mode {
-        crate::config::CommitMode::SyncPostgres => "sync_postgres",
-        crate::config::CommitMode::LocalAsync => "local_async",
+        CommitMode::SyncPostgres => "sync_postgres",
+        CommitMode::LocalAsync => "local_async",
     }
 }
 
@@ -971,8 +1058,20 @@ async fn require_local_owner_for_event_path(
     state: &AppState,
     session_id: &str,
 ) -> Result<(), AppError> {
-    if state.commit_mode == crate::config::CommitMode::LocalAsync {
+    if state.commit_mode == CommitMode::LocalAsync {
         state.ownership.ensure_owned(session_id).await?;
+    }
+
+    Ok(())
+}
+
+fn reject_internal_replication_when_unavailable(state: &AppState) -> Result<(), AppError> {
+    if state.ops.is_draining() {
+        return Err(AppError::node_draining(&state.ops.snapshot()));
+    }
+
+    if state.commit_mode != CommitMode::LocalAsync {
+        return Err(AppError::Internal);
     }
 
     Ok(())

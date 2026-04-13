@@ -162,12 +162,22 @@ appends and replay with `409 session_not_owned`, and the next node can take over
 idles out or the lease expires. That makes the branch honest about who may serve the hot event
 path without pretending it already has Raft-style ownership transfer.
 
+There is now one more real hot-path slice on top of that lease model: `local_async` can replicate
+to one synchronous standby over the ops listener with `LOCAL_ASYNC_STANDBY_URL`. The owner sends a
+prepare then commit control request, waits for the standby to commit the in-memory replica, and
+only then applies the event locally and replies to the client. If that standby is unavailable, the
+append fails with `503 quorum_unavailable` instead of silently falling back to single-node ack.
+That is still only a narrow 2-of-2 experiment, not a full Raft group or routed topology.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
 periodic tick is now only a fallback nudge if no new work arrives. In this branch that worker is
 still transitional: the event rows already exist in Postgres before the flush, so it restores
-hot/cold tier behavior without yet removing Postgres from the append ack path.
+hot/cold tier behavior without yet removing Postgres from the append ack path. Because standby
+commits feed that same queue, a standby can prune its hot copy soon after Postgres catches up, so
+long-idle failover replay may already be on the cold path even though the commit itself was
+standby-replicated in memory.
 
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
@@ -176,9 +186,10 @@ socket connection gauges, local session lifecycle counters, and dynamic gauges f
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
 now exposes that same local runtime map plus hot event-store state, hot session-store state,
-archive-queue backlog, local lease ownership state, and remaining idle time per active session. It
-still does not cover routing, replication, archive, or full event-store invariants because those
-subsystems do not exist in this rewrite.
+archive-queue backlog, local lease ownership state, standby replication config, pending replica
+state, and remaining idle time per active session. It still does not cover routing, full
+replication, archive, or event-store invariants because those subsystems do not exist in this
+rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
@@ -191,8 +202,8 @@ runtime lifecycle in the background instead of blocking on Postgres before retur
 ## Deliberate gaps
 
 - no signature-verified JWT or JWKS flow yet; `unsafe_jwt` is claim parsing only
-- no quorum replication or topology routing behind the runtime lifecycle; `local_async` only has
-  Postgres-backed single-writer session leases
+- no full quorum replication or topology routing behind the runtime lifecycle; `local_async` has
+  only Postgres-backed single-writer session leases plus one optional synchronous standby
 - no routing/replication/archive telemetry parity with the Phoenix service
 
 ## Why this shape
