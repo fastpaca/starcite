@@ -156,11 +156,20 @@ impl OwnershipManager {
             None
         }
     }
+
+    pub fn renew_interval(&self) -> Duration {
+        renew_interval(self.renew_before)
+    }
 }
 
 fn renew_before(lease_ttl: Duration) -> Duration {
     let ttl_ms = lease_ttl.as_millis().min(u64::MAX as u128) as u64;
     Duration::from_millis((ttl_ms / 2).max(1))
+}
+
+fn renew_interval(renew_before: Duration) -> Duration {
+    let renew_before_ms = renew_before.as_millis().min(u64::MAX as u128) as u64;
+    Duration::from_millis((renew_before_ms / 2).max(1))
 }
 
 fn lease_deadline(expires_at: chrono::DateTime<Utc>) -> Instant {
@@ -175,7 +184,7 @@ fn lease_deadline(expires_at: chrono::DateTime<Utc>) -> Instant {
 
 #[cfg(test)]
 mod tests {
-    use super::{LocalLease, OwnershipManager, lease_deadline, renew_before};
+    use super::{LocalLease, OwnershipManager, lease_deadline, renew_before, renew_interval};
     use chrono::{Duration as ChronoDuration, Utc};
     use sqlx::postgres::PgPoolOptions;
     use std::{
@@ -195,6 +204,12 @@ mod tests {
     fn renews_before_half_life() {
         assert_eq!(renew_before(Duration::from_millis(10)).as_millis(), 5);
         assert_eq!(renew_before(Duration::from_millis(1)).as_millis(), 1);
+    }
+
+    #[test]
+    fn renew_interval_uses_half_of_renew_window() {
+        assert_eq!(renew_interval(Duration::from_millis(10)).as_millis(), 5);
+        assert_eq!(renew_interval(Duration::from_millis(1)).as_millis(), 1);
     }
 
     #[test]

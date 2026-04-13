@@ -133,6 +133,7 @@ async fn run() -> Result<(), String> {
         session_store.clone(),
         ownership.clone(),
         replication.clone(),
+        ops_state.clone(),
         config.commit_mode,
         instance_id.clone(),
         Duration::from_millis(config.session_runtime_idle_timeout_ms),

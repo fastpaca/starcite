@@ -12,7 +12,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::{
     sync::{Mutex, mpsc, oneshot},
-    time::timeout,
+    time::{Instant as TokioInstant, MissedTickBehavior, interval_at, sleep},
 };
 
 use crate::{
@@ -23,6 +23,7 @@ use crate::{
     flush_queue::PendingFlushQueue,
     hot_store::HotEventStore,
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
+    ops::OpsState,
     ownership::OwnershipManager,
     replication::ReplicationCoordinator,
     repository::{self, AppendOutcome, ProducerSequenceCheck},
@@ -42,6 +43,7 @@ pub struct SessionManager {
     session_store: HotSessionStore,
     ownership: OwnershipManager,
     replication: ReplicationCoordinator,
+    ops: OpsState,
     commit_mode: CommitMode,
     instance_id: Arc<str>,
     idle_timeout: Duration,
@@ -83,6 +85,7 @@ impl SessionManager {
         session_store: HotSessionStore,
         ownership: OwnershipManager,
         replication: ReplicationCoordinator,
+        ops: OpsState,
         commit_mode: CommitMode,
         instance_id: Arc<str>,
         idle_timeout: Duration,
@@ -97,6 +100,7 @@ impl SessionManager {
             session_store,
             ownership,
             replication,
+            ops,
             commit_mode,
             instance_id,
             idle_timeout,
@@ -189,19 +193,50 @@ impl SessionManager {
         worker_id: u64,
         mut receiver: mpsc::Receiver<AppendCommand>,
     ) {
+        let mut idle = Box::pin(sleep(self.idle_timeout));
+        let mut draining = self.ops.subscribe_draining();
+        let mut renew_tick = interval_at(
+            TokioInstant::now() + self.ownership.renew_interval(),
+            self.ownership.renew_interval(),
+        );
+        renew_tick.set_missed_tick_behavior(MissedTickBehavior::Delay);
+
         loop {
-            let command = match timeout(self.idle_timeout, receiver.recv()).await {
-                Ok(Some(command)) => command,
-                Ok(None) | Err(_) => {
+            tokio::select! {
+                _ = &mut idle => {
                     self.prune_worker(&session_id, worker_id).await;
                     return;
                 }
-            };
+                changed = draining.changed() => {
+                    if changed.is_err() || *draining.borrow() {
+                        tracing::info!(session_id, worker_id, "session worker exiting because node is draining");
+                        self.prune_worker(&session_id, worker_id).await;
+                        return;
+                    }
+                }
+                _ = renew_tick.tick(), if self.commit_mode == CommitMode::LocalAsync => {
+                    if let Err(error) = self.ownership.ensure_owned(&session_id).await {
+                        tracing::warn!(error = ?error, session_id, "session worker failed to renew ownership");
+                        self.prune_worker(&session_id, worker_id).await;
+                        return;
+                    }
+                }
+                command = receiver.recv() => {
+                    let Some(command) = command else {
+                        self.prune_worker(&session_id, worker_id).await;
+                        return;
+                    };
 
-            let result = self
-                .handle_append(&session_id, &command.tenant_id, command.input)
-                .await;
-            let _ = command.reply_tx.send(result);
+                    idle
+                        .as_mut()
+                        .reset(TokioInstant::now() + self.idle_timeout);
+
+                    let result = self
+                        .handle_append(&session_id, &command.tenant_id, command.input)
+                        .await;
+                    let _ = command.reply_tx.send(result);
+                }
+            }
         }
     }
 
@@ -429,8 +464,9 @@ mod tests {
     use super::{SessionManager, SessionWorkerHandle};
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
-        flush_queue::PendingFlushQueue, hot_store::HotEventStore, ownership::OwnershipManager,
-        replication::ReplicationCoordinator, session_store::HotSessionStore,
+        flush_queue::PendingFlushQueue, hot_store::HotEventStore, ops::OpsState,
+        ownership::OwnershipManager, replication::ReplicationCoordinator,
+        session_store::HotSessionStore,
     };
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
@@ -460,6 +496,7 @@ mod tests {
                 Duration::from_millis(500),
             )
             .expect("replication"),
+            OpsState::new(30_000),
             CommitMode::SyncPostgres,
             Arc::<str>::from("node-a"),
             idle_timeout,

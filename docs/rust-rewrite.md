@@ -179,6 +179,12 @@ opaque: when the owner has registered a public URL, non-owner nodes include it a
 the body and `x-starcite-owner-url` in the headers. That is enough for manual drills and for a
 future edge proxy to reroute requests without guessing.
 
+The local worker lifecycle now also matches the ownership story more closely. A live worker renews
+its Postgres lease in the background instead of only on incoming event-path requests, so ownership
+does not silently drift after a quiet period. When drain begins, that worker exits and releases the
+lease promptly, which lets another node take over reads without waiting for the old TTL to burn
+down.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
