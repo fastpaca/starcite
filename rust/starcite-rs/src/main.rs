@@ -15,7 +15,6 @@ mod ownership;
 mod phoenix;
 mod read_path;
 mod relay;
-mod replica_store;
 mod replication;
 mod repository;
 mod runtime;
@@ -39,7 +38,6 @@ use hot_store::HotEventStore;
 use ops::OpsState;
 use owner_proxy::OwnerProxy;
 use ownership::OwnershipManager;
-use replica_store::ReplicaStore;
 use replication::ReplicationCoordinator;
 use runtime::SessionRuntime;
 use session_manager::SessionManager;
@@ -65,7 +63,6 @@ pub struct AppState {
     pub ownership: OwnershipManager,
     pub control_plane: ControlPlaneState,
     pub owner_proxy: OwnerProxy,
-    pub replica_store: ReplicaStore,
     pub replication: ReplicationCoordinator,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
@@ -115,7 +112,6 @@ async fn run() -> Result<(), String> {
         config.local_async_node_ops_url.clone(),
         Duration::from_millis(config.local_async_node_ttl_ms),
     );
-    let replica_store = ReplicaStore::new();
     let owner_proxy = OwnerProxy::new(
         Duration::from_millis(config.local_async_owner_proxy_timeout_ms),
         config.local_async_node_public_url.clone(),
@@ -139,7 +135,6 @@ async fn run() -> Result<(), String> {
         pending_flush.clone(),
         session_store.clone(),
         ownership.clone(),
-        replica_store.clone(),
         replication.clone(),
         ops_state.clone(),
         config.commit_mode,
@@ -166,7 +161,6 @@ async fn run() -> Result<(), String> {
         ownership,
         control_plane: control_plane.clone(),
         owner_proxy,
-        replica_store,
         replication,
         runtime,
         ops: ops_state.clone(),

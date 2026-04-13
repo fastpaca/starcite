@@ -34,7 +34,6 @@ use crate::{
     owner_proxy::build_tail_ws_url,
     ownership::OwnershipSnapshot,
     read_path,
-    replica_store::ReplicaStoreSnapshot,
     replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
     repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
@@ -63,6 +62,13 @@ struct LifecycleOptions {
     tenant_id: String,
     cursor: i64,
     session_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReplicaAppendDisposition {
+    AlreadyCommitted,
+    CommitNext,
+    SeqGap { expected_seq: i64 },
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -129,7 +135,6 @@ struct DebugStateResponse {
     session_manager: SessionManagerSnapshot,
     ownership: OwnershipSnapshot,
     replication: ReplicationSnapshot,
-    replica_store: ReplicaStoreSnapshot,
     pending_flush: PendingFlushSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
@@ -175,7 +180,6 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let session_manager = state.session_manager.snapshot().await;
     let ownership = state.ownership.snapshot().await;
     let replication = state.replication.snapshot();
-    let replica_store = state.replica_store.snapshot().await;
     let pending_flush = state.pending_flush.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
@@ -193,7 +197,6 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         session_manager,
         ownership,
         replication,
-        replica_store,
         pending_flush,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
@@ -232,59 +235,59 @@ pub async fn append_replica(
         .await
         .unwrap_or(0);
 
-    if last_seq >= request.event.seq {
-        return Ok((
-            StatusCode::OK,
-            Json(ReplicationAck {
-                status: "already_committed".to_string(),
-            }),
-        ));
+    match classify_replica_append(last_seq, request.event.seq) {
+        ReplicaAppendDisposition::AlreadyCommitted => {
+            return Ok((
+                StatusCode::OK,
+                Json(ReplicationAck {
+                    status: "already_committed".to_string(),
+                }),
+            ));
+        }
+        ReplicaAppendDisposition::CommitNext => {}
+        ReplicaAppendDisposition::SeqGap { expected_seq } => {
+            tracing::warn!(
+                owner_id = request.owner_id,
+                epoch = request.epoch,
+                session_id = request.event.session_id,
+                last_seq,
+                expected_seq,
+                incoming_seq = request.event.seq,
+                "replica append rejected due to seq gap"
+            );
+
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(ReplicationAck {
+                    status: "seq_gap".to_string(),
+                }),
+            ));
+        }
     }
 
     state
-        .replica_store
-        .prepare(&request.owner_id, request.epoch, request.event.clone())
-        .await
-        .map_err(|error| {
-            tracing::warn!(error = ?error, "replica append rejected during prepare");
-            AppError::Internal
-        })?;
+        .session_manager
+        .apply_local_async_commit(request.event)
+        .await;
 
-    let event = state
-        .replica_store
-        .commit(
-            &request.owner_id,
-            request.epoch,
-            &request.event.session_id,
-            request.event.seq,
-        )
-        .await
-        .map_err(|error| {
-            tracing::warn!(error = ?error, "replica append rejected during commit");
-            AppError::Internal
-        })?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(ReplicationAck {
+            status: "committed".to_string(),
+        }),
+    ))
+}
 
-    match event {
-        Some(event) => {
-            state.session_manager.apply_local_async_commit(event).await;
-            Ok((
-                StatusCode::ACCEPTED,
-                Json(ReplicationAck {
-                    status: "committed".to_string(),
-                }),
-            ))
-        }
-        None => {
-            if last_seq >= request.event.seq {
-                Ok((
-                    StatusCode::OK,
-                    Json(ReplicationAck {
-                        status: "already_committed".to_string(),
-                    }),
-                ))
-            } else {
-                Err(AppError::Internal)
-            }
+fn classify_replica_append(last_seq: i64, incoming_seq: i64) -> ReplicaAppendDisposition {
+    if last_seq >= incoming_seq {
+        ReplicaAppendDisposition::AlreadyCommitted
+    } else {
+        let expected_seq = last_seq + 1;
+
+        if incoming_seq == expected_seq {
+            ReplicaAppendDisposition::CommitNext
+        } else {
+            ReplicaAppendDisposition::SeqGap { expected_seq }
         }
     }
 }
@@ -1766,10 +1769,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LifecycleOptions, TailOptions, build_node_draining_frame, build_resume_invalidated_gap,
-        build_token_expired_frame, parse_archived_filter, parse_events_options,
-        parse_lifecycle_options, parse_list_options, parse_tail_options, ready_response,
-        tail_owner_redirect_response,
+        LifecycleOptions, ReplicaAppendDisposition, TailOptions, build_node_draining_frame,
+        build_resume_invalidated_gap, build_token_expired_frame, classify_replica_append,
+        parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
+        parse_tail_options, ready_response, tail_owner_redirect_response,
     };
     use crate::{
         error::{OWNER_URL_HEADER, OWNER_WEBSOCKET_URL_HEADER},
@@ -1979,6 +1982,26 @@ mod tests {
         assert_eq!(body.reason, Some("draining"));
         assert_eq!(body.drain_source, Some("shutdown"));
         assert!(body.retry_after_ms.is_some());
+    }
+
+    #[test]
+    fn replica_append_classifies_replayed_and_next_seq() {
+        assert_eq!(
+            classify_replica_append(7, 7),
+            ReplicaAppendDisposition::AlreadyCommitted
+        );
+        assert_eq!(
+            classify_replica_append(7, 8),
+            ReplicaAppendDisposition::CommitNext
+        );
+    }
+
+    #[test]
+    fn replica_append_rejects_seq_gaps() {
+        assert_eq!(
+            classify_replica_append(7, 9),
+            ReplicaAppendDisposition::SeqGap { expected_seq: 8 }
+        );
     }
 
     #[test]

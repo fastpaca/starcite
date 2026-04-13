@@ -235,9 +235,10 @@ that session and instead return the standby as the owner hint. That keeps acknow
 falling back to any live node once the designated standby disappears.
 
 Replica fencing now follows that handoff too. Once a standby takes over with a newer epoch, it
-clears stale pending replica state from the older owner epoch and rejects any later prepare or
-commit requests from that stale epoch. That prevents delayed internal replica traffic from
-re-applying pre-takeover state after the session has already moved forward locally.
+rejects any later append request from that stale epoch. Standby appends now apply directly into the
+hot in-memory state and require the next exact session sequence, so delayed or out-of-order
+internal replica traffic fails loudly instead of silently re-applying or skipping state after a
+takeover.
 
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
@@ -259,10 +260,9 @@ socket connection gauges, local session lifecycle counters, and dynamic gauges f
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
 now exposes that same local runtime map plus hot event-store state, hot session-store state,
-archive-queue backlog, local lease ownership state, standby replication config, pending replica
-state, and remaining idle time per active session. It still does not cover routing, full
-replication, archive, or event-store invariants because those subsystems do not exist in this
-rewrite.
+archive-queue backlog, local lease ownership state, standby replication config, and remaining idle
+time per active session. It still does not cover routing, full replication, archive, or event-store
+invariants because those subsystems do not exist in this rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
