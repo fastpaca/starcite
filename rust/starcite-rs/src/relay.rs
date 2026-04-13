@@ -9,6 +9,7 @@ use crate::{
     fanout::{LifecycleFanout, SessionFanout},
     hot_store::HotEventStore,
     repository,
+    session_store::{self, HotSessionStore},
 };
 
 pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";
@@ -33,6 +34,7 @@ pub fn spawn(
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
     archive_queue: ArchiveQueue,
+    session_store: HotSessionStore,
     instance_id: Arc<str>,
 ) {
     tokio::spawn(async move {
@@ -42,6 +44,7 @@ pub fn spawn(
             lifecycle,
             hot_store,
             archive_queue,
+            session_store,
             instance_id,
         )
         .await;
@@ -54,6 +57,7 @@ async fn run_listener_loop(
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
     archive_queue: ArchiveQueue,
+    session_store: HotSessionStore,
     instance_id: Arc<str>,
 ) {
     loop {
@@ -86,6 +90,7 @@ async fn run_listener_loop(
                         &lifecycle,
                         &hot_store,
                         &archive_queue,
+                        &session_store,
                         instance_id.as_ref(),
                         notification.channel(),
                         notification.payload(),
@@ -109,6 +114,7 @@ async fn handle_notification(
     lifecycle: &LifecycleFanout,
     hot_store: &HotEventStore,
     archive_queue: &ArchiveQueue,
+    session_store: &HotSessionStore,
     instance_id: &str,
     channel: &str,
     payload: &str,
@@ -131,6 +137,9 @@ async fn handle_notification(
                 Ok(Some(event)) => {
                     hot_store.put_event(event.clone()).await;
                     archive_queue.enqueue(&event.session_id).await;
+                    session_store
+                        .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
+                        .await;
                     fanout.broadcast(event).await;
                 }
                 Ok(None) => {
@@ -160,6 +169,11 @@ async fn handle_notification(
 
             match repository::load_lifecycle_by_cursor(pool, payload.cursor).await {
                 Ok(Some(event)) => {
+                    if let Err(error) =
+                        session_store::refresh_from_lifecycle(session_store, pool, &event).await
+                    {
+                        tracing::warn!(error = ?error, cursor = event.cursor, "failed to refresh session cache from lifecycle relay");
+                    }
                     lifecycle.broadcast(event).await;
                 }
                 Ok(None) => {

@@ -21,8 +21,9 @@ use crate::{
     config::{AuthMode, MAX_LIST_LIMIT},
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
-    repository,
+    read_path, repository,
     runtime::RuntimeTouchReason,
+    session_store::{resolve_session_last_seq, resolve_session_tenant_id},
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, ReadOperation, ReadOutcome, ReadPhase, SocketSurface,
         SocketTransport,
@@ -291,20 +292,22 @@ async fn handle_join(
                 }
             };
 
-            let tenant_id = match repository::get_session_tenant_id(&state.pool, &session_id).await
-            {
-                Ok(tenant_id) => tenant_id,
-                Err(error) => {
-                    let _ = outbound_tx.send(reply_frame(
-                        frame.join_ref,
-                        frame.ref_id,
-                        frame.topic,
-                        false,
-                        json!({"reason": reason_for_error(&error)}),
-                    ));
-                    return;
-                }
-            };
+            let tenant_id =
+                match resolve_session_tenant_id(&state.session_store, &state.pool, &session_id)
+                    .await
+                {
+                    Ok(tenant_id) => tenant_id,
+                    Err(error) => {
+                        let _ = outbound_tx.send(reply_frame(
+                            frame.join_ref,
+                            frame.ref_id,
+                            frame.topic,
+                            false,
+                            json!({"reason": reason_for_error(&error)}),
+                        ));
+                        return;
+                    }
+                };
 
             if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
                 let _ = outbound_tx.send(reply_frame(
@@ -466,34 +469,22 @@ async fn handle_join(
                 }
             };
 
-            match repository::get_session(&state.pool, &session_id).await {
-                Ok(_session) => {}
-                Err(error) => {
-                    let _ = outbound_tx.send(reply_frame(
-                        frame.join_ref,
-                        frame.ref_id,
-                        frame.topic,
-                        false,
-                        json!({"reason": reason_for_error(&error)}),
-                    ));
-                    return;
-                }
-            }
-
-            let tenant_id = match repository::get_session_tenant_id(&state.pool, &session_id).await
-            {
-                Ok(tenant_id) => tenant_id,
-                Err(error) => {
-                    let _ = outbound_tx.send(reply_frame(
-                        frame.join_ref,
-                        frame.ref_id,
-                        frame.topic,
-                        false,
-                        json!({"reason": reason_for_error(&error)}),
-                    ));
-                    return;
-                }
-            };
+            let tenant_id =
+                match resolve_session_tenant_id(&state.session_store, &state.pool, &session_id)
+                    .await
+                {
+                    Ok(tenant_id) => tenant_id,
+                    Err(error) => {
+                        let _ = outbound_tx.send(reply_frame(
+                            frame.join_ref,
+                            frame.ref_id,
+                            frame.topic,
+                            false,
+                            json!({"reason": reason_for_error(&error)}),
+                        ));
+                        return;
+                    }
+                };
 
             if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
                 let _ = outbound_tx.send(reply_frame(
@@ -879,14 +870,14 @@ async fn sync_tail(
         return Ok(next_cursor);
     }
 
-    let session = repository::get_session(&state.pool, session_id).await?;
+    let last_seq = resolve_session_last_seq(&state.session_store, &state.pool, session_id).await?;
 
-    if cursor > session.last_seq {
-        let gap = build_resume_invalidated_gap(cursor, session.last_seq);
+    if cursor > last_seq {
+        let gap = build_resume_invalidated_gap(cursor, last_seq);
         outbound_tx
             .send(push_frame(join_ref, topic.to_string(), "gap", gap))
             .map_err(|_| AppError::Internal)?;
-        Ok(session.last_seq)
+        Ok(last_seq)
     } else {
         Ok(next_cursor)
     }
@@ -902,7 +893,8 @@ async fn replay_tail(
     mut cursor: i64,
 ) -> Result<i64, AppError> {
     loop {
-        let page = repository::read_events(
+        let page = read_path::read_events(
+            &state.hot_store,
             &state.pool,
             session_id,
             EventsOptions {
@@ -1032,7 +1024,8 @@ async fn validate_lifecycle_scope(
         return Ok(());
     };
 
-    let scoped_tenant_id = repository::get_session_tenant_id(&state.pool, session_id).await?;
+    let scoped_tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
 
     if scoped_tenant_id != tenant_id {
         return Err(AppError::ForbiddenTenant);

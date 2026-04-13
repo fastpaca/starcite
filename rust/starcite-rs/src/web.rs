@@ -31,6 +31,10 @@ use crate::{
     ops::OpsSnapshot,
     read_path, repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
+    session_store::{
+        HotSessionStoreSnapshot, resolve_session, resolve_session_last_seq,
+        resolve_session_tenant_id,
+    },
     telemetry::{
         AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, ReadOperation,
         ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase, SocketSurface,
@@ -111,6 +115,7 @@ struct DebugStateResponse {
     telemetry_enabled: bool,
     runtime: RuntimeSnapshot,
     hot_store: HotEventStoreSnapshot,
+    session_store: HotSessionStoreSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
 }
@@ -150,6 +155,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
     let runtime = state.runtime.snapshot().await;
     let hot_store = state.hot_store.snapshot().await;
+    let session_store = state.session_store.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
@@ -160,6 +166,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         telemetry_enabled: state.telemetry.enabled(),
         runtime,
         hot_store,
+        session_store,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
     })
@@ -207,6 +214,10 @@ pub async fn create_session(
         let validated = auth::validate_create_request(request, &auth)?;
         tenant_id = validated.tenant_id.clone();
         let session = repository::create_session(&state.pool, validated.clone()).await?;
+        state
+            .session_store
+            .put_session(&validated.tenant_id, session.clone())
+            .await;
 
         state
             .runtime
@@ -244,9 +255,10 @@ pub async fn show_session(
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
     validate_session_id(&session_id)?;
     let auth = authenticate_http(&state, &headers)?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    let session = repository::get_session(&state.pool, &session_id).await?;
+    let session = resolve_session(&state.session_store, &state.pool, &session_id).await?;
 
     state
         .runtime
@@ -267,7 +279,8 @@ pub async fn update_session(
     let result: Result<Json<crate::model::SessionResponse>, AppError> = async {
         let auth = authenticate_http(&state, &headers)?;
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
-        tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+        tenant_id =
+            resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
         auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
         state
             .runtime
@@ -276,6 +289,10 @@ pub async fn update_session(
 
         let session =
             repository::update_session(&state.pool, &session_id, request.validate()?).await?;
+        state
+            .session_store
+            .put_session(&tenant_id, session.clone())
+            .await;
 
         publish_lifecycle(&state, LifecycleEvent::updated(tenant_id.clone(), &session)).await;
 
@@ -294,13 +311,18 @@ pub async fn archive_session(
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
     validate_session_id(&session_id)?;
     let auth = authenticate_http(&state, &headers)?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
     state
         .runtime
         .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpWrite)
         .await;
     let outcome = repository::set_archive_state(&state.pool, &session_id, true).await?;
+    state
+        .session_store
+        .put_session(&outcome.tenant_id, outcome.session.clone())
+        .await;
 
     if outcome.changed {
         publish_lifecycle(
@@ -320,13 +342,18 @@ pub async fn unarchive_session(
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
     validate_session_id(&session_id)?;
     let auth = authenticate_http(&state, &headers)?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
     state
         .runtime
         .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpWrite)
         .await;
     let outcome = repository::set_archive_state(&state.pool, &session_id, false).await?;
+    state
+        .session_store
+        .put_session(&outcome.tenant_id, outcome.session.clone())
+        .await;
 
     if outcome.changed {
         publish_lifecycle(
@@ -351,7 +378,8 @@ pub async fn append_event(
     let result: Result<(StatusCode, Json<crate::model::AppendReply>), AppError> = async {
         let auth = authenticate_http(&state, &headers)?;
         let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
-        tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+        tenant_id =
+            resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
@@ -377,6 +405,10 @@ pub async fn append_event(
         if let Some(event) = outcome.event.clone() {
             state.hot_store.put_event(event.clone()).await;
             state.archive_queue.enqueue(&session_id).await;
+            state
+                .session_store
+                .bump_last_seq(&session_id, &outcome.tenant_id, event.seq)
+                .await;
             state.fanout.broadcast(event).await;
         }
 
@@ -517,7 +549,8 @@ pub async fn read_events(
 ) -> Result<Json<crate::model::EventsPage>, AppError> {
     validate_session_id(&session_id)?;
     let auth = authenticate_http(&state, &headers)?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     let page = read_path::read_events(
         &state.hot_store,
@@ -546,8 +579,8 @@ pub async fn tail_events(
     let auth = authenticate_socket(&state, &params)?;
     let expiry = auth.expiry_delay();
     let tail = parse_tail_options(params.clone())?;
-    let _session = repository::get_session(&state.pool, &session_id).await?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, &session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     state
         .runtime
@@ -705,7 +738,8 @@ async fn resolve_session_lifecycle(
     session_id: &str,
     cursor: i64,
 ) -> Result<LifecycleOptions, AppError> {
-    let tenant_id = repository::get_session_tenant_id(&state.pool, session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
     auth::allow_read_session(auth, session_id, &tenant_id)?;
 
     Ok(LifecycleOptions {
@@ -758,7 +792,8 @@ async fn validate_lifecycle_scope(
     };
 
     validate_session_id(session_id)?;
-    let tenant_id = repository::get_session_tenant_id(&state.pool, session_id).await?;
+    let tenant_id =
+        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
 
     if tenant_id != lifecycle.tenant_id {
         return Err(AppError::ForbiddenTenant);
@@ -920,6 +955,7 @@ fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
 async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {
     match repository::append_lifecycle_event(&state.pool, event, &state.instance_id).await {
         Ok(event) => {
+            state.session_store.apply_lifecycle_hint(&event.event).await;
             state.lifecycle.broadcast(event).await;
         }
         Err(error) => {
@@ -1073,14 +1109,14 @@ async fn sync_tail(
         return Ok(next_cursor);
     }
 
-    let session = repository::get_session(&state.pool, session_id).await?;
+    let last_seq = resolve_session_last_seq(&state.session_store, &state.pool, session_id).await?;
 
-    if cursor > session.last_seq {
-        let gap = build_resume_invalidated_gap(cursor, session.last_seq);
+    if cursor > last_seq {
+        let gap = build_resume_invalidated_gap(cursor, last_seq);
         send_gap(socket, &gap)
             .await
             .map_err(|_| AppError::Internal)?;
-        Ok(session.last_seq)
+        Ok(last_seq)
     } else {
         Ok(next_cursor)
     }

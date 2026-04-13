@@ -137,6 +137,12 @@ locally contiguous. That moves replay shape closer to the Elixir `EventStore` an
 contracts, even though append ack is still incorrectly paying the Postgres commit path in this
 experiment.
 
+There is now a matching hot session store too. Session create, update, archive state, relayed
+lifecycle catalog events, and relayed appends keep a local session-header cache current with
+tenant and `last_seq` state, so hot session reads and session-scoped auth checks do not need to
+start at Postgres every time. Phoenix `tail:<session_id>` replay now uses the same hot read path as
+the raw tail endpoint instead of bypassing it with a direct database read.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
@@ -150,14 +156,18 @@ plus lifecycle delivery timings, active raw stream subscriptions and Phoenix top
 socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
-now exposes that same local runtime map plus hot event-store state, archive-queue backlog, and
-remaining idle time per active session. It still does not cover routing,
+now exposes that same local runtime map plus hot event-store state, hot session-store state,
+archive-queue backlog, and remaining idle time per active session. It still does not cover routing,
 replication, archive, or full event-store invariants because those subsystems do not exist in this
 rewrite.
 
 One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
 reading control frames so a quiet client disconnect clears the in-process connection gauge
 immediately instead of leaving the task parked until the next event arrives.
+
+One runtime fix landed too: resume lifecycle persistence is no longer awaited on the hot read path.
+A cold-session HTTP read or tail join updates local runtime state immediately and then persists the
+runtime lifecycle in the background instead of blocking on Postgres before returning.
 
 ## Deliberate gaps
 

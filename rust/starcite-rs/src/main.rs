@@ -12,6 +12,7 @@ mod read_path;
 mod relay;
 mod repository;
 mod runtime;
+mod session_store;
 mod telemetry;
 mod web;
 
@@ -26,6 +27,7 @@ use fanout::{LifecycleFanout, SessionFanout};
 use hot_store::HotEventStore;
 use ops::OpsState;
 use runtime::SessionRuntime;
+use session_store::HotSessionStore;
 use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
 use telemetry::Telemetry;
@@ -41,6 +43,7 @@ pub struct AppState {
     pub lifecycle: LifecycleFanout,
     pub hot_store: HotEventStore,
     pub archive_queue: ArchiveQueue,
+    pub session_store: HotSessionStore,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
@@ -78,6 +81,7 @@ async fn run() -> Result<(), String> {
     let fanout = SessionFanout::default();
     let hot_store = HotEventStore::new();
     let archive_queue = ArchiveQueue::new();
+    let session_store = HotSessionStore::new();
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
@@ -95,6 +99,7 @@ async fn run() -> Result<(), String> {
         lifecycle,
         hot_store: hot_store.clone(),
         archive_queue: archive_queue.clone(),
+        session_store: session_store.clone(),
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
@@ -116,6 +121,7 @@ async fn run() -> Result<(), String> {
         state.lifecycle.clone(),
         hot_store,
         archive_queue,
+        session_store,
         instance_id,
     );
 

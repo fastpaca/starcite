@@ -109,21 +109,26 @@ impl SessionRuntime {
         self.schedule_freeze(session_id.to_string(), tenant_id.to_string(), generation);
 
         if activation == Activation::Resumed {
-            self.emit(LifecycleEvent::hydrating(
-                session_id.to_string(),
-                tenant_id.to_string(),
-            ))
-            .await;
-            self.emit(LifecycleEvent::activated(
-                session_id.to_string(),
-                tenant_id.to_string(),
-            ))
-            .await;
+            let runtime = self.clone();
+            let session_id = session_id.to_string();
+            let tenant_id = tenant_id.to_string();
             self.telemetry.record_session_hydrate(
-                tenant_id,
+                &tenant_id,
                 SessionOutcome::Ok,
                 SessionReason::Hydrate,
             );
+
+            tokio::spawn(async move {
+                runtime
+                    .emit(LifecycleEvent::hydrating(
+                        session_id.clone(),
+                        tenant_id.clone(),
+                    ))
+                    .await;
+                runtime
+                    .emit(LifecycleEvent::activated(session_id, tenant_id))
+                    .await;
+            });
         }
     }
 

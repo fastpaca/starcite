@@ -41,6 +41,12 @@ pub struct ArchiveStateOutcome {
     pub changed: bool,
 }
 
+#[derive(Debug, Clone)]
+pub struct SessionSnapshot {
+    pub tenant_id: String,
+    pub session: SessionResponse,
+}
+
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct ArchiveState {
     pub last_seq: i64,
@@ -164,13 +170,17 @@ pub async fn list_sessions(pool: &PgPool, opts: ListOptions) -> Result<SessionsP
     })
 }
 
-pub async fn get_session(pool: &PgPool, session_id: &str) -> Result<SessionResponse, AppError> {
+pub async fn get_session_snapshot(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<SessionSnapshot, AppError> {
     let row = load_session_row(pool, session_id).await?;
-    row.try_into()
-}
+    let tenant_id = row.tenant_id.clone();
 
-pub async fn get_session_tenant_id(pool: &PgPool, session_id: &str) -> Result<String, AppError> {
-    Ok(load_session_row(pool, session_id).await?.tenant_id)
+    Ok(SessionSnapshot {
+        tenant_id,
+        session: row.try_into()?,
+    })
 }
 
 pub async fn update_session(
