@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 
+use chrono::Utc;
 use serde::Serialize;
 use sqlx::PgPool;
 use tokio::{
@@ -16,12 +17,14 @@ use tokio::{
 
 use crate::{
     archive_queue::ArchiveQueue,
+    config::CommitMode,
     error::AppError,
     fanout::SessionFanout,
+    flush_queue::PendingFlushQueue,
     hot_store::HotEventStore,
-    model::ValidatedAppendEvent,
-    repository::{self, AppendOutcome},
-    session_store::HotSessionStore,
+    model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
+    repository::{self, AppendOutcome, ProducerSequenceCheck},
+    session_store::{HotSessionStore, resolve_session_last_seq},
 };
 
 const APPEND_QUEUE_CAPACITY: usize = 64;
@@ -33,7 +36,9 @@ pub struct SessionManager {
     fanout: SessionFanout,
     hot_store: HotEventStore,
     archive_queue: ArchiveQueue,
+    pending_flush: PendingFlushQueue,
     session_store: HotSessionStore,
+    commit_mode: CommitMode,
     instance_id: Arc<str>,
     idle_timeout: Duration,
     next_worker_id: Arc<AtomicU64>,
@@ -46,6 +51,7 @@ struct SessionWorkerHandle {
 }
 
 struct AppendCommand {
+    tenant_id: String,
     input: ValidatedAppendEvent,
     reply_tx: oneshot::Sender<Result<AppendOutcome, AppError>>,
 }
@@ -69,7 +75,9 @@ impl SessionManager {
         fanout: SessionFanout,
         hot_store: HotEventStore,
         archive_queue: ArchiveQueue,
+        pending_flush: PendingFlushQueue,
         session_store: HotSessionStore,
+        commit_mode: CommitMode,
         instance_id: Arc<str>,
         idle_timeout: Duration,
     ) -> Self {
@@ -79,7 +87,9 @@ impl SessionManager {
             fanout,
             hot_store,
             archive_queue,
+            pending_flush,
             session_store,
+            commit_mode,
             instance_id,
             idle_timeout,
             next_worker_id: Arc::new(AtomicU64::new(1)),
@@ -89,10 +99,15 @@ impl SessionManager {
     pub async fn append(
         &self,
         session_id: &str,
+        tenant_id: &str,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let (reply_tx, reply_rx) = oneshot::channel();
-        let mut command = AppendCommand { input, reply_tx };
+        let mut command = AppendCommand {
+            tenant_id: tenant_id.to_string(),
+            input,
+            reply_tx,
+        };
 
         for _attempt in 0..2 {
             let handle = self.worker_for(session_id).await;
@@ -175,12 +190,26 @@ impl SessionManager {
                 }
             };
 
-            let result = self.handle_append(&session_id, command.input).await;
+            let result = self
+                .handle_append(&session_id, &command.tenant_id, command.input)
+                .await;
             let _ = command.reply_tx.send(result);
         }
     }
 
     async fn handle_append(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        input: ValidatedAppendEvent,
+    ) -> Result<AppendOutcome, AppError> {
+        match self.commit_mode {
+            CommitMode::SyncPostgres => self.append_sync(session_id, input).await,
+            CommitMode::LocalAsync => self.append_local_async(session_id, tenant_id, input).await,
+        }
+    }
+
+    async fn append_sync(
         &self,
         session_id: &str,
         input: ValidatedAppendEvent,
@@ -201,6 +230,147 @@ impl SessionManager {
         Ok(outcome)
     }
 
+    async fn append_local_async(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        input: ValidatedAppendEvent,
+    ) -> Result<AppendOutcome, AppError> {
+        let last_seq =
+            resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
+
+        if let Some(expected_seq) = input.expected_seq
+            && last_seq != expected_seq
+        {
+            return Err(AppError::ExpectedSeqConflict {
+                expected: expected_seq,
+                current: last_seq,
+            });
+        }
+
+        let last_producer_seq = self
+            .resolve_producer_cursor(session_id, &input.producer_id, last_seq)
+            .await?;
+
+        match repository::classify_producer_sequence(last_producer_seq, input.producer_seq) {
+            ProducerSequenceCheck::AcceptFirst | ProducerSequenceCheck::AcceptNext => {}
+            ProducerSequenceCheck::ReplayOrConflict { expected } => {
+                let producer_id = input.producer_id.clone();
+                let current = input.producer_seq;
+                let existing = self
+                    .resolve_existing_event(session_id, &producer_id, current)
+                    .await?;
+
+                return match existing {
+                    Some(existing) if matches_local_event(&existing, &input, tenant_id) => {
+                        Ok(AppendOutcome {
+                            reply: AppendReply {
+                                seq: existing.seq,
+                                last_seq,
+                                deduped: true,
+                                cursor: existing.cursor,
+                                committed_cursor: last_seq,
+                            },
+                            event: None,
+                            tenant_id: tenant_id.to_string(),
+                        })
+                    }
+                    Some(_) => Err(AppError::ProducerReplayConflict),
+                    None => Err(AppError::ProducerSeqConflict {
+                        producer_id,
+                        expected,
+                        current,
+                    }),
+                };
+            }
+            ProducerSequenceCheck::Gap { expected } => {
+                return Err(AppError::ProducerSeqConflict {
+                    producer_id: input.producer_id,
+                    expected,
+                    current: input.producer_seq,
+                });
+            }
+        }
+
+        let next_seq = last_seq + 1;
+        let inserted_at = iso8601(Utc::now());
+        let event = EventResponse {
+            session_id: session_id.to_string(),
+            seq: next_seq,
+            event_type: input.event_type,
+            payload: input.payload,
+            actor: input.actor,
+            source: input.source,
+            metadata: input.metadata,
+            refs: input.refs,
+            idempotency_key: input.idempotency_key,
+            producer_id: input.producer_id,
+            producer_seq: input.producer_seq,
+            tenant_id: tenant_id.to_string(),
+            inserted_at,
+            cursor: next_seq,
+        };
+
+        self.session_store.put_tenant(session_id, tenant_id).await;
+        self.session_store
+            .bump_last_seq(session_id, tenant_id, next_seq)
+            .await;
+        self.hot_store.put_event(event.clone()).await;
+        self.pending_flush.enqueue(event.clone()).await;
+        self.fanout.broadcast(event.clone()).await;
+
+        Ok(AppendOutcome {
+            reply: AppendReply {
+                seq: next_seq,
+                last_seq: next_seq,
+                deduped: false,
+                cursor: next_seq,
+                committed_cursor: next_seq,
+            },
+            event: Some(event),
+            tenant_id: tenant_id.to_string(),
+        })
+    }
+
+    async fn resolve_producer_cursor(
+        &self,
+        session_id: &str,
+        producer_id: &str,
+        last_seq: i64,
+    ) -> Result<Option<i64>, AppError> {
+        if let Some(last_producer_seq) = self
+            .hot_store
+            .last_producer_seq(session_id, producer_id)
+            .await
+        {
+            return Ok(Some(last_producer_seq));
+        }
+
+        if last_seq == 0 {
+            return Ok(None);
+        }
+
+        repository::load_producer_cursor(&self.pool, session_id, producer_id).await
+    }
+
+    async fn resolve_existing_event(
+        &self,
+        session_id: &str,
+        producer_id: &str,
+        producer_seq: i64,
+    ) -> Result<Option<EventResponse>, AppError> {
+        if let Some(event) = self
+            .hot_store
+            .event_for_producer_seq(session_id, producer_id, producer_seq)
+            .await
+        {
+            return Ok(Some(event));
+        }
+
+        repository::load_event_for_producer_seq(&self.pool, session_id, producer_id, producer_seq)
+            .await
+    }
+
     async fn prune_worker(&self, session_id: &str, worker_id: u64) {
         let mut workers = self.workers.lock().await;
 
@@ -213,12 +383,27 @@ impl SessionManager {
     }
 }
 
+fn matches_local_event(
+    existing: &EventResponse,
+    input: &ValidatedAppendEvent,
+    tenant_id: &str,
+) -> bool {
+    existing.event_type == input.event_type
+        && existing.payload == input.payload
+        && existing.actor == input.actor
+        && existing.source == input.source
+        && existing.metadata == input.metadata
+        && existing.refs == input.refs
+        && existing.idempotency_key == input.idempotency_key
+        && existing.tenant_id == tenant_id
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SessionManager, SessionWorkerHandle};
     use crate::{
-        archive_queue::ArchiveQueue, fanout::SessionFanout, hot_store::HotEventStore,
-        session_store::HotSessionStore,
+        archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
+        flush_queue::PendingFlushQueue, hot_store::HotEventStore, session_store::HotSessionStore,
     };
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
@@ -234,7 +419,9 @@ mod tests {
             SessionFanout::default(),
             HotEventStore::new(),
             ArchiveQueue::new(),
+            PendingFlushQueue::new(),
             HotSessionStore::new(),
+            CommitMode::SyncPostgres,
             Arc::<str>::from("node-a"),
             idle_timeout,
         )

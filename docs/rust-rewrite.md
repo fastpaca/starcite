@@ -150,6 +150,14 @@ ordering behind one explicit in-process boundary and makes the ops surface hones
 sessions this process is actively servicing, even though the worker still persists through
 Postgres synchronously in this experiment.
 
+There is now an experimental commit-mode split behind that worker boundary. The default
+`sync_postgres` mode keeps the current durable append path. `local_async` instead acknowledges
+from local hot state, puts the event into a pending-flush backlog, and lets a background flusher
+persist it to Postgres and emit `NOTIFY` later. That is the first real cut at moving Postgres off
+the append ack path in this branch. It is intentionally honest about the remaining gap: without
+distributed ownership or quorum replication yet, `local_async` is only a same-process hot-path
+experiment, not a production-safe multi-node commit model.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The

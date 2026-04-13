@@ -1,3 +1,4 @@
+use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::{
@@ -20,7 +21,7 @@ struct ProducerCursorRow {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ProducerSequenceCheck {
+pub(crate) enum ProducerSequenceCheck {
     AcceptFirst,
     AcceptNext,
     ReplayOrConflict { expected: i64 },
@@ -597,6 +598,175 @@ pub async fn load_event_by_seq(
     row.map(EventResponse::try_from).transpose()
 }
 
+pub async fn load_producer_cursor(
+    pool: &PgPool,
+    session_id: &str,
+    producer_id: &str,
+) -> Result<Option<i64>, AppError> {
+    Ok(sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT last_producer_seq
+        FROM session_producers
+        WHERE session_id = $1
+          AND producer_id = $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(producer_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn load_event_for_producer_seq(
+    pool: &PgPool,
+    session_id: &str,
+    producer_id: &str,
+    producer_seq: i64,
+) -> Result<Option<EventResponse>, AppError> {
+    let row = sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND producer_id = $2
+          AND producer_seq = $3
+        "#,
+    )
+    .bind(session_id)
+    .bind(producer_id)
+    .bind(producer_seq)
+    .fetch_optional(pool)
+    .await?;
+
+    row.map(EventResponse::try_from).transpose()
+}
+
+pub async fn persist_flushed_event(
+    pool: &PgPool,
+    event: &EventResponse,
+    emitter_id: &str,
+) -> Result<(), AppError> {
+    let mut tx = pool.begin().await?;
+    let session = load_session_row_tx(&mut tx, &event.session_id).await?;
+
+    if session.tenant_id != event.tenant_id {
+        return Err(AppError::Internal);
+    }
+
+    if session.last_seq >= event.seq {
+        let existing = load_event_by_seq_tx(&mut tx, &event.session_id, event.seq).await?;
+
+        return match existing {
+            Some(existing) if matches_event_response(&existing, event)? => {
+                tx.commit().await?;
+                Ok(())
+            }
+            _ => Err(AppError::Internal),
+        };
+    }
+
+    if session.last_seq + 1 != event.seq {
+        return Err(AppError::Internal);
+    }
+
+    let inserted_at = parse_inserted_at(&event.inserted_at)?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO events (
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        )
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+        "#,
+    )
+    .bind(&event.session_id)
+    .bind(event.seq)
+    .bind(&event.event_type)
+    .bind(serde_json::Value::Object(event.payload.clone()))
+    .bind(&event.actor)
+    .bind(&event.source)
+    .bind(serde_json::Value::Object(event.metadata.clone()))
+    .bind(serde_json::Value::Object(event.refs.clone()))
+    .bind(&event.idempotency_key)
+    .bind(&event.producer_id)
+    .bind(event.producer_seq)
+    .bind(&event.tenant_id)
+    .bind(inserted_at)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO session_producers (
+          session_id,
+          producer_id,
+          last_producer_seq
+        )
+        VALUES ($1, $2, $3)
+        ON CONFLICT (session_id, producer_id)
+        DO UPDATE
+        SET
+          last_producer_seq = GREATEST(
+            session_producers.last_producer_seq,
+            EXCLUDED.last_producer_seq
+          ),
+          updated_at = now()
+        "#,
+    )
+    .bind(&event.session_id)
+    .bind(&event.producer_id)
+    .bind(event.producer_seq)
+    .execute(&mut *tx)
+    .await?;
+
+    sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
+        .bind(&event.session_id)
+        .bind(event.seq)
+        .execute(&mut *tx)
+        .await?;
+
+    sqlx::query("SELECT pg_notify($1, $2)")
+        .bind(EVENT_NOTIFICATION_CHANNEL)
+        .bind(
+            serde_json::to_string(&EventNotification {
+                emitter_id: emitter_id.to_string(),
+                session_id: event.session_id.clone(),
+                seq: event.seq,
+            })
+            .map_err(|_| AppError::Internal)?,
+        )
+        .execute(&mut *tx)
+        .await?;
+
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn append_lifecycle_event(
     pool: &PgPool,
     event: LifecycleEvent,
@@ -847,7 +1017,40 @@ async fn load_event_for_producer_seq_tx(
     .map_err(AppError::from)
 }
 
-fn classify_producer_sequence(
+async fn load_event_by_seq_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    session_id: &str,
+    seq: i64,
+) -> Result<Option<EventRow>, AppError> {
+    sqlx::query_as::<_, EventRow>(
+        r#"
+        SELECT
+          session_id,
+          seq,
+          type,
+          payload,
+          actor,
+          source,
+          metadata,
+          refs,
+          idempotency_key,
+          producer_id,
+          producer_seq,
+          tenant_id,
+          inserted_at
+        FROM events
+        WHERE session_id = $1
+          AND seq = $2
+        "#,
+    )
+    .bind(session_id)
+    .bind(seq)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(AppError::from)
+}
+
+pub(crate) fn classify_producer_sequence(
     last_producer_seq: Option<i64>,
     incoming_producer_seq: i64,
 ) -> ProducerSequenceCheck {
@@ -881,6 +1084,27 @@ fn matches_event(
         && value_to_object(&existing.refs)? == input.refs
         && existing.idempotency_key == input.idempotency_key
         && existing.tenant_id == tenant_id)
+}
+
+fn matches_event_response(existing: &EventRow, event: &EventResponse) -> Result<bool, AppError> {
+    Ok(existing.session_id == event.session_id
+        && existing.seq == event.seq
+        && existing.event_type == event.event_type
+        && value_to_object(&existing.payload)? == event.payload
+        && existing.actor == event.actor
+        && existing.source == event.source
+        && value_to_object(&existing.metadata)? == event.metadata
+        && value_to_object(&existing.refs)? == event.refs
+        && existing.idempotency_key == event.idempotency_key
+        && existing.producer_id == event.producer_id
+        && existing.producer_seq == event.producer_seq
+        && existing.tenant_id == event.tenant_id)
+}
+
+fn parse_inserted_at(raw: &str) -> Result<DateTime<Utc>, AppError> {
+    DateTime::parse_from_rfc3339(raw)
+        .map(|value| value.with_timezone(&Utc))
+        .map_err(|_| AppError::Internal)
 }
 
 fn value_to_object(value: &serde_json::Value) -> Result<JsonMap, AppError> {

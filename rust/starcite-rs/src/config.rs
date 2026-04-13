@@ -6,6 +6,12 @@ pub enum AuthMode {
     UnsafeJwt,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommitMode {
+    SyncPostgres,
+    LocalAsync,
+}
+
 pub const DEFAULT_LIST_LIMIT: u32 = 100;
 pub const MAX_LIST_LIMIT: u32 = 1_000;
 
@@ -18,9 +24,11 @@ pub struct Config {
     pub archive_flush_interval_ms: u64,
     pub migrate_on_boot: bool,
     pub auth_mode: AuthMode,
+    pub commit_mode: CommitMode,
     pub telemetry_enabled: bool,
     pub shutdown_drain_timeout_ms: u64,
     pub session_runtime_idle_timeout_ms: u64,
+    pub commit_flush_interval_ms: u64,
 }
 
 impl Config {
@@ -60,6 +68,12 @@ impl Config {
             .transpose()?
             .unwrap_or(AuthMode::None);
 
+        let commit_mode = env::var("STARCITE_COMMIT_MODE")
+            .ok()
+            .map(|raw| parse_commit_mode("STARCITE_COMMIT_MODE", &raw))
+            .transpose()?
+            .unwrap_or(CommitMode::SyncPostgres);
+
         let telemetry_enabled = env::var("STARCITE_ENABLE_TELEMETRY")
             .ok()
             .map(|raw| parse_bool("STARCITE_ENABLE_TELEMETRY", &raw))
@@ -78,6 +92,12 @@ impl Config {
             .transpose()?
             .unwrap_or(30_000);
 
+        let commit_flush_interval_ms = env::var("COMMIT_FLUSH_INTERVAL_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("COMMIT_FLUSH_INTERVAL_MS", &raw))
+            .transpose()?
+            .unwrap_or(100);
+
         Ok(Self {
             listen_addr,
             ops_listen_addr,
@@ -86,9 +106,11 @@ impl Config {
             archive_flush_interval_ms,
             migrate_on_boot,
             auth_mode,
+            commit_mode,
             telemetry_enabled,
             shutdown_drain_timeout_ms,
             session_runtime_idle_timeout_ms,
+            commit_flush_interval_ms,
         })
     }
 }
@@ -120,6 +142,14 @@ fn parse_auth_mode(name: &str, raw: &str) -> Result<AuthMode, String> {
         "none" => Ok(AuthMode::None),
         "unsafe_jwt" => Ok(AuthMode::UnsafeJwt),
         _ => Err(format!("invalid auth mode for {name}: {raw}")),
+    }
+}
+
+fn parse_commit_mode(name: &str, raw: &str) -> Result<CommitMode, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "sync_postgres" => Ok(CommitMode::SyncPostgres),
+        "local_async" => Ok(CommitMode::LocalAsync),
+        _ => Err(format!("invalid commit mode for {name}: {raw}")),
     }
 }
 
@@ -163,7 +193,7 @@ fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_listener_addrs, parse_positive_u64};
+    use super::{CommitMode, parse_commit_mode, parse_listener_addrs, parse_positive_u64};
 
     #[test]
     fn defaults_ops_port_to_public_port_plus_one() {
@@ -218,5 +248,20 @@ mod tests {
     fn rejects_non_positive_u64_values() {
         assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "0").is_err());
         assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "-1").is_err());
+    }
+
+    #[test]
+    fn parses_commit_modes() {
+        assert_eq!(
+            parse_commit_mode("STARCITE_COMMIT_MODE", "sync_postgres")
+                .expect("sync mode should parse"),
+            CommitMode::SyncPostgres
+        );
+
+        assert_eq!(
+            parse_commit_mode("STARCITE_COMMIT_MODE", "local_async")
+                .expect("async mode should parse"),
+            CommitMode::LocalAsync
+        );
     }
 }

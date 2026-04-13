@@ -22,6 +22,7 @@ use crate::{
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
+    flush_queue::PendingFlushSnapshot,
     hot_store::HotEventStoreSnapshot,
     model::{
         AppendEventRequest, ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions,
@@ -113,11 +114,13 @@ struct NodeDrainingFrame {
 struct DebugStateResponse {
     ops: OpsSnapshot,
     auth_mode: &'static str,
+    commit_mode: &'static str,
     telemetry_enabled: bool,
     runtime: RuntimeSnapshot,
     hot_store: HotEventStoreSnapshot,
     session_store: HotSessionStoreSnapshot,
     session_manager: SessionManagerSnapshot,
+    pending_flush: PendingFlushSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
 }
@@ -159,6 +162,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let hot_store = state.hot_store.snapshot().await;
     let session_store = state.session_store.snapshot().await;
     let session_manager = state.session_manager.snapshot().await;
+    let pending_flush = state.pending_flush.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
@@ -166,11 +170,13 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     Json(DebugStateResponse {
         ops,
         auth_mode: auth_mode_name(state.auth_mode),
+        commit_mode: commit_mode_name(state.commit_mode),
         telemetry_enabled: state.telemetry.enabled(),
         runtime,
         hot_store,
         session_store,
         session_manager,
+        pending_flush,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
     })
@@ -387,7 +393,10 @@ pub async fn append_event(
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
-        let outcome = state.session_manager.append(&session_id, validated).await;
+        let outcome = state
+            .session_manager
+            .append(&session_id, &tenant_id, validated)
+            .await;
         record_request_result(
             &state,
             RequestPhase::Ack,
@@ -942,6 +951,13 @@ fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
     match auth_mode {
         crate::config::AuthMode::None => "none",
         crate::config::AuthMode::UnsafeJwt => "unsafe_jwt",
+    }
+}
+
+fn commit_mode_name(commit_mode: crate::config::CommitMode) -> &'static str {
+    match commit_mode {
+        crate::config::CommitMode::SyncPostgres => "sync_postgres",
+        crate::config::CommitMode::LocalAsync => "local_async",
     }
 }
 

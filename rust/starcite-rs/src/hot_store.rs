@@ -112,6 +112,34 @@ impl HotEventStore {
             .and_then(|buffer| buffer.events.last_key_value().map(|(seq, _event)| *seq))
     }
 
+    pub async fn last_producer_seq(&self, session_id: &str, producer_id: &str) -> Option<i64> {
+        let sessions = self.sessions.read().await;
+        let buffer = sessions.get(session_id)?;
+
+        buffer
+            .events
+            .values()
+            .filter(|event| event.producer_id == producer_id)
+            .map(|event| event.producer_seq)
+            .max()
+    }
+
+    pub async fn event_for_producer_seq(
+        &self,
+        session_id: &str,
+        producer_id: &str,
+        producer_seq: i64,
+    ) -> Option<EventResponse> {
+        let sessions = self.sessions.read().await;
+        let buffer = sessions.get(session_id)?;
+
+        buffer
+            .events
+            .values()
+            .find(|event| event.producer_id == producer_id && event.producer_seq == producer_seq)
+            .cloned()
+    }
+
     pub async fn session_ids(&self) -> Vec<String> {
         let sessions = self.sessions.read().await;
         let mut ids = sessions.keys().cloned().collect::<Vec<_>>();
@@ -213,5 +241,41 @@ mod tests {
         assert_eq!(snapshot.sessions[1].session_id, "ses_b");
         assert_eq!(snapshot.sessions[1].first_seq, Some(1));
         assert_eq!(snapshot.sessions[1].last_seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn finds_last_producer_seq_and_matching_event() {
+        let store = HotEventStore::new();
+        let mut first = event("ses_demo", 1);
+        first.producer_id = "writer-1".to_string();
+        first.producer_seq = 2;
+        let mut second = event("ses_demo", 2);
+        second.producer_id = "writer-2".to_string();
+        second.producer_seq = 1;
+        let mut third = event("ses_demo", 3);
+        third.producer_id = "writer-1".to_string();
+        third.producer_seq = 3;
+
+        store
+            .put_events(vec![first.clone(), second, third.clone()])
+            .await;
+
+        assert_eq!(
+            store.last_producer_seq("ses_demo", "writer-1").await,
+            Some(3)
+        );
+        assert_eq!(
+            store
+                .event_for_producer_seq("ses_demo", "writer-1", 2)
+                .await
+                .expect("matching event"),
+            first
+        );
+        assert!(
+            store
+                .event_for_producer_seq("ses_demo", "writer-1", 4)
+                .await
+                .is_none()
+        );
     }
 }

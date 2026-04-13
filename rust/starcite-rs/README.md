@@ -35,14 +35,16 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
+- `STARCITE_COMMIT_MODE=sync_postgres` keeps the current fully durable append path, while `STARCITE_COMMIT_MODE=local_async` acknowledges appends from local hot state and flushes them to Postgres in the background. `local_async` is a single-process parity experiment, not a safe multi-node ownership model yet.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, local session runtime counters, and dynamic gauges for node drain state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason.
 - `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, includes `drain_source` and shutdown `retry_after_ms` hints in those drain responses, emits the same drain metadata to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
-- Appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence.
+- In `sync_postgres` mode, appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence immediately.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
 - The rewrite now keeps a local in-memory hot event store per process. Local appends and relayed remote commits both populate that hot store, and `GET /v1/sessions/:id/events` plus tail catch-up replay read hot state first and only fall back to Postgres when the requested range is not locally contiguous.
 - The rewrite now also keeps a local hot session store per process. Session create, update, archive state, relayed lifecycle catalog events, and relayed appends keep that cache current, so hot session reads and session-scoped auth checks can resolve tenant and header state without treating Postgres as the first lookup every time.
 - Appends now route through a local per-session worker boundary before they hit the repository layer. That gets append ordering off the HTTP task and onto one explicit session-local queue per process, which is closer to the eventual runtime/quorum shape even though the worker still calls Postgres synchronously in this branch.
+- In `local_async` commit mode, that same session worker now has a real local commit path: it updates hot in-memory session and event state, broadcasts live fanout, and queues the event for a background Postgres flusher. Same-node reads can keep working while Postgres is briefly unavailable, but flushed durability and cross-node visibility trail the ack.
 - A local archive worker now drains an explicit dirty-session queue, advances `sessions.archived_seq`, and prunes hot in-memory events once they are considered archived. The periodic tick is now only a fallback nudge, not the primary discovery path. In this transitional branch the backend rows already exist in Postgres before that flush, so the worker is modeling the hot/cold boundary and eviction behavior rather than removing Postgres from the ack path yet.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
@@ -64,7 +66,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `GET /health/live` returns `{"status":"ok"}` and stays live during shutdown drain.
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining","drain_source":"shutdown","retry_after_ms":N}` once shutdown drain begins.
 - Public `503 node_draining` responses include `x-starcite-drain-source`, and shutdown drain responses also include `Retry-After` plus `x-starcite-retry-after-ms`.
-- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, drain source, runtime state, hot event-store state, hot session-store state, local session-worker state, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session and per-tenant subscriber counts.
+- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, auth mode, commit mode, runtime state, hot event-store state, hot session-store state, local session-worker state, pending-flush backlog, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session and per-tenant subscriber counts.
 - `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
 - `DELETE /debug/drain` clears only a manual drain and returns the process to `ready`; it refuses to clear a real shutdown drain.
 - Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next session-scoped read, append, tail join, or lifecycle read/stream on that cold session emits `session.hydrating` then `session.activated`.
@@ -89,9 +91,11 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5433/starcite_rust_dev
 DATABASE_MAX_CONNECTIONS=20
 MIGRATE_ON_BOOT=true
 STARCITE_AUTH_MODE=none
+STARCITE_COMMIT_MODE=sync_postgres
 STARCITE_ENABLE_TELEMETRY=true
 STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
+COMMIT_FLUSH_INTERVAL_MS=100
 ARCHIVE_FLUSH_INTERVAL_MS=5000
 RUST_LOG=info
 ```
@@ -100,6 +104,11 @@ Auth mode values:
 
 - `none` for the current trust-everything local workflow
 - `unsafe_jwt` to parse JWT claims without signature verification and enforce the claim contract locally
+
+Commit mode values:
+
+- `sync_postgres` for the current durable append path
+- `local_async` for the experimental local-ack plus background-Postgres-flush path
 
 Telemetry values:
 

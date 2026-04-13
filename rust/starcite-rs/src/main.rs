@@ -4,6 +4,8 @@ mod auth;
 mod config;
 mod error;
 mod fanout;
+mod flush_queue;
+mod flusher;
 mod hot_store;
 mod model;
 mod ops;
@@ -25,6 +27,8 @@ use axum::{
 };
 use config::Config;
 use fanout::{LifecycleFanout, SessionFanout};
+use flush_queue::PendingFlushQueue;
+use flusher::FlushWorker;
 use hot_store::HotEventStore;
 use ops::OpsState;
 use runtime::SessionRuntime;
@@ -45,11 +49,13 @@ pub struct AppState {
     pub lifecycle: LifecycleFanout,
     pub hot_store: HotEventStore,
     pub archive_queue: ArchiveQueue,
+    pub pending_flush: PendingFlushQueue,
     pub session_store: HotSessionStore,
     pub session_manager: SessionManager,
     pub runtime: SessionRuntime,
     pub ops: OpsState,
     pub auth_mode: config::AuthMode,
+    pub commit_mode: config::CommitMode,
     pub telemetry: Telemetry,
     pub instance_id: Arc<str>,
 }
@@ -84,6 +90,7 @@ async fn run() -> Result<(), String> {
     let fanout = SessionFanout::default();
     let hot_store = HotEventStore::new();
     let archive_queue = ArchiveQueue::new();
+    let pending_flush = PendingFlushQueue::new();
     let session_store = HotSessionStore::new();
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
@@ -93,7 +100,9 @@ async fn run() -> Result<(), String> {
         fanout.clone(),
         hot_store.clone(),
         archive_queue.clone(),
+        pending_flush.clone(),
         session_store.clone(),
+        config.commit_mode,
         instance_id.clone(),
         Duration::from_millis(config.session_runtime_idle_timeout_ms),
     );
@@ -111,14 +120,25 @@ async fn run() -> Result<(), String> {
         lifecycle,
         hot_store: hot_store.clone(),
         archive_queue: archive_queue.clone(),
+        pending_flush: pending_flush.clone(),
         session_store: session_store.clone(),
         session_manager,
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
+        commit_mode: config.commit_mode,
         telemetry: telemetry.clone(),
         instance_id: instance_id.clone(),
     };
+
+    FlushWorker::new(
+        pool.clone(),
+        pending_flush,
+        archive_queue.clone(),
+        instance_id.clone(),
+        Duration::from_millis(config.commit_flush_interval_ms),
+    )
+    .spawn();
 
     ArchiveWorker::new(
         pool.clone(),
