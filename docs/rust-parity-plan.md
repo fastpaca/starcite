@@ -24,6 +24,26 @@ existing Starcite app.
 If a Rust implementation cannot preserve those properties, it is not a rewrite.
 It is a redesign.
 
+## Postgres Is Fine, But Only As The Backend Store
+
+The latency requirement does not rule Postgres out. It rules Postgres out of
+the append ack path.
+
+The intended Rust shape is:
+
+- quorum-committed writes land in the replicated hot session log first
+- the hot runtime and hot event store serve the recent replay path
+- a background flusher persists committed state to Postgres asynchronously
+- cold replay and recovery load from Postgres
+- S3 can disappear entirely if Postgres replaces the archive store
+
+That keeps the operational simplification, "one backend store instead of S3 +
+Postgres," without paying synchronous database latency on every append ack.
+
+If the cluster cannot acknowledge a write before Postgres commits it, the
+rewrite has already lost the main performance property it was supposed to
+preserve.
+
 ## Existing Elixir Shape To Preserve
 
 ### Session Quorum
@@ -75,6 +95,10 @@ The current flow is:
 
 That separation is part of the latency story. Moving archive durability into the
 append transaction defeats the original design.
+
+For the Rust parity target, the archive sink can be Postgres instead of S3, but
+the queueing model should stay the same: flush committed hot-path state to the
+backend store after the ack, not before it.
 
 ## What The Current Rust Experiment Got Wrong
 
