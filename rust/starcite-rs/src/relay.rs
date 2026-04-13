@@ -153,6 +153,14 @@ async fn handle_notification(
                     session_store
                         .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
                         .await;
+                    session_store
+                        .bump_producer_seq(
+                            &event.session_id,
+                            &event.tenant_id,
+                            &event.producer_id,
+                            event.producer_seq,
+                        )
+                        .await;
                     fanout.broadcast(event).await;
                 }
                 Ok(None) => {

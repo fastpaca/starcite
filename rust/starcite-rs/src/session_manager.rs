@@ -273,6 +273,14 @@ impl SessionManager {
             .await;
 
         if let Some(event) = outcome.event.clone() {
+            self.session_store
+                .bump_producer_seq(
+                    &event.session_id,
+                    &event.tenant_id,
+                    &event.producer_id,
+                    event.producer_seq,
+                )
+                .await;
             self.hot_store.put_event(event.clone()).await;
             self.archive_queue.enqueue(session_id).await;
             self.fanout.broadcast(event).await;
@@ -391,6 +399,14 @@ impl SessionManager {
         last_seq: i64,
     ) -> Result<Option<i64>, AppError> {
         if let Some(last_producer_seq) = self
+            .session_store
+            .get_last_producer_seq(session_id, producer_id)
+            .await
+        {
+            return Ok(Some(last_producer_seq));
+        }
+
+        if let Some(last_producer_seq) = self
             .hot_store
             .last_producer_seq(session_id, producer_id)
             .await
@@ -429,6 +445,14 @@ impl SessionManager {
             .await;
         self.session_store
             .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
+            .await;
+        self.session_store
+            .bump_producer_seq(
+                &event.session_id,
+                &event.tenant_id,
+                &event.producer_id,
+                event.producer_seq,
+            )
             .await;
         self.hot_store.put_event(event.clone()).await;
         self.pending_flush.enqueue(event.clone()).await;
@@ -475,10 +499,11 @@ mod tests {
     use super::{SessionManager, SessionWorkerHandle};
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
-        flush_queue::PendingFlushQueue, hot_store::HotEventStore, ops::OpsState,
-        ownership::OwnershipManager, replica_store::ReplicaStore,
+        flush_queue::PendingFlushQueue, hot_store::HotEventStore, model::EventResponse,
+        ops::OpsState, ownership::OwnershipManager, replica_store::ReplicaStore,
         replication::ReplicationCoordinator, session_store::HotSessionStore,
     };
+    use serde_json::Map;
     use sqlx::postgres::PgPoolOptions;
     use std::{sync::Arc, time::Duration};
     use tokio::{sync::mpsc, time::sleep};
@@ -513,6 +538,25 @@ mod tests {
             Arc::<str>::from("node-a"),
             idle_timeout,
         )
+    }
+
+    fn sample_event(session_id: &str, seq: i64, producer_seq: i64) -> EventResponse {
+        EventResponse {
+            session_id: session_id.to_string(),
+            seq,
+            event_type: "content".to_string(),
+            payload: Map::new(),
+            actor: "service:bench".to_string(),
+            source: Some("test".to_string()),
+            metadata: Map::new(),
+            refs: Map::new(),
+            idempotency_key: None,
+            producer_id: "writer-1".to_string(),
+            producer_seq,
+            tenant_id: "acme".to_string(),
+            inserted_at: "2026-04-13T00:00:00Z".to_string(),
+            cursor: seq,
+        }
     }
 
     #[tokio::test]
@@ -580,5 +624,22 @@ mod tests {
         sleep(Duration::from_millis(60)).await;
 
         assert_eq!(manager.snapshot().await.active_session_count, 0);
+    }
+
+    #[tokio::test]
+    async fn apply_local_async_commit_tracks_producer_cursor_in_session_store() {
+        let manager = manager(Duration::from_secs(1));
+
+        manager
+            .apply_local_async_commit(sample_event("ses_demo", 4, 9))
+            .await;
+
+        assert_eq!(
+            manager
+                .session_store
+                .get_last_producer_seq("ses_demo", "writer-1")
+                .await,
+            Some(9)
+        );
     }
 }

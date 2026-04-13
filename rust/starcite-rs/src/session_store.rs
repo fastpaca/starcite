@@ -20,6 +20,7 @@ struct SessionCacheEntry {
     tenant_id: String,
     last_seq: i64,
     archived_seq: i64,
+    producer_last_seqs: HashMap<String, i64>,
     session: Option<SessionResponse>,
 }
 
@@ -60,6 +61,7 @@ impl HotSessionStore {
                 tenant_id: tenant_id.to_string(),
                 last_seq: session.last_seq,
                 archived_seq: archived_seq.unwrap_or_default(),
+                producer_last_seqs: HashMap::new(),
                 session: None,
             });
 
@@ -80,6 +82,7 @@ impl HotSessionStore {
                 tenant_id: tenant_id.to_string(),
                 last_seq: 0,
                 archived_seq: 0,
+                producer_last_seqs: HashMap::new(),
                 session: None,
             });
 
@@ -94,6 +97,7 @@ impl HotSessionStore {
                 tenant_id: tenant_id.to_string(),
                 last_seq,
                 archived_seq: 0,
+                producer_last_seqs: HashMap::new(),
                 session: None,
             });
 
@@ -105,6 +109,32 @@ impl HotSessionStore {
         }
     }
 
+    pub async fn bump_producer_seq(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        producer_id: &str,
+        producer_seq: i64,
+    ) {
+        let mut sessions = self.sessions.write().await;
+        let entry = sessions
+            .entry(session_id.to_string())
+            .or_insert_with(|| SessionCacheEntry {
+                tenant_id: tenant_id.to_string(),
+                last_seq: 0,
+                archived_seq: 0,
+                producer_last_seqs: HashMap::new(),
+                session: None,
+            });
+
+        entry.tenant_id = tenant_id.to_string();
+        entry
+            .producer_last_seqs
+            .entry(producer_id.to_string())
+            .and_modify(|current| *current = (*current).max(producer_seq))
+            .or_insert(producer_seq);
+    }
+
     pub async fn apply_lifecycle_hint(&self, event: &LifecycleEvent) {
         let mut sessions = self.sessions.write().await;
         let entry = sessions
@@ -113,6 +143,7 @@ impl HotSessionStore {
                 tenant_id: event.tenant_id().to_string(),
                 last_seq: 0,
                 archived_seq: 0,
+                producer_last_seqs: HashMap::new(),
                 session: None,
             });
 
@@ -177,6 +208,13 @@ impl HotSessionStore {
     pub async fn get_last_seq(&self, session_id: &str) -> Option<i64> {
         let sessions = self.sessions.read().await;
         sessions.get(session_id).map(|entry| entry.last_seq)
+    }
+
+    pub async fn get_last_producer_seq(&self, session_id: &str, producer_id: &str) -> Option<i64> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .and_then(|entry| entry.producer_last_seqs.get(producer_id).copied())
     }
 
     pub async fn update_archived_seq(&self, session_id: &str, archived_seq: i64) {
@@ -414,5 +452,25 @@ mod tests {
 
         let snapshot = store.snapshot().await;
         assert_eq!(snapshot.sessions[0].archived_seq, 4);
+    }
+
+    #[tokio::test]
+    async fn bump_producer_seq_tracks_max_for_session_producer() {
+        let store = HotSessionStore::new();
+
+        store
+            .bump_producer_seq("ses_demo", "acme", "writer-1", 2)
+            .await;
+        store
+            .bump_producer_seq("ses_demo", "acme", "writer-1", 5)
+            .await;
+        store
+            .bump_producer_seq("ses_demo", "acme", "writer-1", 4)
+            .await;
+
+        assert_eq!(
+            store.get_last_producer_seq("ses_demo", "writer-1").await,
+            Some(5)
+        );
     }
 }

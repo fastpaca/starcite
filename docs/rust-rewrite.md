@@ -180,6 +180,11 @@ batch in one Postgres transaction instead of one transaction per event. That is 
 at moving Postgres off the append ack path in this branch. It is intentionally honest about the
 remaining gap: without
 quorum replication yet, `local_async` is still not a production-safe multi-node commit model.
+`local_async` now also keeps producer cursors in the hot session cache instead of deriving them
+only from retained hot events or from the flushed `session_producers` row. Local commits, standby
+replica commits, and Postgres relay fanout all advance that cache, which closes the false
+`producer_seq_conflict` edge when an active session has already archived older hot events but the
+background Postgres flush is still trailing the acknowledged write position.
 What it does have now is explicit single-writer ownership per active session: a Rust node renews a
 Postgres-backed lease while its local session worker is alive, non-owner nodes reject event-path
 appends and replay with `409 session_not_owned`, and the next node can take over once the worker
