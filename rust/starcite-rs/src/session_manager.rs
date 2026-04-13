@@ -335,7 +335,10 @@ impl SessionManager {
         state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
-        let lease = self.ownership.ensure_owned(session_id).await?;
+        let lease = match self.ownership.live_owned_lease(session_id).await {
+            Some(lease) => lease,
+            None => self.ownership.ensure_owned(session_id).await?,
+        };
         if !state.flush_seeded {
             self.seed_pending_flush(session_id).await;
             state.mark_flush_seeded();

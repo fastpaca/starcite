@@ -118,6 +118,15 @@ impl OwnershipManager {
         })
     }
 
+    pub async fn live_owned_lease(&self, session_id: &str) -> Option<OwnedLease> {
+        self.live_cached_lease(session_id)
+            .await
+            .map(|lease| OwnedLease {
+                epoch: lease.epoch,
+                standby: lease.standby,
+            })
+    }
+
     pub async fn release(&self, session_id: &str) {
         self.leases.lock().await.remove(session_id);
 
@@ -178,6 +187,14 @@ impl OwnershipManager {
         } else {
             None
         }
+    }
+
+    async fn live_cached_lease(&self, session_id: &str) -> Option<LocalLease> {
+        let now = Instant::now();
+        let leases = self.leases.lock().await;
+        let lease = leases.get(session_id)?;
+
+        (lease.expires_at > now).then(|| lease.clone())
     }
 
     pub fn renew_interval(&self) -> Duration {
@@ -353,5 +370,50 @@ mod tests {
         assert_eq!(snapshot.active_session_count, 2);
         assert_eq!(snapshot.sessions[0].session_id, "ses_a");
         assert_eq!(snapshot.sessions[1].epoch, 2);
+    }
+
+    #[tokio::test]
+    async fn live_cached_lease_stays_valid_inside_renew_window() {
+        let manager = manager(Duration::from_secs(10));
+        let now = Instant::now();
+        {
+            let mut leases = manager.leases.lock().await;
+            leases.insert(
+                "ses_a".to_string(),
+                LocalLease {
+                    epoch: 4,
+                    expires_at: now + Duration::from_secs(2),
+                    standby: None,
+                },
+            );
+        }
+
+        let lease = manager
+            .live_cached_lease("ses_a")
+            .await
+            .expect("cached lease");
+
+        assert_eq!(lease.epoch, 4);
+        assert!(manager.cached_lease("ses_a").await.is_none());
+    }
+
+    #[tokio::test]
+    async fn live_cached_lease_rejects_expired_entry() {
+        let manager = manager(Duration::from_secs(10));
+        let now = Instant::now();
+        {
+            let mut leases = manager.leases.lock().await;
+            leases.insert(
+                "ses_a".to_string(),
+                LocalLease {
+                    epoch: 4,
+                    expires_at: now - Duration::from_millis(1),
+                    standby: None,
+                },
+            );
+        }
+
+        assert!(manager.live_cached_lease("ses_a").await.is_none());
+        assert!(manager.cached_lease("ses_a").await.is_none());
     }
 }
