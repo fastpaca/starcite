@@ -150,7 +150,7 @@ impl SessionManager {
 
         for _attempt in 0..2 {
             let (reply_tx, reply_rx) = oneshot::channel();
-            let handle = self.worker_for(session_id).await;
+            let handle = self.worker_for_append(session_id).await?;
             let command = AppendCommand {
                 tenant_id: tenant_id.clone(),
                 input: input.clone(),
@@ -211,6 +211,22 @@ impl SessionManager {
 
         self.spawn_worker(session_id.to_string(), worker_id, receiver);
         handle
+    }
+
+    async fn worker_for_append(&self, session_id: &str) -> Result<SessionWorkerHandle, AppError> {
+        if self.commit_mode == CommitMode::LocalAsync {
+            if let Some(handle) = self.existing_worker(session_id).await {
+                return Ok(handle);
+            }
+
+            self.ownership.live_or_renew_owned(session_id).await?;
+        }
+
+        Ok(self.worker_for(session_id).await)
+    }
+
+    async fn existing_worker(&self, session_id: &str) -> Option<SessionWorkerHandle> {
+        self.workers.lock().await.get(session_id).cloned()
     }
 
     fn spawn_worker(

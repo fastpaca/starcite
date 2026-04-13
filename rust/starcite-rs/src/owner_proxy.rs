@@ -8,15 +8,19 @@ use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
+    sync::Mutex,
     time::timeout,
 };
 
 use crate::{error::AppError, model::AppendEventRequest};
 
+const MAX_IDLE_CONNECTIONS_PER_PEER: usize = 8;
+
 #[derive(Debug, Clone)]
 pub struct OwnerProxy {
     timeout: Duration,
     public_url: Option<Arc<str>>,
+    idle_connections: Arc<Mutex<HashMap<String, Vec<TcpStream>>>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -33,7 +37,32 @@ struct HttpPeer {
 
 #[derive(Debug)]
 enum ProxyError {
+    Connect,
+    Write,
+    Read,
+    Timeout,
     BadResponse,
+}
+
+#[derive(Debug)]
+struct HttpResponse {
+    parsed: ParsedResponse,
+    reusable: bool,
+}
+
+#[derive(Debug)]
+struct ParsedResponse {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+#[derive(Debug)]
+struct ParsedHttpHead {
+    status: u16,
+    headers: Vec<(String, String)>,
+    content_length: usize,
+    connection_close: bool,
 }
 
 impl OwnerProxy {
@@ -41,6 +70,7 @@ impl OwnerProxy {
         Self {
             timeout,
             public_url: public_url.map(Arc::from),
+            idle_connections: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -112,7 +142,6 @@ impl OwnerProxy {
             .map_err(|_| AppError::OwnerProxyUnavailable {
                 owner_url: owner_url.to_string(),
             })?;
-
         let request = build_request(
             method,
             path,
@@ -120,41 +149,40 @@ impl OwnerProxy {
             authorization.as_deref(),
             body_json.as_deref(),
         );
+        let mut retried_with_fresh_connection = false;
 
-        let mut stream = timeout(self.timeout, TcpStream::connect(&peer.connect_addr))
-            .await
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?;
+        loop {
+            let pooled = self.take_connection(&peer).await;
+            let mut stream = match pooled {
+                Some(stream) => stream,
+                None => self
+                    .connect(&peer)
+                    .await
+                    .map_err(|_| AppError::OwnerProxyUnavailable {
+                        owner_url: owner_url.to_string(),
+                    })?,
+            };
 
-        timeout(self.timeout, stream.write_all(request.as_bytes()))
-            .await
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?;
+            match self.send_request(&mut stream, &request).await {
+                Ok(response) => {
+                    if response.reusable {
+                        self.return_connection(&peer, stream).await;
+                    }
 
-        let mut response = Vec::new();
-        timeout(self.timeout, stream.read_to_end(&mut response))
-            .await
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?;
-
-        let parsed =
-            parse_http_response(&response).map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?;
-
-        Ok(parsed.into_response())
+                    return Ok(response.parsed.into_response());
+                }
+                Err(error)
+                    if !retried_with_fresh_connection && is_retryable_proxy_error(&error) =>
+                {
+                    retried_with_fresh_connection = true;
+                }
+                Err(_error) => {
+                    return Err(AppError::OwnerProxyUnavailable {
+                        owner_url: owner_url.to_string(),
+                    });
+                }
+            }
+        }
     }
 
     fn proxy_target<'a>(&'a self, owner_url: &'a str) -> Option<&'a str> {
@@ -163,13 +191,102 @@ impl OwnerProxy {
             _ => Some(owner_url),
         }
     }
-}
 
-#[derive(Debug)]
-struct ParsedResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    body: Vec<u8>,
+    async fn connect(&self, peer: &HttpPeer) -> Result<TcpStream, ProxyError> {
+        timeout(self.timeout, TcpStream::connect(&peer.connect_addr))
+            .await
+            .map_err(|_| ProxyError::Timeout)?
+            .map_err(|_| ProxyError::Connect)
+    }
+
+    async fn take_connection(&self, peer: &HttpPeer) -> Option<TcpStream> {
+        let mut idle_connections = self.idle_connections.lock().await;
+        let connections = idle_connections.get_mut(&peer.authority)?;
+        let stream = connections.pop();
+
+        if connections.is_empty() {
+            idle_connections.remove(&peer.authority);
+        }
+
+        stream
+    }
+
+    async fn return_connection(&self, peer: &HttpPeer, stream: TcpStream) {
+        let mut idle_connections = self.idle_connections.lock().await;
+        let connections = idle_connections
+            .entry(peer.authority.clone())
+            .or_insert_with(Vec::new);
+
+        if connections.len() < MAX_IDLE_CONNECTIONS_PER_PEER {
+            connections.push(stream);
+        }
+    }
+
+    async fn send_request(
+        &self,
+        stream: &mut TcpStream,
+        request: &str,
+    ) -> Result<HttpResponse, ProxyError> {
+        timeout(self.timeout, stream.write_all(request.as_bytes()))
+            .await
+            .map_err(|_| ProxyError::Timeout)?
+            .map_err(|_| ProxyError::Write)?;
+
+        timeout(self.timeout, stream.flush())
+            .await
+            .map_err(|_| ProxyError::Timeout)?
+            .map_err(|_| ProxyError::Write)?;
+
+        self.read_response(stream).await
+    }
+
+    async fn read_response(&self, stream: &mut TcpStream) -> Result<HttpResponse, ProxyError> {
+        let mut response = Vec::with_capacity(512);
+        let mut read_buf = [0_u8; 4096];
+
+        let (head_end, parsed_head) = loop {
+            if let Some(head_end) = find_http_head_end(&response) {
+                let parsed_head = parse_http_head(&response[..head_end])?;
+                break (head_end, parsed_head);
+            }
+
+            let read = timeout(self.timeout, stream.read(&mut read_buf))
+                .await
+                .map_err(|_| ProxyError::Timeout)?
+                .map_err(|_| ProxyError::Read)?;
+
+            if read == 0 {
+                return Err(ProxyError::BadResponse);
+            }
+
+            response.extend_from_slice(&read_buf[..read]);
+        };
+
+        let body_start = head_end + 4;
+        let body_end = body_start + parsed_head.content_length;
+
+        while response.len() < body_end {
+            let read = timeout(self.timeout, stream.read(&mut read_buf))
+                .await
+                .map_err(|_| ProxyError::Timeout)?
+                .map_err(|_| ProxyError::Read)?;
+
+            if read == 0 {
+                return Err(ProxyError::BadResponse);
+            }
+
+            response.extend_from_slice(&read_buf[..read]);
+        }
+
+        Ok(HttpResponse {
+            parsed: ParsedResponse {
+                status: parsed_head.status,
+                headers: parsed_head.headers,
+                body: response[body_start..body_end].to_vec(),
+            },
+            reusable: !parsed_head.connection_close,
+        })
+    }
 }
 
 impl ParsedResponse {
@@ -273,11 +390,11 @@ fn build_request(
             request.push_str("Content-Length: ");
             request.push_str(&body.len().to_string());
             request.push_str("\r\n");
-            request.push_str("Connection: close\r\n\r\n");
+            request.push_str("Connection: keep-alive\r\n\r\n");
             request.push_str(body);
         }
         None => {
-            request.push_str("Connection: close\r\n\r\n");
+            request.push_str("Connection: keep-alive\r\n\r\n");
         }
     }
 
@@ -394,45 +511,82 @@ fn split_host_port<'a>(authority: &'a str, raw: &str) -> Result<(&'a str, u16), 
     Ok((host, port))
 }
 
-fn parse_http_response(bytes: &[u8]) -> Result<ParsedResponse, ProxyError> {
-    let header_end = bytes
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .ok_or(ProxyError::BadResponse)?;
-    let header_bytes = &bytes[..header_end];
-    let body = bytes[header_end + 4..].to_vec();
-    let head = std::str::from_utf8(header_bytes).map_err(|_| ProxyError::BadResponse)?;
+fn is_retryable_proxy_error(error: &ProxyError) -> bool {
+    matches!(
+        error,
+        ProxyError::Connect
+            | ProxyError::Write
+            | ProxyError::Read
+            | ProxyError::Timeout
+            | ProxyError::BadResponse
+    )
+}
+
+fn find_http_head_end(bytes: &[u8]) -> Option<usize> {
+    bytes.windows(4).position(|window| window == b"\r\n\r\n")
+}
+
+fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, ProxyError> {
+    let head = std::str::from_utf8(bytes).map_err(|_| ProxyError::BadResponse)?;
     let mut lines = head.lines();
     let status = lines
         .next()
         .and_then(|line| line.split_whitespace().nth(1))
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or(ProxyError::BadResponse)?;
-    let headers = lines
-        .filter_map(|line| line.split_once(':'))
-        .map(|(name, value)| (name.trim().to_string(), value.trim().to_string()))
-        .collect::<Vec<_>>();
+    let mut headers = Vec::new();
+    let mut content_length = 0_usize;
+    let mut connection_close = false;
 
-    Ok(ParsedResponse {
+    for line in lines {
+        let Some((name, value)) = line.split_once(':') else {
+            continue;
+        };
+
+        let value = value.trim();
+        headers.push((name.trim().to_string(), value.to_string()));
+
+        if name.eq_ignore_ascii_case("content-length") {
+            content_length = value
+                .parse::<usize>()
+                .map_err(|_| ProxyError::BadResponse)?;
+        } else if name.eq_ignore_ascii_case("connection") && value.eq_ignore_ascii_case("close") {
+            connection_close = true;
+        }
+    }
+
+    Ok(ParsedHttpHead {
         status,
         headers,
-        body,
+        content_length,
+        connection_close,
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{OwnerProxy, build_phoenix_socket_ws_url, build_tail_ws_url, parse_http_peer};
+    use super::{
+        OwnerProxy, build_phoenix_socket_ws_url, build_tail_ws_url, find_http_head_end,
+        parse_http_head, parse_http_peer,
+    };
     use crate::{error::OWNER_URL_HEADER, model::AppendEventRequest};
     use axum::{
         body,
         http::{HeaderValue, StatusCode, header},
     };
     use serde_json::json;
-    use std::{collections::HashMap, time::Duration};
+    use std::{
+        collections::HashMap,
+        sync::{
+            Arc,
+            atomic::{AtomicUsize, Ordering},
+        },
+        time::Duration,
+    };
     use tokio::{
         io::{AsyncReadExt, AsyncWriteExt},
-        net::TcpListener,
+        net::{TcpListener, TcpStream},
+        time::timeout,
     };
 
     #[test]
@@ -440,6 +594,29 @@ mod tests {
         let peer = parse_http_peer("http://127.0.0.1:4191").expect("peer");
         assert_eq!(peer.authority, "127.0.0.1:4191");
         assert_eq!(peer.connect_addr, "127.0.0.1:4191");
+    }
+
+    #[test]
+    fn parses_http_head_with_keepalive_defaults() {
+        let parsed = parse_http_head(
+            b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 9\r\n\r\n",
+        )
+        .expect("parsed head");
+
+        assert_eq!(parsed.status, 201);
+        assert_eq!(parsed.content_length, 9);
+        assert!(!parsed.connection_close);
+    }
+
+    #[test]
+    fn finds_http_head_end() {
+        let response = b"HTTP/1.1 201 Created\r\nContent-Length: 0\r\n\r\n{}";
+        let expected = std::str::from_utf8(response)
+            .expect("utf8")
+            .find("\r\n\r\n")
+            .expect("head end");
+
+        assert_eq!(find_http_head_end(response), Some(expected));
     }
 
     #[test]
@@ -480,15 +657,23 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let request = read_request(&mut socket).await;
+            let request = read_request(&mut socket)
+                .await
+                .expect("request")
+                .expect("request body");
             assert!(request.contains("POST /v1/sessions/ses_demo/append HTTP/1.1"));
             assert!(request.contains("Authorization: Bearer test-token"));
             assert!(request.contains("\"producer_seq\":1"));
 
+            let response_body = "{\"seq\":1}";
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-starcite-owner-url: http://127.0.0.1:4191\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+
             socket
-                .write_all(
-                    b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nx-starcite-owner-url: http://127.0.0.1:4191\r\n\r\n{\"seq\":1}",
-                )
+                .write_all(response.as_bytes())
                 .await
                 .expect("write response");
         });
@@ -544,15 +729,23 @@ mod tests {
 
         tokio::spawn(async move {
             let (mut socket, _) = listener.accept().await.expect("accept");
-            let request = read_request(&mut socket).await;
+            let request = read_request(&mut socket)
+                .await
+                .expect("request")
+                .expect("request body");
             assert!(
                 request.contains("GET /v1/sessions/ses_demo/events?cursor=0&limit=10 HTTP/1.1")
             );
 
+            let response_body = "{\"events\":[],\"next_cursor\":null}";
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+
             socket
-                .write_all(
-                    b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{\"events\":[],\"next_cursor\":null}",
-                )
+                .write_all(response.as_bytes())
                 .await
                 .expect("write response");
         });
@@ -570,36 +763,133 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
     }
 
-    async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
-        let mut bytes = Vec::new();
-        let mut buffer = [0_u8; 1024];
+    #[tokio::test]
+    async fn reuses_keepalive_connection_for_second_forward_append() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let accepted_connections = Arc::new(AtomicUsize::new(0));
+        let accepted_connections_task = accepted_connections.clone();
 
-        loop {
-            let read = socket.read(&mut buffer).await.expect("read request");
-            if read == 0 {
-                break;
-            }
+        tokio::spawn(async move {
+            let mut handled_requests = 0_usize;
 
-            bytes.extend_from_slice(&buffer[..read]);
+            loop {
+                let accepted = timeout(Duration::from_secs(2), listener.accept()).await;
+                let Ok(Ok((mut stream, _peer_addr))) = accepted else {
+                    break;
+                };
+                accepted_connections_task.fetch_add(1, Ordering::Relaxed);
 
-            if let Some(header_end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
-                let header_bytes = &bytes[..header_end];
-                let header_text = std::str::from_utf8(header_bytes).expect("header text");
-                let content_length = header_text
-                    .lines()
-                    .find_map(|line| {
-                        line.strip_prefix("Content-Length: ")
-                            .and_then(|value| value.parse::<usize>().ok())
-                    })
-                    .unwrap_or(0);
-                let body_len = bytes.len().saturating_sub(header_end + 4);
+                while handled_requests < 2 {
+                    let Ok(Ok(Some(request))) =
+                        timeout(Duration::from_secs(2), read_request(&mut stream)).await
+                    else {
+                        break;
+                    };
 
-                if body_len >= content_length {
-                    return String::from_utf8(bytes).expect("request bytes");
+                    handled_requests += 1;
+                    assert!(request.contains("\"producer_seq\":1"));
+
+                    let response_body = "{\"seq\":1}";
+                    let response = format!(
+                        "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: keep-alive\r\n\r\n{}",
+                        response_body.len(),
+                        response_body
+                    );
+
+                    stream
+                        .write_all(response.as_bytes())
+                        .await
+                        .expect("write response");
+
+                    if handled_requests == 2 {
+                        return;
+                    }
                 }
             }
+        });
+
+        let proxy = OwnerProxy::new(
+            Duration::from_millis(500),
+            Some("http://127.0.0.1:4193".into()),
+        );
+        let request = AppendEventRequest {
+            event_type: "content".to_string(),
+            payload: json!({"text": "hello"}),
+            actor: Some("user:user-1".to_string()),
+            source: None,
+            metadata: None,
+            refs: None,
+            idempotency_key: None,
+            producer_id: "p1".to_string(),
+            producer_seq: 1,
+            expected_seq: Some(0),
+        };
+        let owner_url = format!("http://{}", addr);
+
+        proxy
+            .forward_append(
+                &owner_url,
+                "ses_demo",
+                &request,
+                Some(&HeaderValue::from_static("Bearer test-token")),
+            )
+            .await
+            .expect("first append");
+        proxy
+            .forward_append(
+                &owner_url,
+                "ses_demo",
+                &request,
+                Some(&HeaderValue::from_static("Bearer test-token")),
+            )
+            .await
+            .expect("second append");
+
+        assert_eq!(accepted_connections.load(Ordering::Relaxed), 1);
+    }
+
+    async fn read_request(stream: &mut TcpStream) -> Result<Option<String>, std::io::Error> {
+        let mut request = Vec::with_capacity(512);
+        let mut read_buf = [0_u8; 4096];
+
+        let head_end = loop {
+            if let Some(head_end) = find_http_head_end(&request) {
+                break head_end;
+            }
+
+            let read = stream.read(&mut read_buf).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+
+            request.extend_from_slice(&read_buf[..read]);
+        };
+
+        let head = std::str::from_utf8(&request[..head_end])
+            .expect("request head")
+            .to_string();
+        let content_length = head
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().ok())
+                    .flatten()
+            })
+            .unwrap_or(0);
+        let body_start = head_end + 4;
+        let body_end = body_start + content_length;
+
+        while request.len() < body_end {
+            let read = stream.read(&mut read_buf).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+
+            request.extend_from_slice(&read_buf[..read]);
         }
 
-        String::from_utf8(bytes).expect("request bytes")
+        Ok(Some(String::from_utf8(request).expect("request utf8")))
     }
 }
