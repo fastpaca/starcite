@@ -31,6 +31,7 @@ use crate::{
     ops::OpsSnapshot,
     read_path, repository,
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
+    session_manager::SessionManagerSnapshot,
     session_store::{
         HotSessionStoreSnapshot, resolve_session, resolve_session_last_seq,
         resolve_session_tenant_id,
@@ -116,6 +117,7 @@ struct DebugStateResponse {
     runtime: RuntimeSnapshot,
     hot_store: HotEventStoreSnapshot,
     session_store: HotSessionStoreSnapshot,
+    session_manager: SessionManagerSnapshot,
     archive_queue: ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
 }
@@ -156,6 +158,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     let runtime = state.runtime.snapshot().await;
     let hot_store = state.hot_store.snapshot().await;
     let session_store = state.session_store.snapshot().await;
+    let session_manager = state.session_manager.snapshot().await;
     let archive_queue = state.archive_queue.snapshot().await;
     let events = state.fanout.snapshot().await;
     let lifecycle = state.lifecycle.snapshot().await;
@@ -167,6 +170,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
         runtime,
         hot_store,
         session_store,
+        session_manager,
         archive_queue,
         fanout: DebugFanoutState { events, lifecycle },
     })
@@ -383,8 +387,7 @@ pub async fn append_event(
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
-        let outcome =
-            repository::append_event(&state.pool, &session_id, validated, &state.instance_id).await;
+        let outcome = state.session_manager.append(&session_id, validated).await;
         record_request_result(
             &state,
             RequestPhase::Ack,
@@ -401,16 +404,6 @@ pub async fn append_event(
                 RuntimeTouchReason::HttpWrite,
             )
             .await;
-
-        if let Some(event) = outcome.event.clone() {
-            state.hot_store.put_event(event.clone()).await;
-            state.archive_queue.enqueue(&session_id).await;
-            state
-                .session_store
-                .bump_last_seq(&session_id, &outcome.tenant_id, event.seq)
-                .await;
-            state.fanout.broadcast(event).await;
-        }
 
         Ok((StatusCode::CREATED, Json(outcome.reply)))
     }

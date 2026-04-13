@@ -143,6 +143,13 @@ tenant and `last_seq` state, so hot session reads and session-scoped auth checks
 start at Postgres every time. Phoenix `tail:<session_id>` replay now uses the same hot read path as
 the raw tail endpoint instead of bypassing it with a direct database read.
 
+Another parity-oriented boundary is in place now too: appends no longer execute directly on the
+HTTP task. Each process keeps a local per-session append worker map, and `POST /v1/sessions/:id/append`
+routes through that worker before it touches the repository layer. That gets session-local append
+ordering behind one explicit in-process boundary and makes the ops surface honest about which
+sessions this process is actively servicing, even though the worker still persists through
+Postgres synchronously in this experiment.
+
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Local appends and relayed remote commits enqueue the touched session, the worker advances
 `sessions.archived_seq`, and hot in-memory events are pruned once they are considered archived. The
