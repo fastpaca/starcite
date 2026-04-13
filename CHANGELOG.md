@@ -7,6 +7,18 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+### Fixed
+
+- Fresh session claims now recover on the surviving ready nodes after a
+  single-node failure once the failed node's lease expires.
+- Session reads, replay, and tail cursor lookups can continue from follower
+  replicas when the owner is unavailable.
+
+### Performance
+
+- Tail replay and catch-up reads now prefer follower replicas before the owner,
+  reducing leader load on busy sessions.
+
 ## [0.0.2] - 2026-04-12
 
 ### Added
