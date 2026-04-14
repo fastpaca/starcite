@@ -18,6 +18,7 @@ use crate::{
 #[derive(Debug, Clone)]
 pub struct OwnershipManager {
     leases: Arc<Mutex<HashMap<String, LocalLease>>>,
+    remote_owners: Arc<Mutex<HashMap<String, RemoteOwnerHint>>>,
     pool: PgPool,
     instance_id: Arc<str>,
     lease_ttl: Duration,
@@ -29,6 +30,14 @@ struct LocalLease {
     epoch: i64,
     expires_at: Instant,
     standby: Option<ReplicationPeer>,
+}
+
+#[derive(Debug, Clone)]
+struct RemoteOwnerHint {
+    owner_id: String,
+    owner_public_url: String,
+    epoch: i64,
+    expires_at: Instant,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -57,6 +66,7 @@ impl OwnershipManager {
     pub fn new(pool: PgPool, instance_id: Arc<str>, lease_ttl: Duration) -> Self {
         Self {
             leases: Arc::new(Mutex::new(HashMap::new())),
+            remote_owners: Arc::new(Mutex::new(HashMap::new())),
             pool,
             instance_id,
             lease_ttl,
@@ -66,9 +76,18 @@ impl OwnershipManager {
 
     pub async fn ensure_owned(&self, session_id: &str) -> Result<OwnedLease, AppError> {
         if let Some(lease) = self.cached_lease(session_id).await {
+            self.forget_remote_owner_hint(session_id).await;
             return Ok(OwnedLease {
                 epoch: lease.epoch,
                 standby: lease.standby,
+            });
+        }
+
+        if let Some(redirect) = self.cached_remote_owner_hint(session_id).await {
+            return Err(AppError::SessionNotOwned {
+                owner_id: redirect.owner_id,
+                owner_public_url: redirect.owner_public_url,
+                epoch: redirect.epoch,
             });
         }
 
@@ -76,6 +95,14 @@ impl OwnershipManager {
             repository::load_session_lease_takeover_hint(&self.pool, session_id).await?
             && let Some(redirect) = preferred_takeover_owner(&hint, self.instance_id.as_ref())
         {
+            self.remember_remote_owner_hint(
+                session_id,
+                &redirect.owner_id,
+                redirect.owner_public_url.as_deref(),
+                redirect.epoch,
+            )
+            .await;
+
             return Err(AppError::SessionNotOwned {
                 owner_id: redirect.owner_id,
                 owner_public_url: redirect.owner_public_url,
@@ -92,12 +119,22 @@ impl OwnershipManager {
         .await?;
 
         if row.owner_id != self.instance_id.as_ref() {
+            self.remember_remote_owner_hint(
+                session_id,
+                &row.owner_id,
+                row.owner_public_url.as_deref(),
+                row.epoch,
+            )
+            .await;
+
             return Err(AppError::SessionNotOwned {
                 owner_id: row.owner_id,
                 owner_public_url: row.owner_public_url,
                 epoch: row.epoch,
             });
         }
+
+        self.forget_remote_owner_hint(session_id).await;
 
         let lease = LocalLease {
             epoch: row.epoch,
@@ -185,6 +222,10 @@ impl OwnershipManager {
         (lease.expires_at > now).then_some(lease.epoch)
     }
 
+    pub async fn forget_remote_owner_hint(&self, session_id: &str) {
+        self.remote_owners.lock().await.remove(session_id);
+    }
+
     async fn cached_lease(&self, session_id: &str) -> Option<LocalLease> {
         let now = Instant::now();
         let leases = self.leases.lock().await;
@@ -203,6 +244,52 @@ impl OwnershipManager {
         let lease = leases.get(session_id)?;
 
         (lease.expires_at > now).then(|| lease.clone())
+    }
+
+    async fn cached_remote_owner_hint(&self, session_id: &str) -> Option<TakeoverRedirect> {
+        let now = Instant::now();
+        let mut remote_owners = self.remote_owners.lock().await;
+        let hint = remote_owners.get(session_id)?;
+
+        if hint.expires_at <= now {
+            remote_owners.remove(session_id);
+            return None;
+        }
+
+        Some(TakeoverRedirect {
+            owner_id: hint.owner_id.clone(),
+            owner_public_url: Some(hint.owner_public_url.clone()),
+            epoch: hint.epoch,
+        })
+    }
+
+    async fn remember_remote_owner_hint(
+        &self,
+        session_id: &str,
+        owner_id: &str,
+        owner_public_url: Option<&str>,
+        epoch: i64,
+    ) {
+        let Some(owner_public_url) = owner_public_url else {
+            self.forget_remote_owner_hint(session_id).await;
+            return;
+        };
+
+        if owner_id == self.instance_id.as_ref() {
+            self.forget_remote_owner_hint(session_id).await;
+            return;
+        }
+
+        let expires_at = Instant::now() + self.renew_before;
+        self.remote_owners.lock().await.insert(
+            session_id.to_string(),
+            RemoteOwnerHint {
+                owner_id: owner_id.to_string(),
+                owner_public_url: owner_public_url.to_string(),
+                epoch,
+                expires_at,
+            },
+        );
     }
 
     pub fn renew_interval(&self) -> Duration {
@@ -270,7 +357,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crate::repository::SessionLeaseTakeoverHint;
+    use crate::{error::AppError, repository::SessionLeaseTakeoverHint};
 
     fn manager(lease_ttl: Duration) -> OwnershipManager {
         let pool = PgPoolOptions::new()
@@ -427,6 +514,32 @@ mod tests {
             .expect("owned lease");
 
         assert_eq!(lease.epoch, 4);
+    }
+
+    #[tokio::test]
+    async fn live_or_renew_owned_prefers_cached_remote_owner_hint() {
+        let manager = manager(Duration::from_secs(10));
+        manager
+            .remember_remote_owner_hint("ses_a", "node-b", Some("http://node-b:4001"), 4)
+            .await;
+
+        let error = manager
+            .live_or_renew_owned("ses_a")
+            .await
+            .expect_err("remote owner redirect");
+
+        match error {
+            AppError::SessionNotOwned {
+                owner_id,
+                owner_public_url,
+                epoch,
+            } => {
+                assert_eq!(owner_id, "node-b");
+                assert_eq!(owner_public_url.as_deref(), Some("http://node-b:4001"));
+                assert_eq!(epoch, 4);
+            }
+            other => panic!("expected session_not_owned, got {other:?}"),
+        }
     }
 
     #[tokio::test]

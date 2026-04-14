@@ -123,35 +123,38 @@ impl OwnerProxy {
         authorization: Option<&HeaderValue>,
         body: Option<&T>,
     ) -> Result<Response<Body>, AppError> {
-        let Some(owner_url) = self.proxy_target(owner_url) else {
-            return Err(AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            });
-        };
-        let peer = parse_http_peer(owner_url).map_err(|_| AppError::OwnerProxyUnavailable {
-            owner_url: owner_url.to_string(),
-        })?;
-        let body_json = body.map(serde_json::to_string).transpose().map_err(|_| {
-            AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            }
-        })?;
-        let authorization = authorization
-            .map(|value| value.to_str().map(str::to_owned))
-            .transpose()
-            .map_err(|_| AppError::OwnerProxyUnavailable {
-                owner_url: owner_url.to_string(),
-            })?;
-        let request = build_request(
-            method,
-            path,
-            &peer.authority,
-            authorization.as_deref(),
-            body_json.as_deref(),
-        );
+        let mut current_owner_url = owner_url.to_string();
         let mut retried_with_fresh_connection = false;
+        let mut followed_owner_redirect = false;
 
         loop {
+            let Some(proxy_target) = self.proxy_target(&current_owner_url) else {
+                return Err(AppError::OwnerProxyUnavailable {
+                    owner_url: current_owner_url,
+                });
+            };
+            let peer =
+                parse_http_peer(proxy_target).map_err(|_| AppError::OwnerProxyUnavailable {
+                    owner_url: current_owner_url.clone(),
+                })?;
+            let body_json = body.map(serde_json::to_string).transpose().map_err(|_| {
+                AppError::OwnerProxyUnavailable {
+                    owner_url: current_owner_url.clone(),
+                }
+            })?;
+            let authorization = authorization
+                .map(|value| value.to_str().map(str::to_owned))
+                .transpose()
+                .map_err(|_| AppError::OwnerProxyUnavailable {
+                    owner_url: current_owner_url.clone(),
+                })?;
+            let request = build_request(
+                method,
+                path,
+                &peer.authority,
+                authorization.as_deref(),
+                body_json.as_deref(),
+            );
             let pooled = self.take_connection(&peer).await;
             let mut stream = match pooled {
                 Some(stream) => stream,
@@ -159,12 +162,29 @@ impl OwnerProxy {
                     .connect(&peer)
                     .await
                     .map_err(|_| AppError::OwnerProxyUnavailable {
-                        owner_url: owner_url.to_string(),
+                        owner_url: current_owner_url.clone(),
                     })?,
             };
 
             match self.send_request(&mut stream, &request).await {
                 Ok(response) => {
+                    if let Some(redirect_owner_url) = redirect_owner_url(
+                        response.parsed.status,
+                        &response.parsed.headers,
+                        proxy_target,
+                    ) && !followed_owner_redirect
+                        && self.proxy_target(&redirect_owner_url).is_some()
+                    {
+                        if response.reusable {
+                            self.return_connection(&peer, stream).await;
+                        }
+
+                        current_owner_url = redirect_owner_url;
+                        retried_with_fresh_connection = false;
+                        followed_owner_redirect = true;
+                        continue;
+                    }
+
                     if response.reusable {
                         self.return_connection(&peer, stream).await;
                     }
@@ -178,7 +198,7 @@ impl OwnerProxy {
                 }
                 Err(_error) => {
                     return Err(AppError::OwnerProxyUnavailable {
-                        owner_url: owner_url.to_string(),
+                        owner_url: current_owner_url,
                     });
                 }
             }
@@ -522,6 +542,24 @@ fn is_retryable_proxy_error(error: &ProxyError) -> bool {
     )
 }
 
+fn redirect_owner_url(
+    status: u16,
+    headers: &[(String, String)],
+    current_owner_url: &str,
+) -> Option<String> {
+    if status != StatusCode::CONFLICT.as_u16() {
+        return None;
+    }
+
+    headers
+        .iter()
+        .find(|(name, _value)| name.eq_ignore_ascii_case("x-starcite-owner-url"))
+        .map(|(_name, value)| value.trim())
+        .filter(|value| !value.is_empty())
+        .filter(|value| *value != current_owner_url)
+        .map(str::to_owned)
+}
+
 fn find_http_head_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -847,6 +885,90 @@ mod tests {
             .expect("second append");
 
         assert_eq!(accepted_connections.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn follows_session_not_owned_redirect_once() {
+        let first_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("first listener");
+        let first_addr = first_listener.local_addr().expect("first addr");
+        let second_listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("second listener");
+        let second_addr = second_listener.local_addr().expect("second addr");
+        let redirected_owner_url = format!("http://{second_addr}");
+
+        tokio::spawn(async move {
+            let (mut socket, _) = first_listener.accept().await.expect("first accept");
+            let request = read_request(&mut socket)
+                .await
+                .expect("request")
+                .expect("request body");
+            assert!(request.contains("POST /v1/sessions/ses_demo/append HTTP/1.1"));
+
+            let response_body = "{\"error\":\"session_not_owned\"}";
+            let response = format!(
+                "HTTP/1.1 409 Conflict\r\nContent-Type: application/json\r\nContent-Length: {}\r\nx-starcite-owner-url: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                redirected_owner_url,
+                response_body
+            );
+
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write redirect response");
+        });
+
+        tokio::spawn(async move {
+            let (mut socket, _) = second_listener.accept().await.expect("second accept");
+            let request = read_request(&mut socket)
+                .await
+                .expect("request")
+                .expect("request body");
+            assert!(request.contains("POST /v1/sessions/ses_demo/append HTTP/1.1"));
+
+            let response_body = "{\"seq\":2}";
+            let response = format!(
+                "HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write success response");
+        });
+
+        let proxy = OwnerProxy::new(Duration::from_secs(1), None);
+        let response = proxy
+            .forward_append(
+                &format!("http://{first_addr}"),
+                "ses_demo",
+                &AppendEventRequest {
+                    event_type: "content".to_string(),
+                    payload: json!({"text": "hello"}),
+                    actor: Some("user:user-1".to_string()),
+                    source: None,
+                    metadata: None,
+                    refs: None,
+                    idempotency_key: None,
+                    producer_id: "p1".to_string(),
+                    producer_seq: 1,
+                    expected_seq: Some(0),
+                },
+                None,
+            )
+            .await
+            .expect("forward append after redirect");
+
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        assert_eq!(body.as_ref(), b"{\"seq\":2}");
     }
 
     async fn read_request(stream: &mut TcpStream) -> Result<Option<String>, std::io::Error> {

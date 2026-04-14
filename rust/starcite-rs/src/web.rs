@@ -507,7 +507,7 @@ pub async fn append_event(
                 ..
             }) => {
                 state.session_manager.drop_worker_handle(&session_id).await;
-                state
+                let proxied = state
                     .owner_proxy
                     .forward_append(
                         &owner_public_url,
@@ -515,7 +515,13 @@ pub async fn append_event(
                         &request,
                         headers.get(axum::http::header::AUTHORIZATION),
                     )
-                    .await
+                    .await;
+
+                if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
+                    state.ownership.forget_remote_owner_hint(&session_id).await;
+                }
+
+                proxied
             }
             Err(error) => Err(error),
         };
@@ -672,7 +678,7 @@ pub async fn read_events(
             owner_public_url: Some(owner_public_url),
             ..
         }) => {
-            return state
+            let proxied = state
                 .owner_proxy
                 .forward_read_events(
                     &owner_public_url,
@@ -681,6 +687,12 @@ pub async fn read_events(
                     headers.get(axum::http::header::AUTHORIZATION),
                 )
                 .await;
+
+            if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
+                state.ownership.forget_remote_owner_hint(&session_id).await;
+            }
+
+            return proxied;
         }
         Err(error) => return Err(error),
     }
