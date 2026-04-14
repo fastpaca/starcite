@@ -5,6 +5,7 @@ mod config;
 mod control_plane;
 mod edge_routing;
 mod error;
+mod event_http;
 mod fanout;
 mod flush_queue;
 mod flusher;
@@ -259,8 +260,8 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
             "/v1/sessions/{id}",
             get(web::show_session).patch(web::update_session),
         )
-        .route("/v1/sessions/{id}/append", post(web::append_event))
-        .route("/v1/sessions/{id}/events", get(web::read_events))
+        .route("/v1/sessions/{id}/append", post(event_http::append_event))
+        .route("/v1/sessions/{id}/events", get(event_http::read_events))
         .route(
             "/v1/sessions/{id}/lifecycle",
             get(lifecycle_http::session_lifecycle_events),
@@ -269,7 +270,7 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
             "/v1/sessions/{id}/lifecycle/events",
             get(lifecycle_http::read_session_lifecycle),
         )
-        .route("/v1/sessions/{id}/tail", get(web::tail_events))
+        .route("/v1/sessions/{id}/tail", get(event_http::tail_events))
         .route("/v1/sessions/{id}/archive", post(web::archive_session))
         .route("/v1/sessions/{id}/unarchive", post(web::unarchive_session))
         .layer(middleware::from_fn_with_state(
