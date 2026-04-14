@@ -4,7 +4,6 @@ use axum::{
     body::Body,
     http::{HeaderValue, Response, StatusCode, header::HeaderName},
 };
-use serde::Serialize;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
@@ -95,7 +94,7 @@ impl OwnerProxy {
             "GET",
             &path,
             authorization,
-            None::<&AppendEventRequest>,
+            None,
         )
         .await
     }
@@ -107,25 +106,45 @@ impl OwnerProxy {
         request: &AppendEventRequest,
         authorization: Option<&HeaderValue>,
     ) -> Result<Response<Body>, AppError> {
+        let body = serde_json::to_vec(request).map_err(|_| AppError::OwnerProxyUnavailable {
+            owner_url: owner_url.to_string(),
+        })?;
+        self.forward_append_raw(owner_url, session_id, &body, authorization)
+            .await
+    }
+
+    pub async fn forward_append_raw(
+        &self,
+        owner_url: &str,
+        session_id: &str,
+        body: &[u8],
+        authorization: Option<&HeaderValue>,
+    ) -> Result<Response<Body>, AppError> {
         let path = format!(
             "/v1/sessions/{}/append",
             percent_encode_component(session_id)
         );
-        self.send(owner_url, "POST", &path, authorization, Some(request))
+        self.send(owner_url, "POST", &path, authorization, Some(body))
             .await
     }
 
-    async fn send<T: Serialize>(
+    async fn send(
         &self,
         owner_url: &str,
         method: &str,
         path: &str,
         authorization: Option<&HeaderValue>,
-        body: Option<&T>,
+        body: Option<&[u8]>,
     ) -> Result<Response<Body>, AppError> {
         let mut current_owner_url = owner_url.to_string();
         let mut retried_with_fresh_connection = false;
         let mut followed_owner_redirect = false;
+        let authorization = authorization
+            .map(|value| value.to_str().map(str::to_owned))
+            .transpose()
+            .map_err(|_| AppError::OwnerProxyUnavailable {
+                owner_url: current_owner_url.clone(),
+            })?;
 
         loop {
             let Some(proxy_target) = self.proxy_target(&current_owner_url) else {
@@ -137,23 +156,12 @@ impl OwnerProxy {
                 parse_http_peer(proxy_target).map_err(|_| AppError::OwnerProxyUnavailable {
                     owner_url: current_owner_url.clone(),
                 })?;
-            let body_json = body.map(serde_json::to_string).transpose().map_err(|_| {
-                AppError::OwnerProxyUnavailable {
-                    owner_url: current_owner_url.clone(),
-                }
-            })?;
-            let authorization = authorization
-                .map(|value| value.to_str().map(str::to_owned))
-                .transpose()
-                .map_err(|_| AppError::OwnerProxyUnavailable {
-                    owner_url: current_owner_url.clone(),
-                })?;
             let request = build_request(
                 method,
                 path,
                 &peer.authority,
                 authorization.as_deref(),
-                body_json.as_deref(),
+                body,
             );
             let pooled = self.take_connection(&peer).await;
             let mut stream = match pooled {
@@ -245,9 +253,9 @@ impl OwnerProxy {
     async fn send_request(
         &self,
         stream: &mut TcpStream,
-        request: &str,
+        request: &[u8],
     ) -> Result<HttpResponse, ProxyError> {
-        timeout(self.timeout, stream.write_all(request.as_bytes()))
+        timeout(self.timeout, stream.write_all(request))
             .await
             .map_err(|_| ProxyError::Timeout)?
             .map_err(|_| ProxyError::Write)?;
@@ -394,27 +402,27 @@ fn build_request(
     path: &str,
     authority: &str,
     authorization: Option<&str>,
-    body: Option<&str>,
-) -> String {
-    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {authority}\r\n");
+    body: Option<&[u8]>,
+) -> Vec<u8> {
+    let mut request = format!("{method} {path} HTTP/1.1\r\nHost: {authority}\r\n").into_bytes();
 
     if let Some(authorization) = authorization {
-        request.push_str("Authorization: ");
-        request.push_str(authorization);
-        request.push_str("\r\n");
+        request.extend_from_slice(b"Authorization: ");
+        request.extend_from_slice(authorization.as_bytes());
+        request.extend_from_slice(b"\r\n");
     }
 
     match body {
         Some(body) => {
-            request.push_str("Content-Type: application/json\r\n");
-            request.push_str("Content-Length: ");
-            request.push_str(&body.len().to_string());
-            request.push_str("\r\n");
-            request.push_str("Connection: keep-alive\r\n\r\n");
-            request.push_str(body);
+            request.extend_from_slice(b"Content-Type: application/json\r\n");
+            request.extend_from_slice(b"Content-Length: ");
+            request.extend_from_slice(body.len().to_string().as_bytes());
+            request.extend_from_slice(b"\r\n");
+            request.extend_from_slice(b"Connection: keep-alive\r\n\r\n");
+            request.extend_from_slice(body);
         }
         None => {
-            request.push_str("Connection: keep-alive\r\n\r\n");
+            request.extend_from_slice(b"Connection: keep-alive\r\n\r\n");
         }
     }
 

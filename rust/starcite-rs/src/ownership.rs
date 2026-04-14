@@ -40,6 +40,13 @@ struct RemoteOwnerHint {
     expires_at: Instant,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CachedRemoteOwner {
+    pub owner_id: String,
+    pub owner_public_url: String,
+    pub epoch: i64,
+}
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct OwnershipSnapshot {
     pub lease_ttl_ms: u64,
@@ -161,6 +168,18 @@ impl OwnershipManager {
         }
 
         self.ensure_owned(session_id).await
+    }
+
+    pub async fn cached_remote_owner(&self, session_id: &str) -> Option<CachedRemoteOwner> {
+        self.cached_remote_owner_hint(session_id)
+            .await
+            .and_then(|redirect| {
+                redirect.owner_public_url.map(|owner_public_url| CachedRemoteOwner {
+                    owner_id: redirect.owner_id,
+                    owner_public_url,
+                    epoch: redirect.epoch,
+                })
+            })
     }
 
     async fn live_owned_lease(&self, session_id: &str) -> Option<OwnedLease> {

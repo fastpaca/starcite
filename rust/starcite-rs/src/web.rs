@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use axum::{
-    Json,
+    Json, body,
     extract::{
         Path, Query, State,
         rejection::JsonRejection,
@@ -470,20 +470,41 @@ pub async fn unarchive_session(
 
 pub async fn append_event(
     State(state): State<AppState>,
-    headers: HeaderMap,
     Path(session_id): Path<String>,
-    body: Result<Json<AppendEventRequest>, JsonRejection>,
+    request: Request<axum::body::Body>,
 ) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
     let started_at = Instant::now();
     let mut tenant_id = "unknown".to_string();
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers;
+    let body = read_append_body(&headers, body).await?;
     let result: Result<Response, AppError> = async {
+        if let Some(owner) = state.ownership.cached_remote_owner(&session_id).await {
+            let proxied = state
+                .owner_proxy
+                .forward_append_raw(
+                    &owner.owner_public_url,
+                    &session_id,
+                    &body,
+                    headers.get(axum::http::header::AUTHORIZATION),
+                )
+                .await;
+
+            if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
+                state.ownership.forget_remote_owner_hint(&session_id).await;
+            }
+
+            return proxied;
+        }
+
         let auth = authenticate_http(&state, &headers)?;
-        let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+        let request = serde_json::from_slice::<AppendEventRequest>(&body)
+            .map_err(|_| AppError::InvalidEvent)?;
         tenant_id =
             resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
-        let validated = auth::validate_append_request(request.clone(), &auth)?;
+        let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
         let outcome = state
             .session_manager
@@ -509,10 +530,10 @@ pub async fn append_event(
                 state.session_manager.drop_worker_handle(&session_id).await;
                 let proxied = state
                     .owner_proxy
-                    .forward_append(
+                    .forward_append_raw(
                         &owner_public_url,
                         &session_id,
-                        &request,
+                        &body,
                         headers.get(axum::http::header::AUTHORIZATION),
                     )
                     .await;
@@ -668,6 +689,25 @@ pub async fn read_events(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
+
+    if let Some(owner) = state.ownership.cached_remote_owner(&session_id).await {
+        let proxied = state
+            .owner_proxy
+            .forward_read_events(
+                &owner.owner_public_url,
+                &session_id,
+                &params,
+                headers.get(axum::http::header::AUTHORIZATION),
+            )
+            .await;
+
+        if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
+            state.ownership.forget_remote_owner_hint(&session_id).await;
+        }
+
+        return proxied;
+    }
+
     let auth = authenticate_http(&state, &headers)?;
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
@@ -1668,6 +1708,37 @@ fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> TailGapFrame
     build_resume_invalidated_gap_with_earliest(from_cursor, last_seq, 1)
 }
 
+async fn read_append_body(
+    headers: &HeaderMap,
+    body: axum::body::Body,
+) -> Result<Vec<u8>, AppError> {
+    validate_json_content_type(headers)?;
+    let body = body::to_bytes(body, usize::MAX)
+        .await
+        .map_err(|_| AppError::InvalidEvent)?;
+    Ok(body.to_vec())
+}
+
+fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AppError> {
+    let value = headers
+        .get(header::CONTENT_TYPE)
+        .ok_or(AppError::InvalidEvent)?;
+    let value = value.to_str().map_err(|_| AppError::InvalidEvent)?;
+    let mime = value
+        .split(';')
+        .next()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or(AppError::InvalidEvent)?;
+    let mime = mime.to_ascii_lowercase();
+
+    if mime == "application/json" || mime.ends_with("+json") {
+        Ok(())
+    } else {
+        Err(AppError::InvalidEvent)
+    }
+}
+
 fn build_token_expired_frame() -> TokenExpiredFrame {
     TokenExpiredFrame {
         frame_type: "token_expired",
@@ -1785,8 +1856,10 @@ mod tests {
         build_resume_invalidated_gap, build_token_expired_frame, classify_replica_append,
         parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
         parse_tail_options, ready_response, tail_owner_redirect_response,
+        validate_json_content_type,
     };
     use crate::{
+        error::AppError,
         error::{OWNER_URL_HEADER, OWNER_WEBSOCKET_URL_HEADER},
         model::ArchivedFilter,
         ops::OpsState,
@@ -1846,6 +1919,31 @@ mod tests {
     fn tail_query_rejects_invalid_batch_size() {
         let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
         assert!(parse_tail_options(params).is_err());
+    }
+
+    #[test]
+    fn json_content_type_accepts_json_with_charset() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "application/json; charset=utf-8".parse().expect("content type"),
+        );
+
+        assert!(validate_json_content_type(&headers).is_ok());
+    }
+
+    #[test]
+    fn json_content_type_rejects_non_json_requests() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            header::CONTENT_TYPE,
+            "text/plain".parse().expect("content type"),
+        );
+
+        assert!(matches!(
+            validate_json_content_type(&headers),
+            Err(AppError::InvalidEvent)
+        ));
     }
 
     #[tokio::test]
