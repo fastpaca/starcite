@@ -17,10 +17,9 @@ use tokio::{
 
 use crate::{
     cluster::{OwnershipManager, ReplicationCoordinator},
-    config::CommitMode,
     data_plane,
     data_plane::{
-        ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue,
+        HotEventStore, HotSessionStore, PendingFlushQueue,
         repository::{self, AppendOutcome, ProducerSequenceCheck},
     },
     error::AppError,
@@ -37,13 +36,11 @@ pub struct SessionManager {
     pool: PgPool,
     fanout: SessionFanout,
     hot_store: HotEventStore,
-    archive_queue: ArchiveQueue,
     pending_flush: PendingFlushQueue,
     session_store: HotSessionStore,
     ownership: OwnershipManager,
     replication: ReplicationCoordinator,
     ops: OpsState,
-    commit_mode: CommitMode,
     instance_id: Arc<str>,
     idle_timeout: Duration,
     next_worker_id: Arc<AtomicU64>,
@@ -53,13 +50,11 @@ pub struct SessionManagerDeps {
     pub pool: PgPool,
     pub fanout: SessionFanout,
     pub hot_store: HotEventStore,
-    pub archive_queue: ArchiveQueue,
     pub pending_flush: PendingFlushQueue,
     pub session_store: HotSessionStore,
     pub ownership: OwnershipManager,
     pub replication: ReplicationCoordinator,
     pub ops: OpsState,
-    pub commit_mode: CommitMode,
     pub instance_id: Arc<str>,
     pub idle_timeout: Duration,
 }
@@ -126,13 +121,11 @@ impl SessionManager {
             pool,
             fanout,
             hot_store,
-            archive_queue,
             pending_flush,
             session_store,
             ownership,
             replication,
             ops,
-            commit_mode,
             instance_id,
             idle_timeout,
         } = deps;
@@ -142,13 +135,11 @@ impl SessionManager {
             pool,
             fanout,
             hot_store,
-            archive_queue,
             pending_flush,
             session_store,
             ownership,
             replication,
             ops,
-            commit_mode,
             instance_id,
             idle_timeout,
             next_worker_id: Arc::new(AtomicU64::new(1)),
@@ -229,14 +220,11 @@ impl SessionManager {
     }
 
     async fn worker_for_append(&self, session_id: &str) -> Result<SessionWorkerHandle, AppError> {
-        if self.commit_mode == CommitMode::LocalAsync {
-            if let Some(handle) = self.existing_worker(session_id).await {
-                return Ok(handle);
-            }
-
-            self.ownership.live_or_renew_owned(session_id).await?;
+        if let Some(handle) = self.existing_worker(session_id).await {
+            return Ok(handle);
         }
 
+        self.ownership.live_or_renew_owned(session_id).await?;
         Ok(self.worker_for(session_id).await)
     }
 
@@ -285,7 +273,7 @@ impl SessionManager {
                         return;
                     }
                 }
-                _ = renew_tick.tick(), if self.commit_mode == CommitMode::LocalAsync => {
+                _ = renew_tick.tick() => {
                     if let Err(error) = self.ownership.ensure_owned(&session_id).await {
                         tracing::warn!(error = ?error, session_id, "session worker failed to renew ownership");
                         self.prune_worker(&session_id, worker_id).await;
@@ -318,34 +306,8 @@ impl SessionManager {
         state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
-        match self.commit_mode {
-            CommitMode::SyncPostgres => self.append_sync(session_id, state, input).await,
-            CommitMode::LocalAsync => {
-                self.append_local_async(session_id, tenant_id, state, input)
-                    .await
-            }
-        }
-    }
-
-    async fn append_sync(
-        &self,
-        session_id: &str,
-        state: &mut SessionWorkerState,
-        input: ValidatedAppendEvent,
-    ) -> Result<AppendOutcome, AppError> {
-        let outcome =
-            repository::append_event(&self.pool, session_id, input, &self.instance_id).await?;
-        state.remember_last_seq(outcome.reply.last_seq);
-
-        self.session_store
-            .bump_last_seq(session_id, &outcome.tenant_id, outcome.reply.last_seq)
-            .await;
-
-        if let Some(event) = outcome.event.as_ref() {
-            self.apply_sync_commit(state, event).await;
-        }
-
-        Ok(outcome)
+        self.append_local_async(session_id, tenant_id, state, input)
+            .await
     }
 
     async fn append_local_async(
@@ -442,7 +404,7 @@ impl SessionManager {
             .await?;
         state.remember_last_seq(next_seq);
         state.remember_producer_seq(&event.producer_id, event.producer_seq);
-        self.apply_local_async_owner_commit(event.clone()).await;
+        self.apply_owner_commit(event.clone()).await;
 
         Ok(AppendOutcome {
             reply: AppendReply {
@@ -527,40 +489,25 @@ impl SessionManager {
         }
     }
 
-    pub async fn apply_local_async_owner_commit(&self, event: EventResponse) {
-        self.apply_local_async_commit(event, true).await;
+    pub async fn apply_owner_commit(&self, event: EventResponse) {
+        self.apply_commit(event, true).await;
     }
 
-    pub async fn apply_local_async_replica_commit(&self, event: EventResponse) {
-        self.apply_local_async_commit(event, false).await;
+    pub async fn apply_replica_commit(&self, event: EventResponse) {
+        self.apply_commit(event, false).await;
     }
 
-    async fn apply_sync_commit(&self, state: &mut SessionWorkerState, event: &EventResponse) {
-        state.remember_producer_seq(&event.producer_id, event.producer_seq);
-        self.session_store
-            .bump_producer_seq(
-                &event.session_id,
-                &event.tenant_id,
-                &event.producer_id,
-                event.producer_seq,
-            )
-            .await;
-        self.hot_store.put_event(event.clone()).await;
-        self.archive_queue.enqueue(&event.session_id).await;
-        self.fanout.broadcast(event.clone()).await;
-    }
-
-    async fn apply_local_async_commit(&self, event: EventResponse, enqueue_flush: bool) {
-        self.cache_local_async_commit(&event).await;
+    async fn apply_commit(&self, event: EventResponse, enqueue_flush: bool) {
+        self.cache_commit(&event).await;
 
         if enqueue_flush {
             self.pending_flush.enqueue(event.clone()).await;
         }
 
-        self.publish_local_async_commit(event).await;
+        self.publish_commit(event).await;
     }
 
-    async fn cache_local_async_commit(&self, event: &EventResponse) {
+    async fn cache_commit(&self, event: &EventResponse) {
         self.session_store
             .put_tenant(&event.session_id, &event.tenant_id)
             .await;
@@ -577,7 +524,7 @@ impl SessionManager {
             .await;
     }
 
-    async fn publish_local_async_commit(&self, event: EventResponse) {
+    async fn publish_commit(&self, event: EventResponse) {
         self.hot_store.put_event(event.clone()).await;
         self.fanout.broadcast(event).await;
     }
@@ -596,7 +543,7 @@ impl SessionManager {
             }
         };
 
-        if removed && self.commit_mode == CommitMode::LocalAsync {
+        if removed {
             self.ownership.release(session_id).await;
         }
     }
@@ -640,8 +587,7 @@ mod tests {
     use super::{SessionManager, SessionManagerDeps, SessionWorkerHandle, SessionWorkerState};
     use crate::{
         cluster::{OwnershipManager, ReplicationCoordinator},
-        config::CommitMode,
-        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        data_plane::{HotEventStore, HotSessionStore, PendingFlushQueue},
         model::EventResponse,
         runtime::{OpsState, fanout::SessionFanout},
     };
@@ -659,7 +605,6 @@ mod tests {
             pool: pool.clone(),
             fanout: SessionFanout::default(),
             hot_store: HotEventStore::new(),
-            archive_queue: ArchiveQueue::new(),
             pending_flush: PendingFlushQueue::new(),
             session_store: HotSessionStore::new(),
             ownership: OwnershipManager::new(
@@ -675,7 +620,6 @@ mod tests {
             )
             .expect("replication"),
             ops: OpsState::new(30_000),
-            commit_mode: CommitMode::SyncPostgres,
             instance_id: Arc::<str>::from("node-a"),
             idle_timeout,
         })
@@ -785,7 +729,7 @@ mod tests {
         let manager = manager(Duration::from_secs(1));
 
         manager
-            .apply_local_async_owner_commit(sample_event("ses_demo", 4, 9))
+            .apply_owner_commit(sample_event("ses_demo", 4, 9))
             .await;
 
         assert_eq!(
@@ -806,7 +750,7 @@ mod tests {
         let manager = manager(Duration::from_secs(1));
 
         manager
-            .apply_local_async_replica_commit(sample_event("ses_demo", 4, 9))
+            .apply_replica_commit(sample_event("ses_demo", 4, 9))
             .await;
 
         assert_eq!(

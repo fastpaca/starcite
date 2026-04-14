@@ -35,16 +35,15 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
 - `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
-- `STARCITE_COMMIT_MODE=sync_postgres` keeps the current fully durable append path, while `STARCITE_COMMIT_MODE=local_async` acknowledges appends from local hot state and flushes them to Postgres in the background. That flusher now persists each pending session batch in one Postgres transaction instead of one transaction per event. In `local_async`, each active session is guarded by a Postgres-backed lease, and Postgres can also act as the durable control plane for standby assignment when nodes heartbeat their ops URLs.
+- The only supported write model acknowledges appends from local hot owner state and flushes them to Postgres in the background. That flusher persists each pending session batch in one Postgres transaction instead of one transaction per event. Each active session is guarded by a Postgres-backed lease, and Postgres also acts as the durable control plane for standby assignment when nodes heartbeat their ops URLs.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, local session runtime counters, and dynamic gauges for node drain state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason.
 - `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, includes `drain_source` and shutdown `retry_after_ms` hints in those drain responses, emits the same drain metadata to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
 - In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
-- In `sync_postgres` mode, appends are fully durable on the Postgres commit path, so `committed_cursor` equals the committed session sequence immediately.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
 - The rewrite now keeps a local in-memory hot event store per process. Local appends and relayed remote commits both populate that hot store, and `GET /v1/sessions/:id/events` plus tail catch-up replay read hot state first and only fall back to Postgres when the requested range is not locally contiguous.
 - The rewrite now also keeps a local hot session store per process. Session create, update, archive state, relayed lifecycle catalog events, and relayed appends keep that cache current, so hot session reads and session-scoped auth checks can resolve tenant and header state without treating Postgres as the first lookup every time.
 - Appends now route through a local per-session worker boundary before they hit the repository layer. That gets append ordering off the HTTP task and onto one explicit session-local queue per process, which is closer to the eventual runtime/quorum shape even though the worker still calls Postgres synchronously in this branch.
-- In `local_async` commit mode, that same session worker now has a real local commit path: it updates hot in-memory session and event state, broadcasts live fanout, and queues the event for a background Postgres flusher. Same-node reads can keep working while Postgres is briefly unavailable, but flushed durability and cross-node visibility trail the ack.
+- The session worker now has a real local commit path: it updates hot in-memory session and event state, broadcasts live fanout, and queues the event for a background Postgres flusher. Same-node reads can keep working while Postgres is briefly unavailable, but flushed durability and cross-node visibility trail the ack.
 - `local_async` now also keeps per-session producer cursors in the hot session cache, and relayed commits update that cache too. That lets the owner and its peers continue validating `producer_seq` correctly even after old hot events have been archived away locally and before the background flush has fully caught Postgres up.
 - Active session workers now also keep the current session head and per-producer cursors in local memory while the session stays hot, so repeated owner-path appends do not bounce through shared cache lookups before standby replication.
 - `local_async` now also carries explicit single-writer ownership. The owner node renews a Postgres-backed session lease while its local worker is active, Postgres deterministically designates a live owner for a session instead of letting the first requester win, and a live standby still keeps takeover preference when a lease expires. The process exposes that lease state on `GET /debug/state` and rejects event-path reads or appends on non-owner nodes with `409 session_not_owned` until the worker idles out or the lease expires.
@@ -81,7 +80,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `GET /health/live` returns `{"status":"ok"}` and stays live during shutdown drain.
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining","drain_source":"shutdown","retry_after_ms":N}` once shutdown drain begins.
 - Public `503 node_draining` responses include `x-starcite-drain-source`, and shutdown drain responses also include `Retry-After` plus `x-starcite-retry-after-ms`.
-- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, auth mode, commit mode, runtime state, hot event-store state, hot session-store state, local session-worker state, local session-lease ownership state, Postgres control-plane heartbeat config, standby replication config, pending-flush backlog, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session and per-tenant subscriber counts.
+- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, auth mode, write model, runtime state, hot event-store state, hot session-store state, local session-worker state, local session-lease ownership state, Postgres control-plane heartbeat config, standby replication config, pending-flush backlog, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session and per-tenant subscriber counts.
 - The hot session-store snapshot now also carries cached `archived_seq` per session, and the local archive worker updates that cache as it advances archive progress.
 - Archive progress now also relays across Rust nodes through Postgres `NOTIFY`, so standby session caches and hot-store pruning can follow the owner’s archived frontier without waiting for a cold refresh.
 - `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
@@ -108,7 +107,6 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5433/starcite_rust_dev
 DATABASE_MAX_CONNECTIONS=20
 MIGRATE_ON_BOOT=true
 STARCITE_AUTH_MODE=none
-STARCITE_COMMIT_MODE=sync_postgres
 STARCITE_ENABLE_TELEMETRY=true
 STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
@@ -129,10 +127,9 @@ Auth mode values:
 - `none` for the current trust-everything local workflow
 - `unsafe_jwt` to parse JWT claims without signature verification and enforce the claim contract locally
 
-Commit mode values:
+Write model:
 
-- `sync_postgres` for the current durable append path
-- `local_async` for the experimental local-ack plus background-Postgres-flush path with Postgres-backed single-writer session leases and synchronous standby replication assigned either by the Postgres control plane or a static standby URL
+- local-async acknowledgement with background Postgres flush, Postgres-backed single-writer session leases, and synchronous standby replication assigned either by the Postgres control plane or a static standby URL
 
 Telemetry values:
 

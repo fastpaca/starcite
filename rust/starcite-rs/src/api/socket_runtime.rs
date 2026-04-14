@@ -19,9 +19,7 @@ use tokio::{
 };
 
 use crate::{
-    AppState,
-    config::CommitMode,
-    data_plane,
+    AppState, data_plane,
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
@@ -34,10 +32,7 @@ pub(crate) async fn require_local_owner_for_event_path(
     state: &AppState,
     session_id: &str,
 ) -> Result<(), AppError> {
-    if state.commit_mode == CommitMode::LocalAsync {
-        state.ownership.live_or_renew_owned(session_id).await?;
-    }
-
+    state.ownership.live_or_renew_owned(session_id).await?;
     Ok(())
 }
 

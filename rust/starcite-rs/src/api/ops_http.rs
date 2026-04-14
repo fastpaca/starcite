@@ -10,7 +10,6 @@ use serde::Serialize;
 use crate::{
     AppState, cluster,
     cluster::replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
-    config::CommitMode,
     data_plane,
     error::{self, AppError},
     runtime::{
@@ -47,7 +46,7 @@ struct ReadyResponse {
 struct DebugStateResponse {
     ops: OpsSnapshot,
     auth_mode: &'static str,
-    commit_mode: &'static str,
+    write_model: &'static str,
     telemetry_enabled: bool,
     control_plane: cluster::ControlPlaneSnapshot,
     runtime: RuntimeSnapshot,
@@ -109,7 +108,7 @@ pub async fn debug_state(State(state): State<AppState>) -> impl IntoResponse {
     Json(DebugStateResponse {
         ops,
         auth_mode: auth_mode_name(state.auth_mode),
-        commit_mode: commit_mode_name(state.commit_mode),
+        write_model: "local_async",
         telemetry_enabled: state.telemetry.enabled(),
         control_plane,
         runtime,
@@ -188,7 +187,7 @@ pub async fn append_replica(
 
     state
         .session_manager
-        .apply_local_async_replica_commit(request.event)
+        .apply_replica_commit(request.event)
         .await;
 
     Ok((
@@ -254,20 +253,9 @@ fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
     }
 }
 
-fn commit_mode_name(commit_mode: crate::config::CommitMode) -> &'static str {
-    match commit_mode {
-        CommitMode::SyncPostgres => "sync_postgres",
-        CommitMode::LocalAsync => "local_async",
-    }
-}
-
 fn reject_internal_replication_when_unavailable(state: &AppState) -> Result<(), AppError> {
     if state.ops.is_draining() {
         return Err(AppError::node_draining(&state.ops.snapshot()));
-    }
-
-    if state.commit_mode != CommitMode::LocalAsync {
-        return Err(AppError::Internal);
     }
 
     Ok(())

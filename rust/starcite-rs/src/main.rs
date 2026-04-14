@@ -42,7 +42,6 @@ pub struct AppState {
     pub runtime: runtime::SessionRuntime,
     pub ops: runtime::OpsState,
     pub auth_mode: config::AuthMode,
-    pub commit_mode: config::CommitMode,
     pub telemetry: Telemetry,
     pub instance_id: Arc<str>,
 }
@@ -106,13 +105,11 @@ async fn run() -> Result<(), String> {
         pool: pool.clone(),
         fanout: fanout.clone(),
         hot_store: hot_store.clone(),
-        archive_queue: archive_queue.clone(),
         pending_flush: pending_flush.clone(),
         session_store: session_store.clone(),
         ownership: ownership.clone(),
         replication: replication.clone(),
         ops: ops_state.clone(),
-        commit_mode: config.commit_mode,
         instance_id: instance_id.clone(),
         idle_timeout: Duration::from_millis(config.session_runtime_idle_timeout_ms),
     });
@@ -140,7 +137,6 @@ async fn run() -> Result<(), String> {
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
-        commit_mode: config.commit_mode,
         telemetry: telemetry.clone(),
         instance_id: instance_id.clone(),
     };

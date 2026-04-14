@@ -27,7 +27,6 @@ use crate::{
     api::phoenix_socket::{send_frame, send_node_draining, send_token_expired},
     api::phoenix_topics::{run_lifecycle_topic, run_tail_topic},
     auth::{self, AuthContext},
-    config::CommitMode,
     data_plane,
     error::AppError,
     runtime::RuntimeTouchReason,
@@ -345,9 +344,7 @@ async fn handle_tail_join(
         return;
     }
 
-    if state.commit_mode == CommitMode::LocalAsync
-        && let Err(error) = state.ownership.live_or_renew_owned(&session_id).await
-    {
+    if let Err(error) = state.ownership.live_or_renew_owned(&session_id).await {
         reject_tail_join(outbound_tx, &frame, &error, context);
         return;
     }
