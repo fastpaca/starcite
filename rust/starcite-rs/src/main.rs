@@ -31,12 +31,12 @@ mod repository;
 mod request_metrics;
 mod request_validation;
 mod runtime;
+mod session_http;
 mod session_manager;
 mod session_store;
 mod socket_runtime;
 mod socket_support;
 mod telemetry;
-mod web;
 
 use archive::ArchiveWorker;
 use archive_queue::ArchiveQueue;
@@ -254,11 +254,11 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
         .route("/v1/lifecycle/events", get(lifecycle_http::read_lifecycle))
         .route(
             "/v1/sessions",
-            post(web::create_session).get(web::list_sessions),
+            post(session_http::create_session).get(session_http::list_sessions),
         )
         .route(
             "/v1/sessions/{id}",
-            get(web::show_session).patch(web::update_session),
+            get(session_http::show_session).patch(session_http::update_session),
         )
         .route("/v1/sessions/{id}/append", post(event_http::append_event))
         .route("/v1/sessions/{id}/events", get(event_http::read_events))
@@ -271,8 +271,14 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
             get(lifecycle_http::read_session_lifecycle),
         )
         .route("/v1/sessions/{id}/tail", get(event_http::tail_events))
-        .route("/v1/sessions/{id}/archive", post(web::archive_session))
-        .route("/v1/sessions/{id}/unarchive", post(web::unarchive_session))
+        .route(
+            "/v1/sessions/{id}/archive",
+            post(session_http::archive_session),
+        )
+        .route(
+            "/v1/sessions/{id}/unarchive",
+            post(session_http::unarchive_session),
+        )
         .layer(middleware::from_fn_with_state(
             ops,
             ops_http::reject_when_draining,
