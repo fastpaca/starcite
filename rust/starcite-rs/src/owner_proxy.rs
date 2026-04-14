@@ -89,14 +89,8 @@ impl OwnerProxy {
         authorization: Option<&HeaderValue>,
     ) -> Result<Response<Body>, AppError> {
         let path = build_events_path(session_id, params);
-        self.send(
-            owner_url,
-            "GET",
-            &path,
-            authorization,
-            None,
-        )
-        .await
+        self.send(owner_url, "GET", &path, authorization, None)
+            .await
     }
 
     pub async fn forward_append(

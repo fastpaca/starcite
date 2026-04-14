@@ -3,6 +3,7 @@ mod archive_queue;
 mod auth;
 mod config;
 mod control_plane;
+mod edge_routing;
 mod error;
 mod fanout;
 mod flush_queue;

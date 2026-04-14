@@ -21,6 +21,7 @@ use crate::{
     auth,
     config::{CommitMode, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     control_plane::ControlPlaneSnapshot,
+    edge_routing::{self, EventPathRequest},
     error::{self, AppError},
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     flush_queue::PendingFlushSnapshot,
@@ -479,28 +480,21 @@ pub async fn append_event(
     let (parts, body) = request.into_parts();
     let headers = parts.headers;
     let body = read_append_body(&headers, body).await?;
+    let authorization = headers.get(axum::http::header::AUTHORIZATION);
     let result: Result<Response, AppError> = async {
-        if let Some(owner) = state.ownership.cached_remote_owner(&session_id).await {
-            let proxied = state
-                .owner_proxy
-                .forward_append_raw(
-                    &owner.owner_public_url,
-                    &session_id,
-                    &body,
-                    headers.get(axum::http::header::AUTHORIZATION),
-                )
-                .await;
-
-            if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
-                state.ownership.forget_remote_owner_hint(&session_id).await;
-            }
-
-            return proxied;
+        if let Some(proxied) = edge_routing::forward_cached_event_path(
+            &state,
+            &session_id,
+            EventPathRequest::Append { body: &body },
+            authorization,
+        )
+        .await?
+        {
+            return Ok(proxied);
         }
 
         let auth = authenticate_http(&state, &headers)?;
-        let request = serde_json::from_slice::<AppendEventRequest>(&body)
-            .map_err(|_| AppError::InvalidEvent)?;
+        let request = parse_append_request(&body)?;
         tenant_id =
             resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
@@ -528,21 +522,14 @@ pub async fn append_event(
                 ..
             }) => {
                 state.session_manager.drop_worker_handle(&session_id).await;
-                let proxied = state
-                    .owner_proxy
-                    .forward_append_raw(
-                        &owner_public_url,
-                        &session_id,
-                        &body,
-                        headers.get(axum::http::header::AUTHORIZATION),
-                    )
-                    .await;
-
-                if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
-                    state.ownership.forget_remote_owner_hint(&session_id).await;
-                }
-
-                proxied
+                edge_routing::forward_known_event_path(
+                    &state,
+                    &session_id,
+                    &owner_public_url,
+                    EventPathRequest::Append { body: &body },
+                    authorization,
+                )
+                .await
             }
             Err(error) => Err(error),
         };
@@ -689,23 +676,17 @@ pub async fn read_events(
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
     validate_session_id(&session_id)?;
+    let authorization = headers.get(axum::http::header::AUTHORIZATION);
 
-    if let Some(owner) = state.ownership.cached_remote_owner(&session_id).await {
-        let proxied = state
-            .owner_proxy
-            .forward_read_events(
-                &owner.owner_public_url,
-                &session_id,
-                &params,
-                headers.get(axum::http::header::AUTHORIZATION),
-            )
-            .await;
-
-        if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
-            state.ownership.forget_remote_owner_hint(&session_id).await;
-        }
-
-        return proxied;
+    if let Some(proxied) = edge_routing::forward_cached_event_path(
+        &state,
+        &session_id,
+        EventPathRequest::ReadEvents { params: &params },
+        authorization,
+    )
+    .await?
+    {
+        return Ok(proxied);
     }
 
     let auth = authenticate_http(&state, &headers)?;
@@ -718,21 +699,14 @@ pub async fn read_events(
             owner_public_url: Some(owner_public_url),
             ..
         }) => {
-            let proxied = state
-                .owner_proxy
-                .forward_read_events(
-                    &owner_public_url,
-                    &session_id,
-                    &params,
-                    headers.get(axum::http::header::AUTHORIZATION),
-                )
-                .await;
-
-            if matches!(proxied, Err(AppError::OwnerProxyUnavailable { .. })) {
-                state.ownership.forget_remote_owner_hint(&session_id).await;
-            }
-
-            return proxied;
+            return edge_routing::forward_known_event_path(
+                &state,
+                &session_id,
+                &owner_public_url,
+                EventPathRequest::ReadEvents { params: &params },
+                authorization,
+            )
+            .await;
         }
         Err(error) => return Err(error),
     }
@@ -1739,6 +1713,10 @@ fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AppError> {
     }
 }
 
+fn parse_append_request(body: &[u8]) -> Result<AppendEventRequest, AppError> {
+    serde_json::from_slice(body).map_err(|_| AppError::InvalidEvent)
+}
+
 fn build_token_expired_frame() -> TokenExpiredFrame {
     TokenExpiredFrame {
         frame_type: "token_expired",
@@ -1926,7 +1904,9 @@ mod tests {
         let mut headers = axum::http::HeaderMap::new();
         headers.insert(
             header::CONTENT_TYPE,
-            "application/json; charset=utf-8".parse().expect("content type"),
+            "application/json; charset=utf-8"
+                .parse()
+                .expect("content type"),
         );
 
         assert!(validate_json_content_type(&headers).is_ok());

@@ -174,11 +174,13 @@ impl OwnershipManager {
         self.cached_remote_owner_hint(session_id)
             .await
             .and_then(|redirect| {
-                redirect.owner_public_url.map(|owner_public_url| CachedRemoteOwner {
-                    owner_id: redirect.owner_id,
-                    owner_public_url,
-                    epoch: redirect.epoch,
-                })
+                redirect
+                    .owner_public_url
+                    .map(|owner_public_url| CachedRemoteOwner {
+                        owner_id: redirect.owner_id,
+                        owner_public_url,
+                        epoch: redirect.epoch,
+                    })
             })
     }
 
