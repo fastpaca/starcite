@@ -14,6 +14,7 @@ mod ops;
 mod owner_proxy;
 mod ownership;
 mod phoenix;
+mod raw_socket;
 mod read_path;
 mod relay;
 mod replication;
