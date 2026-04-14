@@ -1,3 +1,4 @@
+mod app;
 mod archive;
 mod archive_queue;
 mod auth;
@@ -38,25 +39,20 @@ mod socket_runtime;
 mod socket_support;
 mod telemetry;
 
-use archive::ArchiveWorker;
-use archive_queue::ArchiveQueue;
+use app::{
+    api,
+    cluster::{self, ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
+    data_plane::{
+        self, ArchiveQueue, ArchiveWorker, FlushWorker, HotEventStore, HotSessionStore,
+        PendingFlushQueue,
+    },
+    runtime as app_runtime,
+};
 use axum::{
     Router, middleware,
     routing::{get, post},
 };
 use config::Config;
-use control_plane::ControlPlaneState;
-use fanout::{LifecycleFanout, SessionFanout};
-use flush_queue::PendingFlushQueue;
-use flusher::FlushWorker;
-use hot_store::HotEventStore;
-use ops::OpsState;
-use owner_proxy::OwnerProxy;
-use ownership::OwnershipManager;
-use replication::ReplicationCoordinator;
-use runtime::SessionRuntime;
-use session_manager::{SessionManager, SessionManagerDeps};
-use session_store::HotSessionStore;
 use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
 use telemetry::Telemetry;
@@ -68,19 +64,19 @@ use uuid::Uuid;
 #[derive(Clone)]
 pub struct AppState {
     pub pool: sqlx::PgPool,
-    pub fanout: SessionFanout,
-    pub lifecycle: LifecycleFanout,
-    pub hot_store: HotEventStore,
-    pub archive_queue: ArchiveQueue,
-    pub pending_flush: PendingFlushQueue,
-    pub session_store: HotSessionStore,
-    pub session_manager: SessionManager,
-    pub ownership: OwnershipManager,
-    pub control_plane: ControlPlaneState,
-    pub owner_proxy: OwnerProxy,
-    pub replication: ReplicationCoordinator,
-    pub runtime: SessionRuntime,
-    pub ops: OpsState,
+    pub fanout: app_runtime::SessionFanout,
+    pub lifecycle: app_runtime::LifecycleFanout,
+    pub hot_store: data_plane::HotEventStore,
+    pub archive_queue: data_plane::ArchiveQueue,
+    pub pending_flush: data_plane::PendingFlushQueue,
+    pub session_store: data_plane::HotSessionStore,
+    pub session_manager: app_runtime::SessionManager,
+    pub ownership: cluster::OwnershipManager,
+    pub control_plane: cluster::ControlPlaneState,
+    pub owner_proxy: cluster::OwnerProxy,
+    pub replication: cluster::ReplicationCoordinator,
+    pub runtime: app_runtime::SessionRuntime,
+    pub ops: app_runtime::OpsState,
     pub auth_mode: config::AuthMode,
     pub commit_mode: config::CommitMode,
     pub telemetry: Telemetry,
@@ -113,14 +109,14 @@ async fn run() -> Result<(), String> {
             .map_err(|error| format!("failed to run migrations: {error}"))?;
     }
 
-    let lifecycle = LifecycleFanout::default();
-    let fanout = SessionFanout::default();
+    let lifecycle = app_runtime::LifecycleFanout::default();
+    let fanout = app_runtime::SessionFanout::default();
     let hot_store = HotEventStore::new();
     let archive_queue = ArchiveQueue::new();
     let pending_flush = PendingFlushQueue::new();
     let session_store = HotSessionStore::new();
     let telemetry = Telemetry::new(config.telemetry_enabled);
-    let ops_state = OpsState::new(config.shutdown_drain_timeout_ms);
+    let ops_state = app_runtime::OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
     let control_plane = ControlPlaneState::new(
         config.local_async_node_public_url.clone(),
@@ -142,7 +138,7 @@ async fn run() -> Result<(), String> {
         config.local_async_standby_url.clone(),
         Duration::from_millis(config.local_async_replication_timeout_ms),
     )?;
-    let session_manager = SessionManager::new(SessionManagerDeps {
+    let session_manager = app_runtime::SessionManager::new(app_runtime::SessionManagerDeps {
         pool: pool.clone(),
         fanout: fanout.clone(),
         hot_store: hot_store.clone(),
@@ -156,7 +152,7 @@ async fn run() -> Result<(), String> {
         instance_id: instance_id.clone(),
         idle_timeout: Duration::from_millis(config.session_runtime_idle_timeout_ms),
     });
-    let runtime = SessionRuntime::new(
+    let runtime = app_runtime::SessionRuntime::new(
         Some(pool.clone()),
         lifecycle.clone(),
         telemetry.clone(),
@@ -206,7 +202,7 @@ async fn run() -> Result<(), String> {
 
     control_plane.spawn(pool.clone(), state.instance_id.clone(), ops_state.clone());
 
-    relay::spawn(
+    cluster::relay::spawn(
         pool,
         fanout,
         state.lifecycle.clone(),
@@ -247,41 +243,50 @@ async fn run() -> Result<(), String> {
         .map_err(|error| format!("server error: {error}"))
 }
 
-fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> {
+fn build_public_router(telemetry: Telemetry, ops: app_runtime::OpsState) -> Router<AppState> {
     Router::new()
-        .route("/v1/socket/websocket", get(phoenix::socket))
-        .route("/v1/lifecycle", get(lifecycle_http::lifecycle_events))
-        .route("/v1/lifecycle/events", get(lifecycle_http::read_lifecycle))
+        .route("/v1/socket/websocket", get(api::phoenix::socket))
+        .route("/v1/lifecycle", get(api::lifecycle_http::lifecycle_events))
+        .route(
+            "/v1/lifecycle/events",
+            get(api::lifecycle_http::read_lifecycle),
+        )
         .route(
             "/v1/sessions",
-            post(session_http::create_session).get(session_http::list_sessions),
+            post(api::session_http::create_session).get(api::session_http::list_sessions),
         )
         .route(
             "/v1/sessions/{id}",
-            get(session_http::show_session).patch(session_http::update_session),
+            get(api::session_http::show_session).patch(api::session_http::update_session),
         )
-        .route("/v1/sessions/{id}/append", post(event_http::append_event))
-        .route("/v1/sessions/{id}/events", get(event_http::read_events))
+        .route(
+            "/v1/sessions/{id}/append",
+            post(api::event_http::append_event),
+        )
+        .route(
+            "/v1/sessions/{id}/events",
+            get(api::event_http::read_events),
+        )
         .route(
             "/v1/sessions/{id}/lifecycle",
-            get(lifecycle_http::session_lifecycle_events),
+            get(api::lifecycle_http::session_lifecycle_events),
         )
         .route(
             "/v1/sessions/{id}/lifecycle/events",
-            get(lifecycle_http::read_session_lifecycle),
+            get(api::lifecycle_http::read_session_lifecycle),
         )
-        .route("/v1/sessions/{id}/tail", get(event_http::tail_events))
+        .route("/v1/sessions/{id}/tail", get(api::event_http::tail_events))
         .route(
             "/v1/sessions/{id}/archive",
-            post(session_http::archive_session),
+            post(api::session_http::archive_session),
         )
         .route(
             "/v1/sessions/{id}/unarchive",
-            post(session_http::unarchive_session),
+            post(api::session_http::unarchive_session),
         )
         .layer(middleware::from_fn_with_state(
             ops,
-            ops_http::reject_when_draining,
+            api::ops_http::reject_when_draining,
         ))
         .layer(middleware::from_fn_with_state(
             telemetry.clone(),
@@ -297,17 +302,17 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
 
 fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
     Router::new()
-        .route("/health/live", get(ops_http::live))
-        .route("/health/ready", get(ops_http::ready))
+        .route("/health/live", get(api::ops_http::live))
+        .route("/health/ready", get(api::ops_http::ready))
         .route("/metrics", get(telemetry::metrics))
-        .route("/debug/state", get(ops_http::debug_state))
+        .route("/debug/state", get(api::ops_http::debug_state))
         .route(
             "/debug/drain",
-            post(ops_http::begin_drain).delete(ops_http::clear_drain),
+            post(api::ops_http::begin_drain).delete(api::ops_http::clear_drain),
         )
         .route(
             "/internal/replication/append",
-            post(ops_http::append_replica),
+            post(api::ops_http::append_replica),
         )
         .layer(middleware::from_fn_with_state(
             telemetry,
@@ -347,7 +352,10 @@ async fn shutdown_signal() {
     }
 }
 
-fn shutdown_watch(ops: OpsState, shutdown_drain_timeout: Duration) -> watch::Receiver<bool> {
+fn shutdown_watch(
+    ops: app_runtime::OpsState,
+    shutdown_drain_timeout: Duration,
+) -> watch::Receiver<bool> {
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
     tokio::spawn(async move {

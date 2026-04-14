@@ -12,22 +12,20 @@ use tokio::{sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
     AppState,
-    auth::{self, AuthContext},
-    config::CommitMode,
-    error::AppError,
-    phoenix_context::{
+    api::phoenix_context::{
         SocketContext, error_reason, resolve_lifecycle_tenant_id, tail_join_error_payload,
     },
-    phoenix_protocol::{
+    api::phoenix_protocol::{
         LifecycleOptions, PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload,
         parse_session_lifecycle_join_payload, parse_tail_join_payload, reply_frame,
     },
-    phoenix_socket::{send_frame, send_node_draining, send_token_expired},
-    phoenix_topics::{run_lifecycle_topic, run_tail_topic},
-    request_metrics::authenticate_socket,
+    api::phoenix_socket::{send_frame, send_node_draining, send_token_expired},
+    api::phoenix_topics::{run_lifecycle_topic, run_tail_topic},
+    app::{api, data_plane, runtime},
+    auth::{self, AuthContext},
+    config::CommitMode,
+    error::AppError,
     runtime::RuntimeTouchReason,
-    session_store::resolve_session_tenant_id,
-    socket_support::wait_for_drain,
     telemetry::{SocketSurface, SocketTransport},
 };
 
@@ -42,7 +40,7 @@ pub async fn socket(
     Query(params): Query<HashMap<String, String>>,
     websocket: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
-    let auth = authenticate_socket(&state, &params)?;
+    let auth = api::request_metrics::authenticate_socket(&state, &params)?;
     let context = SocketContext {
         auth,
         tenant_id: params
@@ -86,7 +84,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         .await;
                     break;
                 }
-                _ = wait_for_drain(&state.ops) => {
+                _ = runtime::socket_support::wait_for_drain(&state.ops) => {
                     tracing::info!(
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
@@ -138,7 +136,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
             }
         } else {
             tokio::select! {
-                _ = wait_for_drain(&state.ops) => {
+                _ = runtime::socket_support::wait_for_drain(&state.ops) => {
                     tracing::info!(
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
@@ -281,22 +279,25 @@ async fn handle_join(
                 }
             };
 
-            let tenant_id =
-                match resolve_session_tenant_id(&state.session_store, &state.pool, &session_id)
-                    .await
-                {
-                    Ok(tenant_id) => tenant_id,
-                    Err(error) => {
-                        let _ = outbound_tx.send(reply_frame(
-                            frame.join_ref,
-                            frame.ref_id,
-                            frame.topic,
-                            false,
-                            json!({"reason": error_reason(&error)}),
-                        ));
-                        return;
-                    }
-                };
+            let tenant_id = match data_plane::session_store::resolve_session_tenant_id(
+                &state.session_store,
+                &state.pool,
+                &session_id,
+            )
+            .await
+            {
+                Ok(tenant_id) => tenant_id,
+                Err(error) => {
+                    let _ = outbound_tx.send(reply_frame(
+                        frame.join_ref,
+                        frame.ref_id,
+                        frame.topic,
+                        false,
+                        json!({"reason": error_reason(&error)}),
+                    ));
+                    return;
+                }
+            };
 
             if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
                 let _ = outbound_tx.send(reply_frame(
@@ -458,22 +459,25 @@ async fn handle_join(
                 }
             };
 
-            let tenant_id =
-                match resolve_session_tenant_id(&state.session_store, &state.pool, &session_id)
-                    .await
-                {
-                    Ok(tenant_id) => tenant_id,
-                    Err(error) => {
-                        let _ = outbound_tx.send(reply_frame(
-                            frame.join_ref,
-                            frame.ref_id,
-                            frame.topic,
-                            false,
-                            json!({"reason": error_reason(&error)}),
-                        ));
-                        return;
-                    }
-                };
+            let tenant_id = match data_plane::session_store::resolve_session_tenant_id(
+                &state.session_store,
+                &state.pool,
+                &session_id,
+            )
+            .await
+            {
+                Ok(tenant_id) => tenant_id,
+                Err(error) => {
+                    let _ = outbound_tx.send(reply_frame(
+                        frame.join_ref,
+                        frame.ref_id,
+                        frame.topic,
+                        false,
+                        json!({"reason": error_reason(&error)}),
+                    ));
+                    return;
+                }
+            };
 
             if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
                 let _ = outbound_tx.send(reply_frame(
@@ -576,8 +580,12 @@ async fn validate_lifecycle_scope(
         return Ok(());
     };
 
-    let scoped_tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
+    let scoped_tenant_id = data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        session_id,
+    )
+    .await?;
 
     if scoped_tenant_id != tenant_id {
         return Err(AppError::ForbiddenTenant);

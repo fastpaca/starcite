@@ -8,16 +8,13 @@ use axum::{
 };
 
 use crate::{
-    AppState, auth,
+    AppState,
+    app::runtime::RuntimeTouchReason,
+    app::{api, data_plane},
+    auth,
+    data_plane::repository,
     error::AppError,
-    lifecycle_http::publish_lifecycle,
     model::{CreateSessionRequest, LifecycleEvent, UpdateSessionRequest},
-    query_options::parse_list_options,
-    repository,
-    request_metrics::{authenticate_http, record_ingest_result},
-    request_validation::validate_session_id,
-    runtime::RuntimeTouchReason,
-    session_store::{resolve_session, resolve_session_tenant_id},
     telemetry::IngestOperation,
 };
 
@@ -28,7 +25,7 @@ pub async fn create_session(
 ) -> Result<impl IntoResponse, AppError> {
     let mut tenant_id = "unknown".to_string();
     let result: Result<(StatusCode, Json<crate::model::SessionResponse>), AppError> = async {
-        let auth = authenticate_http(&state, &headers)?;
+        let auth = api::request_metrics::authenticate_http(&state, &headers)?;
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
         let validated = auth::validate_create_request(request, &auth)?;
         tenant_id = validated.tenant_id.clone();
@@ -42,7 +39,7 @@ pub async fn create_session(
             .runtime
             .session_created(&session.id, &validated.tenant_id)
             .await;
-        publish_lifecycle(
+        api::lifecycle_http::publish_lifecycle(
             &state,
             LifecycleEvent::created(validated.tenant_id, &session),
         )
@@ -52,7 +49,12 @@ pub async fn create_session(
     }
     .await;
 
-    record_ingest_result(&state, IngestOperation::CreateSession, &tenant_id, &result);
+    api::request_metrics::record_ingest_result(
+        &state,
+        IngestOperation::CreateSession,
+        &tenant_id,
+        &result,
+    );
     result
 }
 
@@ -61,8 +63,8 @@ pub async fn list_sessions(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<crate::model::SessionsPage>, AppError> {
-    let auth = authenticate_http(&state, &headers)?;
-    let options = auth::apply_list_scope(&auth, parse_list_options(params)?)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let options = auth::apply_list_scope(&auth, api::query_options::parse_list_options(params)?)?;
     let page = repository::list_sessions(&state.pool, options).await?;
     Ok(Json(page))
 }
@@ -72,12 +74,18 @@ pub async fn show_session(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
-    validate_session_id(&session_id)?;
-    let auth = authenticate_http(&state, &headers)?;
-    let tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
+    api::request_validation::validate_session_id(&session_id)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        &session_id,
+    )
+    .await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    let session = resolve_session(&state.session_store, &state.pool, &session_id).await?;
+    let session =
+        data_plane::session_store::resolve_session(&state.session_store, &state.pool, &session_id)
+            .await?;
 
     state
         .runtime
@@ -93,13 +101,17 @@ pub async fn update_session(
     Path(session_id): Path<String>,
     body: Result<Json<UpdateSessionRequest>, JsonRejection>,
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
-    validate_session_id(&session_id)?;
+    api::request_validation::validate_session_id(&session_id)?;
     let mut tenant_id = "unknown".to_string();
     let result: Result<Json<crate::model::SessionResponse>, AppError> = async {
-        let auth = authenticate_http(&state, &headers)?;
+        let auth = api::request_metrics::authenticate_http(&state, &headers)?;
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
-        tenant_id =
-            resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
+        tenant_id = data_plane::session_store::resolve_session_tenant_id(
+            &state.session_store,
+            &state.pool,
+            &session_id,
+        )
+        .await?;
         auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
         state
             .runtime
@@ -113,13 +125,22 @@ pub async fn update_session(
             .put_session(&tenant_id, session.clone(), None)
             .await;
 
-        publish_lifecycle(&state, LifecycleEvent::updated(tenant_id.clone(), &session)).await;
+        api::lifecycle_http::publish_lifecycle(
+            &state,
+            LifecycleEvent::updated(tenant_id.clone(), &session),
+        )
+        .await;
 
         Ok(Json(session))
     }
     .await;
 
-    record_ingest_result(&state, IngestOperation::UpdateSession, &tenant_id, &result);
+    api::request_metrics::record_ingest_result(
+        &state,
+        IngestOperation::UpdateSession,
+        &tenant_id,
+        &result,
+    );
     result
 }
 
@@ -128,10 +149,14 @@ pub async fn archive_session(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
-    validate_session_id(&session_id)?;
-    let auth = authenticate_http(&state, &headers)?;
-    let tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
+    api::request_validation::validate_session_id(&session_id)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        &session_id,
+    )
+    .await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
     state
         .runtime
@@ -144,7 +169,7 @@ pub async fn archive_session(
         .await;
 
     if outcome.changed {
-        publish_lifecycle(
+        api::lifecycle_http::publish_lifecycle(
             &state,
             LifecycleEvent::archived(outcome.tenant_id.clone(), &outcome.session),
         )
@@ -159,10 +184,14 @@ pub async fn unarchive_session(
     headers: HeaderMap,
     Path(session_id): Path<String>,
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
-    validate_session_id(&session_id)?;
-    let auth = authenticate_http(&state, &headers)?;
-    let tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, &session_id).await?;
+    api::request_validation::validate_session_id(&session_id)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        &session_id,
+    )
+    .await?;
     auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
     state
         .runtime
@@ -175,7 +204,7 @@ pub async fn unarchive_session(
         .await;
 
     if outcome.changed {
-        publish_lifecycle(
+        api::lifecycle_http::publish_lifecycle(
             &state,
             LifecycleEvent::unarchived(outcome.tenant_id.clone(), &outcome.session),
         )

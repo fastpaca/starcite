@@ -9,19 +9,14 @@ use serde::Serialize;
 
 use crate::{
     AppState,
-    archive_queue::ArchiveQueueSnapshot,
+    app::runtime::{
+        LifecycleFanoutSnapshot, OpsSnapshot, RuntimeSnapshot, SessionFanoutSnapshot,
+        SessionManagerSnapshot,
+    },
+    app::{cluster, data_plane},
+    cluster::replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
     config::CommitMode,
-    control_plane::ControlPlaneSnapshot,
     error::{self, AppError},
-    fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
-    flush_queue::PendingFlushSnapshot,
-    hot_store::HotEventStoreSnapshot,
-    ops::OpsSnapshot,
-    ownership::OwnershipSnapshot,
-    replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
-    runtime::RuntimeSnapshot,
-    session_manager::SessionManagerSnapshot,
-    session_store::HotSessionStoreSnapshot,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,15 +49,15 @@ struct DebugStateResponse {
     auth_mode: &'static str,
     commit_mode: &'static str,
     telemetry_enabled: bool,
-    control_plane: ControlPlaneSnapshot,
+    control_plane: cluster::ControlPlaneSnapshot,
     runtime: RuntimeSnapshot,
-    hot_store: HotEventStoreSnapshot,
-    session_store: HotSessionStoreSnapshot,
+    hot_store: data_plane::HotEventStoreSnapshot,
+    session_store: data_plane::HotSessionStoreSnapshot,
     session_manager: SessionManagerSnapshot,
-    ownership: OwnershipSnapshot,
+    ownership: cluster::OwnershipSnapshot,
     replication: ReplicationSnapshot,
-    pending_flush: PendingFlushSnapshot,
-    archive_queue: ArchiveQueueSnapshot,
+    pending_flush: data_plane::PendingFlushSnapshot,
+    archive_queue: data_plane::ArchiveQueueSnapshot,
     fanout: DebugFanoutState,
 }
 
