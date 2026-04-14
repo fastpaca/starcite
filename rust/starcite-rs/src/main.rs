@@ -19,6 +19,7 @@ mod read_path;
 mod relay;
 mod replication;
 mod repository;
+mod request_validation;
 mod runtime;
 mod session_manager;
 mod session_store;

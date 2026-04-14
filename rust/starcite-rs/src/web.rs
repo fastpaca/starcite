@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use axum::{
-    Json, body,
+    Json,
     extract::{
         Path, Query, State,
         rejection::JsonRejection,
@@ -27,9 +27,8 @@ use crate::{
     flush_queue::PendingFlushSnapshot,
     hot_store::HotEventStoreSnapshot,
     model::{
-        AppendEventRequest, ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions,
-        LifecycleEvent, LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest,
-        parse_query_scalar,
+        ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions, LifecycleEvent,
+        LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest, parse_query_scalar,
     },
     ops::OpsSnapshot,
     owner_proxy::build_tail_ws_url,
@@ -41,6 +40,7 @@ use crate::{
     read_path,
     replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
     repository,
+    request_validation::{parse_append_request, read_append_body, validate_session_id},
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     session_manager::SessionManagerSnapshot,
     session_store::{
@@ -780,14 +780,6 @@ fn tail_owner_redirect_response(
     }
 
     response
-}
-
-fn validate_session_id(session_id: &str) -> Result<(), AppError> {
-    if session_id.is_empty() {
-        Err(AppError::InvalidSessionId)
-    } else {
-        Ok(())
-    }
 }
 
 fn parse_list_options(params: HashMap<String, String>) -> Result<ListOptions, AppError> {
@@ -1648,41 +1640,6 @@ async fn handle_socket_message(
     }
 }
 
-async fn read_append_body(
-    headers: &HeaderMap,
-    body: axum::body::Body,
-) -> Result<Vec<u8>, AppError> {
-    validate_json_content_type(headers)?;
-    let body = body::to_bytes(body, usize::MAX)
-        .await
-        .map_err(|_| AppError::InvalidEvent)?;
-    Ok(body.to_vec())
-}
-
-fn validate_json_content_type(headers: &HeaderMap) -> Result<(), AppError> {
-    let value = headers
-        .get(header::CONTENT_TYPE)
-        .ok_or(AppError::InvalidEvent)?;
-    let value = value.to_str().map_err(|_| AppError::InvalidEvent)?;
-    let mime = value
-        .split(';')
-        .next()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .ok_or(AppError::InvalidEvent)?;
-    let mime = mime.to_ascii_lowercase();
-
-    if mime == "application/json" || mime.ends_with("+json") {
-        Ok(())
-    } else {
-        Err(AppError::InvalidEvent)
-    }
-}
-
-fn parse_append_request(body: &[u8]) -> Result<AppendEventRequest, AppError> {
-    serde_json::from_slice(body).map_err(|_| AppError::InvalidEvent)
-}
-
 async fn wait_for_drain(ops: &crate::ops::OpsState) {
     if ops.is_draining() {
         return;
@@ -1711,10 +1668,8 @@ mod tests {
         LifecycleOptions, ReplicaAppendDisposition, TailOptions, classify_replica_append,
         parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
         parse_tail_options, ready_response, tail_owner_redirect_response,
-        validate_json_content_type,
     };
     use crate::{
-        error::AppError,
         error::{OWNER_URL_HEADER, OWNER_WEBSOCKET_URL_HEADER},
         model::ArchivedFilter,
         ops::OpsState,
@@ -1774,33 +1729,6 @@ mod tests {
     fn tail_query_rejects_invalid_batch_size() {
         let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
         assert!(parse_tail_options(params).is_err());
-    }
-
-    #[test]
-    fn json_content_type_accepts_json_with_charset() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "application/json; charset=utf-8"
-                .parse()
-                .expect("content type"),
-        );
-
-        assert!(validate_json_content_type(&headers).is_ok());
-    }
-
-    #[test]
-    fn json_content_type_rejects_non_json_requests() {
-        let mut headers = axum::http::HeaderMap::new();
-        headers.insert(
-            header::CONTENT_TYPE,
-            "text/plain".parse().expect("content type"),
-        );
-
-        assert!(matches!(
-            validate_json_content_type(&headers),
-            Err(AppError::InvalidEvent)
-        ));
     }
 
     #[tokio::test]
