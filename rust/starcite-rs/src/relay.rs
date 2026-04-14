@@ -16,6 +16,17 @@ pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";
 pub const LIFECYCLE_NOTIFICATION_CHANNEL: &str = "starcite_lifecycle_fanout";
 pub const ARCHIVE_NOTIFICATION_CHANNEL: &str = "starcite_archive_progress";
 
+#[derive(Clone)]
+struct ListenerState {
+    pool: PgPool,
+    fanout: SessionFanout,
+    lifecycle: LifecycleFanout,
+    hot_store: HotEventStore,
+    archive_queue: ArchiveQueue,
+    session_store: HotSessionStore,
+    instance_id: Arc<str>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EventNotification {
     pub emitter_id: String,
@@ -46,31 +57,24 @@ pub fn spawn(
     session_store: HotSessionStore,
     instance_id: Arc<str>,
 ) {
+    let state = ListenerState {
+        pool,
+        fanout,
+        lifecycle,
+        hot_store,
+        archive_queue,
+        session_store,
+        instance_id,
+    };
+
     tokio::spawn(async move {
-        run_listener_loop(
-            pool,
-            fanout,
-            lifecycle,
-            hot_store,
-            archive_queue,
-            session_store,
-            instance_id,
-        )
-        .await;
+        run_listener_loop(state).await;
     });
 }
 
-async fn run_listener_loop(
-    pool: PgPool,
-    fanout: SessionFanout,
-    lifecycle: LifecycleFanout,
-    hot_store: HotEventStore,
-    archive_queue: ArchiveQueue,
-    session_store: HotSessionStore,
-    instance_id: Arc<str>,
-) {
+async fn run_listener_loop(state: ListenerState) {
     loop {
-        let mut listener = match PgListener::connect_with(&pool).await {
+        let mut listener = match PgListener::connect_with(&state.pool).await {
             Ok(listener) => listener,
             Err(error) => {
                 tracing::error!(error = ?error, "failed to connect postgres relay listener");
@@ -97,18 +101,8 @@ async fn run_listener_loop(
         loop {
             match listener.recv().await {
                 Ok(notification) => {
-                    handle_notification(
-                        &pool,
-                        &fanout,
-                        &lifecycle,
-                        &hot_store,
-                        &archive_queue,
-                        &session_store,
-                        instance_id.as_ref(),
-                        notification.channel(),
-                        notification.payload(),
-                    )
-                    .await;
+                    handle_notification(&state, notification.channel(), notification.payload())
+                        .await;
                 }
                 Err(error) => {
                     tracing::error!(error = ?error, "postgres relay listener disconnected");
@@ -121,17 +115,7 @@ async fn run_listener_loop(
     }
 }
 
-async fn handle_notification(
-    pool: &PgPool,
-    fanout: &SessionFanout,
-    lifecycle: &LifecycleFanout,
-    hot_store: &HotEventStore,
-    archive_queue: &ArchiveQueue,
-    session_store: &HotSessionStore,
-    instance_id: &str,
-    channel: &str,
-    payload: &str,
-) {
+async fn handle_notification(state: &ListenerState, channel: &str, payload: &str) {
     match channel {
         EVENT_NOTIFICATION_CHANNEL => {
             let payload = match serde_json::from_str::<EventNotification>(payload) {
@@ -142,18 +126,21 @@ async fn handle_notification(
                 }
             };
 
-            if should_ignore_emitter(instance_id, &payload.emitter_id) {
+            if should_ignore_emitter(state.instance_id.as_ref(), &payload.emitter_id) {
                 return;
             }
 
-            match repository::load_event_by_seq(pool, &payload.session_id, payload.seq).await {
+            match repository::load_event_by_seq(&state.pool, &payload.session_id, payload.seq).await
+            {
                 Ok(Some(event)) => {
-                    hot_store.put_event(event.clone()).await;
-                    archive_queue.enqueue(&event.session_id).await;
-                    session_store
+                    state.hot_store.put_event(event.clone()).await;
+                    state.archive_queue.enqueue(&event.session_id).await;
+                    state
+                        .session_store
                         .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
                         .await;
-                    session_store
+                    state
+                        .session_store
                         .bump_producer_seq(
                             &event.session_id,
                             &event.tenant_id,
@@ -161,7 +148,7 @@ async fn handle_notification(
                             event.producer_seq,
                         )
                         .await;
-                    fanout.broadcast(event).await;
+                    state.fanout.broadcast(event).await;
                 }
                 Ok(None) => {
                     tracing::warn!(
@@ -184,18 +171,22 @@ async fn handle_notification(
                 }
             };
 
-            if should_ignore_emitter(instance_id, &payload.emitter_id) {
+            if should_ignore_emitter(state.instance_id.as_ref(), &payload.emitter_id) {
                 return;
             }
 
-            match repository::load_lifecycle_by_cursor(pool, payload.cursor).await {
+            match repository::load_lifecycle_by_cursor(&state.pool, payload.cursor).await {
                 Ok(Some(event)) => {
-                    if let Err(error) =
-                        session_store::refresh_from_lifecycle(session_store, pool, &event).await
+                    if let Err(error) = session_store::refresh_from_lifecycle(
+                        &state.session_store,
+                        &state.pool,
+                        &event,
+                    )
+                    .await
                     {
                         tracing::warn!(error = ?error, cursor = event.cursor, "failed to refresh session cache from lifecycle relay");
                     }
-                    lifecycle.broadcast(event).await;
+                    state.lifecycle.broadcast(event).await;
                 }
                 Ok(None) => {
                     tracing::warn!(
@@ -221,17 +212,20 @@ async fn handle_notification(
                 }
             };
 
-            if should_ignore_emitter(instance_id, &payload.emitter_id) {
+            if should_ignore_emitter(state.instance_id.as_ref(), &payload.emitter_id) {
                 return;
             }
 
-            session_store
+            state
+                .session_store
                 .put_tenant(&payload.session_id, &payload.tenant_id)
                 .await;
-            session_store
+            state
+                .session_store
                 .update_archived_seq(&payload.session_id, payload.archived_seq)
                 .await;
-            hot_store
+            state
+                .hot_store
                 .delete_below(&payload.session_id, payload.archived_seq.saturating_add(1))
                 .await;
         }

@@ -62,7 +62,7 @@ impl HotEventStore {
         }
     }
 
-    pub async fn from_cursor(
+    pub async fn events_after_cursor(
         &self,
         session_id: &str,
         cursor: i64,
@@ -205,7 +205,7 @@ mod tests {
         store.put_event(event("ses_demo", 1)).await;
         store.put_event(event("ses_demo", 3)).await;
 
-        let events = store.from_cursor("ses_demo", 1, 10).await;
+        let events = store.events_after_cursor("ses_demo", 1, 10).await;
         let seqs = events
             .into_iter()
             .map(|event| event.seq)

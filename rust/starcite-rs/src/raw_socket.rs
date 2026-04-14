@@ -131,7 +131,7 @@ async fn send_terminal_message(
         .map_err(|_| ())?;
     socket
         .send(Message::Close(Some(CloseFrame {
-            code: code.into(),
+            code,
             reason: reason.into(),
         })))
         .await

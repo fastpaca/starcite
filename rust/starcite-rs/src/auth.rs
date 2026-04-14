@@ -165,10 +165,10 @@ pub fn apply_list_scope(
         AuthMode::UnsafeJwt => {
             can_read_session(auth)?;
 
-            if let Some(requested_tenant) = options.tenant_id.as_ref() {
-                if requested_tenant != &auth.principal.tenant_id {
-                    return Err(AppError::ForbiddenTenant);
-                }
+            if let Some(requested_tenant) = options.tenant_id.as_ref()
+                && requested_tenant != &auth.principal.tenant_id
+            {
+                return Err(AppError::ForbiddenTenant);
             }
 
             if let Some(requested_session_id) = options.session_id.as_ref() {
@@ -202,16 +202,16 @@ pub fn validate_create_request(
         .map(|tenant_id| require_non_empty(tenant_id, AppError::InvalidSession))
         .transpose()?;
 
-    if let Some(tenant_id) = requested_tenant.as_ref() {
-        if tenant_id != &auth.principal.tenant_id {
-            return Err(AppError::ForbiddenTenant);
-        }
+    if let Some(tenant_id) = requested_tenant.as_ref()
+        && tenant_id != &auth.principal.tenant_id
+    {
+        return Err(AppError::ForbiddenTenant);
     }
 
-    if let Some(creator_principal) = request.creator_principal {
-        if creator_principal.normalized()? != auth.principal {
-            return Err(AppError::InvalidSession);
-        }
+    if let Some(creator_principal) = request.creator_principal
+        && creator_principal.normalized()? != auth.principal
+    {
+        return Err(AppError::InvalidSession);
     }
 
     let id = match resolve_create_session_id(auth, request.id)? {
@@ -258,10 +258,10 @@ pub fn validate_append_request(
         return Err(AppError::InvalidEvent);
     }
 
-    if let Some(expected_seq) = request.expected_seq {
-        if expected_seq < 0 {
-            return Err(AppError::InvalidEvent);
-        }
+    if let Some(expected_seq) = request.expected_seq
+        && expected_seq < 0
+    {
+        return Err(AppError::InvalidEvent);
     }
 
     Ok(ValidatedAppendEvent {

@@ -16,7 +16,7 @@ pub async fn read_events(
     opts: EventsOptions,
 ) -> Result<EventsPage, AppError> {
     let hot_events = hot_store
-        .from_cursor(session_id, opts.cursor, opts.limit)
+        .events_after_cursor(session_id, opts.cursor, opts.limit)
         .await;
     let cold_events =
         maybe_read_cold_events(hot_store, pool, session_id, &opts, &hot_events).await?;

@@ -50,6 +50,21 @@ pub struct SessionManager {
     next_worker_id: Arc<AtomicU64>,
 }
 
+pub struct SessionManagerDeps {
+    pub pool: PgPool,
+    pub fanout: SessionFanout,
+    pub hot_store: HotEventStore,
+    pub archive_queue: ArchiveQueue,
+    pub pending_flush: PendingFlushQueue,
+    pub session_store: HotSessionStore,
+    pub ownership: OwnershipManager,
+    pub replication: ReplicationCoordinator,
+    pub ops: OpsState,
+    pub commit_mode: CommitMode,
+    pub instance_id: Arc<str>,
+    pub idle_timeout: Duration,
+}
+
 #[derive(Clone)]
 struct SessionWorkerHandle {
     worker_id: u64,
@@ -107,20 +122,22 @@ impl SessionWorkerState {
 }
 
 impl SessionManager {
-    pub fn new(
-        pool: PgPool,
-        fanout: SessionFanout,
-        hot_store: HotEventStore,
-        archive_queue: ArchiveQueue,
-        pending_flush: PendingFlushQueue,
-        session_store: HotSessionStore,
-        ownership: OwnershipManager,
-        replication: ReplicationCoordinator,
-        ops: OpsState,
-        commit_mode: CommitMode,
-        instance_id: Arc<str>,
-        idle_timeout: Duration,
-    ) -> Self {
+    pub fn new(deps: SessionManagerDeps) -> Self {
+        let SessionManagerDeps {
+            pool,
+            fanout,
+            hot_store,
+            archive_queue,
+            pending_flush,
+            session_store,
+            ownership,
+            replication,
+            ops,
+            commit_mode,
+            instance_id,
+            idle_timeout,
+        } = deps;
+
         Self {
             workers: Arc::new(Mutex::new(HashMap::new())),
             pool,
@@ -146,7 +163,6 @@ impl SessionManager {
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
         let tenant_id = tenant_id.to_string();
-        let input = input;
 
         for _attempt in 0..2 {
             let (reply_tx, reply_rx) = oneshot::channel();
@@ -519,7 +535,10 @@ impl SessionManager {
     }
 
     async fn seed_pending_flush(&self, session_id: &str) {
-        let events = self.hot_store.from_cursor(session_id, 0, u32::MAX).await;
+        let events = self
+            .hot_store
+            .events_after_cursor(session_id, 0, u32::MAX)
+            .await;
 
         for event in events {
             self.pending_flush.enqueue(event).await;
@@ -602,7 +621,7 @@ fn matches_local_event(
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionManager, SessionWorkerHandle, SessionWorkerState};
+    use super::{SessionManager, SessionManagerDeps, SessionWorkerHandle, SessionWorkerState};
     use crate::{
         archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
         flush_queue::PendingFlushQueue, hot_store::HotEventStore, model::EventResponse,
@@ -619,30 +638,30 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
             .expect("lazy pool");
 
-        SessionManager::new(
-            pool.clone(),
-            SessionFanout::default(),
-            HotEventStore::new(),
-            ArchiveQueue::new(),
-            PendingFlushQueue::new(),
-            HotSessionStore::new(),
-            OwnershipManager::new(
+        SessionManager::new(SessionManagerDeps {
+            pool: pool.clone(),
+            fanout: SessionFanout::default(),
+            hot_store: HotEventStore::new(),
+            archive_queue: ArchiveQueue::new(),
+            pending_flush: PendingFlushQueue::new(),
+            session_store: HotSessionStore::new(),
+            ownership: OwnershipManager::new(
                 pool.clone(),
                 Arc::<str>::from("node-a"),
                 Duration::from_secs(5),
             ),
-            ReplicationCoordinator::new(
+            replication: ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
                 false,
                 None,
                 Duration::from_millis(500),
             )
             .expect("replication"),
-            OpsState::new(30_000),
-            CommitMode::SyncPostgres,
-            Arc::<str>::from("node-a"),
+            ops: OpsState::new(30_000),
+            commit_mode: CommitMode::SyncPostgres,
+            instance_id: Arc::<str>::from("node-a"),
             idle_timeout,
-        )
+        })
     }
 
     #[test]

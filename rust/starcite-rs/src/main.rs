@@ -48,7 +48,7 @@ use owner_proxy::OwnerProxy;
 use ownership::OwnershipManager;
 use replication::ReplicationCoordinator;
 use runtime::SessionRuntime;
-use session_manager::SessionManager;
+use session_manager::{SessionManager, SessionManagerDeps};
 use session_store::HotSessionStore;
 use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
@@ -135,20 +135,20 @@ async fn run() -> Result<(), String> {
         config.local_async_standby_url.clone(),
         Duration::from_millis(config.local_async_replication_timeout_ms),
     )?;
-    let session_manager = SessionManager::new(
-        pool.clone(),
-        fanout.clone(),
-        hot_store.clone(),
-        archive_queue.clone(),
-        pending_flush.clone(),
-        session_store.clone(),
-        ownership.clone(),
-        replication.clone(),
-        ops_state.clone(),
-        config.commit_mode,
-        instance_id.clone(),
-        Duration::from_millis(config.session_runtime_idle_timeout_ms),
-    );
+    let session_manager = SessionManager::new(SessionManagerDeps {
+        pool: pool.clone(),
+        fanout: fanout.clone(),
+        hot_store: hot_store.clone(),
+        archive_queue: archive_queue.clone(),
+        pending_flush: pending_flush.clone(),
+        session_store: session_store.clone(),
+        ownership: ownership.clone(),
+        replication: replication.clone(),
+        ops: ops_state.clone(),
+        commit_mode: config.commit_mode,
+        instance_id: instance_id.clone(),
+        idle_timeout: Duration::from_millis(config.session_runtime_idle_timeout_ms),
+    });
     let runtime = SessionRuntime::new(
         Some(pool.clone()),
         lifecycle.clone(),

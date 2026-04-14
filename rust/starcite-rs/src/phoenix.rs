@@ -489,22 +489,22 @@ async fn handle_join(
                     frame.ref_id,
                     frame.topic,
                     false,
-                    tail_join_error_payload(&error, &context),
+                    tail_join_error_payload(&error, context),
                 ));
                 return;
             }
 
-            if state.commit_mode == CommitMode::LocalAsync {
-                if let Err(error) = state.ownership.live_or_renew_owned(&session_id).await {
-                    let _ = outbound_tx.send(reply_frame(
-                        frame.join_ref,
-                        frame.ref_id,
-                        frame.topic,
-                        false,
-                        tail_join_error_payload(&error, &context),
-                    ));
-                    return;
-                }
+            if state.commit_mode == CommitMode::LocalAsync
+                && let Err(error) = state.ownership.live_or_renew_owned(&session_id).await
+            {
+                let _ = outbound_tx.send(reply_frame(
+                    frame.join_ref,
+                    frame.ref_id,
+                    frame.topic,
+                    false,
+                    tail_join_error_payload(&error, context),
+                ));
+                return;
             }
 
             state
@@ -1058,7 +1058,7 @@ async fn send_socket_close(
 ) -> Result<(), ()> {
     socket
         .send(Message::Close(Some(CloseFrame {
-            code: code.into(),
+            code,
             reason: reason.into(),
         })))
         .await

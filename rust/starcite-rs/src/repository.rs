@@ -244,13 +244,13 @@ pub async fn update_session(
 
     let current = load_session_row_tx(&mut tx, session_id).await?;
 
-    if let Some(expected_version) = patch.expected_version {
-        if current.version != expected_version {
-            return Err(AppError::ExpectedVersionConflict {
-                expected: expected_version,
-                current: current.version,
-            });
-        }
+    if let Some(expected_version) = patch.expected_version
+        && current.version != expected_version
+    {
+        return Err(AppError::ExpectedVersionConflict {
+            expected: expected_version,
+            current: current.version,
+        });
     }
 
     let current_metadata = value_to_object(&current.metadata)?;
@@ -426,13 +426,13 @@ pub async fn append_event(
 
     let session = load_session_row_tx(&mut tx, session_id).await?;
 
-    if let Some(expected_seq) = input.expected_seq {
-        if session.last_seq != expected_seq {
-            return Err(AppError::ExpectedSeqConflict {
-                expected: expected_seq,
-                current: session.last_seq,
-            });
-        }
+    if let Some(expected_seq) = input.expected_seq
+        && session.last_seq != expected_seq
+    {
+        return Err(AppError::ExpectedSeqConflict {
+            expected: expected_seq,
+            current: session.last_seq,
+        });
     }
 
     let producer_cursor = load_producer_cursor_tx(&mut tx, session_id, &input.producer_id).await?;

@@ -72,10 +72,10 @@ impl CreateSessionRequest {
             ),
         };
 
-        if let Some(tenant_id) = requested_tenant.as_ref() {
-            if tenant_id != &creator_principal.tenant_id {
-                return Err(AppError::InvalidSession);
-            }
+        if let Some(tenant_id) = requested_tenant.as_ref()
+            && tenant_id != &creator_principal.tenant_id
+        {
+            return Err(AppError::InvalidSession);
         }
 
         let id = match self.id {
@@ -128,10 +128,10 @@ impl UpdateSessionRequest {
             return Err(AppError::InvalidSession);
         }
 
-        if let Some(expected_version) = self.expected_version {
-            if expected_version <= 0 {
-                return Err(AppError::InvalidSession);
-            }
+        if let Some(expected_version) = self.expected_version
+            && expected_version <= 0
+        {
+            return Err(AppError::InvalidSession);
         }
 
         Ok(ValidatedUpdateSession {
@@ -196,10 +196,10 @@ impl AppendEventRequest {
             return Err(AppError::InvalidEvent);
         }
 
-        if let Some(expected_seq) = self.expected_seq {
-            if expected_seq < 0 {
-                return Err(AppError::InvalidEvent);
-            }
+        if let Some(expected_seq) = self.expected_seq
+            && expected_seq < 0
+        {
+            return Err(AppError::InvalidEvent);
         }
 
         Ok(ValidatedAppendEvent {
@@ -411,6 +411,7 @@ pub struct AppendReply {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind")]
+#[allow(clippy::enum_variant_names)]
 pub enum LifecycleEvent {
     #[serde(rename = "session.activated")]
     SessionActivated {
@@ -581,10 +582,10 @@ pub fn parse_query_scalar(raw: &str) -> Value {
         return Value::Number(integer.into());
     }
 
-    if let Ok(float) = raw.parse::<f64>() {
-        if let Some(number) = serde_json::Number::from_f64(float) {
-            return Value::Number(number);
-        }
+    if let Ok(float) = raw.parse::<f64>()
+        && let Some(number) = serde_json::Number::from_f64(float)
+    {
+        return Value::Number(number);
     }
 
     Value::String(raw.to_string())
