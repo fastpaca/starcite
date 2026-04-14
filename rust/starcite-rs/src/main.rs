@@ -27,6 +27,7 @@ mod runtime;
 mod session_manager;
 mod session_store;
 mod socket_runtime;
+mod socket_support;
 mod telemetry;
 mod web;
 

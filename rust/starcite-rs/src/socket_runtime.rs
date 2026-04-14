@@ -15,7 +15,8 @@ use crate::{
     },
     read_path, repository,
     session_store::resolve_session_last_seq,
-    telemetry::{ReadOperation, ReadOutcome, ReadPhase, SocketSurface, SocketTransport},
+    socket_support::{record_read_result, wait_for_drain},
+    telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
@@ -451,28 +452,6 @@ async fn replay_lifecycle(
     }
 }
 
-fn record_read_result(
-    state: &AppState,
-    operation: ReadOperation,
-    started_at: Instant,
-    result: Result<(), ()>,
-) {
-    let duration_ms = elapsed_ms(started_at);
-    match result {
-        Ok(()) => {
-            state
-                .telemetry
-                .record_read(operation, ReadPhase::Deliver, ReadOutcome::Ok, duration_ms)
-        }
-        Err(()) => state.telemetry.record_read(
-            operation,
-            ReadPhase::Deliver,
-            ReadOutcome::Error,
-            duration_ms,
-        ),
-    }
-}
-
 fn lifecycle_socket_surface(lifecycle: &LifecycleOptions) -> SocketSurface {
     if lifecycle.session_id.is_some() {
         SocketSurface::SessionLifecycle
@@ -494,22 +473,4 @@ async fn handle_socket_message(
             false
         }
     }
-}
-
-async fn wait_for_drain(ops: &crate::ops::OpsState) {
-    if ops.is_draining() {
-        return;
-    }
-
-    loop {
-        sleep(Duration::from_millis(100)).await;
-
-        if ops.is_draining() {
-            return;
-        }
-    }
-}
-
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at.elapsed().as_millis() as u64
 }

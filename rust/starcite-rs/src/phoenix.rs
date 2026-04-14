@@ -23,12 +23,11 @@ use crate::{
     model::{EventResponse, EventsOptions, LifecycleResponse},
     owner_proxy::build_phoenix_socket_ws_url,
     read_path, repository,
+    request_metrics::authenticate_socket,
     runtime::RuntimeTouchReason,
     session_store::{resolve_session_last_seq, resolve_session_tenant_id},
-    telemetry::{
-        AuthOutcome, AuthSource, AuthStage, ReadOperation, ReadOutcome, ReadPhase, SocketSurface,
-        SocketTransport,
-    },
+    socket_support::{record_read_result, wait_for_drain},
+    telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
@@ -944,65 +943,6 @@ async fn replay_tail(
     }
 }
 
-fn authenticate_socket(
-    state: &AppState,
-    params: &HashMap<String, String>,
-) -> Result<AuthContext, AppError> {
-    let started_at = Instant::now();
-    let result = auth::authenticate_socket(params, state.auth_mode);
-    record_auth_result(&state.telemetry, state.auth_mode, started_at, &result);
-    result
-}
-
-fn record_auth_result(
-    telemetry: &crate::telemetry::Telemetry,
-    auth_mode: AuthMode,
-    started_at: Instant,
-    result: &Result<AuthContext, AppError>,
-) {
-    let duration_ms = started_at.elapsed().as_millis() as u64;
-    match result {
-        Ok(_) => telemetry.record_auth(
-            AuthStage::Plug,
-            auth_mode,
-            AuthOutcome::Ok,
-            duration_ms,
-            "none",
-            AuthSource::None,
-        ),
-        Err(error) => telemetry.record_auth(
-            AuthStage::Plug,
-            auth_mode,
-            AuthOutcome::Error,
-            duration_ms,
-            error.error_code(),
-            AuthSource::None,
-        ),
-    }
-}
-
-fn record_read_result(
-    state: &AppState,
-    operation: ReadOperation,
-    started_at: Instant,
-    result: Result<(), ()>,
-) {
-    let duration_ms = started_at.elapsed().as_millis() as u64;
-    match result {
-        Ok(()) => {
-            state
-                .telemetry
-                .record_read(operation, ReadPhase::Deliver, ReadOutcome::Ok, duration_ms)
-        }
-        Err(()) => state.telemetry.record_read(
-            operation,
-            ReadPhase::Deliver,
-            ReadOutcome::Error,
-            duration_ms,
-        ),
-    }
-}
-
 fn resolve_lifecycle_tenant_id(
     context: &SocketContext,
     payload: &Value,
@@ -1114,20 +1054,6 @@ fn build_node_draining_payload(ops: &crate::ops::OpsSnapshot) -> Value {
     }
 
     Value::Object(payload)
-}
-
-async fn wait_for_drain(ops: &crate::ops::OpsState) {
-    if ops.is_draining() {
-        return;
-    }
-
-    loop {
-        sleep(std::time::Duration::from_millis(100)).await;
-
-        if ops.is_draining() {
-            return;
-        }
-    }
 }
 
 async fn send_socket_close(
