@@ -9,6 +9,7 @@ mod fanout;
 mod flush_queue;
 mod flusher;
 mod hot_store;
+mod lifecycle_http;
 mod lifecycle_scope;
 mod model;
 mod ops;
@@ -248,8 +249,8 @@ async fn run() -> Result<(), String> {
 fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> {
     Router::new()
         .route("/v1/socket/websocket", get(phoenix::socket))
-        .route("/v1/lifecycle", get(web::lifecycle_events))
-        .route("/v1/lifecycle/events", get(web::read_lifecycle))
+        .route("/v1/lifecycle", get(lifecycle_http::lifecycle_events))
+        .route("/v1/lifecycle/events", get(lifecycle_http::read_lifecycle))
         .route(
             "/v1/sessions",
             post(web::create_session).get(web::list_sessions),
@@ -262,11 +263,11 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
         .route("/v1/sessions/{id}/events", get(web::read_events))
         .route(
             "/v1/sessions/{id}/lifecycle",
-            get(web::session_lifecycle_events),
+            get(lifecycle_http::session_lifecycle_events),
         )
         .route(
             "/v1/sessions/{id}/lifecycle/events",
-            get(web::read_session_lifecycle),
+            get(lifecycle_http::read_session_lifecycle),
         )
         .route("/v1/sessions/{id}/tail", get(web::tail_events))
         .route("/v1/sessions/{id}/archive", post(web::archive_session))
