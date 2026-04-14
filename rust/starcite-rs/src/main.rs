@@ -18,6 +18,7 @@ mod ownership;
 mod phoenix;
 mod phoenix_context;
 mod phoenix_protocol;
+mod phoenix_socket;
 mod phoenix_topics;
 mod query_options;
 mod raw_socket;

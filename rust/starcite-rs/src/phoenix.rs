@@ -3,11 +3,11 @@ use std::collections::HashMap;
 use axum::{
     extract::{
         Query, State,
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade, close_code},
+        ws::{Message, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
@@ -20,8 +20,9 @@ use crate::{
     },
     phoenix_protocol::{
         LifecycleOptions, PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload,
-        parse_session_lifecycle_join_payload, parse_tail_join_payload, push_frame, reply_frame,
+        parse_session_lifecycle_join_payload, parse_tail_join_payload, reply_frame,
     },
+    phoenix_socket::{send_frame, send_node_draining, send_token_expired},
     phoenix_topics::{run_lifecycle_topic, run_tail_topic},
     request_metrics::authenticate_socket,
     runtime::RuntimeTouchReason,
@@ -68,7 +69,12 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
         .map(|delay| Box::pin(sleep(delay)));
 
     if state.ops.is_draining() {
-        let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
+        let _ = send_node_draining(
+            &mut socket,
+            subscription_targets(&subscriptions),
+            &state.ops,
+        )
+        .await;
         return;
     }
 
@@ -76,7 +82,8 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
         if let Some(expires_at) = expiry.as_mut() {
             tokio::select! {
                 _ = expires_at => {
-                    let _ = send_token_expired_frames(&mut socket, &subscriptions).await;
+                    let _ = send_token_expired(&mut socket, subscription_targets(&subscriptions))
+                        .await;
                     break;
                 }
                 _ = wait_for_drain(&state.ops) => {
@@ -84,7 +91,12 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
                     );
-                    let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
+                    let _ = send_node_draining(
+                        &mut socket,
+                        subscription_targets(&subscriptions),
+                        &state.ops,
+                    )
+                    .await;
                     break;
                 }
                 outbound = outbound_rx.recv() => {
@@ -131,7 +143,12 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
                     );
-                    let _ = send_node_draining_frames(&mut socket, &subscriptions, &state.ops).await;
+                    let _ = send_node_draining(
+                        &mut socket,
+                        subscription_targets(&subscriptions),
+                        &state.ops,
+                    )
+                    .await;
                     break;
                 }
                 outbound = outbound_rx.recv() => {
@@ -541,6 +558,14 @@ fn handle_leave(
     ));
 }
 
+fn subscription_targets(
+    subscriptions: &HashMap<String, TopicSubscription>,
+) -> impl Iterator<Item = (&str, Option<String>)> + '_ {
+    subscriptions
+        .iter()
+        .map(|(topic, subscription)| (topic.as_str(), subscription.join_ref.clone()))
+}
+
 async fn validate_lifecycle_scope(
     state: &AppState,
     auth: &AuthContext,
@@ -559,128 +584,4 @@ async fn validate_lifecycle_scope(
     }
 
     auth::allow_read_session(auth, session_id, &scoped_tenant_id)
-}
-
-async fn send_token_expired_frames(
-    socket: &mut WebSocket,
-    subscriptions: &HashMap<String, TopicSubscription>,
-) -> Result<(), ()> {
-    for (topic, subscription) in subscriptions {
-        send_frame(
-            socket,
-            &push_frame(
-                subscription.join_ref.clone(),
-                topic.clone(),
-                "token_expired",
-                json!({"reason": "token_expired"}),
-            ),
-        )
-        .await?;
-    }
-
-    send_socket_close(socket, close_code::POLICY, "token_expired").await
-}
-
-async fn send_node_draining_frames(
-    socket: &mut WebSocket,
-    subscriptions: &HashMap<String, TopicSubscription>,
-    ops: &crate::ops::OpsState,
-) -> Result<(), ()> {
-    let snapshot = ops.snapshot();
-
-    for (topic, subscription) in subscriptions {
-        send_frame(
-            socket,
-            &push_frame(
-                subscription.join_ref.clone(),
-                topic.clone(),
-                "node_draining",
-                build_node_draining_payload(&snapshot),
-            ),
-        )
-        .await?;
-    }
-
-    send_socket_close(socket, close_code::RESTART, "node_draining").await
-}
-
-fn build_node_draining_payload(ops: &crate::ops::OpsSnapshot) -> Value {
-    let mut payload = serde_json::Map::from_iter([(
-        "reason".to_string(),
-        Value::String("node_draining".to_string()),
-    )]);
-
-    if let Some(drain_source) = ops.drain_source {
-        payload.insert(
-            "drain_source".to_string(),
-            Value::String(drain_source.to_string()),
-        );
-    }
-
-    if let Some(retry_after_ms) = ops.retry_after_ms {
-        payload.insert(
-            "retry_after_ms".to_string(),
-            Value::Number(retry_after_ms.into()),
-        );
-    }
-
-    Value::Object(payload)
-}
-
-async fn send_socket_close(
-    socket: &mut WebSocket,
-    code: u16,
-    reason: &'static str,
-) -> Result<(), ()> {
-    socket
-        .send(Message::Close(Some(CloseFrame {
-            code,
-            reason: reason.into(),
-        })))
-        .await
-        .map_err(|_| ())
-}
-
-async fn send_frame(socket: &mut WebSocket, frame: &PhoenixFrame) -> Result<(), ()> {
-    let message = serde_json::to_string(&(
-        frame.join_ref.clone(),
-        frame.ref_id.clone(),
-        frame.topic.clone(),
-        frame.event.clone(),
-        frame.payload.clone(),
-    ))
-    .map_err(|_| ())?;
-
-    socket
-        .send(Message::Text(message.into()))
-        .await
-        .map_err(|_| ())
-}
-
-#[cfg(test)]
-mod tests {
-    use serde_json::json;
-
-    use super::build_node_draining_payload;
-    use crate::ops::OpsSnapshot;
-
-    #[test]
-    fn node_draining_payload_includes_shutdown_retry_hint() {
-        let payload = build_node_draining_payload(&OpsSnapshot {
-            mode: "draining",
-            draining: true,
-            drain_source: Some("shutdown"),
-            retry_after_ms: Some(2_400),
-            shutdown_drain_timeout_ms: 5_000,
-        });
-
-        assert_eq!(
-            payload,
-            json!({
-                "reason": "node_draining",
-                "drain_source": "shutdown",
-                "retry_after_ms": 2400
-            })
-        );
-    }
 }
