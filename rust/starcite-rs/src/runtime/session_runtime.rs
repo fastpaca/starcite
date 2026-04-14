@@ -88,8 +88,13 @@ impl SessionRuntime {
     }
 
     pub async fn session_created(&self, session_id: &str, tenant_id: &str) {
-        let generation = self
-            .mark_active(session_id, tenant_id, RuntimeTouchReason::Create)
+        let (generation, _) = self
+            .remember_activity(
+                session_id,
+                tenant_id,
+                RuntimeTouchReason::Create,
+                Activation::AlreadyActive,
+            )
             .await;
         self.schedule_freeze(session_id.to_string(), tenant_id.to_string(), generation);
         self.emit(LifecycleEvent::activated(
@@ -106,30 +111,18 @@ impl SessionRuntime {
         tenant_id: &str,
         reason: RuntimeTouchReason,
     ) {
-        let (generation, activation) = self.resume(session_id, tenant_id, reason).await;
+        let (generation, activation) = self
+            .remember_activity(session_id, tenant_id, reason, Activation::Resumed)
+            .await;
         self.schedule_freeze(session_id.to_string(), tenant_id.to_string(), generation);
 
         if activation == Activation::Resumed {
-            let runtime = self.clone();
-            let session_id = session_id.to_string();
-            let tenant_id = tenant_id.to_string();
             self.telemetry.record_session_hydrate(
-                &tenant_id,
+                tenant_id,
                 SessionOutcome::Ok,
                 SessionReason::Hydrate,
             );
-
-            tokio::spawn(async move {
-                runtime
-                    .emit(LifecycleEvent::hydrating(
-                        session_id.clone(),
-                        tenant_id.clone(),
-                    ))
-                    .await;
-                runtime
-                    .emit(LifecycleEvent::activated(session_id, tenant_id))
-                    .await;
-            });
+            self.spawn_resume_lifecycle(session_id, tenant_id);
         }
     }
 
@@ -186,36 +179,12 @@ impl SessionRuntime {
         }
     }
 
-    async fn mark_active(
+    async fn remember_activity(
         &self,
         session_id: &str,
         tenant_id: &str,
         reason: RuntimeTouchReason,
-    ) -> u64 {
-        let mut sessions = self.sessions.lock().await;
-        let now = Instant::now();
-        let generation = sessions
-            .get(session_id)
-            .map(|session| session.generation + 1)
-            .unwrap_or(1);
-
-        sessions.insert(
-            session_id.to_string(),
-            ActiveSession {
-                tenant_id: tenant_id.to_string(),
-                generation,
-                last_touch_at: now,
-                last_touch_reason: reason,
-            },
-        );
-        generation
-    }
-
-    async fn resume(
-        &self,
-        session_id: &str,
-        tenant_id: &str,
-        reason: RuntimeTouchReason,
+        missing_activation: Activation,
     ) -> (u64, Activation) {
         let mut sessions = self.sessions.lock().await;
         let now = Instant::now();
@@ -231,14 +200,9 @@ impl SessionRuntime {
             None => {
                 sessions.insert(
                     session_id.to_string(),
-                    ActiveSession {
-                        tenant_id: tenant_id.to_string(),
-                        generation: 1,
-                        last_touch_at: now,
-                        last_touch_reason: reason,
-                    },
+                    ActiveSession::new(tenant_id, 1, now, reason),
                 );
-                (1, Activation::Resumed)
+                (1, missing_activation)
             }
         }
     }
@@ -280,6 +244,40 @@ impl SessionRuntime {
             );
             self.emit(LifecycleEvent::frozen(session_id, tenant_id))
                 .await;
+        }
+    }
+
+    fn spawn_resume_lifecycle(&self, session_id: &str, tenant_id: &str) {
+        let runtime = self.clone();
+        let session_id = session_id.to_string();
+        let tenant_id = tenant_id.to_string();
+
+        tokio::spawn(async move {
+            runtime
+                .emit(LifecycleEvent::hydrating(
+                    session_id.clone(),
+                    tenant_id.clone(),
+                ))
+                .await;
+            runtime
+                .emit(LifecycleEvent::activated(session_id, tenant_id))
+                .await;
+        });
+    }
+}
+
+impl ActiveSession {
+    fn new(
+        tenant_id: &str,
+        generation: u64,
+        last_touch_at: Instant,
+        last_touch_reason: RuntimeTouchReason,
+    ) -> Self {
+        Self {
+            tenant_id: tenant_id.to_string(),
+            generation,
+            last_touch_at,
+            last_touch_reason,
         }
     }
 }
