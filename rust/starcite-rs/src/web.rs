@@ -32,15 +32,15 @@ use crate::{
     read_path,
     replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
     repository,
+    request_metrics::{
+        authenticate_http, authenticate_socket, record_ingest_result, record_request_result,
+    },
     request_validation::{parse_append_request, read_append_body, validate_session_id},
     runtime::{RuntimeSnapshot, RuntimeTouchReason},
     session_manager::SessionManagerSnapshot,
     session_store::{HotSessionStoreSnapshot, resolve_session, resolve_session_tenant_id},
     socket_runtime::{require_local_owner_for_event_path, run_lifecycle_session, run_tail_session},
-    telemetry::{
-        AuthOutcome, AuthSource, AuthStage, IngestOperation, IngestOutcome, RequestOperation,
-        RequestOutcome, RequestPhase,
-    },
+    telemetry::{IngestOperation, RequestPhase},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -754,104 +754,6 @@ fn tail_owner_redirect_response(
     }
 
     response
-}
-
-fn authenticate_http(state: &AppState, headers: &HeaderMap) -> Result<auth::AuthContext, AppError> {
-    let started_at = Instant::now();
-    let result = auth::authenticate_http(headers, state.auth_mode);
-    record_auth_result(&state.telemetry, state.auth_mode, started_at, &result);
-    result
-}
-
-fn authenticate_socket(
-    state: &AppState,
-    params: &HashMap<String, String>,
-) -> Result<auth::AuthContext, AppError> {
-    let started_at = Instant::now();
-    let result = auth::authenticate_socket(params, state.auth_mode);
-    record_auth_result(&state.telemetry, state.auth_mode, started_at, &result);
-    result
-}
-
-fn record_auth_result(
-    telemetry: &crate::telemetry::Telemetry,
-    auth_mode: crate::config::AuthMode,
-    started_at: Instant,
-    result: &Result<auth::AuthContext, AppError>,
-) {
-    let duration_ms = elapsed_ms(started_at);
-    match result {
-        Ok(_) => telemetry.record_auth(
-            AuthStage::Plug,
-            auth_mode,
-            AuthOutcome::Ok,
-            duration_ms,
-            "none",
-            AuthSource::None,
-        ),
-        Err(error) => telemetry.record_auth(
-            AuthStage::Plug,
-            auth_mode,
-            AuthOutcome::Error,
-            duration_ms,
-            error.error_code(),
-            AuthSource::None,
-        ),
-    }
-}
-
-fn record_ingest_result<T>(
-    state: &AppState,
-    operation: IngestOperation,
-    tenant_id: &str,
-    result: &Result<T, AppError>,
-) {
-    match result {
-        Ok(_) => {
-            state
-                .telemetry
-                .record_ingest_edge(operation, tenant_id, IngestOutcome::Ok, "none")
-        }
-        Err(error) => state.telemetry.record_ingest_edge(
-            operation,
-            tenant_id,
-            IngestOutcome::Error,
-            error.error_code(),
-        ),
-    }
-}
-
-fn record_request_result<T>(
-    state: &AppState,
-    phase: RequestPhase,
-    started_at: Instant,
-    result: Result<T, &AppError>,
-) {
-    let duration_ms = elapsed_ms(started_at);
-    match result {
-        Ok(_) => state.telemetry.record_request(
-            RequestOperation::AppendEvent,
-            phase,
-            RequestOutcome::Ok,
-            duration_ms,
-            "none",
-        ),
-        Err(error) => state.telemetry.record_request(
-            RequestOperation::AppendEvent,
-            phase,
-            request_outcome(error),
-            duration_ms,
-            error.error_code(),
-        ),
-    }
-}
-
-fn request_outcome(_error: &AppError) -> RequestOutcome {
-    RequestOutcome::Error
-}
-
-fn elapsed_ms(started_at: Instant) -> u64 {
-    started_at.elapsed().as_millis() as u64
 }
 
 fn ready_response(
