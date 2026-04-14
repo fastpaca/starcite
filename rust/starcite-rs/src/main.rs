@@ -25,6 +25,7 @@ mod request_validation;
 mod runtime;
 mod session_manager;
 mod session_store;
+mod socket_runtime;
 mod telemetry;
 mod web;
 
