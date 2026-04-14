@@ -9,7 +9,7 @@ use sqlx::PgPool;
 use tokio::{sync::Mutex, time::sleep};
 
 use crate::{
-    app::data_plane,
+    data_plane,
     fanout::LifecycleFanout,
     model::LifecycleEvent,
     telemetry::{SessionOutcome, SessionReason, Telemetry},

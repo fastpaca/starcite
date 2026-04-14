@@ -16,9 +16,9 @@ use tokio::{
 };
 
 use crate::{
-    app::data_plane,
     cluster::{OwnershipManager, ReplicationCoordinator},
     config::CommitMode,
+    data_plane,
     data_plane::{
         ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue,
         repository::{self, AppendOutcome, ProducerSequenceCheck},

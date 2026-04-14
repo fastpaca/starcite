@@ -8,13 +8,11 @@ use axum::{
 };
 
 use crate::{
-    AppState,
-    app::runtime::RuntimeTouchReason,
-    app::{api, data_plane},
-    auth,
+    AppState, api, auth, data_plane,
     data_plane::repository,
     error::AppError,
     model::{CreateSessionRequest, LifecycleEvent, UpdateSessionRequest},
+    runtime::RuntimeTouchReason,
     telemetry::IngestOperation,
 };
 

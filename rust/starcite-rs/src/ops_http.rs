@@ -8,15 +8,15 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    AppState,
-    app::runtime::{
+    AppState, cluster,
+    cluster::replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
+    config::CommitMode,
+    data_plane,
+    error::{self, AppError},
+    runtime::{
         LifecycleFanoutSnapshot, OpsSnapshot, RuntimeSnapshot, SessionFanoutSnapshot,
         SessionManagerSnapshot,
     },
-    app::{cluster, data_plane},
-    cluster::replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
-    config::CommitMode,
-    error::{self, AppError},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

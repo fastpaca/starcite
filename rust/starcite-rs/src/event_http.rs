@@ -9,10 +9,9 @@ use axum::{
 };
 
 use crate::{
-    AppState,
-    app::{api, cluster, data_plane, runtime},
-    auth,
+    AppState, api, auth, cluster, data_plane,
     error::{self, AppError},
+    runtime,
     runtime::RuntimeTouchReason,
     telemetry::{IngestOperation, RequestPhase},
 };

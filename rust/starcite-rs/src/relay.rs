@@ -5,9 +5,9 @@ use sqlx::{PgPool, postgres::PgListener};
 use tokio::time::sleep;
 
 use crate::{
-    app::data_plane,
-    app::runtime::{LifecycleFanout, SessionFanout},
+    data_plane,
     data_plane::{ArchiveQueue, HotEventStore, HotSessionStore},
+    runtime::{LifecycleFanout, SessionFanout},
 };
 
 pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";

@@ -11,7 +11,7 @@ use serde_json::json;
 use tokio::{sync::mpsc, task::JoinHandle, time::sleep};
 
 use crate::{
-    AppState,
+    AppState, api,
     api::phoenix_context::{
         SocketContext, error_reason, resolve_lifecycle_tenant_id, tail_join_error_payload,
     },
@@ -21,10 +21,11 @@ use crate::{
     },
     api::phoenix_socket::{send_frame, send_node_draining, send_token_expired},
     api::phoenix_topics::{run_lifecycle_topic, run_tail_topic},
-    app::{api, data_plane, runtime},
     auth::{self, AuthContext},
     config::CommitMode,
+    data_plane,
     error::AppError,
+    runtime,
     runtime::RuntimeTouchReason,
     telemetry::{SocketSurface, SocketTransport},
 };

@@ -5,8 +5,8 @@ use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
     AppState,
-    app::data_plane,
     config::CommitMode,
+    data_plane,
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
     query_options::{LifecycleOptions, TailOptions},

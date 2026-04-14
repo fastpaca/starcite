@@ -3,8 +3,7 @@ use std::time::Instant;
 use tokio::time::sleep;
 
 use crate::{
-    AppState,
-    app::runtime,
+    AppState, runtime,
     telemetry::{ReadOperation, ReadOutcome, ReadPhase},
 };
 
