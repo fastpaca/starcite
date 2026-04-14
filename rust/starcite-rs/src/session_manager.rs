@@ -546,26 +546,17 @@ impl SessionManager {
     }
 
     pub async fn apply_local_async_owner_commit(&self, event: EventResponse) {
-        self.session_store
-            .put_tenant(&event.session_id, &event.tenant_id)
-            .await;
-        self.session_store
-            .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
-            .await;
-        self.session_store
-            .bump_producer_seq(
-                &event.session_id,
-                &event.tenant_id,
-                &event.producer_id,
-                event.producer_seq,
-            )
-            .await;
-        self.hot_store.put_event(event.clone()).await;
+        self.cache_local_async_commit(&event).await;
         self.pending_flush.enqueue(event.clone()).await;
-        self.fanout.broadcast(event).await;
+        self.publish_local_async_commit(event).await;
     }
 
     pub async fn apply_local_async_replica_commit(&self, event: EventResponse) {
+        self.cache_local_async_commit(&event).await;
+        self.publish_local_async_commit(event).await;
+    }
+
+    async fn cache_local_async_commit(&self, event: &EventResponse) {
         self.session_store
             .put_tenant(&event.session_id, &event.tenant_id)
             .await;
@@ -580,6 +571,9 @@ impl SessionManager {
                 event.producer_seq,
             )
             .await;
+    }
+
+    async fn publish_local_async_commit(&self, event: EventResponse) {
         self.hot_store.put_event(event.clone()).await;
         self.fanout.broadcast(event).await;
     }
