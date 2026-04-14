@@ -26,6 +26,7 @@ use crate::{
     fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
     flush_queue::PendingFlushSnapshot,
     hot_store::HotEventStoreSnapshot,
+    lifecycle_scope::{resolve_lifecycle_options, resolve_session_lifecycle},
     model::{
         CreateSessionRequest, EventResponse, EventsOptions, LifecycleEvent, LifecyclePage,
         LifecycleResponse, UpdateSessionRequest,
@@ -34,8 +35,7 @@ use crate::{
     owner_proxy::build_tail_ws_url,
     ownership::OwnershipSnapshot,
     query_options::{
-        LifecycleOptions, TailOptions, parse_events_options, parse_lifecycle_options,
-        parse_list_options, parse_optional_session_id, parse_tail_options,
+        LifecycleOptions, TailOptions, parse_events_options, parse_list_options, parse_tail_options,
     },
     raw_socket::{
         build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
@@ -771,65 +771,6 @@ fn tail_owner_redirect_response(
     }
 
     response
-}
-
-async fn resolve_lifecycle_options(
-    state: &AppState,
-    auth: &auth::AuthContext,
-    params: &HashMap<String, String>,
-) -> Result<LifecycleOptions, AppError> {
-    let mut lifecycle = match auth.kind {
-        crate::config::AuthMode::None => parse_lifecycle_options(params.clone())?,
-        crate::config::AuthMode::UnsafeJwt => {
-            auth::can_subscribe_lifecycle(auth)?;
-            LifecycleOptions {
-                tenant_id: auth.principal.tenant_id.clone(),
-                cursor: parse_events_options(params.clone())?.cursor,
-                session_id: parse_optional_session_id(params)?,
-            }
-        }
-    };
-
-    validate_lifecycle_scope(state, auth, &mut lifecycle).await?;
-    Ok(lifecycle)
-}
-
-async fn resolve_session_lifecycle(
-    state: &AppState,
-    auth: &auth::AuthContext,
-    session_id: &str,
-    cursor: i64,
-) -> Result<LifecycleOptions, AppError> {
-    let tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
-    auth::allow_read_session(auth, session_id, &tenant_id)?;
-
-    Ok(LifecycleOptions {
-        tenant_id,
-        cursor,
-        session_id: Some(session_id.to_string()),
-    })
-}
-
-async fn validate_lifecycle_scope(
-    state: &AppState,
-    auth: &auth::AuthContext,
-    lifecycle: &mut LifecycleOptions,
-) -> Result<(), AppError> {
-    let Some(session_id) = lifecycle.session_id.as_ref() else {
-        return Ok(());
-    };
-
-    validate_session_id(session_id)?;
-    let tenant_id =
-        resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;
-
-    if tenant_id != lifecycle.tenant_id {
-        return Err(AppError::ForbiddenTenant);
-    }
-
-    auth::allow_read_session(auth, session_id, &tenant_id)?;
-    Ok(())
 }
 
 fn authenticate_http(state: &AppState, headers: &HeaderMap) -> Result<auth::AuthContext, AppError> {

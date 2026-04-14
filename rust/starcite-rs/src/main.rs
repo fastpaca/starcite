@@ -9,6 +9,7 @@ mod fanout;
 mod flush_queue;
 mod flusher;
 mod hot_store;
+mod lifecycle_scope;
 mod model;
 mod ops;
 mod owner_proxy;
