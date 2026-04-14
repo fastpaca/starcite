@@ -1,7 +1,10 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
-use super::{edge_routing, socket_runtime};
+use super::{
+    edge_routing::{self, EventPathRequest},
+    socket_runtime,
+};
 use axum::{
     Json,
     extract::{Path, Query, State, ws::WebSocketUpgrade},
@@ -29,10 +32,10 @@ pub async fn append_event(
     let body = api::request_validation::read_append_body(&headers, body).await?;
     let authorization = headers.get(axum::http::header::AUTHORIZATION);
     let result: Result<Response, AppError> = async {
-        if let Some(proxied) = edge_routing::forward_cached_event_path(
+        if let Some(proxied) = forward_cached_event_request(
             &state,
             &session_id,
-            edge_routing::EventPathRequest::Append { body: &body },
+            EventPathRequest::Append { body: &body },
             authorization,
         )
         .await?
@@ -42,12 +45,7 @@ pub async fn append_event(
 
         let auth = api::request_metrics::authenticate_http(&state, &headers)?;
         let request = api::request_validation::parse_append_request(&body)?;
-        tenant_id = data_plane::session_store::resolve_session_tenant_id(
-            &state.session_store,
-            &state.pool,
-            &session_id,
-        )
-        .await?;
+        tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
@@ -57,14 +55,13 @@ pub async fn append_event(
             .await;
         let response = match outcome {
             Ok(outcome) => {
-                state
-                    .runtime
-                    .touch_existing(
-                        &session_id,
-                        &outcome.tenant_id,
-                        RuntimeTouchReason::HttpWrite,
-                    )
-                    .await;
+                touch_existing_session(
+                    &state,
+                    &session_id,
+                    &outcome.tenant_id,
+                    RuntimeTouchReason::HttpWrite,
+                )
+                .await;
 
                 Ok((StatusCode::CREATED, Json(outcome.reply)).into_response())
             }
@@ -73,11 +70,11 @@ pub async fn append_event(
                 ..
             }) => {
                 state.session_manager.drop_worker_handle(&session_id).await;
-                edge_routing::forward_known_event_path(
+                forward_known_event_request(
                     &state,
                     &session_id,
                     &owner_public_url,
-                    edge_routing::EventPathRequest::Append { body: &body },
+                    EventPathRequest::Append { body: &body },
                     authorization,
                 )
                 .await
@@ -119,10 +116,10 @@ pub async fn read_events(
     api::request_validation::validate_session_id(&session_id)?;
     let authorization = headers.get(axum::http::header::AUTHORIZATION);
 
-    if let Some(proxied) = edge_routing::forward_cached_event_path(
+    if let Some(proxied) = forward_cached_event_request(
         &state,
         &session_id,
-        edge_routing::EventPathRequest::ReadEvents { params: &params },
+        EventPathRequest::ReadEvents { params: &params },
         authorization,
     )
     .await?
@@ -131,30 +128,14 @@ pub async fn read_events(
     }
 
     let auth = api::request_metrics::authenticate_http(&state, &headers)?;
-    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
-        &state.session_store,
-        &state.pool,
-        &session_id,
-    )
-    .await?;
+    let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    match socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
-        Ok(()) => {}
-        Err(AppError::SessionNotOwned {
-            owner_public_url: Some(owner_public_url),
-            ..
-        }) => {
-            return edge_routing::forward_known_event_path(
-                &state,
-                &session_id,
-                &owner_public_url,
-                edge_routing::EventPathRequest::ReadEvents { params: &params },
-                authorization,
-            )
-            .await;
-        }
-        Err(error) => return Err(error),
+    if let Some(proxied) =
+        require_local_read_path_or_forward(&state, &session_id, &params, authorization).await?
+    {
+        return Ok(proxied);
     }
+
     let page = data_plane::read_path::read_events(
         &state.hot_store,
         &state.pool,
@@ -163,10 +144,13 @@ pub async fn read_events(
     )
     .await?;
 
-    state
-        .runtime
-        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::HttpRead)
-        .await;
+    touch_existing_session(
+        &state,
+        &session_id,
+        &tenant_id,
+        RuntimeTouchReason::HttpRead,
+    )
+    .await;
 
     Ok(Json(page).into_response())
 }
@@ -182,12 +166,7 @@ pub async fn tail_events(
     let auth = api::request_metrics::authenticate_socket(&state, &params)?;
     let expiry = auth.expiry_delay();
     let tail = api::query_options::parse_tail_options(params.clone())?;
-    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
-        &state.session_store,
-        &state.pool,
-        &session_id,
-    )
-    .await?;
+    let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     match socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
         Ok(()) => {}
@@ -215,10 +194,7 @@ pub async fn tail_events(
         }
         Err(error) => return Err(error),
     }
-    state
-        .runtime
-        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::RawTail)
-        .await;
+    touch_existing_session(&state, &session_id, &tenant_id, RuntimeTouchReason::RawTail).await;
     let receiver = state.fanout.subscribe(&session_id).await;
 
     Ok(websocket
@@ -227,6 +203,77 @@ pub async fn tail_events(
                 .await;
         })
         .into_response())
+}
+
+async fn resolve_session_tenant_id(state: &AppState, session_id: &str) -> Result<String, AppError> {
+    data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        session_id,
+    )
+    .await
+}
+
+async fn touch_existing_session(
+    state: &AppState,
+    session_id: &str,
+    tenant_id: &str,
+    reason: RuntimeTouchReason,
+) {
+    state
+        .runtime
+        .touch_existing(session_id, tenant_id, reason)
+        .await;
+}
+
+async fn forward_cached_event_request(
+    state: &AppState,
+    session_id: &str,
+    request: EventPathRequest<'_>,
+    authorization: Option<&HeaderValue>,
+) -> Result<Option<Response>, AppError> {
+    edge_routing::forward_cached_event_path(state, session_id, request, authorization).await
+}
+
+async fn forward_known_event_request(
+    state: &AppState,
+    session_id: &str,
+    owner_public_url: &str,
+    request: EventPathRequest<'_>,
+    authorization: Option<&HeaderValue>,
+) -> Result<Response, AppError> {
+    edge_routing::forward_known_event_path(
+        state,
+        session_id,
+        owner_public_url,
+        request,
+        authorization,
+    )
+    .await
+}
+
+async fn require_local_read_path_or_forward(
+    state: &AppState,
+    session_id: &str,
+    params: &HashMap<String, String>,
+    authorization: Option<&HeaderValue>,
+) -> Result<Option<Response>, AppError> {
+    match socket_runtime::require_local_owner_for_event_path(state, session_id).await {
+        Ok(()) => Ok(None),
+        Err(AppError::SessionNotOwned {
+            owner_public_url: Some(owner_public_url),
+            ..
+        }) => forward_known_event_request(
+            state,
+            session_id,
+            &owner_public_url,
+            EventPathRequest::ReadEvents { params },
+            authorization,
+        )
+        .await
+        .map(Some),
+        Err(error) => Err(error),
+    }
 }
 
 fn tail_owner_redirect_response(

@@ -515,12 +515,12 @@ fn send_reply(
 ) -> bool {
     outbound_tx
         .send(reply_frame(
-        frame.join_ref.clone(),
-        frame.ref_id.clone(),
-        frame.topic.clone(),
-        success,
-        payload,
-    ))
+            frame.join_ref.clone(),
+            frame.ref_id.clone(),
+            frame.topic.clone(),
+            success,
+            payload,
+        ))
         .is_ok()
 }
 
