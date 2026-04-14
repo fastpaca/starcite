@@ -4,6 +4,7 @@ use tokio::time::sleep;
 
 use crate::{
     AppState,
+    app::runtime,
     telemetry::{ReadOperation, ReadOutcome, ReadPhase},
 };
 
@@ -29,7 +30,7 @@ pub(crate) fn record_read_result(
     }
 }
 
-pub(crate) async fn wait_for_drain(ops: &crate::ops::OpsState) {
+pub(crate) async fn wait_for_drain(ops: &runtime::OpsState) {
     if ops.is_draining() {
         return;
     }

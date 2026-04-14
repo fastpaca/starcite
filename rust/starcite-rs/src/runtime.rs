@@ -9,9 +9,9 @@ use sqlx::PgPool;
 use tokio::{sync::Mutex, time::sleep};
 
 use crate::{
+    app::data_plane,
     fanout::LifecycleFanout,
     model::LifecycleEvent,
-    repository,
     telemetry::{SessionOutcome, SessionReason, Telemetry},
 };
 
@@ -162,7 +162,9 @@ impl SessionRuntime {
     async fn emit(&self, event: LifecycleEvent) {
         match &self.pool {
             Some(pool) => {
-                match repository::append_lifecycle_event(pool, event, &self.instance_id).await {
+                match data_plane::repository::append_lifecycle_event(pool, event, &self.instance_id)
+                    .await
+                {
                     Ok(event) => {
                         self.lifecycle.broadcast(event).await;
                     }

@@ -16,18 +16,17 @@ use tokio::{
 };
 
 use crate::{
-    archive_queue::ArchiveQueue,
+    app::data_plane,
+    cluster::{OwnershipManager, ReplicationCoordinator},
     config::CommitMode,
+    data_plane::{
+        ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue,
+        repository::{self, AppendOutcome, ProducerSequenceCheck},
+    },
     error::AppError,
     fanout::SessionFanout,
-    flush_queue::PendingFlushQueue,
-    hot_store::HotEventStore,
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
     ops::OpsState,
-    ownership::OwnershipManager,
-    replication::ReplicationCoordinator,
-    repository::{self, AppendOutcome, ProducerSequenceCheck},
-    session_store::{HotSessionStore, resolve_session_last_seq},
 };
 
 const APPEND_QUEUE_CAPACITY: usize = 64;
@@ -375,8 +374,12 @@ impl SessionManager {
         let last_seq = match state.last_seq {
             Some(last_seq) => last_seq,
             None => {
-                let last_seq =
-                    resolve_session_last_seq(&self.session_store, &self.pool, session_id).await?;
+                let last_seq = data_plane::session_store::resolve_session_last_seq(
+                    &self.session_store,
+                    &self.pool,
+                    session_id,
+                )
+                .await?;
                 state.remember_last_seq(last_seq);
                 last_seq
             }

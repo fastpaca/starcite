@@ -5,11 +5,9 @@ use sqlx::{PgPool, postgres::PgListener};
 use tokio::time::sleep;
 
 use crate::{
-    archive_queue::ArchiveQueue,
-    fanout::{LifecycleFanout, SessionFanout},
-    hot_store::HotEventStore,
-    repository,
-    session_store::{self, HotSessionStore},
+    app::data_plane,
+    app::runtime::{LifecycleFanout, SessionFanout},
+    data_plane::{ArchiveQueue, HotEventStore, HotSessionStore},
 };
 
 pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";
@@ -130,7 +128,12 @@ async fn handle_notification(state: &ListenerState, channel: &str, payload: &str
                 return;
             }
 
-            match repository::load_event_by_seq(&state.pool, &payload.session_id, payload.seq).await
+            match data_plane::repository::load_event_by_seq(
+                &state.pool,
+                &payload.session_id,
+                payload.seq,
+            )
+            .await
             {
                 Ok(Some(event)) => {
                     state.hot_store.put_event(event.clone()).await;
@@ -175,9 +178,11 @@ async fn handle_notification(state: &ListenerState, channel: &str, payload: &str
                 return;
             }
 
-            match repository::load_lifecycle_by_cursor(&state.pool, payload.cursor).await {
+            match data_plane::repository::load_lifecycle_by_cursor(&state.pool, payload.cursor)
+                .await
+            {
                 Ok(Some(event)) => {
-                    if let Err(error) = session_store::refresh_from_lifecycle(
+                    if let Err(error) = data_plane::session_store::refresh_from_lifecycle(
                         &state.session_store,
                         &state.pool,
                         &event,

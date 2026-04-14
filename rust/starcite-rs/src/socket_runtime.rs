@@ -5,6 +5,7 @@ use tokio::{sync::broadcast, time::sleep};
 
 use crate::{
     AppState,
+    app::data_plane,
     config::CommitMode,
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
@@ -13,8 +14,6 @@ use crate::{
         build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
         send_gap, send_lifecycle, send_node_draining, send_token_expired,
     },
-    read_path, repository,
-    session_store::resolve_session_last_seq,
     socket_support::{record_read_result, wait_for_drain},
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
@@ -342,7 +341,12 @@ async fn sync_tail(
         return Ok(next_cursor);
     }
 
-    let last_seq = resolve_session_last_seq(&state.session_store, &state.pool, session_id).await?;
+    let last_seq = data_plane::session_store::resolve_session_last_seq(
+        &state.session_store,
+        &state.pool,
+        session_id,
+    )
+    .await?;
 
     if cursor > last_seq {
         let gap = build_resume_invalidated_gap(cursor, last_seq);
@@ -363,7 +367,7 @@ async fn replay_tail(
     batch_size: u32,
 ) -> Result<i64, AppError> {
     loop {
-        let page = read_path::read_events(
+        let page = data_plane::read_path::read_events(
             &state.hot_store,
             &state.pool,
             session_id,
@@ -400,7 +404,7 @@ async fn sync_lifecycle(
         return Ok(next_cursor);
     }
 
-    let head = repository::lifecycle_head_seq(
+    let head = data_plane::repository::lifecycle_head_seq(
         &state.pool,
         &lifecycle.tenant_id,
         lifecycle.session_id.as_deref(),
@@ -427,7 +431,7 @@ async fn replay_lifecycle(
     mut cursor: i64,
 ) -> Result<i64, AppError> {
     loop {
-        let page = repository::read_lifecycle_events(
+        let page = data_plane::repository::read_lifecycle_events(
             &state.pool,
             &lifecycle.tenant_id,
             lifecycle.session_id.as_deref(),
