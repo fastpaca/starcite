@@ -19,7 +19,7 @@ use crate::{
     AppState,
     archive_queue::ArchiveQueueSnapshot,
     auth,
-    config::{CommitMode, DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
+    config::CommitMode,
     control_plane::ControlPlaneSnapshot,
     edge_routing::{self, EventPathRequest},
     error::{self, AppError},
@@ -27,12 +27,16 @@ use crate::{
     flush_queue::PendingFlushSnapshot,
     hot_store::HotEventStoreSnapshot,
     model::{
-        ArchivedFilter, CreateSessionRequest, EventResponse, EventsOptions, LifecycleEvent,
-        LifecyclePage, LifecycleResponse, ListOptions, UpdateSessionRequest, parse_query_scalar,
+        CreateSessionRequest, EventResponse, EventsOptions, LifecycleEvent, LifecyclePage,
+        LifecycleResponse, UpdateSessionRequest,
     },
     ops::OpsSnapshot,
     owner_proxy::build_tail_ws_url,
     ownership::OwnershipSnapshot,
+    query_options::{
+        LifecycleOptions, TailOptions, parse_events_options, parse_lifecycle_options,
+        parse_list_options, parse_optional_session_id, parse_tail_options,
+    },
     raw_socket::{
         build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
         send_gap, send_lifecycle, send_node_draining, send_token_expired,
@@ -55,19 +59,6 @@ use crate::{
 };
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TailOptions {
-    cursor: i64,
-    batch_size: u32,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-struct LifecycleOptions {
-    tenant_id: String,
-    cursor: i64,
-    session_id: Option<String>,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReplicaAppendDisposition {
@@ -782,116 +773,6 @@ fn tail_owner_redirect_response(
     response
 }
 
-fn parse_list_options(params: HashMap<String, String>) -> Result<ListOptions, AppError> {
-    let mut metadata = serde_json::Map::new();
-    let mut tenant_id = None;
-    let mut limit = DEFAULT_LIST_LIMIT;
-    let mut cursor = None;
-    let mut archived = ArchivedFilter::Active;
-
-    for (key, value) in params {
-        match key.as_str() {
-            "limit" => limit = parse_limit(&value)?,
-            "cursor" => {
-                if value.is_empty() {
-                    return Err(AppError::InvalidCursor);
-                }
-
-                cursor = Some(value);
-            }
-            "archived" => archived = parse_archived_filter(&value)?,
-            "tenant_id" => {
-                if value.is_empty() {
-                    return Err(AppError::InvalidListQuery);
-                }
-
-                tenant_id = Some(value);
-            }
-            _ => {
-                if let Some(key) = metadata_key(&key) {
-                    metadata.insert(key.to_string(), parse_query_scalar(&value));
-                }
-            }
-        }
-    }
-
-    Ok(ListOptions {
-        limit,
-        cursor,
-        archived,
-        metadata,
-        tenant_id,
-        session_id: None,
-    })
-}
-
-fn parse_events_options(params: HashMap<String, String>) -> Result<EventsOptions, AppError> {
-    let mut cursor = 0_i64;
-    let mut limit = DEFAULT_LIST_LIMIT;
-
-    for (key, value) in params {
-        match key.as_str() {
-            "cursor" => {
-                cursor = value.parse::<i64>().map_err(|_| AppError::InvalidCursor)?;
-
-                if cursor < 0 {
-                    return Err(AppError::InvalidCursor);
-                }
-            }
-            "limit" => limit = parse_limit(&value)?,
-            _ => {}
-        }
-    }
-
-    Ok(EventsOptions { cursor, limit })
-}
-
-fn parse_tail_options(params: HashMap<String, String>) -> Result<TailOptions, AppError> {
-    let mut cursor = 0_i64;
-    let mut batch_size = 1_u32;
-
-    for (key, value) in params {
-        match key.as_str() {
-            "cursor" => {
-                cursor = value.parse::<i64>().map_err(|_| AppError::InvalidCursor)?;
-
-                if cursor < 0 {
-                    return Err(AppError::InvalidCursor);
-                }
-            }
-            "batch_size" => {
-                batch_size = value
-                    .parse::<u32>()
-                    .map_err(|_| AppError::InvalidTailBatchSize)?;
-
-                if !(1..=MAX_LIST_LIMIT).contains(&batch_size) {
-                    return Err(AppError::InvalidTailBatchSize);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(TailOptions { cursor, batch_size })
-}
-
-fn parse_lifecycle_options(params: HashMap<String, String>) -> Result<LifecycleOptions, AppError> {
-    let cursor = parse_events_options(params.clone())?.cursor;
-    let session_id = parse_optional_session_id(&params)?;
-
-    match params
-        .get("tenant_id")
-        .filter(|tenant_id| !tenant_id.is_empty())
-    {
-        Some(tenant_id) => Ok(LifecycleOptions {
-            tenant_id: tenant_id.clone(),
-            cursor,
-            session_id,
-        }),
-        None => Err(AppError::InvalidTenantId),
-    }
-}
-
 async fn resolve_lifecycle_options(
     state: &AppState,
     auth: &auth::AuthContext,
@@ -928,39 +809,6 @@ async fn resolve_session_lifecycle(
         cursor,
         session_id: Some(session_id.to_string()),
     })
-}
-
-fn parse_archived_filter(raw: &str) -> Result<ArchivedFilter, AppError> {
-    match raw {
-        "false" => Ok(ArchivedFilter::Active),
-        "true" => Ok(ArchivedFilter::Archived),
-        "all" => Ok(ArchivedFilter::All),
-        _ => Err(AppError::InvalidListQuery),
-    }
-}
-
-fn parse_limit(raw: &str) -> Result<u32, AppError> {
-    let parsed = raw.parse::<u32>().map_err(|_| AppError::InvalidLimit)?;
-
-    if (1..=MAX_LIST_LIMIT).contains(&parsed) {
-        Ok(parsed)
-    } else {
-        Err(AppError::InvalidLimit)
-    }
-}
-
-fn metadata_key(raw: &str) -> Option<&str> {
-    raw.strip_prefix("metadata.")
-        .or_else(|| raw.strip_prefix("metadata[")?.strip_suffix(']'))
-        .filter(|key| !key.is_empty())
-}
-
-fn parse_optional_session_id(params: &HashMap<String, String>) -> Result<Option<String>, AppError> {
-    match params.get("session_id") {
-        None => Ok(None),
-        Some(value) if value.is_empty() => Err(AppError::InvalidSessionId),
-        Some(value) => Ok(Some(value.clone())),
-    }
 }
 
 async fn validate_lifecycle_scope(
@@ -1656,80 +1504,19 @@ async fn wait_for_drain(ops: &crate::ops::OpsState) {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use axum::{
         Json, body,
         http::{StatusCode, header},
     };
-    use serde_json::json;
 
     use super::{
-        LifecycleOptions, ReplicaAppendDisposition, TailOptions, classify_replica_append,
-        parse_archived_filter, parse_events_options, parse_lifecycle_options, parse_list_options,
-        parse_tail_options, ready_response, tail_owner_redirect_response,
+        ReplicaAppendDisposition, classify_replica_append, ready_response,
+        tail_owner_redirect_response,
     };
     use crate::{
         error::{OWNER_URL_HEADER, OWNER_WEBSOCKET_URL_HEADER},
-        model::ArchivedFilter,
         ops::OpsState,
     };
-
-    #[test]
-    fn list_query_supports_bracket_metadata_filters() {
-        let params = HashMap::from([
-            ("metadata[marker]".to_string(), "hot".to_string()),
-            ("limit".to_string(), "50".to_string()),
-        ]);
-
-        let opts = parse_list_options(params).expect("query should parse");
-
-        assert_eq!(opts.limit, 50);
-        assert_eq!(opts.metadata.get("marker"), Some(&json!("hot")));
-    }
-
-    #[test]
-    fn events_query_defaults_cursor_to_zero() {
-        let opts = parse_events_options(HashMap::new()).expect("query should parse");
-        assert_eq!(opts.cursor, 0);
-    }
-
-    #[test]
-    fn tail_cursor_uses_same_validation_as_events_query() {
-        let params = HashMap::from([("cursor".to_string(), "12".to_string())]);
-
-        let options = parse_tail_options(params).expect("tail query should parse");
-        assert_eq!(
-            options,
-            TailOptions {
-                cursor: 12,
-                batch_size: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn tail_query_supports_batch_size() {
-        let params = HashMap::from([
-            ("cursor".to_string(), "7".to_string()),
-            ("batch_size".to_string(), "64".to_string()),
-        ]);
-
-        let options = parse_tail_options(params).expect("tail query should parse");
-        assert_eq!(
-            options,
-            TailOptions {
-                cursor: 7,
-                batch_size: 64,
-            }
-        );
-    }
-
-    #[test]
-    fn tail_query_rejects_invalid_batch_size() {
-        let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
-        assert!(parse_tail_options(params).is_err());
-    }
 
     #[tokio::test]
     async fn tail_owner_redirect_sets_headers_and_body() {
@@ -1772,51 +1559,6 @@ mod tests {
             "ws://127.0.0.1:4191/v1/sessions/ses_demo/tail?cursor=2&batch_size=8"
         );
         assert_eq!(json_body["epoch"], 7);
-    }
-
-    #[test]
-    fn lifecycle_query_requires_tenant_id() {
-        assert!(parse_lifecycle_options(HashMap::new()).is_err());
-    }
-
-    #[test]
-    fn lifecycle_query_parses_tenant_id() {
-        let params = HashMap::from([("tenant_id".to_string(), "acme".to_string())]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(
-            options,
-            LifecycleOptions {
-                tenant_id: "acme".to_string(),
-                cursor: 0,
-                session_id: None,
-            }
-        );
-    }
-
-    #[test]
-    fn lifecycle_query_parses_cursor() {
-        let params = HashMap::from([
-            ("tenant_id".to_string(), "acme".to_string()),
-            ("cursor".to_string(), "9".to_string()),
-        ]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(options.cursor, 9);
-    }
-
-    #[test]
-    fn lifecycle_query_parses_session_filter() {
-        let params = HashMap::from([
-            ("tenant_id".to_string(), "acme".to_string()),
-            ("session_id".to_string(), "ses_demo".to_string()),
-        ]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(options.session_id.as_deref(), Some("ses_demo"));
     }
 
     #[test]
@@ -1864,22 +1606,6 @@ mod tests {
         assert_eq!(
             classify_replica_append(7, 9),
             ReplicaAppendDisposition::SeqGap { expected_seq: 8 }
-        );
-    }
-
-    #[test]
-    fn archived_filter_matches_existing_api() {
-        assert_eq!(
-            parse_archived_filter("false").expect("false should parse"),
-            ArchivedFilter::Active
-        );
-        assert_eq!(
-            parse_archived_filter("true").expect("true should parse"),
-            ArchivedFilter::Archived
-        );
-        assert_eq!(
-            parse_archived_filter("all").expect("all should parse"),
-            ArchivedFilter::All
         );
     }
 }
