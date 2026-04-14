@@ -341,19 +341,8 @@ impl SessionManager {
             .bump_last_seq(session_id, &outcome.tenant_id, outcome.reply.last_seq)
             .await;
 
-        if let Some(event) = outcome.event.clone() {
-            state.remember_producer_seq(&event.producer_id, event.producer_seq);
-            self.session_store
-                .bump_producer_seq(
-                    &event.session_id,
-                    &event.tenant_id,
-                    &event.producer_id,
-                    event.producer_seq,
-                )
-                .await;
-            self.hot_store.put_event(event.clone()).await;
-            self.archive_queue.enqueue(session_id).await;
-            self.fanout.broadcast(event).await;
+        if let Some(event) = outcome.event.as_ref() {
+            self.apply_sync_commit(state, event).await;
         }
 
         Ok(outcome)
@@ -410,17 +399,7 @@ impl SessionManager {
                 return match existing {
                     Some(existing) if matches_local_event(&existing, &input, tenant_id) => {
                         state.remember_producer_seq(&producer_id, current);
-                        Ok(AppendOutcome {
-                            reply: AppendReply {
-                                seq: existing.seq,
-                                last_seq,
-                                deduped: true,
-                                cursor: existing.cursor,
-                                committed_cursor: last_seq,
-                            },
-                            event: None,
-                            tenant_id: tenant_id.to_string(),
-                        })
+                        Ok(deduped_append_outcome(&existing, last_seq, tenant_id))
                     }
                     Some(_) => Err(AppError::ProducerReplayConflict),
                     None => Err(AppError::ProducerSeqConflict {
@@ -549,13 +528,35 @@ impl SessionManager {
     }
 
     pub async fn apply_local_async_owner_commit(&self, event: EventResponse) {
-        self.cache_local_async_commit(&event).await;
-        self.pending_flush.enqueue(event.clone()).await;
-        self.publish_local_async_commit(event).await;
+        self.apply_local_async_commit(event, true).await;
     }
 
     pub async fn apply_local_async_replica_commit(&self, event: EventResponse) {
+        self.apply_local_async_commit(event, false).await;
+    }
+
+    async fn apply_sync_commit(&self, state: &mut SessionWorkerState, event: &EventResponse) {
+        state.remember_producer_seq(&event.producer_id, event.producer_seq);
+        self.session_store
+            .bump_producer_seq(
+                &event.session_id,
+                &event.tenant_id,
+                &event.producer_id,
+                event.producer_seq,
+            )
+            .await;
+        self.hot_store.put_event(event.clone()).await;
+        self.archive_queue.enqueue(&event.session_id).await;
+        self.fanout.broadcast(event.clone()).await;
+    }
+
+    async fn apply_local_async_commit(&self, event: EventResponse, enqueue_flush: bool) {
         self.cache_local_async_commit(&event).await;
+
+        if enqueue_flush {
+            self.pending_flush.enqueue(event.clone()).await;
+        }
+
         self.publish_local_async_commit(event).await;
     }
 
@@ -614,6 +615,24 @@ fn matches_local_event(
         && existing.refs == input.refs
         && existing.idempotency_key == input.idempotency_key
         && existing.tenant_id == tenant_id
+}
+
+fn deduped_append_outcome(
+    existing: &EventResponse,
+    last_seq: i64,
+    tenant_id: &str,
+) -> AppendOutcome {
+    AppendOutcome {
+        reply: AppendReply {
+            seq: existing.seq,
+            last_seq,
+            deduped: true,
+            cursor: existing.cursor,
+            committed_cursor: last_seq,
+        },
+        event: None,
+        tenant_id: tenant_id.to_string(),
+    }
 }
 
 #[cfg(test)]
