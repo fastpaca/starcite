@@ -17,6 +17,7 @@ mod owner_proxy;
 mod ownership;
 mod phoenix;
 mod phoenix_protocol;
+mod phoenix_topics;
 mod query_options;
 mod raw_socket;
 mod read_path;
