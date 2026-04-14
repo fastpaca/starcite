@@ -22,6 +22,7 @@ use crate::{
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
     owner_proxy::build_phoenix_socket_ws_url,
+    query_options::TailOptions,
     read_path, repository,
     request_metrics::authenticate_socket,
     runtime::RuntimeTouchReason,
@@ -31,12 +32,6 @@ use crate::{
 };
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct TailOptions {
-    cursor: i64,
-    batch_size: u32,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LifecycleOptions {
