@@ -12,6 +12,7 @@ mod hot_store;
 mod lifecycle_scope;
 mod model;
 mod ops;
+mod ops_http;
 mod owner_proxy;
 mod ownership;
 mod phoenix;
@@ -269,7 +270,7 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
         .route("/v1/sessions/{id}/unarchive", post(web::unarchive_session))
         .layer(middleware::from_fn_with_state(
             ops,
-            web::reject_when_draining,
+            ops_http::reject_when_draining,
         ))
         .layer(middleware::from_fn_with_state(
             telemetry.clone(),
@@ -285,15 +286,18 @@ fn build_public_router(telemetry: Telemetry, ops: OpsState) -> Router<AppState> 
 
 fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
     Router::new()
-        .route("/health/live", get(web::live))
-        .route("/health/ready", get(web::ready))
+        .route("/health/live", get(ops_http::live))
+        .route("/health/ready", get(ops_http::ready))
         .route("/metrics", get(telemetry::metrics))
-        .route("/debug/state", get(web::debug_state))
+        .route("/debug/state", get(ops_http::debug_state))
         .route(
             "/debug/drain",
-            post(web::begin_drain).delete(web::clear_drain),
+            post(ops_http::begin_drain).delete(ops_http::clear_drain),
         )
-        .route("/internal/replication/append", post(web::append_replica))
+        .route(
+            "/internal/replication/append",
+            post(ops_http::append_replica),
+        )
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,
