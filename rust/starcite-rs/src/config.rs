@@ -3,7 +3,7 @@ use std::{env, net::SocketAddr};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AuthMode {
     None,
-    UnsafeJwt,
+    Jwt,
 }
 
 pub const DEFAULT_LIST_LIMIT: u32 = 100;
@@ -18,6 +18,12 @@ pub struct Config {
     pub archive_flush_interval_ms: u64,
     pub migrate_on_boot: bool,
     pub auth_mode: AuthMode,
+    pub auth_issuer: Option<String>,
+    pub auth_audience: Option<String>,
+    pub auth_jwks_url: Option<String>,
+    pub auth_jwt_leeway_seconds: u64,
+    pub auth_jwks_refresh_ms: u64,
+    pub auth_jwks_hard_expiry_ms: u64,
     pub telemetry_enabled: bool,
     pub shutdown_drain_timeout_ms: u64,
     pub session_runtime_idle_timeout_ms: u64,
@@ -67,6 +73,29 @@ impl Config {
             .map(|raw| parse_auth_mode("STARCITE_AUTH_MODE", &raw))
             .transpose()?
             .unwrap_or(AuthMode::None);
+        let auth_jwt_leeway_seconds = env::var("STARCITE_JWT_LEEWAY_SECONDS")
+            .ok()
+            .map(|raw| parse_non_negative_u64("STARCITE_JWT_LEEWAY_SECONDS", &raw))
+            .transpose()?
+            .unwrap_or(1);
+        let auth_jwks_refresh_ms = env::var("STARCITE_JWKS_REFRESH_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("STARCITE_JWKS_REFRESH_MS", &raw))
+            .transpose()?
+            .unwrap_or(60_000);
+        let auth_jwks_hard_expiry_ms = env::var("STARCITE_JWKS_HARD_EXPIRY_MS")
+            .ok()
+            .map(|raw| parse_positive_u64("STARCITE_JWKS_HARD_EXPIRY_MS", &raw))
+            .transpose()?
+            .unwrap_or(auth_jwks_refresh_ms);
+        let (auth_issuer, auth_audience, auth_jwks_url) = match auth_mode {
+            AuthMode::None => (None, None, None),
+            AuthMode::Jwt => (
+                Some(required_non_empty_env("STARCITE_JWT_ISSUER")?),
+                Some(required_non_empty_env("STARCITE_JWT_AUDIENCE")?),
+                Some(required_non_empty_env("STARCITE_JWKS_URL")?),
+            ),
+        };
 
         let telemetry_enabled = env::var("STARCITE_ENABLE_TELEMETRY")
             .ok()
@@ -139,6 +168,12 @@ impl Config {
             archive_flush_interval_ms,
             migrate_on_boot,
             auth_mode,
+            auth_issuer,
+            auth_audience,
+            auth_jwks_url,
+            auth_jwt_leeway_seconds,
+            auth_jwks_refresh_ms,
+            auth_jwks_hard_expiry_ms,
             telemetry_enabled,
             shutdown_drain_timeout_ms,
             session_runtime_idle_timeout_ms,
@@ -176,11 +211,32 @@ fn parse_positive_u64(name: &str, raw: &str) -> Result<u64, String> {
     }
 }
 
+fn parse_non_negative_u64(name: &str, raw: &str) -> Result<u64, String> {
+    raw.trim()
+        .parse::<u64>()
+        .map_err(|_| format!("invalid non-negative integer for {name}: {raw}"))
+}
+
 fn parse_auth_mode(name: &str, raw: &str) -> Result<AuthMode, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "none" => Ok(AuthMode::None),
-        "unsafe_jwt" => Ok(AuthMode::UnsafeJwt),
+        "jwt" | "unsafe_jwt" => Ok(AuthMode::Jwt),
         _ => Err(format!("invalid auth mode for {name}: {raw}")),
+    }
+}
+
+fn required_non_empty_env(name: &str) -> Result<String, String> {
+    match env::var(name) {
+        Ok(value) => {
+            let trimmed = value.trim();
+
+            if trimmed.is_empty() {
+                Err(format!("missing required auth setting {name}"))
+            } else {
+                Ok(trimmed.to_string())
+            }
+        }
+        Err(_) => Err(format!("missing required auth setting {name}")),
     }
 }
 
@@ -224,7 +280,7 @@ fn parse_socket_addr(host: &str, port: u16) -> Result<SocketAddr, String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_listener_addrs, parse_positive_u64};
+    use super::{AuthMode, parse_auth_mode, parse_listener_addrs, parse_positive_u64};
 
     #[test]
     fn defaults_ops_port_to_public_port_plus_one() {
@@ -279,5 +335,22 @@ mod tests {
     fn rejects_non_positive_u64_values() {
         assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "0").is_err());
         assert!(parse_positive_u64("SESSION_RUNTIME_IDLE_TIMEOUT_MS", "-1").is_err());
+    }
+
+    #[test]
+    fn parses_auth_modes() {
+        assert_eq!(
+            parse_auth_mode("STARCITE_AUTH_MODE", "none").expect("none should parse"),
+            AuthMode::None
+        );
+        assert_eq!(
+            parse_auth_mode("STARCITE_AUTH_MODE", "jwt").expect("jwt should parse"),
+            AuthMode::Jwt
+        );
+        assert_eq!(
+            parse_auth_mode("STARCITE_AUTH_MODE", "unsafe_jwt")
+                .expect("legacy jwt mode should parse"),
+            AuthMode::Jwt
+        );
     }
 }

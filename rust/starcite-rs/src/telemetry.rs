@@ -885,7 +885,7 @@ fn edge_stage_label(stage: EdgeStage) -> &'static str {
 fn auth_mode_label(mode: AuthMode) -> &'static str {
     match mode {
         AuthMode::None => "none",
-        AuthMode::UnsafeJwt => "jwt",
+        AuthMode::Jwt => "jwt",
     }
 }
 
@@ -1032,7 +1032,7 @@ mod tests {
         telemetry.record_edge_stage(EdgeStage::ControllerEntry, "POST", 0);
         telemetry.record_auth(
             AuthStage::Plug,
-            AuthMode::UnsafeJwt,
+            AuthMode::Jwt,
             AuthOutcome::Ok,
             3,
             "none",

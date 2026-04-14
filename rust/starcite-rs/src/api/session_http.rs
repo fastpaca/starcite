@@ -23,7 +23,7 @@ pub async fn create_session(
 ) -> Result<impl IntoResponse, AppError> {
     let mut tenant_id = "unknown".to_string();
     let result: Result<(StatusCode, Json<crate::model::SessionResponse>), AppError> = async {
-        let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+        let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
         let validated = auth::validate_create_request(request, &auth)?;
         tenant_id = validated.tenant_id.clone();
@@ -58,7 +58,7 @@ pub async fn list_sessions(
     headers: HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<crate::model::SessionsPage>, AppError> {
-    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let options = auth::apply_list_scope(&auth, api::query_options::parse_list_options(params)?)?;
     let page = repository::list_sessions(&state.pool, options).await?;
     Ok(Json(page))
@@ -70,7 +70,7 @@ pub async fn show_session(
     Path(session_id): Path<String>,
 ) -> Result<Json<crate::model::SessionResponse>, AppError> {
     api::request_validation::validate_session_id(&session_id)?;
-    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     let session =
@@ -97,7 +97,7 @@ pub async fn update_session(
     api::request_validation::validate_session_id(&session_id)?;
     let mut tenant_id = "unknown".to_string();
     let result: Result<Json<crate::model::SessionResponse>, AppError> = async {
-        let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+        let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
         tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
         auth::allow_manage_session(&auth, &session_id, &tenant_id)?;
@@ -189,7 +189,7 @@ async fn change_archive_state(
 ) -> Result<Json<SessionResponse>, AppError> {
     api::request_validation::validate_session_id(session_id)?;
 
-    let auth = api::request_metrics::authenticate_http(state, headers)?;
+    let auth = api::request_metrics::authenticate_http(state, headers).await?;
     let tenant_id = resolve_session_tenant_id(state, session_id).await?;
     auth::allow_manage_session(&auth, session_id, &tenant_id)?;
     touch_existing_session(state, session_id, &tenant_id, RuntimeTouchReason::HttpWrite).await;

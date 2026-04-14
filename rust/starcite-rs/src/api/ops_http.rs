@@ -249,7 +249,7 @@ fn ready_response(
 fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {
     match auth_mode {
         crate::config::AuthMode::None => "none",
-        crate::config::AuthMode::UnsafeJwt => "unsafe_jwt",
+        crate::config::AuthMode::Jwt => "jwt",
     }
 }
 

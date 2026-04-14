@@ -20,7 +20,7 @@ pub async fn lifecycle_events(
     Query(params): Query<HashMap<String, String>>,
     websocket: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
-    let auth = api::request_metrics::authenticate_socket(&state, &params)?;
+    let auth = api::request_metrics::authenticate_socket(&state, &params).await?;
     let expiry = auth.expiry_delay();
     let lifecycle = api::lifecycle_scope::resolve_lifecycle_options(&state, &auth, &params).await?;
     touch_lifecycle_session(
@@ -42,7 +42,7 @@ pub async fn read_lifecycle(
     headers: axum::http::HeaderMap,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<LifecyclePage>, AppError> {
-    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let lifecycle = api::lifecycle_scope::resolve_lifecycle_options(&state, &auth, &params).await?;
     let page = data_plane::repository::read_lifecycle_events(
         &state.pool,
@@ -74,7 +74,7 @@ pub async fn session_lifecycle_events(
 ) -> Result<impl IntoResponse, AppError> {
     api::request_validation::validate_session_id(&session_id)?;
 
-    let auth = api::request_metrics::authenticate_socket(&state, &params)?;
+    let auth = api::request_metrics::authenticate_socket(&state, &params).await?;
     let expiry = auth.expiry_delay();
     let cursor = api::query_options::parse_events_options(params)?.cursor;
     let lifecycle =
@@ -101,7 +101,7 @@ pub async fn read_session_lifecycle(
 ) -> Result<Json<LifecyclePage>, AppError> {
     api::request_validation::validate_session_id(&session_id)?;
 
-    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let options = api::query_options::parse_events_options(params)?;
     let lifecycle =
         api::lifecycle_scope::resolve_session_lifecycle(&state, &auth, &session_id, options.cursor)

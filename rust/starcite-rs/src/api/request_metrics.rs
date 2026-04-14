@@ -11,23 +11,23 @@ use crate::{
     },
 };
 
-pub(crate) fn authenticate_http(
+pub(crate) async fn authenticate_http(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<auth::AuthContext, AppError> {
     let started_at = Instant::now();
-    let result = auth::authenticate_http(headers, state.auth_mode);
-    record_auth_result(&state.telemetry, state.auth_mode, started_at, &result);
+    let result = auth::authenticate_http(headers, &state.auth).await;
+    record_auth_result(&state.telemetry, state.auth.mode(), started_at, &result);
     result
 }
 
-pub(crate) fn authenticate_socket(
+pub(crate) async fn authenticate_socket(
     state: &AppState,
     params: &HashMap<String, String>,
 ) -> Result<auth::AuthContext, AppError> {
     let started_at = Instant::now();
-    let result = auth::authenticate_socket(params, state.auth_mode);
-    record_auth_result(&state.telemetry, state.auth_mode, started_at, &result);
+    let result = auth::authenticate_socket(params, &state.auth).await;
+    record_auth_result(&state.telemetry, state.auth.mode(), started_at, &result);
     result
 }
 

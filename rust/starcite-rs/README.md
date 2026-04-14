@@ -34,11 +34,11 @@ This is a parallel implementation inside the existing repo, not a drop-in replac
 The API shape stays close to the current Starcite REST surface. The main intentional differences are:
 
 - `STARCITE_AUTH_MODE=none` keeps the local no-auth flow for fast iteration.
-- `STARCITE_AUTH_MODE=unsafe_jwt` parses bearer JWT claims and enforces scope, tenant, session lock, and expiry across HTTP plus both WebSocket transports, but it does **not** verify signatures or fetch JWKS. It is for local contract testing, not production trust.
+- `STARCITE_AUTH_MODE=jwt` verifies bearer JWTs against configured JWKS keys and enforces issuer, audience, expiry, scope, tenant, and session-lock claims across HTTP plus both WebSocket transports.
 - The only supported write model acknowledges appends from local hot owner state and flushes them to Postgres in the background. That flusher persists each pending session batch in one Postgres transaction instead of one transaction per event. Each active session is guarded by a Postgres-backed lease, and Postgres also acts as the durable control plane for standby assignment when nodes heartbeat their ops URLs.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, local session runtime counters, and dynamic gauges for node drain state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason.
 - `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, includes `drain_source` and shutdown `retry_after_ms` hints in those drain responses, emits the same drain metadata to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
-- In `unsafe_jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
+- In `jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
 - The rewrite now keeps a local in-memory hot event store per process. Local appends and relayed remote commits both populate that hot store, and `GET /v1/sessions/:id/events` plus tail catch-up replay read hot state first and only fall back to Postgres when the requested range is not locally contiguous.
 - The rewrite now also keeps a local hot session store per process. Session create, update, archive state, relayed lifecycle catalog events, and relayed appends keep that cache current, so hot session reads and session-scoped auth checks can resolve tenant and header state without treating Postgres as the first lookup every time.
@@ -60,7 +60,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Only the active owner now enqueues background Postgres flush work. Standby replicas keep the committed hot copy in memory for takeover, and when a worker first becomes owner it seeds its pending flush queue from that retained hot state before acknowledging new appends. That keeps standby quorum commits cheap while still letting Postgres catch up after failover.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
-- In `unsafe_jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
+- In `jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
 - Session-scoped lifecycle replay is available over `GET /v1/sessions/:id/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/sessions/:id/lifecycle?cursor=N`.
 - Tenant-scoped lifecycle replay is available over `GET /v1/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/lifecycle?cursor=N`.
 - Tenant-scoped lifecycle replay and streaming still accept optional `session_id` filters for compatibility, but the dedicated session routes and Phoenix `lifecycle:<session_id>` topic are the preferred client path.
@@ -71,7 +71,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
 - A wrong-node raw tail handshake now returns `307` with a JSON `session_not_owned` body plus `Location` and `x-starcite-owner-websocket-url` headers pointing at the owner tail URL for the same query.
 - A wrong-node Phoenix `tail:<session_id>` join returns a `phx_reply` error payload with `reason = "session_not_owned"` and `owner_socket_url` for the owner node's `/v1/socket/websocket` endpoint, preserving the current socket query params.
-- In `unsafe_jwt` mode, raw tail and lifecycle sockets push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
+- In `jwt` mode, raw tail and lifecycle sockets push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
 - When local shutdown drain begins, raw tail and lifecycle sockets push `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the process closes the connection.
 - Raw lifecycle sockets subscribe before replaying from Postgres, then reuse the same Postgres replay path when fanout lags.
 - Tail connections subscribe before replaying, then receive in-process fanout updates; raw tail and Phoenix `tail:<session_id>` topics both replay from the hot read path first and only fall back to Postgres when the requested range is not locally contiguous. If the fanout buffer lags, the server replays again to close the gap.
@@ -89,7 +89,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Resume lifecycle persistence is now fire-and-forget from the hot read path. A cold-session read or tail join updates local runtime state immediately and does not wait for Postgres lifecycle persistence before returning.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
 - `/metrics` now also exports `starcite_node_draining`, `starcite_runtime_active_sessions`, `starcite_runtime_active_sessions_by_reason`, `starcite_archive_queue_pending_sessions`, `starcite_fanout_active_keys`, and `starcite_fanout_subscribers`, so the metrics surface reflects the same local ops/runtime truth as `GET /debug/state`.
-- In `unsafe_jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
+- In `jwt` mode, creates always use the token principal and tenant, appends derive `actor` from token `sub` when omitted, and appended event metadata gains a `starcite_principal` object.
 
 ## Run locally
 
@@ -107,6 +107,12 @@ DATABASE_URL=postgres://postgres:postgres@localhost:5433/starcite_rust_dev
 DATABASE_MAX_CONNECTIONS=20
 MIGRATE_ON_BOOT=true
 STARCITE_AUTH_MODE=none
+STARCITE_JWT_ISSUER=https://issuer.example
+STARCITE_JWT_AUDIENCE=starcite-api
+STARCITE_JWKS_URL=https://issuer.example/.well-known/jwks.json
+STARCITE_JWT_LEEWAY_SECONDS=1
+STARCITE_JWKS_REFRESH_MS=60000
+STARCITE_JWKS_HARD_EXPIRY_MS=60000
 STARCITE_ENABLE_TELEMETRY=true
 STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS=30000
 SESSION_RUNTIME_IDLE_TIMEOUT_MS=30000
@@ -125,7 +131,7 @@ RUST_LOG=info
 Auth mode values:
 
 - `none` for the current trust-everything local workflow
-- `unsafe_jwt` to parse JWT claims without signature verification and enforce the claim contract locally
+- `jwt` to verify JWT signatures against JWKS and enforce the claim contract
 
 Write model:
 
@@ -254,7 +260,7 @@ frozen session emits `session.hydrating` and then `session.activated`. When drai
 already-open raw lifecycle or tail socket receives `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}`
 and then closes with code `1012`.
 
-In `unsafe_jwt` mode, use a `token` query param instead of `tenant_id` and let the token principal
+In `jwt` mode, use a `token` query param instead of `tenant_id` and let the token principal
 derive the tenant:
 
 ```bash
@@ -288,7 +294,7 @@ operator `lifecycle` topic or plain `cursor` on `lifecycle:<session_id>` joins.
 When drain starts, active Phoenix topic subscriptions receive a `node_draining` push with
 `drain_source` and shutdown `retry_after_ms`, and then the socket closes with code `1012`.
 
-In `unsafe_jwt` mode, pass the token on the socket URL instead of `tenant_id`:
+In `jwt` mode, pass the token on the socket URL instead of `tenant_id`:
 
 ```bash
 node -e '

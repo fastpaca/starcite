@@ -20,7 +20,7 @@ pub(crate) fn resolve_lifecycle_tenant_id(
     context: &SocketContext,
     payload: &Value,
 ) -> Result<String, AppError> {
-    if context.auth.kind == AuthMode::UnsafeJwt {
+    if context.auth.kind == AuthMode::Jwt {
         auth::can_subscribe_lifecycle(&context.auth)?;
         return Ok(context.auth.principal.tenant_id.clone());
     }
@@ -137,10 +137,10 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_tenant_id_uses_authenticated_service_tenant_in_unsafe_mode() {
+    fn lifecycle_tenant_id_uses_authenticated_service_tenant_in_jwt_mode() {
         let context = SocketContext {
             auth: AuthContext {
-                kind: AuthMode::UnsafeJwt,
+                kind: AuthMode::Jwt,
                 principal: crate::model::Principal {
                     tenant_id: "acme".to_string(),
                     id: "svc".to_string(),

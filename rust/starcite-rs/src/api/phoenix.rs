@@ -46,7 +46,7 @@ pub async fn socket(
     Query(params): Query<HashMap<String, String>>,
     websocket: WebSocketUpgrade,
 ) -> Result<impl IntoResponse, AppError> {
-    let auth = api::request_metrics::authenticate_socket(&state, &params)?;
+    let auth = api::request_metrics::authenticate_socket(&state, &params).await?;
     let context = SocketContext {
         auth,
         tenant_id: params

@@ -6,6 +6,8 @@ edition = "2024"
 [dependencies]
 axum = { version = "0.8", features = ["json", "macros", "ws"] }
 chrono = { version = "0.4", features = ["serde"] }
+jsonwebtoken = { version = "10.3", features = ["rust_crypto", "use_pem"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sqlx = { version = "0.8", default-features = false, features = ["chrono", "json", "macros", "migrate", "postgres", "runtime-tokio-rustls"] }

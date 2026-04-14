@@ -43,7 +43,7 @@ pub async fn append_event(
             return Ok(proxied);
         }
 
-        let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+        let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
         let request = api::request_validation::parse_append_request(&body)?;
         tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
@@ -127,7 +127,7 @@ pub async fn read_events(
         return Ok(proxied);
     }
 
-    let auth = api::request_metrics::authenticate_http(&state, &headers)?;
+    let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
     if let Some(proxied) =
@@ -163,7 +163,7 @@ pub async fn tail_events(
 ) -> Result<Response, AppError> {
     api::request_validation::validate_session_id(&session_id)?;
 
-    let auth = api::request_metrics::authenticate_socket(&state, &params)?;
+    let auth = api::request_metrics::authenticate_socket(&state, &params).await?;
     let expiry = auth.expiry_delay();
     let tail = api::query_options::parse_tail_options(params.clone())?;
     let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;

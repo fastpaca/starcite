@@ -1,12 +1,23 @@
-use std::{collections::HashMap, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use axum::http::HeaderMap;
 use chrono::Utc;
+use jsonwebtoken::{
+    Algorithm, DecodingKey, Validation, decode, decode_header,
+    errors::ErrorKind,
+    jwk::{Jwk, JwkSet},
+};
+use reqwest::Client;
 use serde_json::{Value, json};
+use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::{
-    config::AuthMode,
+    config::{AuthMode, Config},
     error::AppError,
     model::{
         AppendEventRequest, CreateSessionRequest, JsonMap, ListOptions, Principal,
@@ -22,6 +33,30 @@ pub struct AuthContext {
     pub scopes: Vec<String>,
     pub session_id: Option<String>,
     pub expires_at: Option<i64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthService {
+    mode: AuthMode,
+    jwt: Option<JwtVerifier>,
+}
+
+#[derive(Debug, Clone)]
+struct JwtVerifier {
+    issuer: Arc<str>,
+    audience: Arc<str>,
+    jwks_url: Arc<str>,
+    leeway_seconds: u64,
+    refresh_interval: Duration,
+    hard_expiry: Duration,
+    client: Client,
+    cache: Arc<Mutex<JwksCache>>,
+}
+
+#[derive(Debug, Default)]
+struct JwksCache {
+    fetched_at: Option<Instant>,
+    keys: Vec<Jwk>,
 }
 
 impl AuthContext {
@@ -51,39 +86,92 @@ impl AuthContext {
     }
 }
 
-pub fn authenticate_http(
+impl AuthService {
+    pub fn new(config: &Config) -> Result<Self, String> {
+        let jwt = match config.auth_mode {
+            AuthMode::None => None,
+            AuthMode::Jwt => Some(JwtVerifier::new(config)?),
+        };
+
+        Ok(Self {
+            mode: config.auth_mode,
+            jwt,
+        })
+    }
+
+    pub fn mode(&self) -> AuthMode {
+        self.mode
+    }
+}
+
+impl JwtVerifier {
+    fn new(config: &Config) -> Result<Self, String> {
+        let client = Client::builder()
+            .timeout(Duration::from_secs(5))
+            .build()
+            .map_err(|error| format!("failed to build JWKS client: {error}"))?;
+
+        Ok(Self {
+            issuer: Arc::from(
+                config
+                    .auth_issuer
+                    .clone()
+                    .ok_or_else(|| "missing JWT issuer config".to_string())?,
+            ),
+            audience: Arc::from(
+                config
+                    .auth_audience
+                    .clone()
+                    .ok_or_else(|| "missing JWT audience config".to_string())?,
+            ),
+            jwks_url: Arc::from(
+                config
+                    .auth_jwks_url
+                    .clone()
+                    .ok_or_else(|| "missing JWKS URL config".to_string())?,
+            ),
+            leeway_seconds: config.auth_jwt_leeway_seconds,
+            refresh_interval: Duration::from_millis(config.auth_jwks_refresh_ms),
+            hard_expiry: Duration::from_millis(config.auth_jwks_hard_expiry_ms),
+            client,
+            cache: Arc::new(Mutex::new(JwksCache::default())),
+        })
+    }
+}
+
+pub async fn authenticate_http(
     headers: &HeaderMap,
-    auth_mode: AuthMode,
+    auth: &AuthService,
 ) -> Result<AuthContext, AppError> {
-    match auth_mode {
+    match auth.mode() {
         AuthMode::None => Ok(AuthContext::none()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             let value = headers
                 .get(axum::http::header::AUTHORIZATION)
                 .ok_or(AppError::MissingBearerToken)?;
             let raw = value.to_str().map_err(|_| AppError::InvalidBearerToken)?;
             let token = extract_bearer_token(raw)?;
-            authenticate_unsafe_jwt(token)
+            authenticate_jwt(token, auth).await
         }
     }
 }
 
-pub fn authenticate_socket(
+pub async fn authenticate_socket(
     params: &HashMap<String, String>,
-    auth_mode: AuthMode,
+    auth: &AuthService,
 ) -> Result<AuthContext, AppError> {
     if params.contains_key("access_token") {
         return Err(AppError::InvalidBearerToken);
     }
 
-    match auth_mode {
+    match auth.mode() {
         AuthMode::None => Ok(AuthContext::none()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             let token = params
                 .get("token")
                 .filter(|token| !token.is_empty())
                 .ok_or(AppError::MissingBearerToken)?;
-            authenticate_unsafe_jwt(token)
+            authenticate_jwt(token, auth).await
         }
     }
 }
@@ -91,21 +179,21 @@ pub fn authenticate_socket(
 pub fn can_create_session(auth: &AuthContext) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => has_scope(auth, "session:create"),
+        AuthMode::Jwt => has_scope(auth, "session:create"),
     }
 }
 
 pub fn can_read_session(auth: &AuthContext) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => has_scope(auth, "session:read"),
+        AuthMode::Jwt => has_scope(auth, "session:read"),
     }
 }
 
 pub fn can_subscribe_lifecycle(auth: &AuthContext) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             has_scope(auth, "session:read")?;
 
             if auth.session_id.is_some() {
@@ -124,7 +212,7 @@ pub fn can_subscribe_lifecycle(auth: &AuthContext) -> Result<(), AppError> {
 pub fn allowed_to_access_session(auth: &AuthContext, session_id: &str) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => match auth.session_id.as_deref() {
+        AuthMode::Jwt => match auth.session_id.as_deref() {
             None => Ok(()),
             Some(locked_session_id) if locked_session_id == session_id => Ok(()),
             Some(_) => Err(AppError::ForbiddenSession),
@@ -162,7 +250,7 @@ pub fn apply_list_scope(
 ) -> Result<ListOptions, AppError> {
     match auth.kind {
         AuthMode::None => Ok(options),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             can_read_session(auth)?;
 
             if let Some(requested_tenant) = options.tenant_id.as_ref()
@@ -281,7 +369,7 @@ pub fn validate_append_request(
 pub fn has_scope(auth: &AuthContext, scope: &str) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             if auth.scopes.iter().any(|candidate| candidate == scope) {
                 Ok(())
             } else {
@@ -299,7 +387,7 @@ fn session_permission(
 ) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             has_scope(auth, scope)?;
             allowed_to_access_session(auth, session_id)?;
             require_same_tenant(auth, tenant_id)
@@ -310,7 +398,7 @@ fn session_permission(
 fn require_same_tenant(auth: &AuthContext, tenant_id: &str) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
-        AuthMode::UnsafeJwt => {
+        AuthMode::Jwt => {
             if auth.principal.tenant_id == tenant_id {
                 Ok(())
             } else {
@@ -326,7 +414,7 @@ fn resolve_create_session_id(
 ) -> Result<Option<String>, AppError> {
     match auth.kind {
         AuthMode::None => Ok(requested_id),
-        AuthMode::UnsafeJwt => match (auth.session_id.as_ref(), requested_id) {
+        AuthMode::Jwt => match (auth.session_id.as_ref(), requested_id) {
             (None, requested_id) => Ok(requested_id),
             (Some(session_id), None) => Ok(Some(session_id.clone())),
             (Some(session_id), Some(requested_id)) if session_id == &requested_id => {
@@ -381,30 +469,167 @@ fn attach_principal_metadata(auth: &AuthContext, mut metadata: JsonMap) -> JsonM
     metadata
 }
 
-fn authenticate_unsafe_jwt(token: &str) -> Result<AuthContext, AppError> {
-    let claims = parse_claims(token)?;
-    let tenant_id = required_claim_string(&claims, "tenant_id")?;
-    let subject = required_claim_string(&claims, "sub")?;
-    let expires_at = required_claim_i64(&claims, "exp")?;
+async fn authenticate_jwt(token: &str, auth: &AuthService) -> Result<AuthContext, AppError> {
+    let verifier = auth.jwt.as_ref().ok_or(AppError::InvalidBearerToken)?;
+    let header = decode_header(token).map_err(|_| AppError::InvalidBearerToken)?;
+    let kid = header
+        .kid
+        .as_deref()
+        .filter(|kid| !kid.is_empty())
+        .ok_or(AppError::InvalidBearerToken)?;
+    let algorithm = header.alg;
+    ensure_supported_algorithm(algorithm)?;
+    let jwk = verifier.signing_jwk(kid).await?;
+    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| AppError::InvalidBearerToken)?;
+    let validation = verifier.validation(algorithm);
+    let token_data =
+        decode::<Value>(token, &decoding_key, &validation).map_err(map_jwt_decode_error)?;
 
-    if expires_at <= Utc::now().timestamp() {
-        return Err(AppError::TokenExpired);
+    validate_issued_at(token_data.claims.get("iat"), verifier.leeway_seconds)?;
+    auth_context_from_claims(&token_data.claims)
+}
+
+impl JwtVerifier {
+    async fn signing_jwk(&self, kid: &str) -> Result<Jwk, AppError> {
+        if self.should_refresh(kid).await {
+            match self.fetch_jwks().await {
+                Ok(keys) => {
+                    let mut cache = self.cache.lock().await;
+                    cache.fetched_at = Some(Instant::now());
+                    cache.keys = keys;
+                }
+                Err(_error) => {
+                    let cache = self.cache.lock().await;
+
+                    if !cache.is_usable(kid, self.hard_expiry) {
+                        return Err(AppError::InvalidBearerToken);
+                    }
+                }
+            }
+        }
+
+        let cache = self.cache.lock().await;
+        cache.find(kid).cloned().ok_or(AppError::InvalidBearerToken)
     }
 
-    required_claim_string(&claims, "iss")?;
-    require_audience_claim(&claims)?;
+    async fn should_refresh(&self, kid: &str) -> bool {
+        let cache = self.cache.lock().await;
 
+        if cache.keys.is_empty() || cache.find(kid).is_none() {
+            return true;
+        }
+
+        match cache.fetched_at {
+            Some(fetched_at) => fetched_at.elapsed() >= self.refresh_interval,
+            None => true,
+        }
+    }
+
+    async fn fetch_jwks(&self) -> Result<Vec<Jwk>, AppError> {
+        let response = self
+            .client
+            .get(self.jwks_url.as_ref())
+            .send()
+            .await
+            .map_err(|_| AppError::InvalidBearerToken)?;
+        let response = response
+            .error_for_status()
+            .map_err(|_| AppError::InvalidBearerToken)?;
+        let jwks = response
+            .json::<JwkSet>()
+            .await
+            .map_err(|_| AppError::InvalidBearerToken)?;
+
+        if jwks.keys.is_empty() {
+            return Err(AppError::InvalidBearerToken);
+        }
+
+        Ok(jwks.keys)
+    }
+
+    fn validation(&self, algorithm: Algorithm) -> Validation {
+        let mut validation = Validation::new(algorithm);
+        validation.leeway = self.leeway_seconds;
+        validation.validate_nbf = true;
+        validation.set_issuer(&[self.issuer.as_ref()]);
+        validation.set_audience(&[self.audience.as_ref()]);
+        validation.required_spec_claims.extend([
+            "exp".to_string(),
+            "iss".to_string(),
+            "aud".to_string(),
+        ]);
+        validation
+    }
+}
+
+impl JwksCache {
+    fn find(&self, kid: &str) -> Option<&Jwk> {
+        self.keys
+            .iter()
+            .find(|jwk| jwk.common.key_id.as_deref() == Some(kid))
+    }
+
+    fn is_usable(&self, kid: &str, hard_expiry: Duration) -> bool {
+        match self.fetched_at {
+            Some(fetched_at) if fetched_at.elapsed() <= hard_expiry => self.find(kid).is_some(),
+            _ => false,
+        }
+    }
+}
+
+fn auth_context_from_claims(claims: &Value) -> Result<AuthContext, AppError> {
+    let tenant_id = required_claim_string(claims, "tenant_id")?;
+    let subject = required_claim_string(claims, "sub")?;
+    let expires_at = required_claim_i64(claims, "exp")?;
     let principal = principal_from_subject(tenant_id, subject)?;
-    let scopes = claim_scopes(&claims)?;
-    let session_id = optional_claim_string(&claims, "session_id")?;
+    let scopes = claim_scopes(claims)?;
+    let session_id = optional_claim_string(claims, "session_id")?;
 
     Ok(AuthContext {
-        kind: AuthMode::UnsafeJwt,
+        kind: AuthMode::Jwt,
         principal,
         scopes,
         session_id,
         expires_at: Some(expires_at),
     })
+}
+
+fn ensure_supported_algorithm(algorithm: Algorithm) -> Result<(), AppError> {
+    match algorithm {
+        Algorithm::HS256
+        | Algorithm::HS384
+        | Algorithm::HS512
+        | Algorithm::RS256
+        | Algorithm::RS384
+        | Algorithm::RS512
+        | Algorithm::PS256
+        | Algorithm::PS384
+        | Algorithm::PS512
+        | Algorithm::ES256
+        | Algorithm::ES384
+        | Algorithm::EdDSA => Ok(()),
+    }
+}
+
+fn map_jwt_decode_error(error: jsonwebtoken::errors::Error) -> AppError {
+    match error.kind() {
+        ErrorKind::ExpiredSignature => AppError::TokenExpired,
+        _ => AppError::InvalidBearerToken,
+    }
+}
+
+fn validate_issued_at(iat: Option<&Value>, leeway_seconds: u64) -> Result<(), AppError> {
+    let Some(iat) = iat else {
+        return Ok(());
+    };
+    let issued_at = iat.as_i64().ok_or(AppError::InvalidBearerToken)?;
+    let now = Utc::now().timestamp();
+
+    if issued_at <= now + leeway_seconds as i64 {
+        Ok(())
+    } else {
+        Err(AppError::InvalidBearerToken)
+    }
 }
 
 fn extract_bearer_token(header: &str) -> Result<&str, AppError> {
@@ -414,52 +639,6 @@ fn extract_bearer_token(header: &str) -> Result<&str, AppError> {
         }
         _ => Err(AppError::InvalidBearerToken),
     }
-}
-
-fn parse_claims(token: &str) -> Result<Value, AppError> {
-    let mut segments = token.split('.');
-    let _header = segments.next().ok_or(AppError::InvalidBearerToken)?;
-    let payload = segments.next().ok_or(AppError::InvalidBearerToken)?;
-    let _signature = segments.next().ok_or(AppError::InvalidBearerToken)?;
-
-    if segments.next().is_some() {
-        return Err(AppError::InvalidBearerToken);
-    }
-
-    let decoded = decode_base64url(payload)?;
-    serde_json::from_slice(&decoded).map_err(|_| AppError::InvalidBearerToken)
-}
-
-fn decode_base64url(raw: &str) -> Result<Vec<u8>, AppError> {
-    if raw.is_empty() || raw.len() % 4 == 1 {
-        return Err(AppError::InvalidBearerToken);
-    }
-
-    let mut out = Vec::with_capacity(raw.len() * 3 / 4);
-    let mut buffer = 0_u32;
-    let mut bits = 0_u8;
-
-    for byte in raw.bytes() {
-        let value = match byte {
-            b'A'..=b'Z' => byte - b'A',
-            b'a'..=b'z' => byte - b'a' + 26,
-            b'0'..=b'9' => byte - b'0' + 52,
-            b'-' => 62,
-            b'_' => 63,
-            b'=' => break,
-            _ => return Err(AppError::InvalidBearerToken),
-        } as u32;
-
-        buffer = (buffer << 6) | value;
-        bits += 6;
-
-        while bits >= 8 {
-            bits -= 8;
-            out.push(((buffer >> bits) & 0xff) as u8);
-        }
-    }
-
-    Ok(out)
 }
 
 fn required_claim_string(claims: &Value, key: &str) -> Result<String, AppError> {
@@ -485,20 +664,6 @@ fn required_claim_i64(claims: &Value, key: &str) -> Result<i64, AppError> {
         .and_then(Value::as_i64)
         .filter(|value| *value > 0)
         .ok_or(AppError::InvalidBearerToken)
-}
-
-fn require_audience_claim(claims: &Value) -> Result<(), AppError> {
-    match claims.get("aud") {
-        Some(Value::String(value)) if !value.is_empty() => Ok(()),
-        Some(Value::Array(values))
-            if values
-                .iter()
-                .all(|value| matches!(value, Value::String(value) if !value.is_empty())) =>
-        {
-            Ok(())
-        }
-        _ => Err(AppError::InvalidBearerToken),
-    }
 }
 
 fn claim_scopes(claims: &Value) -> Result<Vec<String>, AppError> {
@@ -548,46 +713,75 @@ fn principal_from_subject(tenant_id: String, subject: String) -> Result<Principa
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue, header::AUTHORIZATION};
+    use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+
+    use axum::{
+        Router,
+        http::{HeaderMap, HeaderValue, header::AUTHORIZATION},
+        routing::get,
+    };
+    use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::{Value, json};
+    use tokio::task::JoinHandle;
 
     use super::{
-        AppError, AuthContext, claim_scopes, decode_base64url, validate_append_request,
-        validate_create_request,
+        AppError, AuthContext, AuthService, auth_context_from_claims, claim_scopes,
+        validate_append_request, validate_create_request,
     };
     use crate::{
         auth::{AuthMode, authenticate_http, can_subscribe_lifecycle},
+        config::Config,
         model::{AppendEventRequest, CreateSessionRequest, Principal},
     };
 
-    #[test]
-    fn unsafe_jwt_authenticates_http_claims() {
-        let token = token_for(json!({
+    #[tokio::test]
+    async fn jwt_authenticates_http_claims() {
+        let secret = "super-secret";
+        let jwks = json!({
+            "keys": [{
+                "kty": "oct",
+                "alg": "HS256",
+                "use": "sig",
+                "kid": "kid-1",
+                "k": encode_base64url(secret.as_bytes()),
+            }]
+        });
+        let (jwks_url, server) = spawn_jwks_server(jwks).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            json!({
             "iss": "https://issuer.example",
             "aud": "starcite-api",
             "exp": 4_102_444_800_i64,
             "tenant_id": "acme",
             "sub": "service:rust-rewrite",
             "scope": "session:read session:create",
-        }));
+            }),
+            secret,
+            "kid-1",
+        );
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
             HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
         );
 
-        let auth = authenticate_http(&headers, AuthMode::UnsafeJwt).expect("token should parse");
+        let auth = authenticate_http(&headers, &auth_service)
+            .await
+            .expect("token should parse");
 
         assert_eq!(auth.principal.tenant_id, "acme");
         assert_eq!(auth.principal.id, "rust-rewrite");
         assert_eq!(auth.principal.principal_type, "service");
         assert!(auth.scopes.iter().any(|scope| scope == "session:read"));
+
+        server.abort();
     }
 
     #[test]
-    fn unsafe_jwt_requires_service_principal_for_lifecycle() {
+    fn jwt_requires_service_principal_for_lifecycle() {
         let auth = AuthContext {
-            kind: AuthMode::UnsafeJwt,
+            kind: AuthMode::Jwt,
             principal: Principal {
                 tenant_id: "acme".to_string(),
                 id: "user-42".to_string(),
@@ -605,9 +799,9 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_jwt_create_validation_uses_claim_tenant_and_session_lock() {
+    fn jwt_create_validation_uses_claim_tenant_and_session_lock() {
         let auth = AuthContext {
-            kind: AuthMode::UnsafeJwt,
+            kind: AuthMode::Jwt,
             principal: Principal {
                 tenant_id: "acme".to_string(),
                 id: "svc".to_string(),
@@ -636,9 +830,9 @@ mod tests {
     }
 
     #[test]
-    fn unsafe_jwt_append_validation_derives_actor_and_principal_metadata() {
+    fn jwt_append_validation_derives_actor_and_principal_metadata() {
         let auth = AuthContext {
-            kind: AuthMode::UnsafeJwt,
+            kind: AuthMode::Jwt,
             principal: Principal {
                 tenant_id: "acme".to_string(),
                 id: "user-42".to_string(),
@@ -693,18 +887,79 @@ mod tests {
     }
 
     #[test]
-    fn base64url_decoder_round_trips_unpadded_payload() {
-        let decoded = decode_base64url("eyJmb28iOiJiYXIifQ").expect("payload should decode");
-        assert_eq!(
-            String::from_utf8(decoded).expect("utf8"),
-            "{\"foo\":\"bar\"}"
-        );
+    fn claims_to_auth_context_requires_verified_claim_shape() {
+        let auth = auth_context_from_claims(&json!({
+            "exp": 4_102_444_800_i64,
+            "tenant_id": "acme",
+            "sub": "service:rust-rewrite",
+            "scope": "session:read session:create"
+        }))
+        .expect("claims should map");
+
+        assert_eq!(auth.kind, AuthMode::Jwt);
+        assert_eq!(auth.principal.tenant_id, "acme");
+        assert_eq!(auth.principal.id, "rust-rewrite");
     }
 
-    fn token_for(claims: Value) -> String {
-        let header = encode_base64url(r#"{"alg":"none","typ":"JWT"}"#.as_bytes());
-        let payload = encode_base64url(serde_json::to_string(&claims).expect("claims").as_bytes());
-        format!("{header}.{payload}.signature")
+    async fn spawn_jwks_server(body: Value) -> (String, JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+            .await
+            .expect("bind listener");
+        let addr = listener.local_addr().expect("listener addr");
+        let body = body.to_string();
+        let app = Router::new().route(
+            "/jwks",
+            get(move || {
+                let body = body.clone();
+                async move { body }
+            }),
+        );
+        let handle = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve jwks");
+        });
+
+        (format!("http://{addr}/jwks"), handle)
+    }
+
+    fn jwt_config(jwks_url: &str) -> Config {
+        Config {
+            listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
+            ops_listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4002),
+            database_url: "postgres://postgres:postgres@localhost/starcite_test".to_string(),
+            max_connections: 1,
+            archive_flush_interval_ms: 5_000,
+            migrate_on_boot: false,
+            auth_mode: AuthMode::Jwt,
+            auth_issuer: Some("https://issuer.example".to_string()),
+            auth_audience: Some("starcite-api".to_string()),
+            auth_jwks_url: Some(jwks_url.to_string()),
+            auth_jwt_leeway_seconds: 1,
+            auth_jwks_refresh_ms: 60_000,
+            auth_jwks_hard_expiry_ms: 60_000,
+            telemetry_enabled: false,
+            shutdown_drain_timeout_ms: 30_000,
+            session_runtime_idle_timeout_ms: 30_000,
+            commit_flush_interval_ms: 100,
+            local_async_lease_ttl_ms: 5_000,
+            local_async_node_public_url: None,
+            local_async_node_ops_url: None,
+            local_async_node_ttl_ms: 2_000,
+            local_async_owner_proxy_timeout_ms: 1_000,
+            local_async_standby_url: None,
+            local_async_replication_timeout_ms: 500,
+        }
+    }
+
+    fn token_for(claims: Value, secret: &str, kid: &str) -> String {
+        let mut header = Header::new(Algorithm::HS256);
+        header.kid = Some(kid.to_string());
+
+        encode(
+            &header,
+            &claims,
+            &EncodingKey::from_secret(secret.as_bytes()),
+        )
+        .expect("encode token")
     }
 
     fn encode_base64url(raw: &[u8]) -> String {

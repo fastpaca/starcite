@@ -42,6 +42,7 @@ pub struct AppState {
     pub runtime: runtime::SessionRuntime,
     pub ops: runtime::OpsState,
     pub auth_mode: config::AuthMode,
+    pub auth: auth::AuthService,
     pub telemetry: Telemetry,
     pub instance_id: Arc<str>,
 }
@@ -81,6 +82,7 @@ async fn run() -> Result<(), String> {
     let telemetry = Telemetry::new(config.telemetry_enabled);
     let ops_state = runtime::OpsState::new(config.shutdown_drain_timeout_ms);
     let instance_id: Arc<str> = Arc::from(Uuid::now_v7().simple().to_string());
+    let auth = auth::AuthService::new(&config)?;
     let control_plane = ControlPlaneState::new(
         config.local_async_node_public_url.clone(),
         config.local_async_node_ops_url.clone(),
@@ -137,6 +139,7 @@ async fn run() -> Result<(), String> {
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
+        auth,
         telemetry: telemetry.clone(),
         instance_id: instance_id.clone(),
     };

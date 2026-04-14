@@ -17,7 +17,7 @@ pub(crate) async fn resolve_lifecycle_options(
 ) -> Result<LifecycleOptions, AppError> {
     let mut lifecycle = match auth.kind {
         crate::config::AuthMode::None => parse_lifecycle_options(params.clone())?,
-        crate::config::AuthMode::UnsafeJwt => {
+        crate::config::AuthMode::Jwt => {
             auth::can_subscribe_lifecycle(auth)?;
             LifecycleOptions {
                 tenant_id: auth.principal.tenant_id.clone(),
