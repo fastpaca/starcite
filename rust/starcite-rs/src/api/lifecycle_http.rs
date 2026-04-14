@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
 use super::socket_runtime;
 use axum::{
@@ -6,11 +6,12 @@ use axum::{
     extract::{Path, Query, State, ws::WebSocketUpgrade},
     response::IntoResponse,
 };
+use tokio::sync::broadcast;
 
 use crate::{
     AppState, api, data_plane,
     error::AppError,
-    model::{EventsOptions, LifecycleEvent, LifecyclePage},
+    model::{EventsOptions, LifecycleEvent, LifecyclePage, LifecycleResponse},
     runtime::RuntimeTouchReason,
 };
 
@@ -22,21 +23,18 @@ pub async fn lifecycle_events(
     let auth = api::request_metrics::authenticate_socket(&state, &params)?;
     let expiry = auth.expiry_delay();
     let lifecycle = api::lifecycle_scope::resolve_lifecycle_options(&state, &auth, &params).await?;
-    if let Some(session_id) = lifecycle.session_id.as_deref() {
-        state
-            .runtime
-            .touch_existing(
-                session_id,
-                &lifecycle.tenant_id,
-                RuntimeTouchReason::RawLifecycle,
-            )
-            .await;
-    }
+    touch_lifecycle_session(
+        &state,
+        lifecycle.session_id.as_deref(),
+        &lifecycle.tenant_id,
+        RuntimeTouchReason::RawLifecycle,
+    )
+    .await;
     let receiver = state.lifecycle.subscribe_tenant(&lifecycle.tenant_id).await;
 
-    Ok(websocket.on_upgrade(move |socket| async move {
-        socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
-    }))
+    Ok(upgrade_lifecycle_socket(
+        websocket, state, lifecycle, receiver, expiry,
+    ))
 }
 
 pub async fn read_lifecycle(
@@ -57,16 +55,13 @@ pub async fn read_lifecycle(
     )
     .await?;
 
-    if let Some(session_id) = lifecycle.session_id.as_deref() {
-        state
-            .runtime
-            .touch_existing(
-                session_id,
-                &lifecycle.tenant_id,
-                RuntimeTouchReason::HttpLifecycle,
-            )
-            .await;
-    }
+    touch_lifecycle_session(
+        &state,
+        lifecycle.session_id.as_deref(),
+        &lifecycle.tenant_id,
+        RuntimeTouchReason::HttpLifecycle,
+    )
+    .await;
 
     Ok(Json(page))
 }
@@ -84,19 +79,18 @@ pub async fn session_lifecycle_events(
     let cursor = api::query_options::parse_events_options(params)?.cursor;
     let lifecycle =
         api::lifecycle_scope::resolve_session_lifecycle(&state, &auth, &session_id, cursor).await?;
-    state
-        .runtime
-        .touch_existing(
-            &session_id,
-            &lifecycle.tenant_id,
-            RuntimeTouchReason::RawLifecycle,
-        )
-        .await;
+    touch_lifecycle_session(
+        &state,
+        Some(&session_id),
+        &lifecycle.tenant_id,
+        RuntimeTouchReason::RawLifecycle,
+    )
+    .await;
     let receiver = state.lifecycle.subscribe_session(&session_id).await;
 
-    Ok(websocket.on_upgrade(move |socket| async move {
-        socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
-    }))
+    Ok(upgrade_lifecycle_socket(
+        websocket, state, lifecycle, receiver, expiry,
+    ))
 }
 
 pub async fn read_session_lifecycle(
@@ -120,16 +114,43 @@ pub async fn read_session_lifecycle(
     )
     .await?;
 
-    state
-        .runtime
-        .touch_existing(
-            &session_id,
-            &lifecycle.tenant_id,
-            RuntimeTouchReason::HttpLifecycle,
-        )
-        .await;
+    touch_lifecycle_session(
+        &state,
+        Some(&session_id),
+        &lifecycle.tenant_id,
+        RuntimeTouchReason::HttpLifecycle,
+    )
+    .await;
 
     Ok(Json(page))
+}
+
+async fn touch_lifecycle_session(
+    state: &AppState,
+    session_id: Option<&str>,
+    tenant_id: &str,
+    reason: RuntimeTouchReason,
+) {
+    let Some(session_id) = session_id else {
+        return;
+    };
+
+    state
+        .runtime
+        .touch_existing(session_id, tenant_id, reason)
+        .await;
+}
+
+fn upgrade_lifecycle_socket(
+    websocket: WebSocketUpgrade,
+    state: AppState,
+    lifecycle: api::query_options::LifecycleOptions,
+    receiver: broadcast::Receiver<LifecycleResponse>,
+    expiry: Option<Duration>,
+) -> impl IntoResponse {
+    websocket.on_upgrade(move |socket| async move {
+        socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
+    })
 }
 
 pub(crate) async fn publish_lifecycle(state: &AppState, event: LifecycleEvent) {
