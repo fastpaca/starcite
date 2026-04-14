@@ -2,16 +2,16 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, QueryBuilder};
 
 use crate::{
+    cluster::relay::{
+        ARCHIVE_NOTIFICATION_CHANNEL, ArchiveNotification, EVENT_NOTIFICATION_CHANNEL,
+        EventNotification, LIFECYCLE_NOTIFICATION_CHANNEL, LifecycleNotification,
+    },
     error::AppError,
     model::{
         AppendReply, ArchivedFilter, EventResponse, EventRow, EventsOptions, EventsPage, JsonMap,
         LifecycleEvent, LifecyclePage, LifecycleResponse, LifecycleRow, ListOptions,
         SessionResponse, SessionRow, SessionsPage, ValidatedAppendEvent, ValidatedCreateSession,
         ValidatedUpdateSession, merge_metadata,
-    },
-    relay::{
-        ARCHIVE_NOTIFICATION_CHANNEL, ArchiveNotification, EVENT_NOTIFICATION_CHANNEL,
-        EventNotification, LIFECYCLE_NOTIFICATION_CHANNEL, LifecycleNotification,
     },
 };
 

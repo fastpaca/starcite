@@ -4,7 +4,7 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::{ops::OpsState, repository};
+use crate::{data_plane::repository, runtime::OpsState};
 
 #[derive(Debug, Clone)]
 pub struct ControlPlaneState {

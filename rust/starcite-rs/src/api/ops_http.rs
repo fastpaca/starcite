@@ -200,7 +200,7 @@ pub async fn append_replica(
 }
 
 pub async fn reject_when_draining(
-    State(ops): State<crate::ops::OpsState>,
+    State(ops): State<crate::runtime::OpsState>,
     request: Request<axum::body::Body>,
     next: Next,
 ) -> Response {
@@ -300,7 +300,7 @@ mod tests {
     use axum::{Json, http::StatusCode};
 
     use super::{ReplicaAppendDisposition, classify_replica_append, ready_response};
-    use crate::ops::OpsState;
+    use crate::runtime::OpsState;
 
     #[test]
     fn ready_response_reports_ready_mode() {

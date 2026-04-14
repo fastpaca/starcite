@@ -3,7 +3,7 @@ use serde::Serialize;
 
 use crate::{
     model::{EventResponse, LifecycleResponse},
-    ops::{OpsSnapshot, OpsState},
+    runtime::{OpsSnapshot, OpsState},
 };
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
@@ -143,7 +143,7 @@ mod tests {
     use super::{
         build_node_draining_frame, build_resume_invalidated_gap, build_token_expired_frame,
     };
-    use crate::ops::OpsState;
+    use crate::runtime::OpsState;
 
     #[test]
     fn resume_invalidated_gap_uses_public_shape() {

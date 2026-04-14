@@ -10,10 +10,11 @@ use sqlx::PgPool;
 use tokio::sync::Mutex;
 
 use crate::{
+    data_plane::repository::{self, SessionLeaseTakeoverHint},
     error::AppError,
-    replication::ReplicationPeer,
-    repository::{self, SessionLeaseTakeoverHint},
 };
+
+use super::replication::ReplicationPeer;
 
 #[derive(Debug, Clone)]
 pub struct OwnershipManager {
@@ -384,7 +385,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crate::{error::AppError, repository::SessionLeaseTakeoverHint};
+    use crate::{data_plane::repository::SessionLeaseTakeoverHint, error::AppError};
 
     fn manager(lease_ttl: Duration) -> OwnershipManager {
         let pool = PgPoolOptions::new()

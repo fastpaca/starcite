@@ -1,10 +1,9 @@
+use super::phoenix_protocol::{PhoenixFrame, push_frame};
+
 use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use serde_json::{Value, json};
 
-use crate::{
-    ops::{OpsSnapshot, OpsState},
-    phoenix_protocol::{PhoenixFrame, push_frame},
-};
+use crate::runtime::{OpsSnapshot, OpsState};
 
 pub(crate) async fn send_frame(socket: &mut WebSocket, frame: &PhoenixFrame) -> Result<(), ()> {
     let message = serde_json::to_string(&(
@@ -125,7 +124,7 @@ mod tests {
     use serde_json::json;
 
     use super::build_node_draining_payload;
-    use crate::ops::OpsSnapshot;
+    use crate::runtime::OpsSnapshot;
 
     #[test]
     fn node_draining_payload_includes_shutdown_retry_hint() {

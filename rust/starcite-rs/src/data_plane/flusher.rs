@@ -3,9 +3,8 @@ use std::{sync::Arc, time::Duration};
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::{
-    archive_queue::ArchiveQueue, error::AppError, flush_queue::PendingFlushQueue, repository,
-};
+use super::{archive_queue::ArchiveQueue, flush_queue::PendingFlushQueue, repository};
+use crate::error::AppError;
 
 #[derive(Debug, Clone)]
 pub struct FlushWorker {

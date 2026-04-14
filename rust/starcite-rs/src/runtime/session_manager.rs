@@ -24,10 +24,10 @@ use crate::{
         repository::{self, AppendOutcome, ProducerSequenceCheck},
     },
     error::AppError,
-    fanout::SessionFanout,
     model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
-    ops::OpsState,
 };
+
+use super::{fanout::SessionFanout, ops::OpsState};
 
 const APPEND_QUEUE_CAPACITY: usize = 64;
 
@@ -620,10 +620,11 @@ fn matches_local_event(
 mod tests {
     use super::{SessionManager, SessionManagerDeps, SessionWorkerHandle, SessionWorkerState};
     use crate::{
-        archive_queue::ArchiveQueue, config::CommitMode, fanout::SessionFanout,
-        flush_queue::PendingFlushQueue, hot_store::HotEventStore, model::EventResponse,
-        ops::OpsState, ownership::OwnershipManager, replication::ReplicationCoordinator,
-        session_store::HotSessionStore,
+        cluster::{OwnershipManager, ReplicationCoordinator},
+        config::CommitMode,
+        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        model::EventResponse,
+        runtime::{OpsState, fanout::SessionFanout},
     };
     use serde_json::Map;
     use sqlx::postgres::PgPoolOptions;

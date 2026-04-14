@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::time::Instant;
 
+use super::{edge_routing, socket_runtime};
 use axum::{
     Json,
     extract::{Path, Query, State, ws::WebSocketUpgrade},
@@ -11,7 +12,6 @@ use axum::{
 use crate::{
     AppState, api, auth, cluster, data_plane,
     error::{self, AppError},
-    runtime,
     runtime::RuntimeTouchReason,
     telemetry::{IngestOperation, RequestPhase},
 };
@@ -29,10 +29,10 @@ pub async fn append_event(
     let body = api::request_validation::read_append_body(&headers, body).await?;
     let authorization = headers.get(axum::http::header::AUTHORIZATION);
     let result: Result<Response, AppError> = async {
-        if let Some(proxied) = cluster::edge_routing::forward_cached_event_path(
+        if let Some(proxied) = edge_routing::forward_cached_event_path(
             &state,
             &session_id,
-            cluster::edge_routing::EventPathRequest::Append { body: &body },
+            edge_routing::EventPathRequest::Append { body: &body },
             authorization,
         )
         .await?
@@ -73,11 +73,11 @@ pub async fn append_event(
                 ..
             }) => {
                 state.session_manager.drop_worker_handle(&session_id).await;
-                cluster::edge_routing::forward_known_event_path(
+                edge_routing::forward_known_event_path(
                     &state,
                     &session_id,
                     &owner_public_url,
-                    cluster::edge_routing::EventPathRequest::Append { body: &body },
+                    edge_routing::EventPathRequest::Append { body: &body },
                     authorization,
                 )
                 .await
@@ -119,10 +119,10 @@ pub async fn read_events(
     api::request_validation::validate_session_id(&session_id)?;
     let authorization = headers.get(axum::http::header::AUTHORIZATION);
 
-    if let Some(proxied) = cluster::edge_routing::forward_cached_event_path(
+    if let Some(proxied) = edge_routing::forward_cached_event_path(
         &state,
         &session_id,
-        cluster::edge_routing::EventPathRequest::ReadEvents { params: &params },
+        edge_routing::EventPathRequest::ReadEvents { params: &params },
         authorization,
     )
     .await?
@@ -138,17 +138,17 @@ pub async fn read_events(
     )
     .await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    match runtime::socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
+    match socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
         Ok(()) => {}
         Err(AppError::SessionNotOwned {
             owner_public_url: Some(owner_public_url),
             ..
         }) => {
-            return cluster::edge_routing::forward_known_event_path(
+            return edge_routing::forward_known_event_path(
                 &state,
                 &session_id,
                 &owner_public_url,
-                cluster::edge_routing::EventPathRequest::ReadEvents { params: &params },
+                edge_routing::EventPathRequest::ReadEvents { params: &params },
                 authorization,
             )
             .await;
@@ -189,7 +189,7 @@ pub async fn tail_events(
     )
     .await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    match runtime::socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
+    match socket_runtime::require_local_owner_for_event_path(&state, &session_id).await {
         Ok(()) => {}
         Err(AppError::SessionNotOwned {
             owner_id,
@@ -223,10 +223,8 @@ pub async fn tail_events(
 
     Ok(websocket
         .on_upgrade(move |socket| async move {
-            runtime::socket_runtime::run_tail_session(
-                socket, state, session_id, tail, receiver, expiry,
-            )
-            .await;
+            socket_runtime::run_tail_session(socket, state, session_id, tail, receiver, expiry)
+                .await;
         })
         .into_response())
 }

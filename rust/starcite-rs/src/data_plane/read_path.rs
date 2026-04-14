@@ -2,11 +2,10 @@ use std::collections::BTreeMap;
 
 use sqlx::PgPool;
 
+use super::{hot_store::HotEventStore, repository};
 use crate::{
     error::AppError,
-    hot_store::HotEventStore,
     model::{EventResponse, EventsOptions, EventsPage},
-    repository,
 };
 
 pub async fn read_events(

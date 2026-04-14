@@ -1,4 +1,9 @@
-pub(crate) use crate::{control_plane, edge_routing, owner_proxy, ownership, relay, replication};
+pub(crate) mod control_plane;
+pub(crate) mod owner_proxy;
+pub(crate) mod ownership;
+pub(crate) mod relay;
+pub(crate) mod replication;
+
 pub(crate) use control_plane::{ControlPlaneSnapshot, ControlPlaneState};
 pub(crate) use owner_proxy::OwnerProxy;
 pub(crate) use ownership::{OwnershipManager, OwnershipSnapshot};

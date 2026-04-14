@@ -9,7 +9,7 @@ use axum::{
 use serde_json::{Value, json};
 use thiserror::Error;
 
-use crate::ops::OpsSnapshot;
+use crate::runtime::OpsSnapshot;
 
 pub const DRAIN_SOURCE_HEADER: HeaderName = HeaderName::from_static("x-starcite-drain-source");
 pub const RETRY_AFTER_MS_HEADER: HeaderName = HeaderName::from_static("x-starcite-retry-after-ms");
@@ -384,7 +384,7 @@ mod tests {
     use serde_json::json;
 
     use super::{AppError, DRAIN_SOURCE_HEADER, OWNER_URL_HEADER, RETRY_AFTER_MS_HEADER};
-    use crate::ops::OpsSnapshot;
+    use crate::runtime::OpsSnapshot;
 
     #[tokio::test]
     async fn node_draining_response_includes_retry_headers() {

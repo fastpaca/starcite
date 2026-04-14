@@ -1,8 +1,8 @@
+use super::query_options::TailOptions;
+
 use serde_json::{Value, json};
 
-use crate::{
-    config::MAX_LIST_LIMIT, error::AppError, model::LifecycleResponse, query_options::TailOptions,
-};
+use crate::{config::MAX_LIST_LIMIT, error::AppError, model::LifecycleResponse};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleOptions {

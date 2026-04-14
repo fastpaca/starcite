@@ -10,10 +10,11 @@ use tokio::{sync::Mutex, time::sleep};
 
 use crate::{
     data_plane,
-    fanout::LifecycleFanout,
     model::LifecycleEvent,
     telemetry::{SessionOutcome, SessionReason, Telemetry},
 };
+
+use super::fanout::LifecycleFanout;
 
 #[derive(Debug, Clone)]
 pub struct SessionRuntime {
@@ -301,7 +302,7 @@ mod tests {
     use tokio::time::timeout;
 
     use super::{RuntimeTouchReason, SessionRuntime};
-    use crate::{fanout::LifecycleFanout, model::LifecycleEvent, telemetry::Telemetry};
+    use crate::{model::LifecycleEvent, runtime::fanout::LifecycleFanout, telemetry::Telemetry};
 
     #[tokio::test]
     async fn emits_activation_freeze_and_hydration_lifecycle() {

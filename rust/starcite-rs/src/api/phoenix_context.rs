@@ -4,9 +4,9 @@ use serde_json::{Value, json};
 
 use crate::{
     auth::{self, AuthContext},
+    cluster::owner_proxy::build_phoenix_socket_ws_url,
     config::AuthMode,
     error::AppError,
-    owner_proxy::build_phoenix_socket_ws_url,
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]

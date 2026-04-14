@@ -1,19 +1,20 @@
 use std::time::Instant;
 
+use super::{
+    phoenix_protocol::{
+        LifecycleOptions, PhoenixFrame, build_resume_invalidated_gap, lifecycle_payload, push_frame,
+    },
+    query_options::TailOptions,
+    socket_support::record_read_result,
+};
 use serde_json::json;
 use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     AppState,
+    data_plane::{read_path, repository, session_store::resolve_session_last_seq},
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
-    phoenix_protocol::{
-        LifecycleOptions, PhoenixFrame, build_resume_invalidated_gap, lifecycle_payload, push_frame,
-    },
-    query_options::TailOptions,
-    read_path, repository,
-    session_store::resolve_session_last_seq,
-    socket_support::record_read_result,
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
 

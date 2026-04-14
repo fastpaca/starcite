@@ -4,10 +4,10 @@ use serde::Serialize;
 use sqlx::PgPool;
 use tokio::sync::RwLock;
 
+use super::repository;
 use crate::{
     error::AppError,
     model::{LifecycleEvent, SessionResponse},
-    repository,
 };
 
 #[derive(Debug, Clone, Default)]

@@ -1,5 +1,13 @@
 use std::time::{Duration, Instant};
 
+use super::{
+    query_options::{LifecycleOptions, TailOptions},
+    raw_socket::{
+        build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
+        send_gap, send_lifecycle, send_node_draining, send_token_expired,
+    },
+    socket_support::{record_read_result, wait_for_drain},
+};
 use axum::extract::ws::{Message, WebSocket};
 use tokio::{sync::broadcast, time::sleep};
 
@@ -9,12 +17,6 @@ use crate::{
     data_plane,
     error::AppError,
     model::{EventResponse, EventsOptions, LifecycleResponse},
-    query_options::{LifecycleOptions, TailOptions},
-    raw_socket::{
-        build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
-        send_gap, send_lifecycle, send_node_draining, send_token_expired,
-    },
-    socket_support::{record_read_result, wait_for_drain},
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
 

@@ -1,13 +1,13 @@
 use std::collections::HashMap;
 
-use crate::{
-    AppState, auth,
-    error::AppError,
+use super::{
     query_options::{
         LifecycleOptions, parse_events_options, parse_lifecycle_options, parse_optional_session_id,
     },
     request_validation::validate_session_id,
-    session_store::resolve_session_tenant_id,
+};
+use crate::{
+    AppState, auth, data_plane::session_store::resolve_session_tenant_id, error::AppError,
 };
 
 pub(crate) async fn resolve_lifecycle_options(

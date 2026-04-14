@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::socket_runtime;
 use axum::{
     Json,
     extract::{Path, Query, State, ws::WebSocketUpgrade},
@@ -10,7 +11,6 @@ use crate::{
     AppState, api, data_plane,
     error::AppError,
     model::{EventsOptions, LifecycleEvent, LifecyclePage},
-    runtime,
     runtime::RuntimeTouchReason,
 };
 
@@ -35,8 +35,7 @@ pub async fn lifecycle_events(
     let receiver = state.lifecycle.subscribe_tenant(&lifecycle.tenant_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
-        runtime::socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry)
-            .await;
+        socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
     }))
 }
 
@@ -96,8 +95,7 @@ pub async fn session_lifecycle_events(
     let receiver = state.lifecycle.subscribe_session(&session_id).await;
 
     Ok(websocket.on_upgrade(move |socket| async move {
-        runtime::socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry)
-            .await;
+        socket_runtime::run_lifecycle_session(socket, state, lifecycle, receiver, expiry).await;
     }))
 }
 

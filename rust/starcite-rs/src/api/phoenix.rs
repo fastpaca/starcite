@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use super::socket_support;
 use axum::{
     extract::{
         Query, State,
@@ -25,7 +26,6 @@ use crate::{
     config::CommitMode,
     data_plane,
     error::AppError,
-    runtime,
     runtime::RuntimeTouchReason,
     telemetry::{SocketSurface, SocketTransport},
 };
@@ -85,7 +85,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
                         .await;
                     break;
                 }
-                _ = runtime::socket_support::wait_for_drain(&state.ops) => {
+                _ = socket_support::wait_for_drain(&state.ops) => {
                     tracing::info!(
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"
@@ -137,7 +137,7 @@ async fn run_socket(mut socket: WebSocket, state: AppState, context: SocketConte
             }
         } else {
             tokio::select! {
-                _ = runtime::socket_support::wait_for_drain(&state.ops) => {
+                _ = socket_support::wait_for_drain(&state.ops) => {
                     tracing::info!(
                         topic_count = subscriptions.len(),
                         "closing phoenix socket because node is draining"

@@ -3,10 +3,11 @@ use std::{sync::Arc, time::Duration};
 use sqlx::PgPool;
 use tokio::time::sleep;
 
-use crate::{
-    archive_queue::ArchiveQueue, error::AppError, hot_store::HotEventStore, repository,
+use super::{
+    archive_queue::ArchiveQueue, hot_store::HotEventStore, repository,
     session_store::HotSessionStore,
 };
+use crate::error::AppError;
 
 #[derive(Debug, Clone)]
 pub struct ArchiveWorker {

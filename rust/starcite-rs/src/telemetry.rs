@@ -14,11 +14,12 @@ use axum::{
 
 use crate::{
     AppState,
-    archive_queue::ArchiveQueueSnapshot,
     config::AuthMode,
-    fanout::{LifecycleFanoutSnapshot, SessionFanoutSnapshot},
-    ops::OpsSnapshot,
-    runtime::{RuntimeSnapshot, RuntimeTouchReason},
+    data_plane::ArchiveQueueSnapshot,
+    runtime::{
+        LifecycleFanoutSnapshot, OpsSnapshot, RuntimeSnapshot, RuntimeTouchReason,
+        SessionFanoutSnapshot,
+    },
 };
 
 const DEFAULT_MS_BUCKETS: &[u64] = &[
@@ -1007,14 +1008,14 @@ mod tests {
     use axum::http::StatusCode;
 
     use crate::{
-        archive_queue::ArchiveQueueSnapshot,
         config::AuthMode,
-        fanout::{
-            LifecycleFanoutSnapshot, SessionFanoutSnapshot, SessionSubscriptionSnapshot,
-            TenantSubscriptionSnapshot,
+        data_plane::ArchiveQueueSnapshot,
+        runtime::{
+            LifecycleFanoutSnapshot, OpsSnapshot, RuntimeSnapshot, RuntimeTouchReason,
+            SessionFanoutSnapshot,
+            fanout::{SessionSubscriptionSnapshot, TenantSubscriptionSnapshot},
+            session_runtime::ActiveSessionSnapshot,
         },
-        ops::OpsSnapshot,
-        runtime::{ActiveSessionSnapshot, RuntimeSnapshot, RuntimeTouchReason},
     };
 
     use super::{
