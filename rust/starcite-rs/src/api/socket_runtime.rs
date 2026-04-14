@@ -1,4 +1,8 @@
-use std::time::{Duration, Instant};
+use std::{
+    future::pending,
+    pin::Pin,
+    time::{Duration, Instant},
+};
 
 use super::{
     query_options::{LifecycleOptions, TailOptions},
@@ -9,7 +13,10 @@ use super::{
     socket_support::{record_read_result, wait_for_drain},
 };
 use axum::extract::ws::{Message, WebSocket};
-use tokio::{sync::broadcast, time::sleep};
+use tokio::{
+    sync::broadcast,
+    time::{Sleep, sleep},
+};
 
 use crate::{
     AppState,
@@ -21,6 +28,7 @@ use crate::{
 };
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
+type SocketExpiry = Pin<Box<Sleep>>;
 
 pub(crate) async fn require_local_owner_for_event_path(
     state: &AppState,
@@ -65,101 +73,53 @@ pub(crate) async fn run_tail_session(
     }
 
     loop {
-        if let Some(expires_at) = expiry.as_mut() {
-            tokio::select! {
-                _ = expires_at => {
-                    let _ = send_token_expired(&mut socket).await;
+        tokio::select! {
+            _ = wait_for_optional_expiry(expiry.as_mut()) => {
+                let _ = send_token_expired(&mut socket).await;
+                return;
+            }
+            _ = wait_for_drain(&state.ops) => {
+                tracing::info!(
+                    session_id = %session_id,
+                    "closing raw tail socket because node is draining"
+                );
+                let _ = send_node_draining(&mut socket, &state.ops).await;
+                return;
+            }
+            incoming = socket.recv() => {
+                if !handle_socket_message(&mut socket, incoming).await {
                     return;
-                }
-                _ = wait_for_drain(&state.ops) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        "closing raw tail socket because node is draining"
-                    );
-                    let _ = send_node_draining(&mut socket, &state.ops).await;
-                    return;
-                }
-                incoming = socket.recv() => {
-                    if !handle_socket_message(&mut socket, incoming).await {
-                        return;
-                    }
-                }
-                received = receiver.recv() => match received {
-                    Ok(event) if event.seq <= cursor => continue,
-                    Ok(event) => {
-                        cursor = event.seq;
-                        let started_at = Instant::now();
-                        let result = send_events(&mut socket, &[event]).await;
-                        record_read_result(&state, ReadOperation::TailLive, started_at, result);
-
-                        if result.is_err() {
-                            return;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            session_id,
-                            skipped,
-                            cursor,
-                            "tail broadcast lagged, replaying from store"
-                        );
-
-                        match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
-                            Ok(next_cursor) => cursor = next_cursor,
-                            Err(error) => {
-                                tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
-        } else {
-            tokio::select! {
-                _ = wait_for_drain(&state.ops) => {
-                    tracing::info!(
-                        session_id = %session_id,
-                        "closing raw tail socket because node is draining"
-                    );
-                    let _ = send_node_draining(&mut socket, &state.ops).await;
-                    return;
-                }
-                incoming = socket.recv() => {
-                    if !handle_socket_message(&mut socket, incoming).await {
+            received = receiver.recv() => match received {
+                Ok(event) if event.seq <= cursor => continue,
+                Ok(event) => {
+                    cursor = event.seq;
+                    let started_at = Instant::now();
+                    let result = send_events(&mut socket, &[event]).await;
+                    record_read_result(&state, ReadOperation::TailLive, started_at, result);
+
+                    if result.is_err() {
                         return;
                     }
                 }
-                received = receiver.recv() => match received {
-                    Ok(event) if event.seq <= cursor => continue,
-                    Ok(event) => {
-                        cursor = event.seq;
-                        let started_at = Instant::now();
-                        let result = send_events(&mut socket, &[event]).await;
-                        record_read_result(&state, ReadOperation::TailLive, started_at, result);
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        session_id,
+                        skipped,
+                        cursor,
+                        "tail broadcast lagged, replaying from store"
+                    );
 
-                        if result.is_err() {
+                    match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
+                        Ok(next_cursor) => cursor = next_cursor,
+                        Err(error) => {
+                            tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            session_id,
-                            skipped,
-                            cursor,
-                            "tail broadcast lagged, replaying from store"
-                        );
-
-                        match sync_tail(&mut socket, &state, &session_id, cursor, tail.batch_size).await {
-                            Ok(next_cursor) => cursor = next_cursor,
-                            Err(error) => {
-                                tracing::warn!(error = ?error, session_id, "tail replay after lag failed");
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
                 }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
     }
@@ -203,127 +163,66 @@ pub(crate) async fn run_lifecycle_session(
     }
 
     loop {
-        if let Some(expires_at) = expiry.as_mut() {
-            tokio::select! {
-                _ = expires_at => {
-                    let _ = send_token_expired(&mut socket).await;
+        tokio::select! {
+            _ = wait_for_optional_expiry(expiry.as_mut()) => {
+                let _ = send_token_expired(&mut socket).await;
+                return;
+            }
+            _ = wait_for_drain(&state.ops) => {
+                tracing::info!(
+                    tenant_id = %lifecycle.tenant_id,
+                    session_id = ?lifecycle.session_id,
+                    "closing raw lifecycle socket because node is draining"
+                );
+                let _ = send_node_draining(&mut socket, &state.ops).await;
+                return;
+            }
+            incoming = socket.recv() => {
+                if !handle_socket_message(&mut socket, incoming).await {
                     return;
-                }
-                _ = wait_for_drain(&state.ops) => {
-                    tracing::info!(
-                        tenant_id = %lifecycle.tenant_id,
-                        session_id = ?lifecycle.session_id,
-                        "closing raw lifecycle socket because node is draining"
-                    );
-                    let _ = send_node_draining(&mut socket, &state.ops).await;
-                    return;
-                }
-                incoming = socket.recv() => {
-                    if !handle_socket_message(&mut socket, incoming).await {
-                        return;
-                    }
-                }
-                received = receiver.recv() => match received {
-                    Ok(event) if event.cursor <= cursor => continue,
-                    Ok(event)
-                        if lifecycle
-                            .session_id
-                            .as_ref()
-                            .is_some_and(|session_id| event.event.session_id() != session_id) =>
-                    {
-                        continue;
-                    }
-                    Ok(event) => {
-                        cursor = event.cursor;
-                        let started_at = Instant::now();
-                        let result = send_lifecycle(&mut socket, &event).await;
-                        record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
-
-                        if result.is_err() {
-                            return;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            skipped,
-                            tenant_id = lifecycle.tenant_id,
-                            cursor,
-                            "lifecycle broadcast lagged, replaying from store"
-                        );
-
-                        match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
-                            Ok(next_cursor) => cursor = next_cursor,
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = ?error,
-                                    tenant_id = lifecycle.tenant_id,
-                                    "lifecycle replay after lag failed"
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
                 }
             }
-        } else {
-            tokio::select! {
-                _ = wait_for_drain(&state.ops) => {
-                    tracing::info!(
-                        tenant_id = %lifecycle.tenant_id,
-                        session_id = ?lifecycle.session_id,
-                        "closing raw lifecycle socket because node is draining"
-                    );
-                    let _ = send_node_draining(&mut socket, &state.ops).await;
-                    return;
+            received = receiver.recv() => match received {
+                Ok(event) if event.cursor <= cursor => continue,
+                Ok(event)
+                    if lifecycle
+                        .session_id
+                        .as_ref()
+                        .is_some_and(|session_id| event.event.session_id() != session_id) =>
+                {
+                    continue;
                 }
-                incoming = socket.recv() => {
-                    if !handle_socket_message(&mut socket, incoming).await {
+                Ok(event) => {
+                    cursor = event.cursor;
+                    let started_at = Instant::now();
+                    let result = send_lifecycle(&mut socket, &event).await;
+                    record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
+
+                    if result.is_err() {
                         return;
                     }
                 }
-                received = receiver.recv() => match received {
-                    Ok(event) if event.cursor <= cursor => continue,
-                    Ok(event)
-                        if lifecycle
-                            .session_id
-                            .as_ref()
-                            .is_some_and(|session_id| event.event.session_id() != session_id) =>
-                    {
-                        continue;
-                    }
-                    Ok(event) => {
-                        cursor = event.cursor;
-                        let started_at = Instant::now();
-                        let result = send_lifecycle(&mut socket, &event).await;
-                        record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        skipped,
+                        tenant_id = lifecycle.tenant_id,
+                        cursor,
+                        "lifecycle broadcast lagged, replaying from store"
+                    );
 
-                        if result.is_err() {
+                    match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
+                        Ok(next_cursor) => cursor = next_cursor,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                tenant_id = lifecycle.tenant_id,
+                                "lifecycle replay after lag failed"
+                            );
                             return;
                         }
                     }
-                    Err(broadcast::error::RecvError::Lagged(skipped)) => {
-                        tracing::warn!(
-                            skipped,
-                            tenant_id = lifecycle.tenant_id,
-                            cursor,
-                            "lifecycle broadcast lagged, replaying from store"
-                        );
-
-                        match sync_lifecycle(&mut socket, &state, &lifecycle, cursor).await {
-                            Ok(next_cursor) => cursor = next_cursor,
-                            Err(error) => {
-                                tracing::warn!(
-                                    error = ?error,
-                                    tenant_id = lifecycle.tenant_id,
-                                    "lifecycle replay after lag failed"
-                                );
-                                return;
-                            }
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Closed) => return,
                 }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
     }
@@ -478,5 +377,12 @@ async fn handle_socket_message(
             tracing::warn!(error = ?error, "raw websocket receive failed");
             false
         }
+    }
+}
+
+async fn wait_for_optional_expiry(expiry: Option<&mut SocketExpiry>) {
+    match expiry {
+        Some(expiry) => expiry.await,
+        None => pending::<()>().await,
     }
 }
