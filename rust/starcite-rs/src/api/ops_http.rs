@@ -83,7 +83,10 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         .fetch_one(&state.pool)
         .await
     {
-        Ok(_) => ready_response(&ops, None).into_response(),
+        Ok(_) => match state.control_plane.readiness_reason() {
+            Some(reason) => ready_response(&ops, Some(reason)).into_response(),
+            None => ready_response(&ops, None).into_response(),
+        },
         Err(error) => {
             tracing::error!(error = ?error, "readiness query failed");
             ready_response(&ops, Some("database_unavailable")).into_response()
