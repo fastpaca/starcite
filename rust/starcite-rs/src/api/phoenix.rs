@@ -180,12 +180,7 @@ async fn handle_join(
     subscriptions: &mut HashMap<String, TopicSubscription>,
 ) {
     if subscriptions.contains_key(&frame.topic) {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            json!({"reason": "already_joined"}),
-        );
+        reject_join_reason(outbound_tx, &frame, "already_joined");
         return;
     }
 
@@ -196,12 +191,7 @@ async fn handle_join(
     } else if frame.topic.starts_with("tail:") {
         handle_tail_join(frame, state, context, outbound_tx, subscriptions).await;
     } else {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            json!({"reason": "invalid_topic"}),
-        );
+        reject_join_reason(outbound_tx, &frame, "invalid_topic");
     }
 }
 
@@ -215,12 +205,7 @@ async fn handle_session_lifecycle_join(
     let session_id = match parse_topic_session_id(&frame.topic, "lifecycle:") {
         Some(session_id) => session_id,
         None => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": "invalid_session_id"}),
-            );
+            reject_join_reason(outbound_tx, &frame, "invalid_session_id");
             return;
         }
     };
@@ -228,12 +213,7 @@ async fn handle_session_lifecycle_join(
     let cursor = match parse_session_lifecycle_join_payload(&frame.payload) {
         Ok(cursor) => cursor,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
@@ -241,23 +221,13 @@ async fn handle_session_lifecycle_join(
     let tenant_id = match resolve_session_tenant_id(state, &session_id).await {
         Ok(tenant_id) => tenant_id,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
 
     if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            json!({"reason": error_reason(&error)}),
-        );
+        reject_join_error(outbound_tx, &frame, &error);
         return;
     }
 
@@ -265,14 +235,13 @@ async fn handle_session_lifecycle_join(
         cursor,
         session_id: Some(session_id.clone()),
     };
-    state
-        .runtime
-        .touch_existing(
-            &session_id,
-            &tenant_id,
-            RuntimeTouchReason::PhoenixLifecycle,
-        )
-        .await;
+    touch_existing_session(
+        state,
+        &session_id,
+        &tenant_id,
+        RuntimeTouchReason::PhoenixLifecycle,
+    )
+    .await;
     let receiver = state.lifecycle.subscribe_session(&session_id).await;
     spawn_lifecycle_subscription(
         frame,
@@ -295,44 +264,32 @@ async fn handle_lifecycle_join(
     let tenant_id = match resolve_lifecycle_tenant_id(context, &frame.payload) {
         Ok(tenant_id) => tenant_id,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
     let lifecycle = match parse_lifecycle_join_payload(&frame.payload) {
         Ok(lifecycle) => lifecycle,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
 
     if let Err(error) = validate_lifecycle_scope(state, &context.auth, &tenant_id, &lifecycle).await
     {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            json!({"reason": error_reason(&error)}),
-        );
+        reject_join_error(outbound_tx, &frame, &error);
         return;
     }
 
     if let Some(session_id) = lifecycle.session_id.as_deref() {
-        state
-            .runtime
-            .touch_existing(session_id, &tenant_id, RuntimeTouchReason::PhoenixLifecycle)
-            .await;
+        touch_existing_session(
+            state,
+            session_id,
+            &tenant_id,
+            RuntimeTouchReason::PhoenixLifecycle,
+        )
+        .await;
     }
 
     let receiver = state.lifecycle.subscribe_tenant(&tenant_id).await;
@@ -357,35 +314,20 @@ async fn handle_tail_join(
     let session_id = match parse_topic_session_id(&frame.topic, "tail:") {
         Some(session_id) => session_id,
         None => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": "invalid_session_id"}),
-            );
+            reject_join_reason(outbound_tx, &frame, "invalid_session_id");
             return;
         }
     };
 
     if let Err(error) = auth::allowed_to_access_session(&context.auth, &session_id) {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            json!({"reason": error_reason(&error)}),
-        );
+        reject_join_error(outbound_tx, &frame, &error);
         return;
     }
 
     let tail = match parse_tail_join_payload(&frame.payload) {
         Ok(tail) => tail,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
@@ -393,42 +335,30 @@ async fn handle_tail_join(
     let tenant_id = match resolve_session_tenant_id(state, &session_id).await {
         Ok(tenant_id) => tenant_id,
         Err(error) => {
-            let _ = send_reply(
-                outbound_tx,
-                &frame,
-                false,
-                json!({"reason": error_reason(&error)}),
-            );
+            reject_join_error(outbound_tx, &frame, &error);
             return;
         }
     };
 
     if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            tail_join_error_payload(&error, context),
-        );
+        reject_tail_join(outbound_tx, &frame, &error, context);
         return;
     }
 
     if state.commit_mode == CommitMode::LocalAsync
         && let Err(error) = state.ownership.live_or_renew_owned(&session_id).await
     {
-        let _ = send_reply(
-            outbound_tx,
-            &frame,
-            false,
-            tail_join_error_payload(&error, context),
-        );
+        reject_tail_join(outbound_tx, &frame, &error, context);
         return;
     }
 
-    state
-        .runtime
-        .touch_existing(&session_id, &tenant_id, RuntimeTouchReason::PhoenixTail)
-        .await;
+    touch_existing_session(
+        state,
+        &session_id,
+        &tenant_id,
+        RuntimeTouchReason::PhoenixTail,
+    )
+    .await;
     let receiver = state.fanout.subscribe(&session_id).await;
     spawn_tail_subscription(
         frame,
@@ -471,12 +401,7 @@ async fn validate_lifecycle_scope(
         return Ok(());
     };
 
-    let scoped_tenant_id = data_plane::session_store::resolve_session_tenant_id(
-        &state.session_store,
-        &state.pool,
-        session_id,
-    )
-    .await?;
+    let scoped_tenant_id = resolve_session_tenant_id(state, session_id).await?;
 
     if scoped_tenant_id != tenant_id {
         return Err(AppError::ForbiddenTenant);
@@ -538,6 +463,51 @@ async fn resolve_session_tenant_id(state: &AppState, session_id: &str) -> Result
         session_id,
     )
     .await
+}
+
+async fn touch_existing_session(
+    state: &AppState,
+    session_id: &str,
+    tenant_id: &str,
+    reason: RuntimeTouchReason,
+) {
+    state
+        .runtime
+        .touch_existing(session_id, tenant_id, reason)
+        .await;
+}
+
+fn reject_join(
+    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    frame: &PhoenixFrame,
+    payload: Value,
+) {
+    let _ = send_reply(outbound_tx, frame, false, payload);
+}
+
+fn reject_join_reason(
+    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    frame: &PhoenixFrame,
+    reason: &str,
+) {
+    reject_join(outbound_tx, frame, json!({ "reason": reason }));
+}
+
+fn reject_join_error(
+    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    frame: &PhoenixFrame,
+    error: &AppError,
+) {
+    reject_join_reason(outbound_tx, frame, error_reason(error));
+}
+
+fn reject_tail_join(
+    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    frame: &PhoenixFrame,
+    error: &AppError,
+    context: &SocketContext,
+) {
+    reject_join(outbound_tx, frame, tail_join_error_payload(error, context));
 }
 
 fn spawn_lifecycle_subscription(
