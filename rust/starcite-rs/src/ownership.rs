@@ -91,30 +91,25 @@ impl OwnershipManager {
         }
 
         if let Some(redirect) = self.cached_remote_owner_hint(session_id).await {
-            return Err(AppError::SessionNotOwned {
-                owner_id: redirect.owner_id,
-                owner_public_url: redirect.owner_public_url,
-                epoch: redirect.epoch,
-            });
+            return Err(session_not_owned(
+                redirect.owner_id,
+                redirect.owner_public_url,
+                redirect.epoch,
+            ));
         }
 
         if let Some(hint) =
             repository::load_session_lease_takeover_hint(&self.pool, session_id).await?
             && let Some(redirect) = preferred_takeover_owner(&hint, self.instance_id.as_ref())
         {
-            self.remember_remote_owner_hint(
-                session_id,
-                &redirect.owner_id,
-                redirect.owner_public_url.as_deref(),
-                redirect.epoch,
-            )
-            .await;
-
-            return Err(AppError::SessionNotOwned {
-                owner_id: redirect.owner_id,
-                owner_public_url: redirect.owner_public_url,
-                epoch: redirect.epoch,
-            });
+            return Err(self
+                .reject_remote_owner(
+                    session_id,
+                    redirect.owner_id,
+                    redirect.owner_public_url,
+                    redirect.epoch,
+                )
+                .await);
         }
 
         let row = repository::acquire_session_lease(
@@ -126,19 +121,9 @@ impl OwnershipManager {
         .await?;
 
         if row.owner_id != self.instance_id.as_ref() {
-            self.remember_remote_owner_hint(
-                session_id,
-                &row.owner_id,
-                row.owner_public_url.as_deref(),
-                row.epoch,
-            )
-            .await;
-
-            return Err(AppError::SessionNotOwned {
-                owner_id: row.owner_id,
-                owner_public_url: row.owner_public_url,
-                epoch: row.epoch,
-            });
+            return Err(self
+                .reject_remote_owner(session_id, row.owner_id, row.owner_public_url, row.epoch)
+                .await);
         }
 
         self.forget_remote_owner_hint(session_id).await;
@@ -284,6 +269,19 @@ impl OwnershipManager {
         })
     }
 
+    async fn reject_remote_owner(
+        &self,
+        session_id: &str,
+        owner_id: String,
+        owner_public_url: Option<String>,
+        epoch: i64,
+    ) -> AppError {
+        self.remember_remote_owner_hint(session_id, &owner_id, owner_public_url.as_deref(), epoch)
+            .await;
+
+        session_not_owned(owner_id, owner_public_url, epoch)
+    }
+
     async fn remember_remote_owner_hint(
         &self,
         session_id: &str,
@@ -323,6 +321,14 @@ struct TakeoverRedirect {
     owner_id: String,
     owner_public_url: Option<String>,
     epoch: i64,
+}
+
+fn session_not_owned(owner_id: String, owner_public_url: Option<String>, epoch: i64) -> AppError {
+    AppError::SessionNotOwned {
+        owner_id,
+        owner_public_url,
+        epoch,
+    }
 }
 
 fn preferred_takeover_owner(
