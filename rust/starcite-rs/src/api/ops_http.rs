@@ -295,10 +295,128 @@ async fn reject_stale_replica_epoch(
 
 #[cfg(test)]
 mod tests {
-    use axum::{Json, http::StatusCode};
+    use std::{sync::Arc, time::Duration};
 
-    use super::{ReplicaAppendDisposition, classify_replica_append, ready_response};
-    use crate::{cluster::ControlPlaneReadinessDetail, runtime::OpsState};
+    use axum::{Json, http::StatusCode};
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::{
+        ReplicaAppendDisposition, classify_replica_append, ready_response,
+        reject_stale_replica_epoch,
+    };
+    use crate::{
+        AppState,
+        auth::AuthService,
+        cluster::{
+            ControlPlaneReadinessDetail, ControlPlaneState, OwnerProxy, OwnershipManager,
+            ReplicationCoordinator,
+        },
+        config::{AuthMode, Config},
+        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        error::AppError,
+        runtime::{
+            LifecycleFanout, OpsState, SessionFanout, SessionManager, SessionManagerDeps,
+            SessionRuntime,
+        },
+        telemetry::Telemetry,
+    };
+
+    fn test_state(public_url: Option<&str>) -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
+            .expect("lazy pool");
+        let fanout = SessionFanout::default();
+        let lifecycle = LifecycleFanout::default();
+        let hot_store = HotEventStore::new();
+        let archive_queue = ArchiveQueue::new();
+        let pending_flush = PendingFlushQueue::new();
+        let session_store = HotSessionStore::new();
+        let telemetry = Telemetry::new(true);
+        let ops = OpsState::new(30_000);
+        let instance_id = Arc::<str>::from("node-a");
+        let ownership =
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+        let control_plane =
+            ControlPlaneState::new(public_url.map(str::to_string), None, Duration::from_secs(5));
+        let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
+        let replication = ReplicationCoordinator::new(
+            instance_id.clone(),
+            false,
+            None,
+            Duration::from_millis(100),
+        )
+        .expect("replication");
+        let session_manager = SessionManager::new(SessionManagerDeps {
+            pool: pool.clone(),
+            fanout: fanout.clone(),
+            hot_store: hot_store.clone(),
+            pending_flush: pending_flush.clone(),
+            session_store: session_store.clone(),
+            ownership: ownership.clone(),
+            replication: replication.clone(),
+            ops: ops.clone(),
+            telemetry: telemetry.clone(),
+            idle_timeout: Duration::from_secs(30),
+        });
+        let runtime = SessionRuntime::new(
+            None,
+            lifecycle.clone(),
+            telemetry.clone(),
+            instance_id.clone(),
+            Duration::from_secs(30),
+        );
+        let auth = AuthService::new(&test_config()).expect("auth");
+
+        AppState {
+            pool,
+            fanout,
+            lifecycle,
+            hot_store,
+            archive_queue,
+            pending_flush,
+            session_store,
+            session_manager,
+            ownership,
+            control_plane,
+            owner_proxy,
+            replication,
+            runtime,
+            ops,
+            auth_mode: AuthMode::None,
+            auth,
+            telemetry,
+            instance_id,
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            listen_addr: "127.0.0.1:4001".parse().expect("listen addr"),
+            ops_listen_addr: "127.0.0.1:4101".parse().expect("ops listen addr"),
+            database_url: "postgres://postgres:postgres@localhost/starcite_test".to_string(),
+            max_connections: 1,
+            archive_flush_interval_ms: 5_000,
+            migrate_on_boot: false,
+            auth_mode: AuthMode::None,
+            auth_issuer: None,
+            auth_audience: None,
+            auth_jwks_url: None,
+            auth_jwt_leeway_seconds: 1,
+            auth_jwks_refresh_ms: 60_000,
+            auth_jwks_hard_expiry_ms: 60_000,
+            telemetry_enabled: true,
+            shutdown_drain_timeout_ms: 30_000,
+            session_runtime_idle_timeout_ms: 30_000,
+            commit_flush_interval_ms: 100,
+            local_async_lease_ttl_ms: 5_000,
+            local_async_node_public_url: None,
+            local_async_node_ops_url: None,
+            local_async_node_ttl_ms: 2_000,
+            local_async_owner_proxy_timeout_ms: 100,
+            local_async_standby_url: None,
+            local_async_replication_timeout_ms: 100,
+        }
+    }
 
     #[test]
     fn ready_response_reports_ready_mode() {
@@ -352,5 +470,42 @@ mod tests {
             classify_replica_append(7, 9),
             ReplicaAppendDisposition::SeqGap { expected_seq: 8 }
         );
+    }
+
+    #[tokio::test]
+    async fn stale_replica_epoch_is_rejected_with_local_owner_hint() {
+        let state = test_state(Some("http://node-a:4001"));
+        state.ownership.insert_test_lease("ses_demo", 9, None).await;
+
+        let error = reject_stale_replica_epoch(&state, "ses_demo", 7)
+            .await
+            .expect_err("older replica epoch should be rejected");
+
+        assert!(matches!(
+            error,
+            AppError::SessionNotOwned {
+                owner_id,
+                owner_public_url,
+                epoch
+            } if owner_id == "node-a"
+                && owner_public_url.as_deref() == Some("http://node-a:4001")
+                && epoch == 9
+        ));
+    }
+
+    #[tokio::test]
+    async fn same_or_newer_replica_epoch_is_allowed() {
+        let state = test_state(None);
+        state.ownership.insert_test_lease("ses_demo", 9, None).await;
+
+        reject_stale_replica_epoch(&state, "ses_demo", 9)
+            .await
+            .expect("same epoch should pass");
+        reject_stale_replica_epoch(&state, "ses_demo", 10)
+            .await
+            .expect("newer epoch should pass");
+        reject_stale_replica_epoch(&state, "ses_other", 1)
+            .await
+            .expect("missing local ownership should pass");
     }
 }
