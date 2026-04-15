@@ -100,7 +100,6 @@ async fn run() -> Result<(), String> {
     let replication = ReplicationCoordinator::new(
         instance_id.clone(),
         control_plane.enabled(),
-        config.local_async_standby_url.clone(),
         Duration::from_millis(config.local_async_replication_timeout_ms),
     )?;
     let session_manager = runtime::SessionManager::new(runtime::SessionManagerDeps {

@@ -50,7 +50,6 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port` registers the node in Postgres as a live standby candidate. When that is enabled, the session lease path assigns one live non-draining standby per owned session, spreads new standby assignments across the least-loaded live peers, keeps a healthy standby stable across routine owner renewals, prefers the previous live owner as the new standby on takeover, and treats standby replication as required for quorum.
 - Assigned standby replication now uses one internal append request per event instead of separate prepare and commit hops, and the owner reuses warm standby TCP connections across appends, so the single-standby quorum path drops one round trip and one connect cost from the ack path.
 - Standby append handling now applies directly into the hot local state and rejects seq gaps, so the replicated path behaves like an ordered commit log instead of buffering a second in-process prepare/commit step.
-- `LOCAL_ASYNC_STANDBY_URL=http://host:ops_port` remains as a static fallback for local drills when you do not want Postgres-backed node registration.
 - A local archive worker now drains an explicit dirty-session queue, advances `sessions.archived_seq`, and prunes hot in-memory events once they are considered archived. The periodic tick is now only a fallback nudge, not the primary discovery path.
 - Only the active owner now enqueues background Postgres flush work. Standby replicas keep the committed hot copy in memory for takeover, and when a worker first becomes owner it seeds its pending flush queue from that retained hot state before acknowledging new appends. That keeps standby quorum commits cheap while still letting Postgres catch up after failover.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
@@ -118,7 +117,6 @@ LOCAL_ASYNC_NODE_PUBLIC_URL=
 LOCAL_ASYNC_NODE_OPS_URL=
 LOCAL_ASYNC_NODE_TTL_MS=2000
 LOCAL_ASYNC_OWNER_PROXY_TIMEOUT_MS=1000
-LOCAL_ASYNC_STANDBY_URL=
 LOCAL_ASYNC_REPLICATION_TIMEOUT_MS=500
 ARCHIVE_FLUSH_INTERVAL_MS=5000
 RUST_LOG=info
@@ -131,7 +129,7 @@ Auth mode values:
 
 Write model:
 
-- local-async acknowledgement with background Postgres flush, Postgres-backed single-writer session leases, and synchronous standby replication assigned either by the Postgres control plane or a static standby URL
+- local-async acknowledgement with background Postgres flush, Postgres-backed single-writer session leases, and synchronous standby replication assigned by the Postgres control plane
 
 Telemetry values:
 
@@ -163,8 +161,7 @@ For multi-node `local_async` drills, leave the single-node compose file as-is an
 with its own `LOCAL_ASYNC_NODE_PUBLIC_URL=http://host:public_port` plus
 `LOCAL_ASYNC_NODE_OPS_URL=http://host:ops_port`. That lets Postgres assign live standbys without
 hard-coding one peer per process, and it gives non-owner nodes enough metadata to return an owner
-hint instead of a blind `409`. Keep `LOCAL_ASYNC_STANDBY_URL` empty unless you want the older
-static 2-node fallback. On a fresh database, non-migrator nodes will now wait for the
+hint instead of a blind `409`. On a fresh database, non-migrator nodes will now wait for the
 `control_nodes` table to appear before they start heartbeating into the Postgres control plane.
 When you benchmark that multi-node shape with the existing k6 hot-path script, set
 `SESSION_ROUTE_MODE=designated_owner` if you want the script to hash each session onto the same

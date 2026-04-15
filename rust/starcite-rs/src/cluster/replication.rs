@@ -15,7 +15,6 @@ const MAX_IDLE_CONNECTIONS_PER_PEER: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct ReplicationCoordinator {
-    standby: Option<ControlPeer>,
     require_standby: bool,
     instance_id: Arc<str>,
     timeout: Duration,
@@ -33,7 +32,6 @@ struct ControlPeer {
 pub struct ReplicationSnapshot {
     pub enabled: bool,
     pub standby_required: bool,
-    pub standby_url: Option<String>,
     pub timeout_ms: u64,
 }
 
@@ -100,13 +98,9 @@ impl ReplicationCoordinator {
     pub fn new(
         instance_id: Arc<str>,
         require_standby: bool,
-        standby_url: Option<String>,
         timeout: Duration,
     ) -> Result<Self, String> {
-        let standby = standby_url.as_deref().map(parse_control_peer).transpose()?;
-
         Ok(Self {
-            standby,
             require_standby,
             instance_id,
             timeout,
@@ -141,9 +135,8 @@ impl ReplicationCoordinator {
 
     pub fn snapshot(&self) -> ReplicationSnapshot {
         ReplicationSnapshot {
-            enabled: self.require_standby || self.standby.is_some(),
+            enabled: self.require_standby,
             standby_required: self.require_standby,
-            standby_url: self.standby.as_ref().map(|peer| peer.base_url.clone()),
             timeout_ms: self.timeout.as_millis().min(u64::MAX as u128) as u64,
         }
     }
@@ -182,10 +175,6 @@ impl ReplicationCoordinator {
                     required: 2,
                     acknowledged: 1,
                 });
-        }
-
-        if let Some(standby) = self.standby.clone() {
-            return Ok(Some(standby));
         }
 
         if self.require_standby {
@@ -348,33 +337,29 @@ impl ReplicationCoordinator {
 fn parse_control_peer(raw: &str) -> Result<ControlPeer, String> {
     let trimmed = raw.trim().trim_end_matches('/');
     let Some(rest) = trimmed.strip_prefix("http://") else {
-        return Err(format!(
-            "LOCAL_ASYNC_STANDBY_URL must start with http://: {raw}"
-        ));
+        return Err(format!("control peer URL must start with http://: {raw}"));
     };
 
     if rest.is_empty() || rest.contains('/') {
         return Err(format!(
-            "LOCAL_ASYNC_STANDBY_URL must be a bare http host:port base URL: {raw}"
+            "control peer URL must be a bare http host:port base URL: {raw}"
         ));
     }
 
     let Some((host, port_raw)) = rest.rsplit_once(':') else {
-        return Err(format!(
-            "LOCAL_ASYNC_STANDBY_URL must include a port: {raw}"
-        ));
+        return Err(format!("control peer URL must include a port: {raw}"));
     };
 
     if host.is_empty() {
-        return Err(format!("LOCAL_ASYNC_STANDBY_URL host is empty: {raw}"));
+        return Err(format!("control peer URL host is empty: {raw}"));
     }
 
     let port = port_raw
         .parse::<u16>()
-        .map_err(|_| format!("LOCAL_ASYNC_STANDBY_URL has invalid port: {raw}"))?;
+        .map_err(|_| format!("control peer URL has invalid port: {raw}"))?;
 
     if port == 0 {
-        return Err(format!("LOCAL_ASYNC_STANDBY_URL has invalid port: {raw}"));
+        return Err(format!("control peer URL has invalid port: {raw}"));
     }
 
     Ok(ControlPeer {
@@ -435,8 +420,8 @@ fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, ReplicationClientErro
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendReplicaRequest, ReplicationCoordinator, find_http_head_end, parse_control_peer,
-        parse_http_head,
+        AppendReplicaRequest, ReplicationCoordinator, ReplicationPeer, find_http_head_end,
+        parse_control_peer, parse_http_head,
     };
     use crate::model::EventResponse;
     use serde_json::Map;
@@ -475,7 +460,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_standby_base_url() {
+    fn parses_control_peer_base_url() {
         let peer = parse_control_peer("http://127.0.0.1:4194").expect("peer");
 
         assert_eq!(peer.base_url, "http://127.0.0.1:4194");
@@ -484,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_standby_url_without_port() {
+    fn rejects_control_peer_without_port() {
         let error = parse_control_peer("http://127.0.0.1").expect_err("missing port");
         assert!(error.contains("must include a port"));
     }
@@ -578,18 +563,21 @@ mod tests {
         let coordinator = ReplicationCoordinator::new(
             Arc::<str>::from("node-a"),
             true,
-            Some(format!("http://127.0.0.1:{}", addr.port())),
             Duration::from_millis(500),
         )
         .expect("replication coordinator");
         let event = event();
+        let assigned_standby = ReplicationPeer {
+            node_id: "node-b".to_string(),
+            ops_url: format!("http://127.0.0.1:{}", addr.port()),
+        };
 
         coordinator
-            .replicate(7, &event, None)
+            .replicate(7, &event, Some(&assigned_standby))
             .await
             .expect("first replicate");
         coordinator
-            .replicate(7, &event, None)
+            .replicate(7, &event, Some(&assigned_standby))
             .await
             .expect("second replicate");
 

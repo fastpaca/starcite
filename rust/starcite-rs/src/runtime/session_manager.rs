@@ -648,7 +648,6 @@ mod tests {
             replication: ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
                 require_standby,
-                None,
                 Duration::from_millis(500),
             )
             .expect("replication"),

@@ -339,13 +339,9 @@ mod tests {
         let control_plane =
             ControlPlaneState::new(public_url.map(str::to_string), None, Duration::from_secs(5));
         let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
-        let replication = ReplicationCoordinator::new(
-            instance_id.clone(),
-            false,
-            None,
-            Duration::from_millis(100),
-        )
-        .expect("replication");
+        let replication =
+            ReplicationCoordinator::new(instance_id.clone(), false, Duration::from_millis(100))
+                .expect("replication");
         let session_manager = SessionManager::new(SessionManagerDeps {
             pool: pool.clone(),
             fanout: fanout.clone(),
@@ -413,7 +409,6 @@ mod tests {
             local_async_node_ops_url: None,
             local_async_node_ttl_ms: 2_000,
             local_async_owner_proxy_timeout_ms: 100,
-            local_async_standby_url: None,
             local_async_replication_timeout_ms: 100,
         }
     }

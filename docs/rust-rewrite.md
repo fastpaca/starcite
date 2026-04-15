@@ -200,10 +200,8 @@ new standby before it falls back to a cold peer, so acknowledged sessions keep a
 through renewals and takeover. The owner now sends one append control request to that assigned standby before it applies
 the event locally and replies to the client, instead of paying separate prepare and commit round
 trips on the critical path. If no assigned standby is available, append fails with
-`503 quorum_unavailable` instead of silently falling back to single-node ack.
-`LOCAL_ASYNC_STANDBY_URL` remains as a static fallback for local drills when Postgres-backed node
-registration is not enabled. That is still a narrow 2-of-2 quorum path, not a full 3-replica Raft
-group or routed topology.
+`503 quorum_unavailable` instead of silently falling back to single-node ack. That is still a
+narrow 2-of-2 quorum path, not a full 3-replica Raft group or routed topology.
 
 The control-plane heartbeat can now also carry a node's public base URL. That does not implement
 full routed ownership yet, but it does make the current `409 session_not_owned` response less
@@ -280,7 +278,7 @@ is actually participating in Postgres-backed standby assignment.
 - no external IdP interoperability coverage beyond the in-process JWKS rotation/failure harness
 - no full quorum replication or topology routing behind the runtime lifecycle; `local_async` has
   only Postgres-backed single-writer session leases plus one synchronous standby chosen by the
-  Postgres control plane or a static fallback URL
+  Postgres control plane
 - no routing/replication/archive telemetry parity with the Phoenix service
 
 ## Why this shape
