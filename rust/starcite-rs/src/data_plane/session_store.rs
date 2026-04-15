@@ -210,6 +210,11 @@ impl HotSessionStore {
         sessions.get(session_id).map(|entry| entry.last_seq)
     }
 
+    pub async fn get_archived_seq(&self, session_id: &str) -> Option<i64> {
+        let sessions = self.sessions.read().await;
+        sessions.get(session_id).map(|entry| entry.archived_seq)
+    }
+
     pub async fn get_last_producer_seq(&self, session_id: &str, producer_id: &str) -> Option<i64> {
         let sessions = self.sessions.read().await;
         sessions
@@ -316,6 +321,27 @@ pub async fn resolve_session_last_seq(
         )
         .await;
     Ok(last_seq)
+}
+
+pub async fn resolve_session_archived_seq(
+    store: &HotSessionStore,
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<i64, AppError> {
+    if let Some(archived_seq) = store.get_archived_seq(session_id).await {
+        return Ok(archived_seq);
+    }
+
+    let snapshot = repository::get_session_snapshot(pool, session_id).await?;
+    let archived_seq = snapshot.archived_seq;
+    store
+        .put_session(
+            &snapshot.tenant_id,
+            snapshot.session,
+            Some(snapshot.archived_seq),
+        )
+        .await;
+    Ok(archived_seq)
 }
 
 pub async fn refresh_from_lifecycle(

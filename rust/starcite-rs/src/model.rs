@@ -240,6 +240,25 @@ pub struct EventsOptions {
     pub limit: u32,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Cursor {
+    pub epoch: Option<i64>,
+    pub seq: i64,
+}
+
+impl Cursor {
+    pub fn new(epoch: Option<i64>, seq: i64) -> Self {
+        Self { epoch, seq }
+    }
+
+    pub fn zero() -> Self {
+        Self {
+            epoch: None,
+            seq: 0,
+        }
+    }
+}
+
 #[derive(Debug, Clone, FromRow)]
 pub struct SessionRow {
     pub id: String,
@@ -332,6 +351,8 @@ pub struct EventResponse {
     pub producer_seq: i64,
     pub tenant_id: String,
     pub inserted_at: String,
+    #[serde(skip_serializing, default)]
+    pub epoch: Option<i64>,
     pub cursor: i64,
 }
 
@@ -358,8 +379,20 @@ impl TryFrom<EventRow> for EventResponse {
             producer_seq: row.producer_seq,
             tenant_id: row.tenant_id,
             inserted_at: iso8601(row.inserted_at),
+            epoch: None,
             cursor: seq,
         })
+    }
+}
+
+impl EventResponse {
+    pub fn with_epoch(mut self, epoch: i64) -> Self {
+        self.epoch = Some(epoch);
+        self
+    }
+
+    pub fn cursor_token(&self) -> Cursor {
+        Cursor::new(self.epoch, self.cursor)
     }
 }
 

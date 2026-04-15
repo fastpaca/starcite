@@ -1,13 +1,12 @@
 use std::collections::HashMap;
 
 use super::{
-    query_options::{
-        LifecycleOptions, parse_events_options, parse_lifecycle_options, parse_optional_session_id,
-    },
+    query_options::{LifecycleOptions, parse_lifecycle_options, parse_optional_session_id},
     request_validation::validate_session_id,
 };
 use crate::{
     AppState, auth, data_plane::session_store::resolve_session_tenant_id, error::AppError,
+    model::Cursor,
 };
 
 pub(crate) async fn resolve_lifecycle_options(
@@ -21,7 +20,11 @@ pub(crate) async fn resolve_lifecycle_options(
             auth::can_subscribe_lifecycle(auth)?;
             LifecycleOptions {
                 tenant_id: auth.principal.tenant_id.clone(),
-                cursor: parse_events_options(params.clone())?.cursor,
+                cursor: params
+                    .get("cursor")
+                    .map(|raw| crate::api::socket_cursor::parse_query_cursor(raw))
+                    .transpose()?
+                    .unwrap_or_else(Cursor::zero),
                 session_id: parse_optional_session_id(params)?,
             }
         }
@@ -35,7 +38,7 @@ pub(crate) async fn resolve_session_lifecycle(
     state: &AppState,
     auth: &auth::AuthContext,
     session_id: &str,
-    cursor: i64,
+    cursor: Cursor,
 ) -> Result<LifecycleOptions, AppError> {
     let tenant_id =
         resolve_session_tenant_id(&state.session_store, &state.pool, session_id).await?;

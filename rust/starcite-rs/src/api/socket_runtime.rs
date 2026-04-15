@@ -7,9 +7,10 @@ use std::{
 use super::{
     query_options::{LifecycleOptions, TailOptions},
     raw_socket::{
-        build_resume_invalidated_gap, build_resume_invalidated_gap_with_earliest, send_events,
-        send_gap, send_lifecycle, send_node_draining, send_token_expired,
+        build_gap_frame, send_events, send_gap, send_lifecycle, send_node_draining,
+        send_token_expired,
     },
+    socket_cursor::{CursorSnapshot, build_gap, replay_gap_reason},
     socket_support::{record_read_result, wait_for_drain},
 };
 use axum::extract::ws::{Message, WebSocket};
@@ -21,7 +22,7 @@ use tokio::{
 use crate::{
     AppState, data_plane,
     error::AppError,
-    model::{EventResponse, EventsOptions, LifecycleResponse},
+    model::{Cursor, EventResponse, EventsOptions, LifecycleResponse},
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
 };
 
@@ -87,9 +88,9 @@ pub(crate) async fn run_tail_session(
                 }
             }
             received = receiver.recv() => match received {
-                Ok(event) if event.seq <= cursor => continue,
+                Ok(event) if event.seq <= cursor.seq => continue,
                 Ok(event) => {
-                    cursor = event.seq;
+                    cursor = event.cursor_token();
                     let started_at = Instant::now();
                     let result = send_events(&mut socket, &[event]).await;
                     record_read_result(&state, ReadOperation::TailLive, started_at, result);
@@ -102,7 +103,7 @@ pub(crate) async fn run_tail_session(
                     tracing::warn!(
                         session_id,
                         skipped,
-                        cursor,
+                        cursor = ?cursor,
                         "tail broadcast lagged, replaying from store"
                     );
 
@@ -178,7 +179,7 @@ pub(crate) async fn run_lifecycle_session(
                 }
             }
             received = receiver.recv() => match received {
-                Ok(event) if event.cursor <= cursor => continue,
+                Ok(event) if event.cursor <= cursor.seq => continue,
                 Ok(event)
                     if lifecycle
                         .session_id
@@ -188,7 +189,7 @@ pub(crate) async fn run_lifecycle_session(
                     continue;
                 }
                 Ok(event) => {
-                    cursor = event.cursor;
+                    cursor = Cursor::new(None, event.cursor);
                     let started_at = Instant::now();
                     let result = send_lifecycle(&mut socket, &event).await;
                     record_read_result(&state, ReadOperation::LifecycleLive, started_at, result);
@@ -201,7 +202,7 @@ pub(crate) async fn run_lifecycle_session(
                     tracing::warn!(
                         skipped,
                         tenant_id = lifecycle.tenant_id,
-                        cursor,
+                        cursor = ?cursor,
                         "lifecycle broadcast lagged, replaying from store"
                     );
 
@@ -227,48 +228,46 @@ async fn sync_tail(
     socket: &mut WebSocket,
     state: &AppState,
     session_id: &str,
-    cursor: i64,
+    cursor: Cursor,
     batch_size: u32,
-) -> Result<i64, AppError> {
-    require_local_owner_for_event_path(state, session_id).await?;
-    let next_cursor = replay_tail(socket, state, session_id, cursor, batch_size).await?;
+) -> Result<Cursor, AppError> {
+    let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
+    let earliest_available_seq = earliest_available_seq(snapshot);
 
-    if next_cursor != cursor {
-        return Ok(next_cursor);
-    }
-
-    let last_seq = data_plane::session_store::resolve_session_last_seq(
-        &state.session_store,
-        &state.pool,
-        session_id,
-    )
-    .await?;
-
-    if cursor > last_seq {
-        let gap = build_resume_invalidated_gap(cursor, last_seq);
-        send_gap(socket, &gap)
+    if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
+        let gap = build_gap(reason, cursor, snapshot, earliest_available_seq);
+        send_gap(socket, &build_gap_frame(&gap))
             .await
             .map_err(|_| AppError::Internal)?;
-        Ok(last_seq)
-    } else {
-        Ok(next_cursor)
+        return Ok(gap.next_cursor);
     }
+
+    replay_tail(
+        socket,
+        state,
+        session_id,
+        cursor,
+        batch_size,
+        snapshot.epoch,
+    )
+    .await
 }
 
 async fn replay_tail(
     socket: &mut WebSocket,
     state: &AppState,
     session_id: &str,
-    mut cursor: i64,
+    mut cursor: Cursor,
     batch_size: u32,
-) -> Result<i64, AppError> {
+    epoch: Option<i64>,
+) -> Result<Cursor, AppError> {
     loop {
         let page = data_plane::read_path::read_events(
             &state.hot_store,
             &state.pool,
             session_id,
             EventsOptions {
-                cursor,
+                cursor: cursor.seq,
                 limit: TAIL_REPLAY_LIMIT,
             },
         )
@@ -279,9 +278,17 @@ async fn replay_tail(
         }
 
         for events in page.events.chunks(batch_size as usize) {
-            cursor = events.last().map(|event| event.seq).unwrap_or(cursor);
+            let events = events
+                .iter()
+                .cloned()
+                .map(|event| attach_event_epoch(event, epoch))
+                .collect::<Vec<_>>();
+            cursor = events
+                .last()
+                .map(EventResponse::cursor_token)
+                .unwrap_or(cursor);
             let started_at = Instant::now();
-            let result = send_events(socket, events).await;
+            let result = send_events(socket, &events).await;
             record_read_result(state, ReadOperation::TailCatchup, started_at, result);
             result.map_err(|_| AppError::Internal)?;
         }
@@ -292,47 +299,36 @@ async fn sync_lifecycle(
     socket: &mut WebSocket,
     state: &AppState,
     lifecycle: &LifecycleOptions,
-    cursor: i64,
-) -> Result<i64, AppError> {
-    let next_cursor = replay_lifecycle(socket, state, lifecycle, cursor).await?;
+    cursor: Cursor,
+) -> Result<Cursor, AppError> {
+    let snapshot = resolve_lifecycle_cursor_snapshot(state, lifecycle).await?;
+    let earliest_available_seq = earliest_available_seq(snapshot);
 
-    if next_cursor != cursor {
-        return Ok(next_cursor);
-    }
-
-    let head = data_plane::repository::lifecycle_head_seq(
-        &state.pool,
-        &lifecycle.tenant_id,
-        lifecycle.session_id.as_deref(),
-    )
-    .await?;
-
-    if cursor > head {
-        let earliest_available_cursor = if head == 0 { 0 } else { 1 };
-        let gap =
-            build_resume_invalidated_gap_with_earliest(cursor, head, earliest_available_cursor);
-        send_gap(socket, &gap)
+    if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
+        let gap = build_gap(reason, cursor, snapshot, earliest_available_seq);
+        send_gap(socket, &build_gap_frame(&gap))
             .await
             .map_err(|_| AppError::Internal)?;
-        Ok(head)
-    } else {
-        Ok(next_cursor)
+        return Ok(gap.next_cursor);
     }
+
+    let next_cursor = replay_lifecycle(socket, state, lifecycle, cursor).await?;
+    Ok(next_cursor)
 }
 
 async fn replay_lifecycle(
     socket: &mut WebSocket,
     state: &AppState,
     lifecycle: &LifecycleOptions,
-    mut cursor: i64,
-) -> Result<i64, AppError> {
+    mut cursor: Cursor,
+) -> Result<Cursor, AppError> {
     loop {
         let page = data_plane::repository::read_lifecycle_events(
             &state.pool,
             &lifecycle.tenant_id,
             lifecycle.session_id.as_deref(),
             EventsOptions {
-                cursor,
+                cursor: cursor.seq,
                 limit: TAIL_REPLAY_LIMIT,
             },
         )
@@ -343,7 +339,7 @@ async fn replay_lifecycle(
         }
 
         for event in page.events {
-            cursor = event.cursor;
+            cursor = Cursor::new(None, event.cursor);
             let started_at = Instant::now();
             let result = send_lifecycle(socket, &event).await;
             record_read_result(state, ReadOperation::LifecycleCatchup, started_at, result);
@@ -357,6 +353,60 @@ fn lifecycle_socket_surface(lifecycle: &LifecycleOptions) -> SocketSurface {
         SocketSurface::SessionLifecycle
     } else {
         SocketSurface::TenantLifecycle
+    }
+}
+
+async fn resolve_session_cursor_snapshot(
+    state: &AppState,
+    session_id: &str,
+) -> Result<CursorSnapshot, AppError> {
+    let lease = state.ownership.live_or_renew_owned(session_id).await?;
+    let last_seq = data_plane::session_store::resolve_session_last_seq(
+        &state.session_store,
+        &state.pool,
+        session_id,
+    )
+    .await?;
+    let committed_seq = data_plane::session_store::resolve_session_archived_seq(
+        &state.session_store,
+        &state.pool,
+        session_id,
+    )
+    .await?;
+
+    Ok(CursorSnapshot {
+        epoch: Some(lease.epoch),
+        last_seq,
+        committed_seq,
+    })
+}
+
+async fn resolve_lifecycle_cursor_snapshot(
+    state: &AppState,
+    lifecycle: &LifecycleOptions,
+) -> Result<CursorSnapshot, AppError> {
+    let last_seq = data_plane::repository::lifecycle_head_seq(
+        &state.pool,
+        &lifecycle.tenant_id,
+        lifecycle.session_id.as_deref(),
+    )
+    .await?;
+
+    Ok(CursorSnapshot {
+        epoch: None,
+        last_seq,
+        committed_seq: last_seq,
+    })
+}
+
+fn earliest_available_seq(snapshot: CursorSnapshot) -> Option<i64> {
+    (snapshot.last_seq > 0).then_some(1)
+}
+
+fn attach_event_epoch(event: EventResponse, epoch: Option<i64>) -> EventResponse {
+    match epoch {
+        Some(epoch) => event.with_epoch(epoch),
+        None => event,
     }
 }
 

@@ -2,11 +2,16 @@ use super::query_options::TailOptions;
 
 use serde_json::{Value, json};
 
-use crate::{config::MAX_LIST_LIMIT, error::AppError, model::LifecycleResponse};
+use crate::{
+    api::socket_cursor::{ReplayGap, parse_json_cursor, public_gap_reason},
+    config::MAX_LIST_LIMIT,
+    error::AppError,
+    model::{Cursor, LifecycleResponse},
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleOptions {
-    pub(crate) cursor: i64,
+    pub(crate) cursor: Cursor,
     pub(crate) session_id: Option<String>,
 }
 
@@ -37,7 +42,7 @@ pub(crate) fn parse_lifecycle_join_payload(payload: &Value) -> Result<LifecycleO
     Ok(LifecycleOptions { cursor, session_id })
 }
 
-pub(crate) fn parse_session_lifecycle_join_payload(payload: &Value) -> Result<i64, AppError> {
+pub(crate) fn parse_session_lifecycle_join_payload(payload: &Value) -> Result<Cursor, AppError> {
     let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
 
     if object.contains_key("session_id") {
@@ -49,15 +54,11 @@ pub(crate) fn parse_session_lifecycle_join_payload(payload: &Value) -> Result<i6
 
 pub(crate) fn parse_tail_join_payload(payload: &Value) -> Result<TailOptions, AppError> {
     let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-    let mut cursor = 0_i64;
+    let mut cursor = Cursor::zero();
     let mut batch_size = 1_u32;
 
     if let Some(value) = object.get("cursor") {
-        cursor = value.as_i64().ok_or(AppError::InvalidCursor)?;
-
-        if cursor < 0 {
-            return Err(AppError::InvalidCursor);
-        }
+        cursor = parse_json_cursor(value)?;
     }
 
     if let Some(value) = object.get("batch_size") {
@@ -128,27 +129,23 @@ pub(crate) fn lifecycle_payload(event: &LifecycleResponse) -> Result<Value, AppE
     serde_json::to_value(event).map_err(|_| AppError::Internal)
 }
 
-pub(crate) fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> Value {
+pub(crate) fn build_gap_payload(gap: &ReplayGap) -> Value {
     json!({
         "type": "gap",
-        "reason": "resume_invalidated",
-        "from_cursor": from_cursor,
-        "next_cursor": last_seq,
-        "committed_cursor": last_seq,
-        "earliest_available_cursor": 1
+        "reason": public_gap_reason(gap.reason),
+        "from_cursor": gap.from_cursor.seq,
+        "next_cursor": gap.next_cursor.seq,
+        "committed_cursor": gap.committed_cursor.seq,
+        "earliest_available_cursor": gap.earliest_available_cursor.seq
     })
 }
 
-fn parse_lifecycle_cursor(payload: &Value) -> Result<i64, AppError> {
+fn parse_lifecycle_cursor(payload: &Value) -> Result<Cursor, AppError> {
     let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-    let mut cursor = 0_i64;
+    let mut cursor = Cursor::zero();
 
     if let Some(value) = object.get("cursor") {
-        cursor = value.as_i64().ok_or(AppError::InvalidCursor)?;
-
-        if cursor < 0 {
-            return Err(AppError::InvalidCursor);
-        }
+        cursor = parse_json_cursor(value)?;
     }
 
     Ok(cursor)
@@ -162,6 +159,7 @@ mod tests {
         PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload,
         parse_session_lifecycle_join_payload, parse_tail_join_payload, push_frame, reply_frame,
     };
+    use crate::model::Cursor;
 
     #[test]
     fn parses_client_frame_from_protocol_array() {
@@ -183,7 +181,7 @@ mod tests {
     #[test]
     fn tail_join_payload_defaults_cursor_and_batch_size() {
         let options = parse_tail_join_payload(&json!({})).expect("defaults should parse");
-        assert_eq!(options.cursor, 0);
+        assert_eq!(options.cursor, Cursor::zero());
         assert_eq!(options.batch_size, 1);
     }
 
@@ -195,7 +193,7 @@ mod tests {
     #[test]
     fn lifecycle_join_payload_defaults_cursor() {
         let options = parse_lifecycle_join_payload(&json!({})).expect("defaults should parse");
-        assert_eq!(options.cursor, 0);
+        assert_eq!(options.cursor, Cursor::zero());
         assert_eq!(options.session_id, None);
     }
 
@@ -217,7 +215,7 @@ mod tests {
         let cursor = parse_session_lifecycle_join_payload(&json!({"cursor": 7}))
             .expect("cursor should parse");
 
-        assert_eq!(cursor, 7);
+        assert_eq!(cursor, Cursor::new(None, 7));
     }
 
     #[test]

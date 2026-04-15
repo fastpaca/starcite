@@ -13,5 +13,6 @@ pub(crate) mod raw_socket;
 pub(crate) mod request_metrics;
 pub(crate) mod request_validation;
 pub(crate) mod session_http;
+pub(crate) mod socket_cursor;
 pub(crate) mod socket_runtime;
 pub(crate) mod socket_support;

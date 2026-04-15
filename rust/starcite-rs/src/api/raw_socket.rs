@@ -2,6 +2,7 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use serde::Serialize;
 
 use crate::{
+    api::socket_cursor::{ReplayGap, public_gap_reason},
     model::{EventResponse, LifecycleResponse},
     runtime::{OpsSnapshot, OpsState},
 };
@@ -40,22 +41,14 @@ pub(crate) struct TailGapFrame {
     earliest_available_cursor: i64,
 }
 
-pub(crate) fn build_resume_invalidated_gap(from_cursor: i64, last_seq: i64) -> TailGapFrame {
-    build_resume_invalidated_gap_with_earliest(from_cursor, last_seq, 1)
-}
-
-pub(crate) fn build_resume_invalidated_gap_with_earliest(
-    from_cursor: i64,
-    last_seq: i64,
-    earliest_available_cursor: i64,
-) -> TailGapFrame {
+pub(crate) fn build_gap_frame(gap: &ReplayGap) -> TailGapFrame {
     TailGapFrame {
         frame_type: "gap",
-        reason: "resume_invalidated",
-        from_cursor,
-        next_cursor: last_seq,
-        committed_cursor: last_seq,
-        earliest_available_cursor,
+        reason: public_gap_reason(gap.reason),
+        from_cursor: gap.from_cursor.seq,
+        next_cursor: gap.next_cursor.seq,
+        committed_cursor: gap.committed_cursor.seq,
+        earliest_available_cursor: gap.earliest_available_cursor.seq,
     }
 }
 
@@ -140,20 +133,28 @@ async fn send_terminal_message(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        build_node_draining_frame, build_resume_invalidated_gap, build_token_expired_frame,
-    };
+    use super::{build_gap_frame, build_node_draining_frame, build_token_expired_frame};
     use crate::runtime::OpsState;
+    use crate::{
+        api::socket_cursor::{GapReason, ReplayGap},
+        model::Cursor,
+    };
 
     #[test]
     fn resume_invalidated_gap_uses_public_shape() {
-        let gap = build_resume_invalidated_gap(10, 2);
+        let gap = build_gap_frame(&ReplayGap {
+            reason: GapReason::Rollback,
+            from_cursor: Cursor::new(None, 10),
+            next_cursor: Cursor::new(Some(7), 2),
+            committed_cursor: Cursor::new(Some(7), 1),
+            earliest_available_cursor: Cursor::new(Some(7), 1),
+        });
 
         assert_eq!(gap.frame_type, "gap");
         assert_eq!(gap.reason, "resume_invalidated");
         assert_eq!(gap.from_cursor, 10);
         assert_eq!(gap.next_cursor, 2);
-        assert_eq!(gap.committed_cursor, 2);
+        assert_eq!(gap.committed_cursor, 1);
         assert_eq!(gap.earliest_available_cursor, 1);
     }
 

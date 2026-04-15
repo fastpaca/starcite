@@ -469,6 +469,7 @@ mod tests {
             producer_seq: 1,
             tenant_id: "acme".to_string(),
             inserted_at: "2026-04-13T00:00:00Z".to_string(),
+            epoch: None,
             cursor: 1,
         }
     }

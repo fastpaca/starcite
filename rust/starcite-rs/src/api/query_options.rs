@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 
 use crate::{
+    api::socket_cursor::parse_query_cursor,
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::AppError,
-    model::{ArchivedFilter, EventsOptions, ListOptions, parse_query_scalar},
+    model::{ArchivedFilter, Cursor, EventsOptions, ListOptions, parse_query_scalar},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct TailOptions {
-    pub(crate) cursor: i64,
+    pub(crate) cursor: Cursor,
     pub(crate) batch_size: u32,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleOptions {
     pub(crate) tenant_id: String,
-    pub(crate) cursor: i64,
+    pub(crate) cursor: Cursor,
     pub(crate) session_id: Option<String>,
 }
 
@@ -86,18 +87,12 @@ pub(crate) fn parse_events_options(
 }
 
 pub(crate) fn parse_tail_options(params: HashMap<String, String>) -> Result<TailOptions, AppError> {
-    let mut cursor = 0_i64;
+    let mut cursor = Cursor::zero();
     let mut batch_size = 1_u32;
 
     for (key, value) in params {
         match key.as_str() {
-            "cursor" => {
-                cursor = value.parse::<i64>().map_err(|_| AppError::InvalidCursor)?;
-
-                if cursor < 0 {
-                    return Err(AppError::InvalidCursor);
-                }
-            }
+            "cursor" => cursor = parse_query_cursor(&value)?,
             "batch_size" => {
                 batch_size = value
                     .parse::<u32>()
@@ -117,7 +112,10 @@ pub(crate) fn parse_tail_options(params: HashMap<String, String>) -> Result<Tail
 pub(crate) fn parse_lifecycle_options(
     params: HashMap<String, String>,
 ) -> Result<LifecycleOptions, AppError> {
-    let cursor = parse_events_options(params.clone())?.cursor;
+    let cursor = match params.get("cursor") {
+        Some(raw) => parse_query_cursor(raw)?,
+        None => Cursor::zero(),
+    };
     let session_id = parse_optional_session_id(&params)?;
 
     match params
@@ -178,7 +176,7 @@ mod tests {
         LifecycleOptions, TailOptions, parse_archived_filter, parse_events_options,
         parse_lifecycle_options, parse_list_options, parse_tail_options,
     };
-    use crate::model::ArchivedFilter;
+    use crate::model::{ArchivedFilter, Cursor};
 
     #[test]
     fn list_query_supports_bracket_metadata_filters() {
@@ -207,7 +205,7 @@ mod tests {
         assert_eq!(
             options,
             TailOptions {
-                cursor: 12,
+                cursor: Cursor::new(None, 12),
                 batch_size: 1,
             }
         );
@@ -224,7 +222,7 @@ mod tests {
         assert_eq!(
             options,
             TailOptions {
-                cursor: 7,
+                cursor: Cursor::new(None, 7),
                 batch_size: 64,
             }
         );
@@ -251,7 +249,7 @@ mod tests {
             options,
             LifecycleOptions {
                 tenant_id: "acme".to_string(),
-                cursor: 0,
+                cursor: Cursor::zero(),
                 session_id: None,
             }
         );
@@ -266,7 +264,7 @@ mod tests {
 
         let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
 
-        assert_eq!(options.cursor, 9);
+        assert_eq!(options.cursor, Cursor::new(None, 9));
     }
 
     #[test]

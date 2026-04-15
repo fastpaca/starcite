@@ -322,6 +322,12 @@ impl SessionManager {
             self.seed_pending_flush(session_id).await;
             state.mark_flush_seeded();
         }
+        let committed_seq = data_plane::session_store::resolve_session_archived_seq(
+            &self.session_store,
+            &self.pool,
+            session_id,
+        )
+        .await?;
         let last_seq = match state.last_seq {
             Some(last_seq) => last_seq,
             None => {
@@ -361,7 +367,12 @@ impl SessionManager {
                 return match existing {
                     Some(existing) if matches_local_event(&existing, &input, tenant_id) => {
                         state.remember_producer_seq(&producer_id, current);
-                        Ok(deduped_append_outcome(&existing, last_seq, tenant_id))
+                        Ok(deduped_append_outcome(
+                            &existing,
+                            last_seq,
+                            committed_seq,
+                            tenant_id,
+                        ))
                     }
                     Some(_) => Err(AppError::ProducerReplayConflict),
                     None => Err(AppError::ProducerSeqConflict {
@@ -396,6 +407,7 @@ impl SessionManager {
             producer_seq: input.producer_seq,
             tenant_id: tenant_id.to_string(),
             inserted_at,
+            epoch: Some(lease.epoch),
             cursor: next_seq,
         };
 
@@ -412,7 +424,7 @@ impl SessionManager {
                 last_seq: next_seq,
                 deduped: false,
                 cursor: next_seq,
-                committed_cursor: next_seq,
+                committed_cursor: committed_seq,
             },
             event: Some(event),
             tenant_id: tenant_id.to_string(),
@@ -567,6 +579,7 @@ fn matches_local_event(
 fn deduped_append_outcome(
     existing: &EventResponse,
     last_seq: i64,
+    committed_seq: i64,
     tenant_id: &str,
 ) -> AppendOutcome {
     AppendOutcome {
@@ -575,7 +588,7 @@ fn deduped_append_outcome(
             last_seq,
             deduped: true,
             cursor: existing.cursor,
-            committed_cursor: last_seq,
+            committed_cursor: committed_seq,
         },
         event: None,
         tenant_id: tenant_id.to_string(),
@@ -653,6 +666,7 @@ mod tests {
             producer_seq,
             tenant_id: "acme".to_string(),
             inserted_at: "2026-04-13T00:00:00Z".to_string(),
+            epoch: None,
             cursor: seq,
         }
     }

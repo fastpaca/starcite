@@ -11,7 +11,7 @@ use tokio::sync::broadcast;
 use crate::{
     AppState, api, data_plane,
     error::AppError,
-    model::{EventsOptions, LifecycleEvent, LifecyclePage, LifecycleResponse},
+    model::{Cursor, EventsOptions, LifecycleEvent, LifecyclePage, LifecycleResponse},
     runtime::RuntimeTouchReason,
 };
 
@@ -49,7 +49,7 @@ pub async fn read_lifecycle(
         &lifecycle.tenant_id,
         lifecycle.session_id.as_deref(),
         EventsOptions {
-            cursor: lifecycle.cursor,
+            cursor: lifecycle.cursor.seq,
             limit: api::query_options::parse_events_options(params)?.limit,
         },
     )
@@ -76,7 +76,11 @@ pub async fn session_lifecycle_events(
 
     let auth = api::request_metrics::authenticate_socket(&state, &params).await?;
     let expiry = auth.expiry_delay();
-    let cursor = api::query_options::parse_events_options(params)?.cursor;
+    let cursor = params
+        .get("cursor")
+        .map(|raw| api::socket_cursor::parse_query_cursor(raw))
+        .transpose()?
+        .unwrap_or_else(Cursor::zero);
     let lifecycle =
         api::lifecycle_scope::resolve_session_lifecycle(&state, &auth, &session_id, cursor).await?;
     touch_lifecycle_session(
@@ -103,9 +107,13 @@ pub async fn read_session_lifecycle(
 
     let auth = api::request_metrics::authenticate_http(&state, &headers).await?;
     let options = api::query_options::parse_events_options(params)?;
-    let lifecycle =
-        api::lifecycle_scope::resolve_session_lifecycle(&state, &auth, &session_id, options.cursor)
-            .await?;
+    let lifecycle = api::lifecycle_scope::resolve_session_lifecycle(
+        &state,
+        &auth,
+        &session_id,
+        Cursor::new(None, options.cursor),
+    )
+    .await?;
     let page = data_plane::repository::read_lifecycle_events(
         &state.pool,
         &lifecycle.tenant_id,

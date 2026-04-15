@@ -190,7 +190,7 @@ pub async fn append_replica(
 
     state
         .session_manager
-        .apply_replica_commit(request.event)
+        .apply_replica_commit(request.event.with_epoch(request.epoch))
         .await;
 
     Ok((
