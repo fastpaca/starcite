@@ -23,7 +23,7 @@ The experiment here asked what falls out when Starcite is modeled as:
 - append with `expected_seq`
 - producer dedupe and replay conflict handling
 - archive and unarchive as a session visibility flag
-- explicit auth modes with `none` and `unsafe_jwt`
+- explicit auth modes with `none` and verified `jwt`
 - Prometheus text metrics on a separate ops listener
 - `/health/live` and `/health/ready` on the same separate ops listener
 - local ops-state JSON on `GET /debug/state`
@@ -86,12 +86,12 @@ and pushes `token_expired` when an active socket outlives a `jwt` token. During 
 Auth is now explicit instead of hand-waved:
 
 - `STARCITE_AUTH_MODE=none` keeps the existing trust-everything local path
-- `STARCITE_AUTH_MODE=unsafe_jwt` parses JWT claims without signature verification and enforces
-  scope, tenant, session lock, and expiry across HTTP plus WebSocket transports
+- `STARCITE_AUTH_MODE=jwt` verifies bearer JWT signatures against JWKS and enforces
+  issuer, audience, scope, tenant, session lock, and expiry across HTTP plus WebSocket transports
 - `STARCITE_ENABLE_TELEMETRY=true` enables Prometheus exposition and in-process metric recording;
   `false` leaves only the uptime gauge
-- `unsafe_jwt` expects `Authorization: Bearer <jwt>` on HTTP and `token=<jwt>` on WebSocket URLs
-- tenant-scoped lifecycle subscriptions in `unsafe_jwt` require a service principal with
+- `jwt` expects `Authorization: Bearer <jwt>` on HTTP and `token=<jwt>` on WebSocket URLs
+- tenant-scoped lifecycle subscriptions in `jwt` require a service principal with
   `session:read` and no `session_id` lock
 
 That gets the Rust rewrite onto the real Starcite policy surface without pretending it already has
@@ -277,7 +277,7 @@ is actually participating in Postgres-backed standby assignment.
 
 ## Deliberate gaps
 
-- no signature-verified JWT or JWKS flow yet; `unsafe_jwt` is claim parsing only
+- no key rotation tests beyond the in-process JWKS test harness yet
 - no full quorum replication or topology routing behind the runtime lifecycle; `local_async` has
   only Postgres-backed single-writer session leases plus one synchronous standby chosen by the
   Postgres control plane or a static fallback URL
@@ -289,6 +289,6 @@ The existing Elixir system splits the hot path from the durable archive path and
 
 If the experiment holds up, the next decisions are straightforward:
 
-1. Replace `unsafe_jwt` with verified JWT/JWKS handling without losing the typed policy surface.
+1. Harden JWT/JWKS operational behavior and docs without losing the typed policy surface.
 2. Decide whether the filtered tenant `session_id` compatibility path should stay once clients move to dedicated session lifecycle routes and topics.
 3. Decide whether the Rust metrics surface should stay as direct Prometheus text or eventually grow a richer event substrate before attempting any horizontal scaling story.

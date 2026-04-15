@@ -220,7 +220,7 @@ fn parse_non_negative_u64(name: &str, raw: &str) -> Result<u64, String> {
 fn parse_auth_mode(name: &str, raw: &str) -> Result<AuthMode, String> {
     match raw.trim().to_ascii_lowercase().as_str() {
         "none" => Ok(AuthMode::None),
-        "jwt" | "unsafe_jwt" => Ok(AuthMode::Jwt),
+        "jwt" => Ok(AuthMode::Jwt),
         _ => Err(format!("invalid auth mode for {name}: {raw}")),
     }
 }
@@ -347,10 +347,6 @@ mod tests {
             parse_auth_mode("STARCITE_AUTH_MODE", "jwt").expect("jwt should parse"),
             AuthMode::Jwt
         );
-        assert_eq!(
-            parse_auth_mode("STARCITE_AUTH_MODE", "unsafe_jwt")
-                .expect("legacy jwt mode should parse"),
-            AuthMode::Jwt
-        );
+        assert!(parse_auth_mode("STARCITE_AUTH_MODE", "unsafe_jwt").is_err());
     }
 }
