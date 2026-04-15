@@ -8,17 +8,12 @@ use crate::{
     },
     error::AppError,
     model::{
-        AppendReply, ArchivedFilter, Cursor, EventResponse, EventRow, EventsOptions, EventsPage,
-        JsonMap, LifecycleEvent, LifecyclePage, LifecycleResponse, LifecycleRow, ListOptions,
-        SessionResponse, SessionRow, SessionsPage, ValidatedAppendEvent, ValidatedCreateSession,
-        ValidatedUpdateSession, merge_metadata,
+        AppendReply, ArchivedFilter, EventResponse, EventRow, EventsOptions, EventsPage, JsonMap,
+        LifecycleEvent, LifecyclePage, LifecycleResponse, LifecycleRow, ListOptions,
+        SessionResponse, SessionRow, SessionsPage, ValidatedCreateSession, ValidatedUpdateSession,
+        merge_metadata,
     },
 };
-
-#[derive(Debug, Clone, sqlx::FromRow)]
-struct ProducerCursorRow {
-    last_producer_seq: i64,
-}
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SessionLeaseRow {
@@ -414,185 +409,6 @@ pub async fn publish_archive_progress(
         .await?;
 
     Ok(())
-}
-
-pub async fn append_event(
-    pool: &PgPool,
-    session_id: &str,
-    input: ValidatedAppendEvent,
-    emitter_id: &str,
-) -> Result<AppendOutcome, AppError> {
-    let mut tx = pool.begin().await?;
-
-    let session = load_session_row_tx(&mut tx, session_id).await?;
-
-    if let Some(expected_seq) = input.expected_seq
-        && session.last_seq != expected_seq
-    {
-        return Err(AppError::ExpectedSeqConflict {
-            expected: expected_seq,
-            current: session.last_seq,
-        });
-    }
-
-    let producer_cursor = load_producer_cursor_tx(&mut tx, session_id, &input.producer_id).await?;
-
-    match classify_producer_sequence(
-        producer_cursor.as_ref().map(|row| row.last_producer_seq),
-        input.producer_seq,
-    ) {
-        ProducerSequenceCheck::AcceptFirst | ProducerSequenceCheck::AcceptNext => {}
-        ProducerSequenceCheck::ReplayOrConflict { expected } => {
-            let existing = load_event_for_producer_seq_tx(
-                &mut tx,
-                session_id,
-                &input.producer_id,
-                input.producer_seq,
-            )
-            .await?;
-
-            if let Some(existing) = existing {
-                if matches_event(&existing, &input, &session.tenant_id)? {
-                    let seq = existing.seq;
-                    tx.commit().await?;
-
-                    return Ok(AppendOutcome {
-                        reply: AppendReply {
-                            seq,
-                            last_seq: session.last_seq,
-                            deduped: true,
-                            epoch: None,
-                            cursor: Cursor::new(None, seq),
-                            committed_cursor: Cursor::new(None, session.last_seq),
-                        },
-                        event: None,
-                        tenant_id: session.tenant_id,
-                    });
-                }
-
-                return Err(AppError::ProducerReplayConflict);
-            }
-
-            return Err(AppError::ProducerSeqConflict {
-                producer_id: input.producer_id,
-                expected,
-                current: input.producer_seq,
-            });
-        }
-        ProducerSequenceCheck::Gap { expected } => {
-            return Err(AppError::ProducerSeqConflict {
-                producer_id: input.producer_id,
-                expected,
-                current: input.producer_seq,
-            });
-        }
-    }
-
-    let next_seq = session.last_seq + 1;
-
-    let event = sqlx::query_as::<_, EventRow>(
-        r#"
-        INSERT INTO events (
-          session_id,
-          seq,
-          type,
-          payload,
-          actor,
-          source,
-          metadata,
-          refs,
-          idempotency_key,
-          producer_id,
-          producer_seq,
-          tenant_id
-        )
-        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-        RETURNING
-          session_id,
-          seq,
-          type,
-          payload,
-          actor,
-          source,
-          metadata,
-          refs,
-          idempotency_key,
-          producer_id,
-          producer_seq,
-          tenant_id,
-          inserted_at
-        "#,
-    )
-    .bind(session_id)
-    .bind(next_seq)
-    .bind(input.event_type)
-    .bind(serde_json::Value::Object(input.payload))
-    .bind(input.actor)
-    .bind(input.source)
-    .bind(serde_json::Value::Object(input.metadata))
-    .bind(serde_json::Value::Object(input.refs))
-    .bind(input.idempotency_key)
-    .bind(&input.producer_id)
-    .bind(input.producer_seq)
-    .bind(&session.tenant_id)
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(map_insert_error)?;
-
-    sqlx::query(
-        r#"
-        INSERT INTO session_producers (
-          session_id,
-          producer_id,
-          last_producer_seq
-        )
-        VALUES ($1, $2, $3)
-        ON CONFLICT (session_id, producer_id)
-        DO UPDATE
-        SET
-          last_producer_seq = EXCLUDED.last_producer_seq,
-          updated_at = now()
-        "#,
-    )
-    .bind(session_id)
-    .bind(&input.producer_id)
-    .bind(input.producer_seq)
-    .execute(&mut *tx)
-    .await?;
-
-    sqlx::query("UPDATE sessions SET last_seq = $2 WHERE id = $1")
-        .bind(session_id)
-        .bind(next_seq)
-        .execute(&mut *tx)
-        .await?;
-
-    sqlx::query("SELECT pg_notify($1, $2)")
-        .bind(EVENT_NOTIFICATION_CHANNEL)
-        .bind(
-            serde_json::to_string(&EventNotification {
-                emitter_id: emitter_id.to_string(),
-                session_id: session_id.to_string(),
-                seq: next_seq,
-            })
-            .map_err(|_| AppError::Internal)?,
-        )
-        .execute(&mut *tx)
-        .await?;
-
-    tx.commit().await?;
-
-    Ok(AppendOutcome {
-        reply: AppendReply {
-            seq: next_seq,
-            last_seq: next_seq,
-            deduped: false,
-            epoch: None,
-            cursor: Cursor::new(None, next_seq),
-            committed_cursor: Cursor::new(None, next_seq),
-        },
-        event: Some(EventResponse::try_from(event)?),
-        tenant_id: session.tenant_id,
-    })
 }
 
 pub async fn read_events(
@@ -1361,62 +1177,6 @@ async fn load_session_row_tx(
     row.ok_or(AppError::SessionNotFound)
 }
 
-async fn load_producer_cursor_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: &str,
-    producer_id: &str,
-) -> Result<Option<ProducerCursorRow>, AppError> {
-    sqlx::query_as::<_, ProducerCursorRow>(
-        r#"
-        SELECT last_producer_seq
-        FROM session_producers
-        WHERE session_id = $1
-          AND producer_id = $2
-        "#,
-    )
-    .bind(session_id)
-    .bind(producer_id)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AppError::from)
-}
-
-async fn load_event_for_producer_seq_tx(
-    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
-    session_id: &str,
-    producer_id: &str,
-    producer_seq: i64,
-) -> Result<Option<EventRow>, AppError> {
-    sqlx::query_as::<_, EventRow>(
-        r#"
-        SELECT
-          session_id,
-          seq,
-          type,
-          payload,
-          actor,
-          source,
-          metadata,
-          refs,
-          idempotency_key,
-          producer_id,
-          producer_seq,
-          tenant_id,
-          inserted_at
-        FROM events
-        WHERE session_id = $1
-          AND producer_id = $2
-          AND producer_seq = $3
-        "#,
-    )
-    .bind(session_id)
-    .bind(producer_id)
-    .bind(producer_seq)
-    .fetch_optional(&mut **tx)
-    .await
-    .map_err(AppError::from)
-}
-
 async fn load_event_by_seq_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     session_id: &str,
@@ -1469,21 +1229,6 @@ pub(crate) fn classify_producer_sequence(
             expected: last_producer_seq + 1,
         },
     }
-}
-
-fn matches_event(
-    existing: &EventRow,
-    input: &ValidatedAppendEvent,
-    tenant_id: &str,
-) -> Result<bool, AppError> {
-    Ok(existing.event_type == input.event_type
-        && value_to_object(&existing.payload)? == input.payload
-        && existing.actor == input.actor
-        && existing.source == input.source
-        && value_to_object(&existing.metadata)? == input.metadata
-        && value_to_object(&existing.refs)? == input.refs
-        && existing.idempotency_key == input.idempotency_key
-        && existing.tenant_id == tenant_id)
 }
 
 fn matches_event_response(existing: &EventRow, event: &EventResponse) -> Result<bool, AppError> {

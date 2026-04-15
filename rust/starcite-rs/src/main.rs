@@ -112,7 +112,6 @@ async fn run() -> Result<(), String> {
         ownership: ownership.clone(),
         replication: replication.clone(),
         ops: ops_state.clone(),
-        instance_id: instance_id.clone(),
         idle_timeout: Duration::from_millis(config.session_runtime_idle_timeout_ms),
     });
     let runtime = runtime::SessionRuntime::new(

@@ -41,7 +41,6 @@ pub struct SessionManager {
     ownership: OwnershipManager,
     replication: ReplicationCoordinator,
     ops: OpsState,
-    instance_id: Arc<str>,
     idle_timeout: Duration,
     next_worker_id: Arc<AtomicU64>,
 }
@@ -55,7 +54,6 @@ pub struct SessionManagerDeps {
     pub ownership: OwnershipManager,
     pub replication: ReplicationCoordinator,
     pub ops: OpsState,
-    pub instance_id: Arc<str>,
     pub idle_timeout: Duration,
 }
 
@@ -126,7 +124,6 @@ impl SessionManager {
             ownership,
             replication,
             ops,
-            instance_id,
             idle_timeout,
         } = deps;
 
@@ -140,7 +137,6 @@ impl SessionManager {
             ownership,
             replication,
             ops,
-            instance_id,
             idle_timeout,
             next_worker_id: Arc::new(AtomicU64::new(1)),
         }
@@ -637,7 +633,6 @@ mod tests {
             )
             .expect("replication"),
             ops: OpsState::new(30_000),
-            instance_id: Arc::<str>::from("node-a"),
             idle_timeout,
         })
     }
