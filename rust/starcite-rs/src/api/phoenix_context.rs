@@ -56,9 +56,10 @@ pub(crate) fn tail_join_error_payload(error: &AppError, context: &SocketContext)
 
 pub(crate) fn error_reason(error: &AppError) -> &'static str {
     match error {
-        AppError::MissingBearerToken => "missing_bearer_token",
-        AppError::InvalidBearerToken => "invalid_bearer_token",
-        AppError::TokenExpired => "token_expired",
+        AppError::MissingBearerToken
+        | AppError::InvalidBearerToken
+        | AppError::InvalidToken
+        | AppError::TokenExpired => "unauthorized",
         AppError::Forbidden => "forbidden",
         AppError::ForbiddenScope => "forbidden_scope",
         AppError::ForbiddenSession => "forbidden_session",

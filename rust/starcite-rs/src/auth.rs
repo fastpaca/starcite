@@ -493,17 +493,17 @@ fn attach_principal_metadata(auth: &AuthContext, mut metadata: JsonMap) -> JsonM
 }
 
 async fn authenticate_jwt(token: &str, auth: &AuthService) -> Result<AuthContext, AppError> {
-    let verifier = auth.jwt.as_ref().ok_or(AppError::InvalidBearerToken)?;
-    let header = decode_header(token).map_err(|_| AppError::InvalidBearerToken)?;
+    let verifier = auth.jwt.as_ref().ok_or(AppError::InvalidToken)?;
+    let header = decode_header(token).map_err(|_| AppError::InvalidToken)?;
     let kid = header
         .kid
         .as_deref()
         .filter(|kid| !kid.is_empty())
-        .ok_or(AppError::InvalidBearerToken)?;
+        .ok_or(AppError::InvalidToken)?;
     let algorithm = header.alg;
     ensure_supported_algorithm(algorithm)?;
     let jwk = verifier.signing_jwk(kid).await?;
-    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| AppError::InvalidBearerToken)?;
+    let decoding_key = DecodingKey::from_jwk(&jwk).map_err(|_| AppError::InvalidToken)?;
     let validation = verifier.validation(algorithm);
     let token_data =
         decode::<Value>(token, &decoding_key, &validation).map_err(map_jwt_decode_error)?;
@@ -525,14 +525,14 @@ impl JwtVerifier {
                     let cache = self.cache.lock().await;
 
                     if !cache.is_usable(kid, self.hard_expiry) {
-                        return Err(AppError::InvalidBearerToken);
+                        return Err(AppError::InvalidToken);
                     }
                 }
             }
         }
 
         let cache = self.cache.lock().await;
-        cache.find(kid).cloned().ok_or(AppError::InvalidBearerToken)
+        cache.find(kid).cloned().ok_or(AppError::InvalidToken)
     }
 
     async fn should_refresh(&self, kid: &str) -> bool {
@@ -554,17 +554,17 @@ impl JwtVerifier {
             .get(self.jwks_url.as_ref())
             .send()
             .await
-            .map_err(|_| AppError::InvalidBearerToken)?;
+            .map_err(|_| AppError::InvalidToken)?;
         let response = response
             .error_for_status()
-            .map_err(|_| AppError::InvalidBearerToken)?;
+            .map_err(|_| AppError::InvalidToken)?;
         let jwks = response
             .json::<JwkSet>()
             .await
-            .map_err(|_| AppError::InvalidBearerToken)?;
+            .map_err(|_| AppError::InvalidToken)?;
 
         if jwks.keys.is_empty() {
-            return Err(AppError::InvalidBearerToken);
+            return Err(AppError::InvalidToken);
         }
 
         Ok(jwks.keys)
@@ -637,7 +637,7 @@ fn ensure_supported_algorithm(algorithm: Algorithm) -> Result<(), AppError> {
 fn map_jwt_decode_error(error: jsonwebtoken::errors::Error) -> AppError {
     match error.kind() {
         ErrorKind::ExpiredSignature => AppError::TokenExpired,
-        _ => AppError::InvalidBearerToken,
+        _ => AppError::InvalidToken,
     }
 }
 
@@ -645,13 +645,13 @@ fn validate_issued_at(iat: Option<&Value>, leeway_seconds: u64) -> Result<(), Ap
     let Some(iat) = iat else {
         return Ok(());
     };
-    let issued_at = iat.as_i64().ok_or(AppError::InvalidBearerToken)?;
+    let issued_at = iat.as_i64().ok_or(AppError::InvalidToken)?;
     let now = Utc::now().timestamp();
 
     if issued_at <= now + leeway_seconds as i64 {
         Ok(())
     } else {
-        Err(AppError::InvalidBearerToken)
+        Err(AppError::InvalidToken)
     }
 }
 
@@ -670,14 +670,14 @@ fn required_claim_string(claims: &Value, key: &str) -> Result<String, AppError> 
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(ToString::to_string)
-        .ok_or(AppError::InvalidBearerToken)
+        .ok_or(AppError::InvalidToken)
 }
 
 fn optional_claim_string(claims: &Value, key: &str) -> Result<Option<String>, AppError> {
     match claims.get(key) {
         None | Some(Value::Null) => Ok(None),
         Some(Value::String(value)) if !value.is_empty() => Ok(Some(value.clone())),
-        _ => Err(AppError::InvalidBearerToken),
+        _ => Err(AppError::InvalidToken),
     }
 }
 
@@ -686,7 +686,7 @@ fn required_claim_i64(claims: &Value, key: &str) -> Result<i64, AppError> {
         .get(key)
         .and_then(Value::as_i64)
         .filter(|value| *value > 0)
-        .ok_or(AppError::InvalidBearerToken)
+        .ok_or(AppError::InvalidToken)
 }
 
 fn claim_scopes(claims: &Value) -> Result<Vec<String>, AppError> {
@@ -706,7 +706,7 @@ fn claim_scopes(claims: &Value) -> Result<Vec<String>, AppError> {
             let scope = value
                 .as_str()
                 .filter(|scope| !scope.is_empty())
-                .ok_or(AppError::InvalidBearerToken)?;
+                .ok_or(AppError::InvalidToken)?;
             scopes.push(scope.to_string());
         }
     }
@@ -715,22 +715,20 @@ fn claim_scopes(claims: &Value) -> Result<Vec<String>, AppError> {
     scopes.dedup();
 
     if scopes.is_empty() {
-        Err(AppError::InvalidBearerToken)
+        Err(AppError::InvalidToken)
     } else {
         Ok(scopes)
     }
 }
 
 fn principal_from_subject(tenant_id: String, subject: String) -> Result<Principal, AppError> {
-    let (principal_type, id) = subject
-        .split_once(':')
-        .ok_or(AppError::InvalidBearerToken)?;
+    let (principal_type, id) = subject.split_once(':').ok_or(AppError::InvalidToken)?;
 
     Ok(Principal {
         tenant_id,
-        id: require_non_empty(id.to_string(), AppError::InvalidBearerToken)?,
+        id: require_non_empty(id.to_string(), AppError::InvalidToken)?,
         principal_type: normalize_principal_type(principal_type)
-            .map_err(|_| AppError::InvalidBearerToken)?,
+            .map_err(|_| AppError::InvalidToken)?,
     })
 }
 
@@ -983,7 +981,33 @@ mod tests {
 
         assert!(matches!(
             authenticate_bearer(&auth_service, &token).await,
-            Err(AppError::InvalidBearerToken)
+            Err(AppError::InvalidToken)
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn jwt_rejects_invalid_audience_as_invalid_token() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            json!({
+                "iss": "https://issuer.example",
+                "aud": "not-starcite-api",
+                "exp": 4_102_444_800_i64,
+                "tenant_id": "acme",
+                "sub": "service:rust-rewrite",
+                "scope": "session:read"
+            }),
+            secret,
+            "kid-1",
+        );
+
+        assert!(matches!(
+            authenticate_bearer(&auth_service, &token).await,
+            Err(AppError::InvalidToken)
         ));
 
         server.abort();

@@ -21,6 +21,8 @@ pub enum AppError {
     MissingBearerToken,
     #[error("invalid bearer token")]
     InvalidBearerToken,
+    #[error("invalid token")]
+    InvalidToken,
     #[error("token expired")]
     TokenExpired,
     #[error("forbidden")]
@@ -106,6 +108,7 @@ impl AppError {
         match self {
             Self::MissingBearerToken => "missing_bearer_token",
             Self::InvalidBearerToken => "invalid_bearer_token",
+            Self::InvalidToken => "invalid_token",
             Self::TokenExpired => "token_expired",
             Self::Forbidden => "forbidden",
             Self::ForbiddenScope => "forbidden_scope",
@@ -140,9 +143,10 @@ impl AppError {
 
     fn status_code(&self) -> StatusCode {
         match self {
-            Self::MissingBearerToken | Self::InvalidBearerToken | Self::TokenExpired => {
-                StatusCode::UNAUTHORIZED
-            }
+            Self::MissingBearerToken
+            | Self::InvalidBearerToken
+            | Self::InvalidToken
+            | Self::TokenExpired => StatusCode::UNAUTHORIZED,
             Self::Forbidden
             | Self::ForbiddenScope
             | Self::ForbiddenSession
@@ -176,17 +180,12 @@ impl AppError {
 
     fn body(&self) -> Value {
         match self {
-            Self::MissingBearerToken => json!({
-                "error": self.error_code(),
-                "message": "Missing bearer token"
-            }),
-            Self::InvalidBearerToken => json!({
-                "error": self.error_code(),
-                "message": "Invalid bearer token"
-            }),
-            Self::TokenExpired => json!({
-                "error": self.error_code(),
-                "message": "Token expired"
+            Self::MissingBearerToken
+            | Self::InvalidBearerToken
+            | Self::InvalidToken
+            | Self::TokenExpired => json!({
+                "error": "unauthorized",
+                "message": "Unauthorized"
             }),
             Self::Forbidden => json!({
                 "error": self.error_code(),
@@ -325,6 +324,19 @@ impl AppError {
             }),
         }
     }
+
+    fn www_authenticate_header(&self) -> Option<&'static str> {
+        match self {
+            Self::MissingBearerToken => Some(r#"Bearer realm="starcite""#),
+            Self::InvalidBearerToken => Some(
+                r#"Bearer realm="starcite", error="invalid_request", error_description="Malformed bearer token""#,
+            ),
+            Self::InvalidToken | Self::TokenExpired => {
+                Some(r#"Bearer realm="starcite", error="invalid_token""#)
+            }
+            _ => None,
+        }
+    }
 }
 
 pub fn apply_drain_headers(
@@ -358,6 +370,16 @@ impl IntoResponse for AppError {
         let mut response = (self.status_code(), Json(self.body())).into_response();
 
         match &self {
+            Self::MissingBearerToken
+            | Self::InvalidBearerToken
+            | Self::InvalidToken
+            | Self::TokenExpired => {
+                if let Some(value) = self.www_authenticate_header() {
+                    response
+                        .headers_mut()
+                        .insert(header::WWW_AUTHENTICATE, HeaderValue::from_static(value));
+                }
+            }
             Self::NodeDraining {
                 drain_source,
                 retry_after_ms,
@@ -544,6 +566,61 @@ mod tests {
                 "message": "Session owner is unavailable",
                 "owner_url": "http://127.0.0.1:4191"
             })
+        );
+    }
+
+    #[tokio::test]
+    async fn missing_bearer_token_response_matches_legacy_unauthorized_shape() {
+        let response = AppError::MissingBearerToken.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            r#"Bearer realm="starcite""#
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body bytes");
+        let json_body: serde_json::Value = serde_json::from_slice(&body).expect("response json");
+
+        assert_eq!(
+            json_body,
+            json!({
+                "error": "unauthorized",
+                "message": "Unauthorized"
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_bearer_token_response_uses_invalid_request_challenge() {
+        let response = AppError::InvalidBearerToken.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            r#"Bearer realm="starcite", error="invalid_request", error_description="Malformed bearer token""#
+        );
+    }
+
+    #[tokio::test]
+    async fn invalid_token_response_uses_invalid_token_challenge() {
+        let response = AppError::InvalidToken.into_response();
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get(axum::http::header::WWW_AUTHENTICATE)
+                .unwrap(),
+            r#"Bearer realm="starcite", error="invalid_token""#
         );
     }
 }
