@@ -753,13 +753,14 @@ mod tests {
     };
 
     use super::{
-        AppError, AuthContext, AuthService, auth_context_from_claims, claim_scopes,
-        validate_append_request, validate_create_request,
+        AppError, AuthContext, AuthService, allow_append_session, allow_read_session,
+        apply_list_scope, auth_context_from_claims, claim_scopes, validate_append_request,
+        validate_create_request,
     };
     use crate::{
         auth::{AuthMode, authenticate_http, can_subscribe_lifecycle},
         config::Config,
-        model::{AppendEventRequest, CreateSessionRequest, Principal},
+        model::{AppendEventRequest, ArchivedFilter, CreateSessionRequest, ListOptions, Principal},
     };
 
     #[tokio::test]
@@ -1080,6 +1081,107 @@ mod tests {
                 "principal_id": "user-42"
             })
         );
+    }
+
+    #[test]
+    fn jwt_list_scope_forces_claim_tenant_and_session_lock() {
+        let auth = AuthContext {
+            kind: AuthMode::Jwt,
+            principal: Principal {
+                tenant_id: "acme".to_string(),
+                id: "service".to_string(),
+                principal_type: "service".to_string(),
+            },
+            scopes: vec!["session:read".to_string()],
+            session_id: Some("ses_locked".to_string()),
+            expires_at: Some(4_102_444_800_i64),
+        };
+
+        let scoped = apply_list_scope(
+            &auth,
+            ListOptions {
+                limit: 50,
+                cursor: None,
+                archived: ArchivedFilter::Active,
+                metadata: serde_json::Map::new(),
+                tenant_id: Some("acme".to_string()),
+                session_id: None,
+            },
+        )
+        .expect("list scope should validate");
+
+        assert_eq!(scoped.tenant_id.as_deref(), Some("acme"));
+        assert_eq!(scoped.session_id.as_deref(), Some("ses_locked"));
+    }
+
+    #[test]
+    fn jwt_list_scope_rejects_cross_tenant_filter() {
+        let auth = AuthContext {
+            kind: AuthMode::Jwt,
+            principal: Principal {
+                tenant_id: "acme".to_string(),
+                id: "service".to_string(),
+                principal_type: "service".to_string(),
+            },
+            scopes: vec!["session:read".to_string()],
+            session_id: None,
+            expires_at: Some(4_102_444_800_i64),
+        };
+
+        let error = apply_list_scope(
+            &auth,
+            ListOptions {
+                limit: 50,
+                cursor: None,
+                archived: ArchivedFilter::Active,
+                metadata: serde_json::Map::new(),
+                tenant_id: Some("beta".to_string()),
+                session_id: None,
+            },
+        )
+        .expect_err("cross-tenant list filter should fail");
+
+        assert!(matches!(error, AppError::ForbiddenTenant));
+    }
+
+    #[test]
+    fn jwt_read_permission_rejects_locked_other_session() {
+        let auth = AuthContext {
+            kind: AuthMode::Jwt,
+            principal: Principal {
+                tenant_id: "acme".to_string(),
+                id: "user-42".to_string(),
+                principal_type: "user".to_string(),
+            },
+            scopes: vec!["session:read".to_string()],
+            session_id: Some("ses_locked".to_string()),
+            expires_at: Some(4_102_444_800_i64),
+        };
+
+        let error = allow_read_session(&auth, "ses_other", "acme")
+            .expect_err("locked token should reject other session");
+
+        assert!(matches!(error, AppError::ForbiddenSession));
+    }
+
+    #[test]
+    fn jwt_append_permission_rejects_cross_tenant_session() {
+        let auth = AuthContext {
+            kind: AuthMode::Jwt,
+            principal: Principal {
+                tenant_id: "acme".to_string(),
+                id: "user-42".to_string(),
+                principal_type: "user".to_string(),
+            },
+            scopes: vec!["session:append".to_string()],
+            session_id: None,
+            expires_at: Some(4_102_444_800_i64),
+        };
+
+        let error = allow_append_session(&auth, "ses_demo", "beta")
+            .expect_err("cross-tenant append should fail");
+
+        assert!(matches!(error, AppError::ForbiddenTenant));
     }
 
     #[test]
