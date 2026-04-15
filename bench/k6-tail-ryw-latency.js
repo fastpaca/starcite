@@ -91,6 +91,7 @@ export default function (data) {
   const producerSeq = runtime.nextSeqBySession[sessionIndex];
   const producerId = `bench-vu-${__VU}-s-${sessionIndex}`;
   const cursor = runtime.cursorBySession[sessionIndex];
+  const cursorEpoch = runtime.cursorEpochBySession[sessionIndex];
   const wsUrl = socketUrl(tailNode);
   const tailTopic = `tail:${sessionId}`;
   const joinRef = `${__VU}-${__ITER}`;
@@ -107,7 +108,7 @@ export default function (data) {
 
   const outcome = {
     appendAccepted: false,
-    latestSeq: cursor,
+    latestCursor: { seq: cursor, epoch: cursorEpoch },
     status: 'init',
   };
 
@@ -117,7 +118,13 @@ export default function (data) {
 
   const res = ws.connect(wsUrl, { timeout: `${wsTimeoutMs}ms` }, function (socket) {
     socket.on('open', function () {
-      socket.send(JSON.stringify([joinRef, joinRef, tailTopic, 'phx_join', { cursor, batch_size: 1 }]));
+      const joinPayload = { cursor, batch_size: 1 };
+
+      if (Number.isInteger(cursorEpoch) && cursorEpoch >= 0) {
+        joinPayload.cursor_epoch = cursorEpoch;
+      }
+
+      socket.send(JSON.stringify([joinRef, joinRef, tailTopic, 'phx_join', joinPayload]));
     });
 
     socket.on('message', function (message) {
@@ -145,7 +152,7 @@ export default function (data) {
 
           const payload = safeParse(appendRes.body);
           awaitedSeq = payload && payload.seq;
-          outcome.latestSeq = maxSeq(outcome.latestSeq, payload);
+          outcome.latestCursor = mergeCursor(outcome.latestCursor, cursorFromAppendReply(payload));
 
           if (!Number.isInteger(awaitedSeq) || awaitedSeq < 1) {
             outcome.status = 'invalid_append_reply';
@@ -179,8 +186,8 @@ export default function (data) {
         return;
       }
 
-      if (frame.maxSeq !== null) {
-        outcome.latestSeq = Math.max(outcome.latestSeq, frame.maxSeq);
+      if (frame.cursor !== null) {
+        outcome.latestCursor = mergeCursor(outcome.latestCursor, frame.cursor);
       }
 
       if (awaitedSeq !== null && frame.seqs.includes(awaitedSeq)) {
@@ -219,7 +226,8 @@ export default function (data) {
     runtime.nextSeqBySession[sessionIndex] = producerSeq + 1;
   }
 
-  runtime.cursorBySession[sessionIndex] = Math.max(runtime.cursorBySession[sessionIndex], outcome.latestSeq);
+  runtime.cursorBySession[sessionIndex] = outcome.latestCursor.seq;
+  runtime.cursorEpochBySession[sessionIndex] = outcome.latestCursor.epoch;
 
   if (outcome.status !== 'ok' && outcome.status !== 'timeout' && outcome.status !== 'gap' && !outcome.status.startsWith('append_')) {
     rywErr.add(1);
@@ -234,6 +242,7 @@ function runtimeForVu(sessionCount) {
   const runtime = {
     nextSeqBySession: Array.from({ length: sessionCount }, () => 1),
     cursorBySession: Array.from({ length: sessionCount }, () => 0),
+    cursorEpochBySession: Array.from({ length: sessionCount }, () => null),
   };
 
   vuRuntime[__VU] = runtime;
@@ -266,7 +275,7 @@ function parseFrame(message) {
 
     if (event === 'phx_reply') {
       if (payload && payload.status === 'ok') {
-        return { type: 'join_ok', seqs: [], maxSeq: null };
+        return { type: 'join_ok', seqs: [], cursor: null };
       }
 
       if (payload && payload.status === 'error') {
@@ -274,7 +283,7 @@ function parseFrame(message) {
           type: 'join_error',
           reason: payload.response && payload.response.reason ? payload.response.reason : 'join_error',
           seqs: [],
-          maxSeq: null,
+          cursor: null,
         };
       }
     }
@@ -284,41 +293,96 @@ function parseFrame(message) {
       const seqs = events
         .map((item) => item && item.seq)
         .filter((seq) => Number.isInteger(seq) && seq > 0);
+      const latestEvent = events
+        .filter((item) => item && Number.isInteger(item.seq) && item.seq > 0)
+        .sort((left, right) => left.seq - right.seq)
+        .pop();
 
       return {
         type: 'events',
         seqs,
-        maxSeq: seqs.length > 0 ? Math.max(...seqs) : null,
+        cursor: latestEvent
+          ? {
+              seq: latestEvent.seq,
+              epoch:
+                Number.isInteger(latestEvent.epoch) && latestEvent.epoch >= 0
+                  ? latestEvent.epoch
+                  : null,
+            }
+          : null,
       };
     }
 
     if (event === 'gap') {
-      return { type: 'gap', seqs: [], maxSeq: null };
+      return {
+        type: 'gap',
+        seqs: [],
+        cursor: cursorFromGapPayload(payload),
+      };
     }
 
     if (event === 'token_expired' || event === 'node_draining') {
-      return { type: event, seqs: [], maxSeq: null };
+      return { type: event, seqs: [], cursor: null };
     }
   }
 
   if (parsed && parsed.type === 'gap') {
-    return { type: 'gap', seqs: [], maxSeq: null };
+    return { type: 'gap', seqs: [], cursor: cursorFromGapPayload(parsed) };
   }
 
   if (parsed && Number.isInteger(parsed.seq) && parsed.seq > 0) {
-    return { type: 'events', seqs: [parsed.seq], maxSeq: parsed.seq };
+    return {
+      type: 'events',
+      seqs: [parsed.seq],
+      cursor: {
+        seq: parsed.seq,
+        epoch: Number.isInteger(parsed.epoch) && parsed.epoch >= 0 ? parsed.epoch : null,
+      },
+    };
   }
 
-  return { type: 'unknown', seqs: [], maxSeq: null };
+  return { type: 'unknown', seqs: [], cursor: null };
 }
 
-function maxSeq(current, payload) {
-  if (payload && payload.cursor && Number.isInteger(payload.cursor.seq)) {
-    return Math.max(current, payload.cursor.seq);
+function cursorFromAppendReply(payload) {
+  if (!payload || !Number.isInteger(payload.cursor) || payload.cursor < 0) {
+    return null;
   }
 
-  if (payload && Number.isInteger(payload.seq)) {
-    return Math.max(current, payload.seq);
+  const epoch = Number.isInteger(payload.cursor_epoch)
+    ? payload.cursor_epoch
+    : Number.isInteger(payload.epoch)
+      ? payload.epoch
+      : null;
+
+  return { seq: payload.cursor, epoch };
+}
+
+function cursorFromGapPayload(payload) {
+  if (!payload || !Number.isInteger(payload.next_cursor) || payload.next_cursor < 0) {
+    return null;
+  }
+
+  return {
+    seq: payload.next_cursor,
+    epoch:
+      Number.isInteger(payload.next_cursor_epoch) && payload.next_cursor_epoch >= 0
+        ? payload.next_cursor_epoch
+        : null,
+  };
+}
+
+function mergeCursor(current, candidate) {
+  if (!candidate) {
+    return current;
+  }
+
+  if (!current || candidate.seq > current.seq) {
+    return candidate;
+  }
+
+  if (candidate.seq === current.seq && current.epoch === null && candidate.epoch !== null) {
+    return candidate;
   }
 
   return current;

@@ -3,7 +3,10 @@ use super::query_options::TailOptions;
 use serde_json::{Value, json};
 
 use crate::{
-    api::{public_payload, socket_cursor::ReplayGap},
+    api::{
+        public_payload,
+        socket_cursor::{ReplayGap, parse_json_cursor},
+    },
     config::MAX_LIST_LIMIT,
     error::AppError,
     model::{Cursor, LifecycleResponse},
@@ -30,12 +33,8 @@ pub(crate) fn parse_lifecycle_join_payload(payload: &Value) -> Result<LifecycleO
 
 pub(crate) fn parse_tail_join_payload(payload: &Value) -> Result<TailOptions, AppError> {
     let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-    let mut cursor = Cursor::zero();
+    let cursor = parse_phoenix_cursor(object)?;
     let mut batch_size = 1_u32;
-
-    if let Some(value) = object.get("cursor") {
-        cursor = parse_phoenix_cursor(value)?;
-    }
 
     if let Some(value) = object.get("batch_size") {
         let value = value.as_u64().ok_or(AppError::InvalidTailBatchSize)?;
@@ -111,21 +110,39 @@ pub(crate) fn build_gap_payload(gap: &ReplayGap) -> Value {
 
 fn parse_lifecycle_cursor(payload: &Value) -> Result<Cursor, AppError> {
     let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-    let mut cursor = Cursor::zero();
+    parse_phoenix_cursor(object)
+}
 
-    if let Some(value) = object.get("cursor") {
-        cursor = parse_phoenix_cursor(value)?;
+fn parse_phoenix_cursor(object: &serde_json::Map<String, Value>) -> Result<Cursor, AppError> {
+    let mut cursor = match object.get("cursor") {
+        Some(value) => parse_json_cursor(value)?,
+        None => Cursor::zero(),
+    };
+
+    if let Some(epoch) = parse_cursor_epoch(object.get("cursor_epoch"))? {
+        if !object.contains_key("cursor") {
+            return Err(AppError::InvalidCursor);
+        }
+
+        match cursor.epoch {
+            Some(cursor_epoch) if cursor_epoch != epoch => return Err(AppError::InvalidCursor),
+            _ => cursor.epoch = Some(epoch),
+        }
     }
 
     Ok(cursor)
 }
 
-fn parse_phoenix_cursor(value: &Value) -> Result<Cursor, AppError> {
-    value
-        .as_i64()
-        .filter(|seq| *seq >= 0)
-        .map(|seq| Cursor::new(None, seq))
-        .ok_or(AppError::InvalidCursor)
+fn parse_cursor_epoch(value: Option<&Value>) -> Result<Option<i64>, AppError> {
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(number)) => number
+            .as_i64()
+            .filter(|epoch| *epoch >= 0)
+            .map(Some)
+            .ok_or(AppError::InvalidCursor),
+        _ => Err(AppError::InvalidCursor),
+    }
 }
 
 #[cfg(test)]
@@ -163,9 +180,33 @@ mod tests {
     }
 
     #[test]
-    fn tail_join_payload_rejects_non_integer_cursor() {
+    fn tail_join_payload_accepts_cursor_epoch_pair() {
+        let options = parse_tail_join_payload(&json!({"cursor": 4, "cursor_epoch": 9}))
+            .expect("cursor epoch pair should parse");
+
+        assert_eq!(options.cursor, Cursor::new(Some(9), 4));
+    }
+
+    #[test]
+    fn tail_join_payload_accepts_object_cursor_shape() {
+        let options = parse_tail_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}}))
+            .expect("object cursor should parse");
+
+        assert_eq!(options.cursor, Cursor::new(Some(4), 4));
+    }
+
+    #[test]
+    fn tail_join_payload_rejects_invalid_cursor_shapes() {
         assert!(parse_tail_join_payload(&json!({"cursor": "4"})).is_err());
-        assert!(parse_tail_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}})).is_err());
+        assert!(parse_tail_join_payload(&json!({"cursor_epoch": 4})).is_err());
+        assert!(parse_tail_join_payload(&json!({"cursor": 4, "cursor_epoch": "9"})).is_err());
+        assert!(
+            parse_tail_join_payload(&json!({
+                "cursor": {"epoch": 4, "seq": 4},
+                "cursor_epoch": 9
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -175,9 +216,17 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_join_payload_rejects_non_integer_cursor() {
+    fn lifecycle_join_payload_accepts_cursor_epoch_pair() {
+        let options = parse_lifecycle_join_payload(&json!({"cursor": 4, "cursor_epoch": 9}))
+            .expect("cursor epoch pair should parse");
+
+        assert_eq!(options.cursor, Cursor::new(Some(9), 4));
+    }
+
+    #[test]
+    fn lifecycle_join_payload_rejects_invalid_cursor_shapes() {
         assert!(parse_lifecycle_join_payload(&json!({"cursor": "4"})).is_err());
-        assert!(parse_lifecycle_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}})).is_err());
+        assert!(parse_lifecycle_join_payload(&json!({"cursor_epoch": 4})).is_err());
     }
 
     #[test]

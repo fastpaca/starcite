@@ -351,7 +351,7 @@ pub struct EventResponse {
     pub producer_seq: i64,
     pub tenant_id: String,
     pub inserted_at: String,
-    #[serde(skip_serializing, default)]
+    #[serde(skip_serializing_if = "Option::is_none", default)]
     pub epoch: Option<i64>,
     pub cursor: i64,
 }
@@ -678,6 +678,7 @@ pub(crate) fn value_to_object(value: Value, error: AppError) -> Result<JsonMap, 
 
 #[cfg(test)]
 mod tests {
+    use super::EventResponse;
     use serde_json::json;
 
     use super::{
@@ -766,6 +767,35 @@ mod tests {
         assert_eq!(value["version"], 1);
         assert_eq!(value["created_at"], "2026-04-11T00:00:00.000000Z");
         assert!(value.get("updated_at").is_none());
+    }
+
+    #[test]
+    fn event_response_serializes_epoch_when_present() {
+        let event = EventResponse {
+            session_id: "ses_demo".to_string(),
+            seq: 4,
+            event_type: "content".to_string(),
+            payload: json!({"text": "hello"})
+                .as_object()
+                .cloned()
+                .expect("object"),
+            actor: "user:demo".to_string(),
+            source: Some("api".to_string()),
+            metadata: json!({"bench": true}).as_object().cloned().expect("object"),
+            refs: json!({}).as_object().cloned().expect("object"),
+            idempotency_key: None,
+            producer_id: "producer".to_string(),
+            producer_seq: 4,
+            tenant_id: "acme".to_string(),
+            inserted_at: "2026-04-11T00:00:00.000000Z".to_string(),
+            epoch: Some(9),
+            cursor: 4,
+        };
+        let value = serde_json::to_value(event).expect("event should serialize");
+
+        assert_eq!(value["seq"], 4);
+        assert_eq!(value["cursor"], 4);
+        assert_eq!(value["epoch"], 9);
     }
 
     #[test]

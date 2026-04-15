@@ -40,11 +40,11 @@ The Phoenix-compatible socket transport keeps the existing public payload shape 
 
 - `GET /v1/socket/websocket` now accepts Phoenix channel frames so one socket can join the operator `lifecycle` topic plus many `tail:<session_id>` topics
 - lifecycle delivery arrives as `{"cursor": N, "inserted_at": "...", "event": {...}}` frames, with the inner event discriminator serialized as `kind`
-- replay and live delivery arrive as `{"events":[...]}` frames
-- invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
-- in `unsafe_jwt` mode, Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
+- replay and live delivery arrive as `{"events":[...]}` frames, and session-scoped events now carry `epoch` when the runtime knows the active fencing epoch
+- invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"` or `reason = "cursor_expired"`, plus epoch metadata for each cursor field
+- in `jwt` mode, Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
 - when local shutdown drain begins, Phoenix topic subscriptions emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
-- Phoenix `tail:<session_id>` joins use payload fields `cursor` and `batch_size`
+- Phoenix `tail:<session_id>` joins use payload fields `cursor`, optional `cursor_epoch`, and `batch_size`
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
@@ -79,8 +79,8 @@ behavior across the cluster instead of the designated owner's append hot path.
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
 `phx_join`, and `phx_leave` with the usual Phoenix frame array shape
 `[join_ref, ref, topic, event, payload]`, replies with `phx_reply`, accepts plain `cursor` on the
-operator `lifecycle` topic and on `tail:<session_id>` joins, and pushes `token_expired` when an
-active socket outlives an `unsafe_jwt` token. During local shutdown drain it also pushes
+operator `lifecycle` topic plus `cursor` and optional `cursor_epoch` on `tail:<session_id>` joins,
+and pushes `token_expired` when an active socket outlives a `jwt` token. During local shutdown drain it also pushes
 `node_draining` on active joined topics before the socket closes.
 
 Auth is now explicit instead of hand-waved:

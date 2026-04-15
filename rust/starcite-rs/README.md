@@ -58,8 +58,9 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Live tail uses Phoenix `tail:<session_id>` topics on `GET /v1/socket/websocket`.
 - Lifecycle frames follow the canonical payload shape `{"cursor": N, "inserted_at": "...", "event": {...}}`, with the inner event discriminator serialized as `kind`. The Rust rewrite emits both session catalog events (`session.created`, `session.updated`, `session.archived`, `session.unarchived`) and local runtime state transitions (`session.activated`, `session.hydrating`, `session.freezing`, `session.frozen`).
 - Lifecycle storage is tenant-scoped and the public lifecycle surface now matches that shape: one operator `lifecycle` topic with replay and live delivery over the Phoenix socket.
-- Phoenix `tail:<session_id>` joins use payload fields `cursor` and `batch_size`.
-- Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
+- Phoenix `tail:<session_id>` joins use payload fields `cursor`, optional `cursor_epoch`, and `batch_size`.
+- Tail replay/live frames keep the canonical `{"events":[...]}` envelope, and session-scoped events now carry `epoch` when the runtime knows the active fencing epoch.
+- Tail gap frames keep the canonical `{"type":"gap",...}` shape and now include epoch metadata alongside each cursor field (`from_cursor_epoch`, `next_cursor_epoch`, `committed_cursor_epoch`, `earliest_available_cursor_epoch`) so clients can resume against the current owner epoch after fencing changes.
 - A wrong-node Phoenix `tail:<session_id>` join returns a `phx_reply` error payload with `reason = "session_not_owned"` and `owner_socket_url` for the owner node's `/v1/socket/websocket` endpoint, preserving the current socket query params.
 - In `jwt` mode, Phoenix topic subscriptions push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
 - When local shutdown drain begins, Phoenix topic subscriptions push `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the process closes the connection.
@@ -231,8 +232,9 @@ That Phoenix-compatible socket currently supports `heartbeat`, `phx_join`, and `
 for the operator `lifecycle` topic plus `tail:<session_id>` topics.
 It keeps the normal Phoenix frame array shape `[join_ref, ref, topic, event, payload]`, replies
 with `phx_reply`, pushes `lifecycle`, `events`, `gap`, `token_expired`, and `node_draining`, lets one socket
-multiplex many session streams, and accepts plain `cursor` joins on the operator `lifecycle` topic
-and on `tail:<session_id>` topics.
+multiplex many session streams, accepts plain `cursor` joins on the operator `lifecycle` topic,
+and accepts `cursor` plus optional `cursor_epoch` on `tail:<session_id>` topics for epoch-aware
+resume.
 When drain starts, active Phoenix topic subscriptions receive a `node_draining` push with
 `drain_source` and shutdown `retry_after_ms`, and then the socket closes with code `1012`.
 
