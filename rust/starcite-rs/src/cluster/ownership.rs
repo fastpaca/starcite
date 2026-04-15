@@ -229,6 +229,23 @@ impl OwnershipManager {
         (lease.expires_at > now).then_some(lease.epoch)
     }
 
+    #[cfg(test)]
+    pub(crate) async fn insert_test_lease(
+        &self,
+        session_id: &str,
+        epoch: i64,
+        standby: Option<ReplicationPeer>,
+    ) {
+        self.leases.lock().await.insert(
+            session_id.to_string(),
+            LocalLease {
+                epoch,
+                expires_at: Instant::now() + self.lease_ttl,
+                standby,
+            },
+        );
+    }
+
     pub async fn forget_remote_owner_hint(&self, session_id: &str) {
         self.remote_owners.lock().await.remove(session_id);
     }

@@ -601,7 +601,8 @@ mod tests {
     use crate::{
         cluster::{OwnershipManager, ReplicationCoordinator},
         data_plane::{HotEventStore, HotSessionStore, PendingFlushQueue},
-        model::EventResponse,
+        error::AppError,
+        model::{AppendEventRequest, Cursor, EventResponse, Principal, SessionResponse},
         runtime::{OpsState, fanout::SessionFanout},
     };
     use serde_json::Map;
@@ -610,6 +611,10 @@ mod tests {
     use tokio::{sync::mpsc, time::sleep};
 
     fn manager(idle_timeout: Duration) -> SessionManager {
+        manager_with_replication(idle_timeout, false)
+    }
+
+    fn manager_with_replication(idle_timeout: Duration, require_standby: bool) -> SessionManager {
         let pool = PgPoolOptions::new()
             .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
             .expect("lazy pool");
@@ -627,7 +632,7 @@ mod tests {
             ),
             replication: ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
-                false,
+                require_standby,
                 None,
                 Duration::from_millis(500),
             )
@@ -668,6 +673,44 @@ mod tests {
             epoch: None,
             cursor: seq,
         }
+    }
+
+    fn sample_session(last_seq: i64) -> SessionResponse {
+        SessionResponse {
+            id: "ses_demo".to_string(),
+            title: Some("Draft".to_string()),
+            creator_principal: Some(Principal {
+                tenant_id: "acme".to_string(),
+                id: "user-42".to_string(),
+                principal_type: "user".to_string(),
+            }),
+            metadata: Map::new(),
+            last_seq,
+            created_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            updated_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            version: 1,
+            archived: false,
+        }
+    }
+
+    fn sample_append_input(
+        producer_seq: i64,
+        expected_seq: Option<i64>,
+    ) -> crate::model::ValidatedAppendEvent {
+        AppendEventRequest {
+            event_type: "content".to_string(),
+            payload: serde_json::json!({"text": "hello"}),
+            actor: Some("service:test".to_string()),
+            source: Some("test".to_string()),
+            metadata: None,
+            refs: None,
+            idempotency_key: None,
+            producer_id: "writer-1".to_string(),
+            producer_seq,
+            expected_seq,
+        }
+        .validate()
+        .expect("validated append input")
     }
 
     #[tokio::test]
@@ -776,6 +819,113 @@ mod tests {
         assert_eq!(
             manager.pending_flush.snapshot().await.pending_event_count,
             0
+        );
+    }
+
+    #[tokio::test]
+    async fn append_local_async_does_not_publish_before_quorum() {
+        let manager = manager_with_replication(Duration::from_secs(1), true);
+        manager
+            .ownership
+            .insert_test_lease("ses_demo", 4, None)
+            .await;
+        manager
+            .session_store
+            .put_session("acme", sample_session(0), Some(0))
+            .await;
+
+        let result = manager
+            .append_local_async(
+                "ses_demo",
+                "acme",
+                &mut SessionWorkerState::default(),
+                sample_append_input(1, Some(0)),
+            )
+            .await;
+
+        assert!(matches!(
+            result,
+            Err(AppError::QuorumUnavailable {
+                required: 2,
+                acknowledged: 1
+            })
+        ));
+        assert!(
+            manager
+                .hot_store
+                .events_after_cursor("ses_demo", 0, 10)
+                .await
+                .is_empty()
+        );
+        assert_eq!(
+            manager.pending_flush.snapshot().await.pending_event_count,
+            0
+        );
+        assert_eq!(
+            manager.session_store.get_last_seq("ses_demo").await,
+            Some(0)
+        );
+        assert_eq!(
+            manager
+                .session_store
+                .get_last_producer_seq("ses_demo", "writer-1")
+                .await,
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn append_local_async_keeps_committed_cursor_on_archived_frontier() {
+        let manager = manager(Duration::from_secs(1));
+        manager
+            .ownership
+            .insert_test_lease("ses_demo", 7, None)
+            .await;
+        manager
+            .session_store
+            .put_session("acme", sample_session(2), Some(2))
+            .await;
+        manager
+            .session_store
+            .bump_producer_seq("ses_demo", "acme", "writer-1", 2)
+            .await;
+
+        let outcome = manager
+            .append_local_async(
+                "ses_demo",
+                "acme",
+                &mut SessionWorkerState::default(),
+                sample_append_input(3, Some(2)),
+            )
+            .await
+            .expect("append should succeed");
+
+        assert_eq!(outcome.reply.seq, 3);
+        assert_eq!(outcome.reply.last_seq, 3);
+        assert_eq!(outcome.reply.epoch, Some(7));
+        assert_eq!(outcome.reply.cursor, Cursor::new(Some(7), 3));
+        assert_eq!(outcome.reply.committed_cursor, Cursor::new(Some(7), 2));
+        assert_eq!(
+            manager
+                .hot_store
+                .events_after_cursor("ses_demo", 0, 10)
+                .await
+                .into_iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![3]
+        );
+        assert_eq!(
+            manager.pending_flush.snapshot().await.pending_event_count,
+            1
+        );
+        assert_eq!(
+            manager.session_store.get_last_seq("ses_demo").await,
+            Some(3)
+        );
+        assert_eq!(
+            manager.session_store.get_archived_seq("ses_demo").await,
+            Some(2)
         );
     }
 }
