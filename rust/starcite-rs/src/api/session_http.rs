@@ -231,3 +231,172 @@ async fn publish_archive_lifecycle(
     )
     .await;
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{sync::Arc, time::Duration};
+
+    use axum::{
+        extract::{Path, State},
+        http::HeaderMap,
+    };
+    use sqlx::postgres::PgPoolOptions;
+
+    use super::show_session;
+    use crate::{
+        AppState,
+        auth::AuthService,
+        cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
+        config::{AuthMode, Config},
+        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        error::AppError,
+        model::SessionResponse,
+        runtime::{
+            LifecycleFanout, OpsState, RuntimeTouchReason, SessionFanout, SessionManager,
+            SessionManagerDeps, SessionRuntime,
+        },
+        telemetry::Telemetry,
+    };
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
+            .expect("lazy pool");
+        let fanout = SessionFanout::default();
+        let lifecycle = LifecycleFanout::default();
+        let hot_store = HotEventStore::new();
+        let archive_queue = ArchiveQueue::new();
+        let pending_flush = PendingFlushQueue::new();
+        let session_store = HotSessionStore::new();
+        let telemetry = Telemetry::new(true);
+        let ops = OpsState::new(30_000);
+        let instance_id = Arc::<str>::from("node-a");
+        let ownership =
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+        let control_plane = ControlPlaneState::new(None, None, Duration::from_secs(5));
+        let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
+        let replication =
+            ReplicationCoordinator::new(instance_id.clone(), false, Duration::from_millis(100))
+                .expect("replication");
+        let session_manager = SessionManager::new(SessionManagerDeps {
+            pool: pool.clone(),
+            fanout: fanout.clone(),
+            hot_store: hot_store.clone(),
+            pending_flush: pending_flush.clone(),
+            session_store: session_store.clone(),
+            ownership: ownership.clone(),
+            replication: replication.clone(),
+            ops: ops.clone(),
+            telemetry: telemetry.clone(),
+            idle_timeout: Duration::from_secs(30),
+        });
+        let runtime = SessionRuntime::new(
+            None,
+            lifecycle.clone(),
+            telemetry.clone(),
+            instance_id.clone(),
+            Duration::from_secs(30),
+        );
+        let auth = AuthService::new(&test_config()).expect("auth");
+
+        AppState {
+            pool,
+            fanout,
+            lifecycle,
+            hot_store,
+            archive_queue,
+            pending_flush,
+            session_store,
+            session_manager,
+            ownership,
+            control_plane,
+            owner_proxy,
+            replication,
+            runtime,
+            ops,
+            auth_mode: AuthMode::None,
+            auth,
+            telemetry,
+            instance_id,
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            listen_addr: "127.0.0.1:4001".parse().expect("listen addr"),
+            ops_listen_addr: "127.0.0.1:4101".parse().expect("ops listen addr"),
+            database_url: "postgres://postgres:postgres@localhost/starcite_test".to_string(),
+            max_connections: 1,
+            archive_flush_interval_ms: 5_000,
+            migrate_on_boot: false,
+            auth_mode: AuthMode::None,
+            auth_issuer: None,
+            auth_audience: None,
+            auth_jwks_url: None,
+            auth_jwt_leeway_seconds: 1,
+            auth_jwks_refresh_ms: 60_000,
+            auth_jwks_hard_expiry_ms: 60_000,
+            telemetry_enabled: true,
+            shutdown_drain_timeout_ms: 30_000,
+            session_runtime_idle_timeout_ms: 30_000,
+            commit_flush_interval_ms: 100,
+            local_async_lease_ttl_ms: 5_000,
+            local_async_node_public_url: None,
+            local_async_node_ops_url: None,
+            local_async_node_ttl_ms: 2_000,
+            local_async_owner_proxy_timeout_ms: 100,
+            local_async_replication_timeout_ms: 100,
+        }
+    }
+
+    fn sample_session(session_id: &str, archived: bool) -> SessionResponse {
+        SessionResponse {
+            id: session_id.to_string(),
+            title: Some("Draft".to_string()),
+            creator_principal: None,
+            metadata: serde_json::Map::new(),
+            last_seq: 3,
+            created_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            updated_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            version: 2,
+            archived,
+        }
+    }
+
+    #[tokio::test]
+    async fn show_session_keeps_archived_sessions_readable_by_id() {
+        let state = test_state();
+        state
+            .session_store
+            .put_session("acme", sample_session("ses_archived", true), Some(0))
+            .await;
+
+        let axum::Json(session) = show_session(
+            State(state.clone()),
+            HeaderMap::new(),
+            Path("ses_archived".to_string()),
+        )
+        .await
+        .expect("archived session should stay readable");
+
+        assert_eq!(session.id, "ses_archived");
+        assert!(session.archived);
+
+        let runtime = state.runtime.snapshot().await;
+        assert_eq!(runtime.active_session_count, 1);
+        assert_eq!(runtime.sessions[0].session_id, "ses_archived");
+        assert_eq!(
+            runtime.sessions[0].last_touch_reason,
+            RuntimeTouchReason::HttpRead
+        );
+    }
+
+    #[tokio::test]
+    async fn show_session_rejects_empty_session_id() {
+        let error = show_session(State(test_state()), HeaderMap::new(), Path(String::new()))
+            .await
+            .expect_err("empty session ids must fail loudly");
+
+        assert!(matches!(error, AppError::InvalidSessionId));
+    }
+}
