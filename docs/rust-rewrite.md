@@ -164,18 +164,14 @@ Another parity-oriented boundary is in place now too: appends no longer execute 
 HTTP task. Each process keeps a local per-session append worker map, and `POST /v1/sessions/:id/append`
 routes through that worker before it touches the repository layer. That gets session-local append
 ordering behind one explicit in-process boundary and makes the ops surface honest about which
-sessions this process is actively servicing, even though the worker still persists through
-Postgres synchronously in this experiment.
+sessions this process is actively servicing.
 
-There is now an experimental commit-mode split behind that worker boundary. The default
-`sync_postgres` mode keeps the current durable append path. `local_async` instead acknowledges
-from local hot state, puts the event into a pending-flush backlog, and lets a background flusher
-persist it to Postgres and emit `NOTIFY` later. That flusher now persists each pending session
-batch in one Postgres transaction instead of one transaction per event. That is the first real cut
-at moving Postgres off the append ack path in this branch. It is intentionally honest about the
-remaining gap: without
-quorum replication yet, `local_async` is still not a production-safe multi-node commit model.
-`local_async` now also keeps producer cursors in the hot session cache instead of deriving them
+There is now one write model behind that worker boundary: `local_async`. The owner validates
+ownership, replicates to the assigned standby, applies the event into local hot state, replies to
+the client, and leaves durable Postgres persistence to the background flush worker. That flusher
+persists each pending session batch in one Postgres transaction and emits `NOTIFY` after the
+acknowledged write, so Postgres is no longer on the append ack path. `local_async` now also keeps
+producer cursors in the hot session cache instead of deriving them
 only from retained hot events or from the flushed `session_producers` row. Local commits, standby
 replica commits, and Postgres relay fanout all advance that cache, which closes the false
 `producer_seq_conflict` edge when an active session has already archived older hot events but the
@@ -201,8 +197,8 @@ the event locally and replies to the client, instead of paying separate prepare 
 trips on the critical path. If no assigned standby is available, append fails with
 `503 quorum_unavailable` instead of silently falling back to single-node ack.
 `LOCAL_ASYNC_STANDBY_URL` remains as a static fallback for local drills when Postgres-backed node
-registration is not enabled. That is still only a narrow 2-of-2 experiment, not a full Raft group
-or routed topology.
+registration is not enabled. That is still a narrow 2-of-2 quorum path, not a full 3-replica Raft
+group or routed topology.
 
 The control-plane heartbeat can now also carry a node's public base URL. That does not implement
 full routed ownership yet, but it does make the current `409 session_not_owned` response less
