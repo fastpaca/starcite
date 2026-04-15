@@ -239,13 +239,12 @@ takeover.
 The rewrite now also has a background archive-progress worker backed by an explicit dirty-session
 queue. Owner commits enqueue the touched session, the worker advances `sessions.archived_seq`, and
 hot in-memory events are pruned once they are considered archived. The
-periodic tick is now only a fallback nudge if no new work arrives. In this branch that worker is
-still transitional: the event rows already exist in Postgres before the flush, so it restores
-hot/cold tier behavior without yet removing Postgres from the append ack path. Standby commits no
-longer feed that queue. They keep only the committed hot copy in memory, and when a worker first
-becomes owner it seeds the flush backlog from that retained hot state before it starts
-acknowledging new appends. That keeps steady-state standby quorum commits off the Postgres flush
-path while preserving a durable catch-up path after failover.
+periodic tick is now only a fallback nudge if no new work arrives. Event rows reach Postgres
+through the background flush worker after the hot-path ack, and standby commits no longer feed
+that queue. They keep only the committed hot copy in memory, and when a worker first becomes owner
+it seeds the flush backlog from that retained hot state before it starts acknowledging new
+appends. That keeps steady-state standby quorum commits off the Postgres flush path while
+preserving a durable catch-up path after failover.
 
 Archive progress now also relays over Postgres `NOTIFY`, so other Rust nodes can advance cached
 `archived_seq` state and prune stale hot copies without waiting for a cold session refresh.
@@ -283,10 +282,10 @@ is actually participating in Postgres-backed standby assignment.
 
 ## Why this shape
 
-The existing Elixir system splits the hot path from the durable archive path and then rebuilds ordered replay across memory, Postgres, and S3. This rewrite tests the opposite tradeoff: make Postgres the whole log, pay the write cost directly, and get a much simpler consistency story in return.
+The existing Elixir system splits the hot path from the durable archive path and then rebuilds ordered replay across memory, Postgres, and S3. This rewrite keeps that hot-ack plus async-archive shape, but replaces the Raft/S3-heavy persistence story with a Postgres-backed control plane plus archive store and much stricter Rust boundaries.
 
 If the experiment holds up, the next decisions are straightforward:
 
-1. Harden JWT/JWKS operational behavior and docs without losing the typed policy surface.
+1. Decide whether the current 2-of-2 local-async standby path should stay narrow or grow into a fuller quorum/topology story.
 2. Decide whether the filtered tenant `session_id` compatibility path should stay once clients move to dedicated session lifecycle routes and topics.
 3. Decide whether the Rust metrics surface should stay as direct Prometheus text or eventually grow a richer event substrate before attempting any horizontal scaling story.
