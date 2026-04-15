@@ -91,7 +91,9 @@ export default function (data) {
   const producerSeq = runtime.nextSeqBySession[sessionIndex];
   const producerId = `bench-vu-${__VU}-s-${sessionIndex}`;
   const cursor = runtime.cursorBySession[sessionIndex];
-  const wsUrl = tailUrl(tailNode, sessionId, cursor);
+  const wsUrl = socketUrl(tailNode);
+  const tailTopic = `tail:${sessionId}`;
+  const joinRef = `${__VU}-${__ITER}`;
   const wsTimeoutMs = Number(__ENV.WS_TIMEOUT_MS || 10000);
 
   const body = {
@@ -111,44 +113,68 @@ export default function (data) {
 
   let appendStartedAtMs = 0;
   let awaitedSeq = null;
+  let joinAccepted = false;
 
   const res = ws.connect(wsUrl, { timeout: `${wsTimeoutMs}ms` }, function (socket) {
     socket.on('open', function () {
-      appendStartedAtMs = Date.now();
-
-      const appendRes = http.post(
-        `${appendNode}/sessions/${sessionId}/append`,
-        JSON.stringify(body),
-        { headers: { 'Content-Type': 'application/json' }, timeout: __ENV.REQUEST_TIMEOUT || '20s' }
-      );
-
-      appendLatency.add(appendRes.timings.duration);
-
-      if (appendRes.status >= 200 && appendRes.status < 300) {
-        appendOk.add(1);
-        outcome.appendAccepted = true;
-
-        const payload = safeParse(appendRes.body);
-        awaitedSeq = payload && payload.seq;
-        outcome.latestSeq = maxSeq(outcome.latestSeq, payload);
-
-        if (!Number.isInteger(awaitedSeq) || awaitedSeq < 1) {
-          outcome.status = 'invalid_append_reply';
-          socket.close();
-        }
-      } else {
-        appendErr.add(1);
-        outcome.status = `append_${appendRes.status}`;
-        socket.close();
-      }
+      socket.send(JSON.stringify([joinRef, joinRef, tailTopic, 'phx_join', { cursor, batch_size: 1 }]));
     });
 
     socket.on('message', function (message) {
       const frame = parseFrame(message);
 
+      if (frame.type === 'join_ok') {
+        if (joinAccepted) {
+          return;
+        }
+
+        joinAccepted = true;
+        appendStartedAtMs = Date.now();
+
+        const appendRes = http.post(
+          `${appendNode}/sessions/${sessionId}/append`,
+          JSON.stringify(body),
+          { headers: { 'Content-Type': 'application/json' }, timeout: __ENV.REQUEST_TIMEOUT || '20s' }
+        );
+
+        appendLatency.add(appendRes.timings.duration);
+
+        if (appendRes.status >= 200 && appendRes.status < 300) {
+          appendOk.add(1);
+          outcome.appendAccepted = true;
+
+          const payload = safeParse(appendRes.body);
+          awaitedSeq = payload && payload.seq;
+          outcome.latestSeq = maxSeq(outcome.latestSeq, payload);
+
+          if (!Number.isInteger(awaitedSeq) || awaitedSeq < 1) {
+            outcome.status = 'invalid_append_reply';
+            socket.close();
+          }
+        } else {
+          appendErr.add(1);
+          outcome.status = `append_${appendRes.status}`;
+          socket.close();
+        }
+
+        return;
+      }
+
+      if (frame.type === 'join_error') {
+        outcome.status = frame.reason || 'join_error';
+        socket.close();
+        return;
+      }
+
       if (frame.type === 'gap') {
         rywGap.add(1);
         outcome.status = 'gap';
+        socket.close();
+        return;
+      }
+
+      if (frame.type === 'token_expired' || frame.type === 'node_draining') {
+        outcome.status = frame.type;
         socket.close();
         return;
       }
@@ -227,24 +253,52 @@ function parseNodes(rawNodes, fallbackNode) {
   return nodes.length > 0 ? nodes : [fallbackNode];
 }
 
-function tailUrl(node, sessionId, cursor) {
+function socketUrl(node) {
   const base = node.replace(/^http/, 'ws').replace(/\/v1$/, '');
-  return `${base}/v1/sessions/${sessionId}/tail?cursor=${cursor}&batch_size=1`;
+  return `${base}/v1/socket/websocket?tenant_id=bench&vsn=2.0.0`;
 }
 
 function parseFrame(message) {
   const parsed = safeParse(message);
 
-  if (Array.isArray(parsed)) {
-    const seqs = parsed
-      .map((event) => event && event.seq)
-      .filter((seq) => Number.isInteger(seq) && seq > 0);
+  if (Array.isArray(parsed) && parsed.length === 5) {
+    const [, , , event, payload] = parsed;
 
-    return {
-      type: 'events',
-      seqs,
-      maxSeq: seqs.length > 0 ? Math.max(...seqs) : null,
-    };
+    if (event === 'phx_reply') {
+      if (payload && payload.status === 'ok') {
+        return { type: 'join_ok', seqs: [], maxSeq: null };
+      }
+
+      if (payload && payload.status === 'error') {
+        return {
+          type: 'join_error',
+          reason: payload.response && payload.response.reason ? payload.response.reason : 'join_error',
+          seqs: [],
+          maxSeq: null,
+        };
+      }
+    }
+
+    if (event === 'events') {
+      const events = payload && Array.isArray(payload.events) ? payload.events : [];
+      const seqs = events
+        .map((item) => item && item.seq)
+        .filter((seq) => Number.isInteger(seq) && seq > 0);
+
+      return {
+        type: 'events',
+        seqs,
+        maxSeq: seqs.length > 0 ? Math.max(...seqs) : null,
+      };
+    }
+
+    if (event === 'gap') {
+      return { type: 'gap', seqs: [], maxSeq: null };
+    }
+
+    if (event === 'token_expired' || event === 'node_draining') {
+      return { type: event, seqs: [], maxSeq: null };
+    }
   }
 
   if (parsed && parsed.type === 'gap') {

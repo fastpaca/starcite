@@ -61,7 +61,6 @@ pub enum RuntimeTouchReason {
     Create,
     HttpRead,
     HttpWrite,
-    RawTail,
     PhoenixTail,
 }
 

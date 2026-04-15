@@ -33,19 +33,18 @@ The experiment here asked what falls out when Starcite is modeled as:
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
 - tenant-scoped lifecycle replay plus live delivery through the Phoenix `lifecycle` topic on `GET /v1/socket/websocket`
 - local in-process runtime lifecycle with `session.activated`, `session.hydrating`, `session.freezing`, and `session.frozen`
-- ordered event replay through `GET /v1/sessions/:id/events`
-- replay-then-live tail through `GET /v1/sessions/:id/tail?cursor=N` over WebSocket
+- replay-then-live tail through Phoenix `tail:<session_id>` topics on `GET /v1/socket/websocket`
 - SQL migrations and a dedicated Docker Compose file
 
-The raw WebSocket endpoints keep the existing public payload shape where it matters:
+The Phoenix-compatible socket transport keeps the existing public payload shape where it matters:
 
 - `GET /v1/socket/websocket` now accepts Phoenix channel frames so one socket can join the operator `lifecycle` topic plus many `tail:<session_id>` topics
 - lifecycle delivery arrives as `{"cursor": N, "inserted_at": "...", "event": {...}}` frames, with the inner event discriminator serialized as `kind`
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
-- in `unsafe_jwt` mode, raw tail sockets and Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
-- when local shutdown drain begins, raw tail sockets and Phoenix topic subscriptions emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
-- the direct raw WebSocket endpoint still uses query params for `cursor` and `batch_size` on the tail route
+- in `unsafe_jwt` mode, Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
+- when local shutdown drain begins, Phoenix topic subscriptions emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
+- Phoenix `tail:<session_id>` joins use payload fields `cursor` and `batch_size`
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
@@ -149,9 +148,9 @@ one Rust node can still receive live events or lifecycle updates produced by ano
 sharing the same database, without adding Redis or a separate broker.
 
 One read-path parity slice has landed too: each Rust process now keeps a local in-memory hot event
-store populated by local appends and relayed remote commits. HTTP event reads and tail catch-up
-replay consult that hot store first and only fall back to Postgres when the requested range is not
-locally contiguous. That moves replay shape closer to the Elixir `EventStore` and `ReadPath`
+store populated by local appends and relayed remote commits. Phoenix `tail:<session_id>` catch-up
+replay consults that hot store first and only falls back to Postgres when the requested range is
+not locally contiguous. That moves replay shape closer to the Elixir `EventStore` and `ReadPath`
 contracts, even though append ack is still incorrectly paying the Postgres commit path in this
 experiment.
 
@@ -159,7 +158,7 @@ There is now a matching hot session store too. Session create, update, archive s
 lifecycle catalog events, and relayed appends keep a local session-header cache current with
 tenant and `last_seq` state, so hot session reads and session-scoped auth checks do not need to
 start at Postgres every time. Phoenix `tail:<session_id>` replay now uses the same hot read path as
-the raw tail endpoint instead of bypassing it with a direct database read.
+the session replay path instead of bypassing it with a direct database read.
 
 Another parity-oriented boundary is in place now too: appends no longer execute directly on the
 HTTP task. Each process keeps a local per-session append worker map, and `POST /v1/sessions/:id/append`
@@ -211,13 +210,11 @@ opaque: when the owner has registered a public URL, non-owner nodes include it a
 the body and `x-starcite-owner-url` in the headers. That is enough for manual drills and for a
 future edge proxy to reroute requests without guessing.
 
-That edge proxying story has now started inside the Rust service itself for plain HTTP event-path
-requests. Wrong-node `GET /events` and `POST /append` calls can forward to the current owner using
-the Postgres control-plane hint instead of forcing the client to retry manually. Tail now enforces
-that same ownership boundary too: a wrong-node raw tail handshake returns `307` with an owner
-WebSocket target, and a wrong-node Phoenix `tail:<session_id>` join fails explicitly with
-`session_not_owned` plus `owner_socket_url` so the client can reconnect to the correct node using
-the same socket query params.
+That edge proxying story now lives in the places where the old app actually needs it. Wrong-node
+`POST /append` calls can forward to the current owner using the Postgres control-plane hint instead
+of forcing the client to retry manually, and a wrong-node Phoenix `tail:<session_id>` join fails
+explicitly with `session_not_owned` plus `owner_socket_url` so the client can reconnect to the
+correct node using the same socket query params.
 
 The local worker lifecycle now also matches the ownership story more closely. A live worker renews
 its Postgres lease in the background instead of only on incoming event-path requests, so ownership
@@ -257,7 +254,7 @@ Archive progress now also relays over Postgres `NOTIFY`, so other Rust nodes can
 
 Telemetry parity is now partial instead of missing. The Rust service exports edge HTTP,
 controller-entry edge-stage telemetry, auth, ingest-edge outcomes, append request timings, tail
-plus lifecycle delivery timings, active raw stream subscriptions and Phoenix topic joins, active
+plus lifecycle delivery timings, active Phoenix topic joins, active
 socket connection gauges, local session lifecycle counters, and dynamic gauges for node drain
 state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason, with
 metric names aligned to the existing PromEx surface where that still makes sense. `/debug/state`
@@ -266,7 +263,7 @@ archive-queue backlog, local lease ownership state, standby replication config, 
 time per active session. It still does not cover routing, full replication, archive, or event-store
 invariants because those subsystems do not exist in this rewrite.
 
-One subtle transport fix landed with those gauges: the raw tail and lifecycle sockets now keep
+One subtle transport fix landed with those gauges: the Phoenix socket now keeps
 reading control frames so a quiet client disconnect clears the in-process connection gauge
 immediately instead of leaving the task parked until the next event arrives.
 

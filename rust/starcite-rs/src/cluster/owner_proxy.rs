@@ -81,18 +81,6 @@ impl OwnerProxy {
         self.public_url.as_deref()
     }
 
-    pub async fn forward_read_events(
-        &self,
-        owner_url: &str,
-        session_id: &str,
-        params: &HashMap<String, String>,
-        authorization: Option<&HeaderValue>,
-    ) -> Result<Response<Body>, AppError> {
-        let path = build_events_path(session_id, params);
-        self.send(owner_url, "GET", &path, authorization, None)
-            .await
-    }
-
     pub async fn forward_append(
         &self,
         owner_url: &str,
@@ -341,40 +329,6 @@ impl ParsedResponse {
     }
 }
 
-fn build_events_path(session_id: &str, params: &HashMap<String, String>) -> String {
-    let mut path = format!(
-        "/v1/sessions/{}/events",
-        percent_encode_component(session_id)
-    );
-    let query = encode_query(params);
-    if !query.is_empty() {
-        path.push('?');
-        path.push_str(&query);
-    }
-
-    path
-}
-
-pub fn build_tail_ws_url(
-    owner_url: &str,
-    session_id: &str,
-    params: &HashMap<String, String>,
-) -> Option<String> {
-    let base = websocket_base_url(owner_url)?;
-    let mut path = format!(
-        "{base}/v1/sessions/{}/tail",
-        percent_encode_component(session_id)
-    );
-    let query = encode_query(params);
-
-    if !query.is_empty() {
-        path.push('?');
-        path.push_str(&query);
-    }
-
-    Some(path)
-}
-
 pub fn build_phoenix_socket_ws_url(
     owner_url: &str,
     params: &HashMap<String, String>,
@@ -606,8 +560,8 @@ fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OwnerProxy, build_phoenix_socket_ws_url, build_tail_ws_url, find_http_head_end,
-        parse_http_head, parse_http_peer,
+        OwnerProxy, build_phoenix_socket_ws_url, find_http_head_end, parse_http_head,
+        parse_http_peer,
     };
     use crate::{error::OWNER_URL_HEADER, model::AppendEventRequest};
     use axum::{
@@ -657,22 +611,6 @@ mod tests {
             .expect("head end");
 
         assert_eq!(find_http_head_end(response), Some(expected));
-    }
-
-    #[test]
-    fn builds_tail_websocket_url_from_owner_public_url() {
-        let params = HashMap::from([
-            ("batch_size".to_string(), "32".to_string()),
-            ("cursor".to_string(), "8".to_string()),
-        ]);
-
-        let url = build_tail_ws_url("https://owner.example:4443/", "ses demo", &params)
-            .expect("websocket URL");
-
-        assert_eq!(
-            url,
-            "wss://owner.example:4443/v1/sessions/ses%20demo/tail?batch_size=32&cursor=8"
-        );
     }
 
     #[test]
@@ -760,47 +698,6 @@ mod tests {
             .await
             .expect("body");
         assert_eq!(body.as_ref(), b"{\"seq\":1}");
-    }
-
-    #[tokio::test]
-    async fn forwards_event_reads() {
-        let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
-        let addr = listener.local_addr().expect("local addr");
-
-        tokio::spawn(async move {
-            let (mut socket, _) = listener.accept().await.expect("accept");
-            let request = read_request(&mut socket)
-                .await
-                .expect("request")
-                .expect("request body");
-            assert!(
-                request.contains("GET /v1/sessions/ses_demo/events?cursor=0&limit=10 HTTP/1.1")
-            );
-
-            let response_body = "{\"events\":[],\"next_cursor\":null}";
-            let response = format!(
-                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-                response_body.len(),
-                response_body
-            );
-
-            socket
-                .write_all(response.as_bytes())
-                .await
-                .expect("write response");
-        });
-
-        let proxy = OwnerProxy::new(Duration::from_secs(1), None);
-        let mut params = HashMap::new();
-        params.insert("limit".to_string(), "10".to_string());
-        params.insert("cursor".to_string(), "0".to_string());
-
-        let response = proxy
-            .forward_read_events(&format!("http://{}", addr), "ses_demo", &params, None)
-            .await
-            .expect("forward read");
-
-        assert_eq!(response.status(), StatusCode::OK);
     }
 
     #[tokio::test]

@@ -230,7 +230,6 @@ pub enum SessionReason {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SocketTransport {
-    Raw,
     Phoenix,
 }
 
@@ -961,14 +960,12 @@ fn runtime_touch_reason_label(reason: RuntimeTouchReason) -> &'static str {
         RuntimeTouchReason::Create => "create",
         RuntimeTouchReason::HttpRead => "http_read",
         RuntimeTouchReason::HttpWrite => "http_write",
-        RuntimeTouchReason::RawTail => "raw_tail",
         RuntimeTouchReason::PhoenixTail => "phoenix_tail",
     }
 }
 
 fn socket_transport_label(transport: SocketTransport) -> &'static str {
     match transport {
-        SocketTransport::Raw => "raw",
         SocketTransport::Phoenix => "phoenix",
     }
 }
@@ -1039,7 +1036,7 @@ mod tests {
         telemetry.record_session_freeze("acme", SessionOutcome::Ok, SessionReason::IdleTimeout);
         telemetry.record_session_hydrate("acme", SessionOutcome::Ok, SessionReason::Hydrate);
         let _connection =
-            telemetry.track_socket_connection(SocketTransport::Raw, SocketSurface::Tail);
+            telemetry.track_socket_connection(SocketTransport::Phoenix, SocketSurface::Tail);
         let _subscription = telemetry
             .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::TenantLifecycle);
 
@@ -1062,7 +1059,7 @@ mod tests {
         assert!(rendered.contains("starcite_session_hydrate_total"));
         assert!(rendered.contains("starcite_socket_connections"));
         assert!(rendered.contains("starcite_socket_subscriptions"));
-        assert!(rendered.contains(r#"transport="raw""#));
+        assert!(rendered.contains(r#"transport="phoenix""#));
         assert!(rendered.contains(r#"surface="tenant_lifecycle""#));
     }
 

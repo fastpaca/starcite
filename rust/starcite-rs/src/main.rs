@@ -221,11 +221,6 @@ fn build_public_router(telemetry: Telemetry, ops: runtime::OpsState) -> Router<A
             post(api::event_http::append_event),
         )
         .route(
-            "/v1/sessions/{id}/events",
-            get(api::event_http::read_events),
-        )
-        .route("/v1/sessions/{id}/tail", get(api::event_http::tail_events))
-        .route(
             "/v1/sessions/{id}/archive",
             post(api::session_http::archive_session),
         )
