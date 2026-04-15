@@ -24,6 +24,7 @@ use crate::{
     },
     error::AppError,
     model::{AppendReply, Cursor, EventResponse, ValidatedAppendEvent, iso8601},
+    telemetry::{AppendBoundary, Telemetry},
 };
 
 use super::{fanout::SessionFanout, ops::OpsState};
@@ -41,6 +42,7 @@ pub struct SessionManager {
     ownership: OwnershipManager,
     replication: ReplicationCoordinator,
     ops: OpsState,
+    telemetry: Telemetry,
     idle_timeout: Duration,
     next_worker_id: Arc<AtomicU64>,
 }
@@ -54,6 +56,7 @@ pub struct SessionManagerDeps {
     pub ownership: OwnershipManager,
     pub replication: ReplicationCoordinator,
     pub ops: OpsState,
+    pub telemetry: Telemetry,
     pub idle_timeout: Duration,
 }
 
@@ -124,6 +127,7 @@ impl SessionManager {
             ownership,
             replication,
             ops,
+            telemetry,
             idle_timeout,
         } = deps;
 
@@ -137,6 +141,7 @@ impl SessionManager {
             ownership,
             replication,
             ops,
+            telemetry,
             idle_timeout,
             next_worker_id: Arc::new(AtomicU64::new(1)),
         }
@@ -313,6 +318,7 @@ impl SessionManager {
         state: &mut SessionWorkerState,
         input: ValidatedAppendEvent,
     ) -> Result<AppendOutcome, AppError> {
+        let started_at = std::time::Instant::now();
         let lease = self.ownership.live_or_renew_owned(session_id).await?;
         if !state.flush_seeded {
             self.seed_pending_flush(session_id).await;
@@ -408,12 +414,20 @@ impl SessionManager {
             cursor: next_seq,
         };
 
+        self.telemetry.record_append_boundary(
+            AppendBoundary::BeforeQuorumReplicate,
+            started_at.elapsed().as_millis() as u64,
+        );
         self.replication
             .replicate(lease.epoch, &event, lease.standby.as_ref())
             .await?;
         state.remember_last_seq(next_seq);
         state.remember_producer_seq(&event.producer_id, event.producer_seq);
         self.apply_owner_commit(event.clone()).await;
+        self.telemetry.record_append_boundary(
+            AppendBoundary::AfterCommitBeforeReply,
+            started_at.elapsed().as_millis() as u64,
+        );
 
         Ok(AppendOutcome {
             reply: AppendReply {
@@ -604,6 +618,7 @@ mod tests {
         error::AppError,
         model::{AppendEventRequest, Cursor, EventResponse, Principal, SessionResponse},
         runtime::{OpsState, fanout::SessionFanout},
+        telemetry::Telemetry,
     };
     use serde_json::Map;
     use sqlx::postgres::PgPoolOptions;
@@ -638,6 +653,7 @@ mod tests {
             )
             .expect("replication"),
             ops: OpsState::new(30_000),
+            telemetry: Telemetry::new(true),
             idle_timeout,
         })
     }

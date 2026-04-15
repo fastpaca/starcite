@@ -93,6 +93,10 @@ const COUNTERS: &[CounterSpec] = &[
         help: "Stream delivery outcomes by operation",
     },
     CounterSpec {
+        name: "starcite_append_boundary_total",
+        help: "Append pipeline arrivals at critical owner-side crash boundaries",
+    },
+    CounterSpec {
         name: "starcite_session_create_total",
         help: "Total successfully created sessions",
     },
@@ -141,6 +145,11 @@ const HISTOGRAMS: &[HistogramSpec] = &[
     HistogramSpec {
         name: "starcite_read_duration_ms",
         help: "Stream delivery duration in milliseconds by operation and phase",
+        buckets: DEFAULT_MS_BUCKETS,
+    },
+    HistogramSpec {
+        name: "starcite_append_boundary_duration_ms",
+        help: "Elapsed append time in milliseconds when critical owner-side crash boundaries are crossed",
         buckets: DEFAULT_MS_BUCKETS,
     },
 ];
@@ -215,6 +224,12 @@ pub enum ReadOutcome {
     Ok,
     Error,
     Timeout,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AppendBoundary {
+    BeforeQuorumReplicate,
+    AfterCommitBeforeReply,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -393,6 +408,16 @@ impl Telemetry {
 
         self.increment_counter("starcite_read_total", labels);
         self.observe_histogram("starcite_read_duration_ms", histogram_labels, duration_ms);
+    }
+
+    pub fn record_append_boundary(&self, boundary: AppendBoundary, duration_ms: u64) {
+        let labels = label_set(&[
+            ("node", self.node_name().to_string()),
+            ("boundary", append_boundary_label(boundary).to_string()),
+        ]);
+
+        self.increment_counter("starcite_append_boundary_total", labels.clone());
+        self.observe_histogram("starcite_append_boundary_duration_ms", labels, duration_ms);
     }
 
     pub fn track_socket_connection(
@@ -942,6 +967,13 @@ fn read_outcome_label(outcome: ReadOutcome) -> &'static str {
     }
 }
 
+fn append_boundary_label(boundary: AppendBoundary) -> &'static str {
+    match boundary {
+        AppendBoundary::BeforeQuorumReplicate => "before_quorum_replicate",
+        AppendBoundary::AfterCommitBeforeReply => "after_commit_before_reply",
+    }
+}
+
 fn session_outcome_label(outcome: SessionOutcome) -> &'static str {
     match outcome {
         SessionOutcome::Ok => "ok",
@@ -994,9 +1026,9 @@ mod tests {
     };
 
     use super::{
-        AuthOutcome, AuthSource, AuthStage, EdgeStage, IngestOperation, IngestOutcome,
-        ReadOperation, ReadOutcome, ReadPhase, RequestOperation, RequestOutcome, RequestPhase,
-        SessionOutcome, SessionReason, SocketSurface, SocketTransport, Telemetry,
+        AppendBoundary, AuthOutcome, AuthSource, AuthStage, EdgeStage, IngestOperation,
+        IngestOutcome, ReadOperation, ReadOutcome, ReadPhase, RequestOperation, RequestOutcome,
+        RequestPhase, SessionOutcome, SessionReason, SocketSurface, SocketTransport, Telemetry,
     };
 
     #[test]
@@ -1032,6 +1064,8 @@ mod tests {
             ReadOutcome::Ok,
             2,
         );
+        telemetry.record_append_boundary(AppendBoundary::BeforeQuorumReplicate, 3);
+        telemetry.record_append_boundary(AppendBoundary::AfterCommitBeforeReply, 4);
         telemetry.record_session_create("acme");
         telemetry.record_session_freeze("acme", SessionOutcome::Ok, SessionReason::IdleTimeout);
         telemetry.record_session_hydrate("acme", SessionOutcome::Ok, SessionReason::Hydrate);
@@ -1054,6 +1088,9 @@ mod tests {
         assert!(rendered.contains("starcite_request_duration_ms_bucket"));
         assert!(rendered.contains("starcite_read_total"));
         assert!(rendered.contains(r#"operation="lifecycle_catchup""#));
+        assert!(rendered.contains("starcite_append_boundary_total"));
+        assert!(rendered.contains(r#"boundary="before_quorum_replicate""#));
+        assert!(rendered.contains("starcite_append_boundary_duration_ms_bucket"));
         assert!(rendered.contains("starcite_session_create_total"));
         assert!(rendered.contains("starcite_session_freeze_total"));
         assert!(rendered.contains("starcite_session_hydrate_total"));
