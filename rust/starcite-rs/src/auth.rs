@@ -717,12 +717,16 @@ mod tests {
 
     use axum::{
         Router,
-        http::{HeaderMap, HeaderValue, header::AUTHORIZATION},
+        http::{HeaderMap, HeaderValue, StatusCode, header::AUTHORIZATION},
         routing::get,
     };
     use jsonwebtoken::{Algorithm, EncodingKey, Header, encode};
     use serde_json::{Value, json};
-    use tokio::task::JoinHandle;
+    use tokio::{
+        sync::Mutex,
+        task::JoinHandle,
+        time::{Duration, sleep},
+    };
 
     use super::{
         AppError, AuthContext, AuthService, auth_context_from_claims, claim_scopes,
@@ -737,16 +741,7 @@ mod tests {
     #[tokio::test]
     async fn jwt_authenticates_http_claims() {
         let secret = "super-secret";
-        let jwks = json!({
-            "keys": [{
-                "kty": "oct",
-                "alg": "HS256",
-                "use": "sig",
-                "kid": "kid-1",
-                "k": encode_base64url(secret.as_bytes()),
-            }]
-        });
-        let (jwks_url, server) = spawn_jwks_server(jwks).await;
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
         let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
         let token = token_for(
             json!({
@@ -774,6 +769,100 @@ mod tests {
         assert_eq!(auth.principal.id, "rust-rewrite");
         assert_eq!(auth.principal.principal_type, "service");
         assert!(auth.scopes.iter().any(|scope| scope == "session:read"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn jwt_refreshes_when_a_new_kid_appears() {
+        let (jwks_url, state, server) = spawn_jwks_server(jwks("super-secret", "kid-1")).await;
+        let auth_service =
+            AuthService::new(&jwt_config_with_jwks_cache(&jwks_url, 5, 100)).expect("auth config");
+
+        let first_token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            "super-secret",
+            "kid-1",
+        );
+        let second_token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            "rotated-secret",
+            "kid-2",
+        );
+
+        authenticate_bearer(&auth_service, &first_token)
+            .await
+            .expect("first token should authenticate");
+
+        set_jwks_response(&state, StatusCode::OK, jwks("rotated-secret", "kid-2")).await;
+
+        let rotated = authenticate_bearer(&auth_service, &second_token)
+            .await
+            .expect("rotated token should authenticate");
+
+        assert_eq!(rotated.principal.id, "rust-rewrite");
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn jwt_uses_cached_key_when_refresh_fails_before_hard_expiry() {
+        let secret = "super-secret";
+        let (jwks_url, state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service =
+            AuthService::new(&jwt_config_with_jwks_cache(&jwks_url, 5, 100)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+
+        authenticate_bearer(&auth_service, &token)
+            .await
+            .expect("initial token should authenticate");
+
+        sleep(Duration::from_millis(15)).await;
+        set_jwks_response(
+            &state,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "boom"}),
+        )
+        .await;
+
+        authenticate_bearer(&auth_service, &token)
+            .await
+            .expect("cached key should remain usable before hard expiry");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn jwt_rejects_when_refresh_fails_after_hard_expiry() {
+        let secret = "super-secret";
+        let (jwks_url, state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service =
+            AuthService::new(&jwt_config_with_jwks_cache(&jwks_url, 5, 10)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+
+        authenticate_bearer(&auth_service, &token)
+            .await
+            .expect("initial token should authenticate");
+
+        sleep(Duration::from_millis(20)).await;
+        set_jwks_response(
+            &state,
+            StatusCode::INTERNAL_SERVER_ERROR,
+            json!({"error": "boom"}),
+        )
+        .await;
+
+        assert!(matches!(
+            authenticate_bearer(&auth_service, &token).await,
+            Err(AppError::InvalidBearerToken)
+        ));
 
         server.abort();
     }
@@ -901,27 +990,60 @@ mod tests {
         assert_eq!(auth.principal.id, "rust-rewrite");
     }
 
-    async fn spawn_jwks_server(body: Value) -> (String, JoinHandle<()>) {
+    #[derive(Debug)]
+    struct MutableJwksResponse {
+        status: StatusCode,
+        body: String,
+    }
+
+    async fn spawn_jwks_server(
+        body: Value,
+    ) -> (
+        String,
+        std::sync::Arc<Mutex<MutableJwksResponse>>,
+        JoinHandle<()>,
+    ) {
         let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("bind listener");
         let addr = listener.local_addr().expect("listener addr");
-        let body = body.to_string();
+        let state = std::sync::Arc::new(Mutex::new(MutableJwksResponse {
+            status: StatusCode::OK,
+            body: body.to_string(),
+        }));
+        let route_state = state.clone();
         let app = Router::new().route(
             "/jwks",
             get(move || {
-                let body = body.clone();
-                async move { body }
+                let route_state = route_state.clone();
+                async move {
+                    let response = route_state.lock().await;
+                    (response.status, response.body.clone())
+                }
             }),
         );
         let handle = tokio::spawn(async move {
             axum::serve(listener, app).await.expect("serve jwks");
         });
 
-        (format!("http://{addr}/jwks"), handle)
+        (format!("http://{addr}/jwks"), state, handle)
+    }
+
+    async fn set_jwks_response(
+        state: &std::sync::Arc<Mutex<MutableJwksResponse>>,
+        status: StatusCode,
+        body: Value,
+    ) {
+        let mut response = state.lock().await;
+        response.status = status;
+        response.body = body.to_string();
     }
 
     fn jwt_config(jwks_url: &str) -> Config {
+        jwt_config_with_jwks_cache(jwks_url, 60_000, 60_000)
+    }
+
+    fn jwt_config_with_jwks_cache(jwks_url: &str, refresh_ms: u64, hard_expiry_ms: u64) -> Config {
         Config {
             listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4001),
             ops_listen_addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 4002),
@@ -934,8 +1056,8 @@ mod tests {
             auth_audience: Some("starcite-api".to_string()),
             auth_jwks_url: Some(jwks_url.to_string()),
             auth_jwt_leeway_seconds: 1,
-            auth_jwks_refresh_ms: 60_000,
-            auth_jwks_hard_expiry_ms: 60_000,
+            auth_jwks_refresh_ms: refresh_ms,
+            auth_jwks_hard_expiry_ms: hard_expiry_ms,
             telemetry_enabled: false,
             shutdown_drain_timeout_ms: 30_000,
             session_runtime_idle_timeout_ms: 30_000,
@@ -948,6 +1070,41 @@ mod tests {
             local_async_standby_url: None,
             local_async_replication_timeout_ms: 500,
         }
+    }
+
+    async fn authenticate_bearer(
+        auth_service: &AuthService,
+        token: &str,
+    ) -> Result<AuthContext, AppError> {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
+        );
+        authenticate_http(&headers, auth_service).await
+    }
+
+    fn base_claims(subject: &str, scope: &str) -> Value {
+        json!({
+            "iss": "https://issuer.example",
+            "aud": "starcite-api",
+            "exp": 4_102_444_800_i64,
+            "tenant_id": "acme",
+            "sub": subject,
+            "scope": scope,
+        })
+    }
+
+    fn jwks(secret: &str, kid: &str) -> Value {
+        json!({
+            "keys": [{
+                "kty": "oct",
+                "alg": "HS256",
+                "use": "sig",
+                "kid": kid,
+                "k": encode_base64url(secret.as_bytes()),
+            }]
+        })
     }
 
     fn token_for(claims: Value, secret: &str, kid: &str) -> String {

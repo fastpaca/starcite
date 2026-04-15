@@ -273,7 +273,7 @@ is actually participating in Postgres-backed standby assignment.
 
 ## Deliberate gaps
 
-- no key rotation tests beyond the in-process JWKS test harness yet
+- no external IdP interoperability coverage beyond the in-process JWKS rotation/failure harness
 - no full quorum replication or topology routing behind the runtime lifecycle; `local_async` has
   only Postgres-backed single-writer session leases plus one synchronous standby chosen by the
   Postgres control plane or a static fallback URL
