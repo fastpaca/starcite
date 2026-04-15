@@ -1056,7 +1056,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_gap_reason_keeps_same_epoch_cursor_ahead_of_head_recoverable() {
+    fn replay_gap_reason_rejects_same_epoch_cursor_ahead_of_head() {
         let reason = replay_gap_reason(
             Cursor::new(Some(7), 9),
             CursorSnapshot {
@@ -1067,7 +1067,7 @@ mod tests {
             Some(2),
         );
 
-        assert_eq!(reason, None);
+        assert_eq!(reason, Some(GapReason::Rollback));
     }
 
     #[test]

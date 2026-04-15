@@ -50,7 +50,7 @@ pub(crate) fn replay_gap_reason(
     snapshot: CursorSnapshot,
     earliest_available_seq: Option<i64>,
 ) -> Option<GapReason> {
-    if cursor_epoch_mismatch(cursor.epoch, snapshot.epoch) && cursor.seq > snapshot.last_seq {
+    if cursor.seq > snapshot.last_seq {
         return Some(GapReason::Rollback);
     }
 
@@ -218,7 +218,7 @@ mod tests {
     }
 
     #[test]
-    fn cursor_ahead_without_epoch_mismatch_is_not_a_gap() {
+    fn cursor_ahead_of_head_is_rollback_even_with_same_epoch() {
         let reason = replay_gap_reason(
             Cursor::new(Some(4), 10),
             CursorSnapshot {
@@ -229,7 +229,26 @@ mod tests {
             Some(1),
         );
 
-        assert_eq!(reason, None);
+        assert_eq!(reason, Some(GapReason::Rollback));
+    }
+
+    #[test]
+    fn public_seq_cursor_ahead_of_head_maps_to_resume_invalidated() {
+        let reason = replay_gap_reason(
+            Cursor::new(None, 10),
+            CursorSnapshot {
+                epoch: Some(4),
+                last_seq: 3,
+                committed_seq: 1,
+            },
+            Some(1),
+        );
+
+        assert_eq!(reason, Some(GapReason::Rollback));
+        assert_eq!(
+            public_gap_reason(reason.expect("rollback reason")),
+            "resume_invalidated"
+        );
     }
 
     #[test]
