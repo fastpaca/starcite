@@ -713,6 +713,7 @@ fn principal_from_subject(tenant_id: String, subject: String) -> Result<Principa
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 
     use axum::{
@@ -769,6 +770,49 @@ mod tests {
         assert_eq!(auth.principal.id, "rust-rewrite");
         assert_eq!(auth.principal.principal_type, "service");
         assert!(auth.scopes.iter().any(|scope| scope == "session:read"));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn jwt_authenticates_socket_claims() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let params = HashMap::from([("token".to_string(), token)]);
+
+        let auth = super::authenticate_socket(&params, &auth_service)
+            .await
+            .expect("socket token should authenticate");
+
+        assert_eq!(auth.principal.tenant_id, "acme");
+        assert_eq!(auth.principal.id, "rust-rewrite");
+        assert_eq!(auth.principal.principal_type, "service");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn socket_auth_rejects_access_token_param() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let params = HashMap::from([("access_token".to_string(), token)]);
+
+        assert!(matches!(
+            super::authenticate_socket(&params, &auth_service).await,
+            Err(AppError::InvalidBearerToken)
+        ));
 
         server.abort();
     }
