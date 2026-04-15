@@ -470,3 +470,216 @@ async fn wait_for_optional_expiry(expiry: Option<&mut SocketExpiry>) {
         None => pending::<()>().await,
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::{collections::HashMap, sync::Arc, time::Duration};
+
+    use serde_json::json;
+    use sqlx::postgres::PgPoolOptions;
+    use tokio::sync::mpsc;
+
+    use super::{TopicSubscription, handle_tail_join};
+    use crate::{
+        AppState,
+        api::{
+            phoenix_context::SocketContext, phoenix_protocol::PhoenixFrame,
+            query_options::TailOptions,
+        },
+        auth::{AuthContext, AuthService},
+        cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
+        config::{AuthMode, Config},
+        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        model::{Cursor, Principal, SessionResponse},
+        runtime::{
+            LifecycleFanout, OpsState, SessionFanout, SessionManager, SessionManagerDeps,
+            SessionRuntime,
+        },
+        telemetry::Telemetry,
+    };
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
+            .expect("lazy pool");
+        let fanout = SessionFanout::default();
+        let lifecycle = LifecycleFanout::default();
+        let hot_store = HotEventStore::new();
+        let archive_queue = ArchiveQueue::new();
+        let pending_flush = PendingFlushQueue::new();
+        let session_store = HotSessionStore::new();
+        let telemetry = Telemetry::new(true);
+        let ops = OpsState::new(30_000);
+        let instance_id = Arc::<str>::from("node-a");
+        let ownership =
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+        let control_plane = ControlPlaneState::new(None, None, Duration::from_secs(5));
+        let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
+        let replication =
+            ReplicationCoordinator::new(instance_id.clone(), false, Duration::from_millis(100))
+                .expect("replication");
+        let session_manager = SessionManager::new(SessionManagerDeps {
+            pool: pool.clone(),
+            fanout: fanout.clone(),
+            hot_store: hot_store.clone(),
+            pending_flush: pending_flush.clone(),
+            session_store: session_store.clone(),
+            ownership: ownership.clone(),
+            replication: replication.clone(),
+            ops: ops.clone(),
+            telemetry: telemetry.clone(),
+            idle_timeout: Duration::from_secs(30),
+        });
+        let runtime = SessionRuntime::new(
+            None,
+            lifecycle.clone(),
+            telemetry.clone(),
+            instance_id.clone(),
+            Duration::from_secs(30),
+        );
+        let auth = AuthService::new(&test_config()).expect("auth");
+
+        AppState {
+            pool,
+            fanout,
+            lifecycle,
+            hot_store,
+            archive_queue,
+            pending_flush,
+            session_store,
+            session_manager,
+            ownership,
+            control_plane,
+            owner_proxy,
+            replication,
+            runtime,
+            ops,
+            auth_mode: AuthMode::None,
+            auth,
+            telemetry,
+            instance_id,
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            listen_addr: "127.0.0.1:4001".parse().expect("listen addr"),
+            ops_listen_addr: "127.0.0.1:4101".parse().expect("ops listen addr"),
+            database_url: "postgres://postgres:postgres@localhost/starcite_test".to_string(),
+            max_connections: 1,
+            archive_flush_interval_ms: 5_000,
+            migrate_on_boot: false,
+            auth_mode: AuthMode::None,
+            auth_issuer: None,
+            auth_audience: None,
+            auth_jwks_url: None,
+            auth_jwt_leeway_seconds: 1,
+            auth_jwks_refresh_ms: 60_000,
+            auth_jwks_hard_expiry_ms: 60_000,
+            telemetry_enabled: true,
+            shutdown_drain_timeout_ms: 30_000,
+            session_runtime_idle_timeout_ms: 30_000,
+            commit_flush_interval_ms: 100,
+            local_async_lease_ttl_ms: 5_000,
+            local_async_node_public_url: None,
+            local_async_node_ops_url: None,
+            local_async_node_ttl_ms: 2_000,
+            local_async_owner_proxy_timeout_ms: 100,
+            local_async_replication_timeout_ms: 100,
+        }
+    }
+
+    fn auth_context(tenant_id: &str, session_id: Option<&str>, scopes: &[&str]) -> AuthContext {
+        AuthContext {
+            kind: AuthMode::Jwt,
+            principal: Principal {
+                tenant_id: tenant_id.to_string(),
+                id: "user-42".to_string(),
+                principal_type: "user".to_string(),
+            },
+            scopes: scopes.iter().map(|scope| scope.to_string()).collect(),
+            session_id: session_id.map(str::to_string),
+            expires_at: Some(4_102_444_800_i64),
+        }
+    }
+
+    fn tail_join_frame(session_id: &str) -> PhoenixFrame {
+        PhoenixFrame {
+            join_ref: Some("1".to_string()),
+            ref_id: Some("2".to_string()),
+            topic: format!("tail:{session_id}"),
+            event: "phx_join".to_string(),
+            payload: json!({
+                "cursor": Cursor::zero().seq,
+                "batch_size": TailOptions {
+                    cursor: Cursor::zero(),
+                    batch_size: 1,
+                }.batch_size,
+            }),
+        }
+    }
+
+    fn sample_session(session_id: &str) -> SessionResponse {
+        SessionResponse {
+            id: session_id.to_string(),
+            title: Some("Draft".to_string()),
+            creator_principal: None,
+            metadata: serde_json::Map::new(),
+            last_seq: 0,
+            created_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            updated_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            version: 1,
+            archived: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn tail_join_rejects_session_locked_token_on_other_session() {
+        let state = test_state();
+        let session_id = "ses_demo";
+        let frame = tail_join_frame(session_id);
+        let context = SocketContext {
+            auth: auth_context("acme", Some("ses_locked"), &["session:read"]),
+            tenant_id: None,
+            connect_params: HashMap::from([("token".to_string(), "jwt-token".to_string())]),
+        };
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let mut subscriptions = HashMap::<String, TopicSubscription>::new();
+
+        handle_tail_join(frame, &state, &context, &outbound_tx, &mut subscriptions).await;
+
+        let reply = outbound_rx.recv().await.expect("join reply");
+        assert_eq!(reply.topic, "tail:ses_demo");
+        assert_eq!(reply.event, "phx_reply");
+        assert_eq!(reply.payload["status"], "error");
+        assert_eq!(reply.payload["response"]["reason"], "forbidden_session");
+        assert!(subscriptions.is_empty());
+    }
+
+    #[tokio::test]
+    async fn tail_join_rejects_cross_tenant_session() {
+        let state = test_state();
+        let session_id = "ses_demo";
+        state
+            .session_store
+            .put_session("beta", sample_session(session_id), Some(0))
+            .await;
+        let frame = tail_join_frame(session_id);
+        let context = SocketContext {
+            auth: auth_context("acme", None, &["session:read"]),
+            tenant_id: None,
+            connect_params: HashMap::from([("token".to_string(), "jwt-token".to_string())]),
+        };
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+        let mut subscriptions = HashMap::<String, TopicSubscription>::new();
+
+        handle_tail_join(frame, &state, &context, &outbound_tx, &mut subscriptions).await;
+
+        let reply = outbound_rx.recv().await.expect("join reply");
+        assert_eq!(reply.topic, "tail:ses_demo");
+        assert_eq!(reply.event, "phx_reply");
+        assert_eq!(reply.payload["status"], "error");
+        assert_eq!(reply.payload["response"]["reason"], "forbidden_tenant");
+        assert!(subscriptions.is_empty());
+    }
+}
