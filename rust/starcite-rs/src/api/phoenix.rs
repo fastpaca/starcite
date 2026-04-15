@@ -26,8 +26,7 @@ use crate::{
     },
     api::phoenix_socket::{send_frame, send_node_draining, send_token_expired},
     api::phoenix_topics::{run_lifecycle_topic, run_tail_topic},
-    auth::{self, AuthContext},
-    data_plane,
+    auth, data_plane,
     error::AppError,
     runtime::RuntimeTouchReason,
     telemetry::{SocketSurface, SocketTransport},
@@ -214,22 +213,6 @@ async fn handle_lifecycle_join(
         }
     };
 
-    if let Err(error) = validate_lifecycle_scope(state, &context.auth, &tenant_id, &lifecycle).await
-    {
-        reject_join_error(outbound_tx, &frame, &error);
-        return;
-    }
-
-    if let Some(session_id) = lifecycle.session_id.as_deref() {
-        touch_existing_session(
-            state,
-            session_id,
-            &tenant_id,
-            RuntimeTouchReason::PhoenixLifecycle,
-        )
-        .await;
-    }
-
     let receiver = state.lifecycle.subscribe_tenant(&tenant_id).await;
     spawn_lifecycle_subscription(
         frame,
@@ -325,25 +308,6 @@ fn subscription_targets(
     subscriptions
         .iter()
         .map(|(topic, subscription)| (topic.as_str(), subscription.join_ref.clone()))
-}
-
-async fn validate_lifecycle_scope(
-    state: &AppState,
-    auth: &AuthContext,
-    tenant_id: &str,
-    lifecycle: &LifecycleOptions,
-) -> Result<(), AppError> {
-    let Some(session_id) = lifecycle.session_id.as_ref() else {
-        return Ok(());
-    };
-
-    let scoped_tenant_id = resolve_session_tenant_id(state, session_id).await?;
-
-    if scoped_tenant_id != tenant_id {
-        return Err(AppError::ForbiddenTenant);
-    }
-
-    auth::allow_read_session(auth, session_id, &scoped_tenant_id)
 }
 
 async fn handle_socket_message(

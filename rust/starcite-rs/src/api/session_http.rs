@@ -34,8 +34,11 @@ pub async fn create_session(
             .runtime
             .session_created(&session.id, &validated.tenant_id)
             .await;
-        api::lifecycle_http::publish_lifecycle(
-            &state,
+        crate::runtime::publish_catalog_lifecycle(
+            &state.pool,
+            &state.session_store,
+            &state.lifecycle,
+            &state.instance_id,
             LifecycleEvent::created(validated.tenant_id, &session),
         )
         .await;
@@ -113,8 +116,11 @@ pub async fn update_session(
             repository::update_session(&state.pool, &session_id, request.validate()?).await?;
         cache_session(&state, &tenant_id, &session, None).await;
 
-        api::lifecycle_http::publish_lifecycle(
-            &state,
+        crate::runtime::publish_catalog_lifecycle(
+            &state.pool,
+            &state.session_store,
+            &state.lifecycle,
+            &state.instance_id,
             LifecycleEvent::updated(tenant_id.clone(), &session),
         )
         .await;
@@ -216,5 +222,12 @@ async fn publish_archive_lifecycle(
         LifecycleEvent::unarchived(outcome.tenant_id.clone(), &outcome.session)
     };
 
-    api::lifecycle_http::publish_lifecycle(state, event).await;
+    crate::runtime::publish_catalog_lifecycle(
+        &state.pool,
+        &state.session_store,
+        &state.lifecycle,
+        &state.instance_id,
+        event,
+    )
+    .await;
 }

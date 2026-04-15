@@ -12,7 +12,6 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct LifecycleOptions {
     pub(crate) cursor: Cursor,
-    pub(crate) session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -26,10 +25,7 @@ pub(crate) struct PhoenixFrame {
 
 pub(crate) fn parse_lifecycle_join_payload(payload: &Value) -> Result<LifecycleOptions, AppError> {
     let cursor = parse_lifecycle_cursor(payload)?;
-    Ok(LifecycleOptions {
-        cursor,
-        session_id: None,
-    })
+    Ok(LifecycleOptions { cursor })
 }
 
 pub(crate) fn parse_tail_join_payload(payload: &Value) -> Result<TailOptions, AppError> {
@@ -176,21 +172,12 @@ mod tests {
     fn lifecycle_join_payload_defaults_cursor() {
         let options = parse_lifecycle_join_payload(&json!({})).expect("defaults should parse");
         assert_eq!(options.cursor, Cursor::zero());
-        assert_eq!(options.session_id, None);
     }
 
     #[test]
     fn lifecycle_join_payload_rejects_non_integer_cursor() {
         assert!(parse_lifecycle_join_payload(&json!({"cursor": "4"})).is_err());
         assert!(parse_lifecycle_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}})).is_err());
-    }
-
-    #[test]
-    fn lifecycle_join_payload_ignores_session_filter() {
-        let options = parse_lifecycle_join_payload(&json!({"session_id": "ses_demo"}))
-            .expect("payload should parse");
-
-        assert_eq!(options.session_id, None);
     }
 
     #[test]

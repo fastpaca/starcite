@@ -239,7 +239,6 @@ pub enum SocketSurface {
     Socket,
     Tail,
     TenantLifecycle,
-    SessionLifecycle,
 }
 
 #[derive(Debug)]
@@ -577,11 +576,6 @@ impl Telemetry {
             ("node", self.node_name().to_string()),
             ("scope", "lifecycle_tenant".to_string()),
         ]);
-        let session_lifecycle_labels = label_set(&[
-            ("node", self.node_name().to_string()),
-            ("scope", "lifecycle_session".to_string()),
-        ]);
-
         render_scalar_gauge(
             &mut out,
             "starcite_node_draining",
@@ -644,10 +638,6 @@ impl Telemetry {
                     &tenant_lifecycle_labels,
                     lifecycle.active_tenant_count as i64,
                 ),
-                (
-                    &session_lifecycle_labels,
-                    lifecycle.active_session_count as i64,
-                ),
             ],
         );
         render_scalar_gauge_family(
@@ -669,14 +659,6 @@ impl Telemetry {
                         .tenants
                         .iter()
                         .map(|tenant| tenant.subscribers as i64)
-                        .sum::<i64>(),
-                ),
-                (
-                    &session_lifecycle_labels,
-                    lifecycle
-                        .sessions
-                        .iter()
-                        .map(|session| session.subscribers as i64)
                         .sum::<i64>(),
                 ),
             ],
@@ -979,11 +961,8 @@ fn runtime_touch_reason_label(reason: RuntimeTouchReason) -> &'static str {
         RuntimeTouchReason::Create => "create",
         RuntimeTouchReason::HttpRead => "http_read",
         RuntimeTouchReason::HttpWrite => "http_write",
-        RuntimeTouchReason::HttpLifecycle => "http_lifecycle",
         RuntimeTouchReason::RawTail => "raw_tail",
-        RuntimeTouchReason::RawLifecycle => "raw_lifecycle",
         RuntimeTouchReason::PhoenixTail => "phoenix_tail",
-        RuntimeTouchReason::PhoenixLifecycle => "phoenix_lifecycle",
     }
 }
 
@@ -999,7 +978,6 @@ fn socket_surface_label(surface: SocketSurface) -> &'static str {
         SocketSurface::Socket => "socket",
         SocketSurface::Tail => "tail",
         SocketSurface::TenantLifecycle => "tenant_lifecycle",
-        SocketSurface::SessionLifecycle => "session_lifecycle",
     }
 }
 
@@ -1063,7 +1041,7 @@ mod tests {
         let _connection =
             telemetry.track_socket_connection(SocketTransport::Raw, SocketSurface::Tail);
         let _subscription = telemetry
-            .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::SessionLifecycle);
+            .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::TenantLifecycle);
 
         let rendered = telemetry.render();
 
@@ -1085,7 +1063,7 @@ mod tests {
         assert!(rendered.contains("starcite_socket_connections"));
         assert!(rendered.contains("starcite_socket_subscriptions"));
         assert!(rendered.contains(r#"transport="raw""#));
-        assert!(rendered.contains(r#"surface="session_lifecycle""#));
+        assert!(rendered.contains(r#"surface="tenant_lifecycle""#));
     }
 
     #[test]
@@ -1153,7 +1131,7 @@ mod tests {
                         session_id: "ses_a".to_string(),
                         tenant_id: "acme".to_string(),
                         generation: 1,
-                        last_touch_reason: RuntimeTouchReason::HttpLifecycle,
+                        last_touch_reason: RuntimeTouchReason::HttpWrite,
                         idle_expires_in_ms: 12_345,
                     },
                     ActiveSessionSnapshot {
@@ -1178,21 +1156,10 @@ mod tests {
             },
             &LifecycleFanoutSnapshot {
                 active_tenant_count: 1,
-                active_session_count: 2,
                 tenants: vec![TenantSubscriptionSnapshot {
                     tenant_id: "acme".to_string(),
                     subscribers: 4,
                 }],
-                sessions: vec![
-                    SessionSubscriptionSnapshot {
-                        session_id: "ses_a".to_string(),
-                        subscribers: 2,
-                    },
-                    SessionSubscriptionSnapshot {
-                        session_id: "ses_b".to_string(),
-                        subscribers: 1,
-                    },
-                ],
             },
         );
 
@@ -1206,7 +1173,7 @@ mod tests {
         );
         assert!(rendered.contains("starcite_runtime_active_sessions_by_reason"));
         assert!(rendered.contains(
-            r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="http_lifecycle"} 1"#
+            r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="http_write"} 1"#
         ));
         assert!(rendered.contains(
             r#"starcite_runtime_active_sessions_by_reason{node="starcite-rs",reason="phoenix_tail"} 1"#
@@ -1218,18 +1185,12 @@ mod tests {
         assert!(rendered.contains(
             r#"starcite_fanout_active_keys{node="starcite-rs",scope="lifecycle_tenant"} 1"#
         ));
-        assert!(rendered.contains(
-            r#"starcite_fanout_active_keys{node="starcite-rs",scope="lifecycle_session"} 2"#
-        ));
         assert!(rendered.contains("starcite_fanout_subscribers"));
         assert!(rendered.contains(
             r#"starcite_fanout_subscribers{node="starcite-rs",scope="events_session"} 3"#
         ));
         assert!(rendered.contains(
             r#"starcite_fanout_subscribers{node="starcite-rs",scope="lifecycle_tenant"} 4"#
-        ));
-        assert!(rendered.contains(
-            r#"starcite_fanout_subscribers{node="starcite-rs",scope="lifecycle_session"} 3"#
         ));
     }
 }

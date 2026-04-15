@@ -30,20 +30,15 @@ pub(crate) async fn run_lifecycle_topic(
     mut receiver: broadcast::Receiver<LifecycleResponse>,
     outbound_tx: mpsc::UnboundedSender<PhoenixFrame>,
 ) {
-    let _subscription = state.telemetry.track_socket_subscription(
-        SocketTransport::Phoenix,
-        lifecycle_socket_surface(&lifecycle),
-    );
-    let _fanout_guard = match lifecycle.session_id.as_ref() {
-        Some(session_id) => state.lifecycle.session_guard(session_id.clone()),
-        None => state.lifecycle.tenant_guard(tenant_id.to_string()),
-    };
+    let _subscription = state
+        .telemetry
+        .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::TenantLifecycle);
+    let _fanout_guard = state.lifecycle.tenant_guard(tenant_id.to_string());
     let mut cursor = lifecycle.cursor;
 
     match sync_lifecycle(
         &topic,
         &tenant_id,
-        &lifecycle,
         join_ref.clone(),
         &state,
         &outbound_tx,
@@ -61,14 +56,6 @@ pub(crate) async fn run_lifecycle_topic(
     loop {
         match receiver.recv().await {
             Ok(event) if event.cursor <= cursor.seq => continue,
-            Ok(event)
-                if lifecycle
-                    .session_id
-                    .as_ref()
-                    .is_some_and(|session_id| event.event.session_id() != session_id) =>
-            {
-                continue;
-            }
             Ok(event) => {
                 cursor = Cursor::new(None, event.cursor);
                 let payload = match lifecycle_payload(&event) {
@@ -108,7 +95,6 @@ pub(crate) async fn run_lifecycle_topic(
                 match sync_lifecycle(
                     &topic,
                     &tenant_id,
-                    &lifecycle,
                     join_ref.clone(),
                     &state,
                     &outbound_tx,
@@ -223,24 +209,15 @@ pub(crate) async fn run_tail_topic(
     }
 }
 
-fn lifecycle_socket_surface(lifecycle: &LifecycleOptions) -> SocketSurface {
-    if lifecycle.session_id.is_some() {
-        SocketSurface::SessionLifecycle
-    } else {
-        SocketSurface::TenantLifecycle
-    }
-}
-
 async fn sync_lifecycle(
     topic: &str,
     tenant_id: &str,
-    lifecycle: &LifecycleOptions,
     join_ref: Option<String>,
     state: &AppState,
     outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
     cursor: Cursor,
 ) -> Result<Cursor, AppError> {
-    let snapshot = resolve_lifecycle_cursor_snapshot(state, tenant_id, lifecycle).await?;
+    let snapshot = resolve_lifecycle_cursor_snapshot(state, tenant_id).await?;
     let earliest_available_seq = earliest_available_seq(snapshot);
 
     if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
@@ -259,7 +236,6 @@ async fn sync_lifecycle(
     replay_lifecycle(
         topic,
         tenant_id,
-        lifecycle,
         join_ref.clone(),
         state,
         outbound_tx,
@@ -271,7 +247,6 @@ async fn sync_lifecycle(
 async fn replay_lifecycle(
     topic: &str,
     tenant_id: &str,
-    lifecycle: &LifecycleOptions,
     join_ref: Option<String>,
     state: &AppState,
     outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
@@ -281,7 +256,7 @@ async fn replay_lifecycle(
         let page = repository::read_lifecycle_events(
             &state.pool,
             tenant_id,
-            lifecycle.session_id.as_deref(),
+            None,
             EventsOptions {
                 cursor: cursor.seq,
                 limit: TAIL_REPLAY_LIMIT,
@@ -428,11 +403,8 @@ async fn resolve_session_cursor_snapshot(
 async fn resolve_lifecycle_cursor_snapshot(
     state: &AppState,
     tenant_id: &str,
-    lifecycle: &LifecycleOptions,
 ) -> Result<CursorSnapshot, AppError> {
-    let last_seq =
-        repository::lifecycle_head_seq(&state.pool, tenant_id, lifecycle.session_id.as_deref())
-            .await?;
+    let last_seq = repository::lifecycle_head_seq(&state.pool, tenant_id, None).await?;
 
     Ok(CursorSnapshot {
         epoch: None,

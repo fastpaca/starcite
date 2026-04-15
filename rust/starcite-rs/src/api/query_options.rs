@@ -13,13 +13,6 @@ pub(crate) struct TailOptions {
     pub(crate) batch_size: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LifecycleOptions {
-    pub(crate) tenant_id: String,
-    pub(crate) cursor: Cursor,
-    pub(crate) session_id: Option<String>,
-}
-
 pub(crate) fn parse_list_options(params: HashMap<String, String>) -> Result<ListOptions, AppError> {
     let mut metadata = serde_json::Map::new();
     let mut tenant_id = None;
@@ -109,28 +102,6 @@ pub(crate) fn parse_tail_options(params: HashMap<String, String>) -> Result<Tail
     Ok(TailOptions { cursor, batch_size })
 }
 
-pub(crate) fn parse_lifecycle_options(
-    params: HashMap<String, String>,
-) -> Result<LifecycleOptions, AppError> {
-    let cursor = match params.get("cursor") {
-        Some(raw) => parse_query_cursor(raw)?,
-        None => Cursor::zero(),
-    };
-    let session_id = parse_optional_session_id(&params)?;
-
-    match params
-        .get("tenant_id")
-        .filter(|tenant_id| !tenant_id.is_empty())
-    {
-        Some(tenant_id) => Ok(LifecycleOptions {
-            tenant_id: tenant_id.clone(),
-            cursor,
-            session_id,
-        }),
-        None => Err(AppError::InvalidTenantId),
-    }
-}
-
 pub(crate) fn parse_archived_filter(raw: &str) -> Result<ArchivedFilter, AppError> {
     match raw {
         "false" => Ok(ArchivedFilter::Active),
@@ -156,16 +127,6 @@ fn metadata_key(raw: &str) -> Option<&str> {
         .filter(|key| !key.is_empty())
 }
 
-pub(crate) fn parse_optional_session_id(
-    params: &HashMap<String, String>,
-) -> Result<Option<String>, AppError> {
-    match params.get("session_id") {
-        None => Ok(None),
-        Some(value) if value.is_empty() => Err(AppError::InvalidSessionId),
-        Some(value) => Ok(Some(value.clone())),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
@@ -173,8 +134,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        LifecycleOptions, TailOptions, parse_archived_filter, parse_events_options,
-        parse_lifecycle_options, parse_list_options, parse_tail_options,
+        TailOptions, parse_archived_filter, parse_events_options, parse_list_options,
+        parse_tail_options,
     };
     use crate::model::{ArchivedFilter, Cursor};
 
@@ -232,51 +193,6 @@ mod tests {
     fn tail_query_rejects_invalid_batch_size() {
         let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
         assert!(parse_tail_options(params).is_err());
-    }
-
-    #[test]
-    fn lifecycle_query_requires_tenant_id() {
-        assert!(parse_lifecycle_options(HashMap::new()).is_err());
-    }
-
-    #[test]
-    fn lifecycle_query_parses_tenant_id() {
-        let params = HashMap::from([("tenant_id".to_string(), "acme".to_string())]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(
-            options,
-            LifecycleOptions {
-                tenant_id: "acme".to_string(),
-                cursor: Cursor::zero(),
-                session_id: None,
-            }
-        );
-    }
-
-    #[test]
-    fn lifecycle_query_parses_cursor() {
-        let params = HashMap::from([
-            ("tenant_id".to_string(), "acme".to_string()),
-            ("cursor".to_string(), "9".to_string()),
-        ]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(options.cursor, Cursor::new(None, 9));
-    }
-
-    #[test]
-    fn lifecycle_query_parses_session_filter() {
-        let params = HashMap::from([
-            ("tenant_id".to_string(), "acme".to_string()),
-            ("session_id".to_string(), "ses_demo".to_string()),
-        ]);
-
-        let options = parse_lifecycle_options(params).expect("lifecycle query should parse");
-
-        assert_eq!(options.session_id.as_deref(), Some("ses_demo"));
     }
 
     #[test]

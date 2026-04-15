@@ -31,10 +31,7 @@ The experiment here asked what falls out when Starcite is modeled as:
 - local manual drain reset on `DELETE /debug/drain`
 - local shutdown drain with `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS`
 - Phoenix-compatible multiplexed socket transport on `GET /v1/socket/websocket`
-- tenant-scoped durable lifecycle replay through `GET /v1/lifecycle/events?tenant_id=...`
-- tenant-scoped replay-then-live lifecycle streaming through `GET /v1/lifecycle?tenant_id=...`
-- session-scoped durable lifecycle replay through `GET /v1/sessions/:id/lifecycle/events`
-- session-scoped replay-then-live lifecycle streaming through `GET /v1/sessions/:id/lifecycle`
+- tenant-scoped lifecycle replay plus live delivery through the Phoenix `lifecycle` topic on `GET /v1/socket/websocket`
 - local in-process runtime lifecycle with `session.activated`, `session.hydrating`, `session.freezing`, and `session.frozen`
 - ordered event replay through `GET /v1/sessions/:id/events`
 - replay-then-live tail through `GET /v1/sessions/:id/tail?cursor=N` over WebSocket
@@ -46,9 +43,9 @@ The raw WebSocket endpoints keep the existing public payload shape where it matt
 - lifecycle delivery arrives as `{"cursor": N, "inserted_at": "...", "event": {...}}` frames, with the inner event discriminator serialized as `kind`
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
-- in `unsafe_jwt` mode, raw lifecycle and tail sockets emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
-- when local shutdown drain begins, raw lifecycle and tail sockets emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
-- the direct raw WebSocket endpoints still use query params for `tenant_id`, `cursor`, `session_id`, and `batch_size` on the relevant routes
+- in `unsafe_jwt` mode, raw tail sockets and Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
+- when local shutdown drain begins, raw tail sockets and Phoenix topic subscriptions emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
+- the direct raw WebSocket endpoint still uses query params for `cursor` and `batch_size` on the tail route
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
@@ -97,9 +94,6 @@ Auth is now explicit instead of hand-waved:
 - `unsafe_jwt` expects `Authorization: Bearer <jwt>` on HTTP and `token=<jwt>` on WebSocket URLs
 - tenant-scoped lifecycle subscriptions in `unsafe_jwt` require a service principal with
   `session:read` and no `session_id` lock
-- session-scoped raw lifecycle routes still use normal `allow_read_session` checks, so
-  session-locked tokens can consume them directly even though Phoenix lifecycle stays on the
-  single tenant-scoped `lifecycle` topic
 
 That gets the Rust rewrite onto the real Starcite policy surface without pretending it already has
 JWKS-backed trust.
@@ -108,12 +102,10 @@ The runtime lifecycle is intentionally simple. This service keeps a local active
 marks new sessions active immediately, emits `session.freezing` plus `session.frozen` after
 `SESSION_RUNTIME_IDLE_TIMEOUT_MS` of inactivity, and emits `session.hydrating` plus
 `session.activated` when a cold session is touched again. That gives the rewrite a typed lifecycle
-story without pretending it already has cluster ownership semantics. The lifecycle log itself is
-tenant-scoped, but the lifecycle surface now exposes dedicated session routes and topics in
-addition to the older server-filtered tenant view. When the tenant lifecycle stream is filtered to
-one session, resume-gap detection is computed against that session head instead of the full tenant
-head. `GET /debug/state` exposes that local runtime map directly, including the current generation
-per active session, so the rewrite now has one honest ops surface for "what this process thinks it
+story without pretending it already has cluster ownership semantics. The lifecycle log and public
+delivery surface are both tenant-scoped through the Phoenix `lifecycle` topic, and
+`GET /debug/state` exposes that local runtime map directly, including the current generation per
+active session, so the rewrite now has one honest ops surface for "what this process thinks it
 owns right now."
 
 The rewrite now also has a minimal local drain story instead of pretending graceful shutdown is

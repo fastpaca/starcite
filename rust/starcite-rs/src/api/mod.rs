@@ -1,7 +1,5 @@
 pub(crate) mod edge_routing;
 pub(crate) mod event_http;
-pub(crate) mod lifecycle_http;
-pub(crate) mod lifecycle_scope;
 pub(crate) mod ops_http;
 pub(crate) mod phoenix;
 pub(crate) mod phoenix_context;

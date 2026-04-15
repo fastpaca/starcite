@@ -9,7 +9,6 @@ use sqlx::PgPool;
 use tokio::{sync::Mutex, time::sleep};
 
 use crate::{
-    data_plane,
     model::LifecycleEvent,
     telemetry::{SessionOutcome, SessionReason, Telemetry},
 };
@@ -62,11 +61,8 @@ pub enum RuntimeTouchReason {
     Create,
     HttpRead,
     HttpWrite,
-    HttpLifecycle,
     RawTail,
-    RawLifecycle,
     PhoenixTail,
-    PhoenixLifecycle,
 }
 
 impl SessionRuntime {
@@ -156,16 +152,7 @@ impl SessionRuntime {
     async fn emit(&self, event: LifecycleEvent) {
         match &self.pool {
             Some(pool) => {
-                match data_plane::repository::append_lifecycle_event(pool, event, &self.instance_id)
-                    .await
-                {
-                    Ok(event) => {
-                        self.lifecycle.broadcast(event).await;
-                    }
-                    Err(error) => {
-                        tracing::error!(error = ?error, "failed to persist runtime lifecycle event");
-                    }
-                }
+                super::publish_lifecycle(pool, &self.lifecycle, &self.instance_id, event).await;
             }
             None => {
                 self.lifecycle

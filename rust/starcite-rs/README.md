@@ -16,15 +16,11 @@ This is a parallel implementation inside the existing repo, not a drop-in replac
 - `GET /metrics` on the ops listener
 - `GET /debug/state` on the ops listener
 - `POST /debug/drain` and `DELETE /debug/drain` on the ops listener
-- `GET /v1/lifecycle/events`
-- `GET /v1/lifecycle` over WebSocket
 - `GET /v1/socket/websocket` over WebSocket with Phoenix channel framing
 - `GET /v1/sessions/:id`
 - `PATCH /v1/sessions/:id`
 - `POST /v1/sessions/:id/append`
 - `GET /v1/sessions/:id/events`
-- `GET /v1/sessions/:id/lifecycle/events`
-- `GET /v1/sessions/:id/lifecycle` over WebSocket
 - `GET /v1/sessions/:id/tail` over WebSocket
 - `POST /v1/sessions/:id/archive`
 - `POST /v1/sessions/:id/unarchive`
@@ -60,20 +56,17 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Only the active owner now enqueues background Postgres flush work. Standby replicas keep the committed hot copy in memory for takeover, and when a worker first becomes owner it seeds its pending flush queue from that retained hot state before acknowledging new appends. That keeps standby quorum commits cheap while still letting Postgres catch up after failover.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
 - `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `tail:<session_id>` topics.
-- In `jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
-- Session-scoped lifecycle replay is available over `GET /v1/sessions/:id/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/sessions/:id/lifecycle?cursor=N`.
-- Tenant-scoped lifecycle replay is available over `GET /v1/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/lifecycle?cursor=N`.
-- Tenant-scoped lifecycle replay and streaming still accept optional `session_id` filters for compatibility on the raw lifecycle endpoints, but Phoenix lifecycle joins stay on the single operator `lifecycle` topic.
+- In `jwt` mode, the tenant-scoped Phoenix `lifecycle` topic requires a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
+- Lifecycle replay and live delivery are exposed through the Phoenix `lifecycle` topic on `GET /v1/socket/websocket`, not through separate raw lifecycle endpoints.
 - Live tail uses a direct WebSocket endpoint (`GET /v1/sessions/:id/tail?cursor=N`) instead of Phoenix Channels.
 - Lifecycle frames follow the canonical payload shape `{"cursor": N, "inserted_at": "...", "event": {...}}`, with the inner event discriminator serialized as `kind`. The Rust rewrite emits both session catalog events (`session.created`, `session.updated`, `session.archived`, `session.unarchived`) and local runtime state transitions (`session.activated`, `session.hydrating`, `session.freezing`, `session.frozen`).
-- Lifecycle storage is still tenant-scoped under the hood, but the public lifecycle surface now exposes both tenant streams and dedicated session streams. When a tenant lifecycle stream uses `session_id`, gap detection is computed against that filtered session head rather than the full tenant head.
+- Lifecycle storage is tenant-scoped and the public lifecycle surface now matches that shape: one operator `lifecycle` topic with replay and live delivery over the Phoenix socket.
 - Raw WebSocket tail uses query params for `cursor` and `batch_size` because there is no channel join payload.
 - Tail frames follow the canonical payload shape: `{"events":[...]}` for replay/live delivery and `{"type":"gap",...}` for invalid resume cursors.
 - A wrong-node raw tail handshake now returns `307` with a JSON `session_not_owned` body plus `Location` and `x-starcite-owner-websocket-url` headers pointing at the owner tail URL for the same query.
 - A wrong-node Phoenix `tail:<session_id>` join returns a `phx_reply` error payload with `reason = "session_not_owned"` and `owner_socket_url` for the owner node's `/v1/socket/websocket` endpoint, preserving the current socket query params.
-- In `jwt` mode, raw tail and lifecycle sockets push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
-- When local shutdown drain begins, raw tail and lifecycle sockets push `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the process closes the connection.
-- Raw lifecycle sockets subscribe before replaying from Postgres, then reuse the same Postgres replay path when fanout lags.
+- In `jwt` mode, raw tail sockets and Phoenix topic subscriptions push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
+- When local shutdown drain begins, raw tail sockets and Phoenix topic subscriptions push `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the process closes the connection.
 - Tail connections subscribe before replaying, then receive in-process fanout updates; raw tail and Phoenix `tail:<session_id>` topics both replay from the hot read path first and only fall back to Postgres when the requested range is not locally contiguous. If the fanout buffer lags, the server replays again to close the gap.
 - In-process fanout channels are demand-driven: broadcasts do not allocate dormant per-session or per-tenant channels, and idle channels are pruned when the last receiver disconnects instead of waiting for the next broadcast.
 - `/health/live`, `/health/ready`, and `/metrics` now live on `STARCITE_OPS_PORT` instead of the public API port, matching the Phoenix deployment shape more closely.
@@ -81,12 +74,12 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - `GET /health/ready` returns `{"status":"ok","mode":"ready"}` when the process is serving, and `503 {"status":"starting","mode":"draining","reason":"draining","drain_source":"shutdown","retry_after_ms":N}` once shutdown drain begins.
 - Outside shutdown drain, `GET /health/ready` now checks the local `control_nodes` row in Postgres instead of trusting only the in-process heartbeat timer. If the row is missing or stale it returns `reason = "routing_sync"` or `reason = "lease_expired"`, and when detail is available it includes a `detail` object matching the old readiness contract shape.
 - Public `503 node_draining` responses include `x-starcite-drain-source`, and shutdown drain responses also include `Retry-After` plus `x-starcite-retry-after-ms`.
-- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, auth mode, write model, runtime state, hot event-store state, hot session-store state, local session-worker state, local session-lease ownership state, Postgres control-plane heartbeat config, standby replication config, pending-flush backlog, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session and per-tenant subscriber counts.
+- `GET /debug/state` on `STARCITE_OPS_PORT` exposes local ops mode, auth mode, write model, runtime state, hot event-store state, hot session-store state, local session-worker state, local session-lease ownership state, Postgres control-plane heartbeat config, standby replication config, pending-flush backlog, archive-queue backlog, and fanout state for this process only, including each active runtime session's tenant, generation, last touch reason, idle deadline countdown, and per-session plus lifecycle-topic subscriber counts.
 - The hot session-store snapshot now also carries cached `archived_seq` per session, and the local archive worker updates that cache as it advances archive progress.
 - Archive progress now also relays across Rust nodes through Postgres `NOTIFY`, so standby session caches and hot-store pruning can follow the owner’s archived frontier without waiting for a cold refresh.
 - `POST /debug/drain` on `STARCITE_OPS_PORT` flips local drain without terminating the process, which is useful for verifying readiness and socket-drain behavior in local drills.
 - `DELETE /debug/drain` clears only a manual drain and returns the process to `ready`; it refuses to clear a real shutdown drain.
-- Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next session-scoped read, append, tail join, or lifecycle read/stream on that cold session emits `session.hydrating` then `session.activated`.
+- Runtime lifecycle is local to this process. A new session emits `session.activated` before `session.created`, an idle session emits `session.freezing` then `session.frozen`, and the next session-scoped read, append, or tail join on that cold session emits `session.hydrating` then `session.activated`.
 - Resume lifecycle persistence is now fire-and-forget from the hot read path. A cold-session read or tail join updates local runtime state immediately and does not wait for Postgres lifecycle persistence before returning.
 - `/metrics` exports Prometheus text directly from the Rust process without an external metrics service or new crate dependency.
 - `/metrics` now also exports `starcite_node_draining`, `starcite_runtime_active_sessions`, `starcite_runtime_active_sessions_by_reason`, `starcite_archive_queue_pending_sessions`, `starcite_fanout_active_keys`, and `starcite_fanout_subscribers`, so the metrics surface reflects the same local ops/runtime truth as `GET /debug/state`.
@@ -206,10 +199,6 @@ curl -X POST http://localhost:4001/v1/sessions/ses_demo/append \
 
 curl "http://localhost:4001/v1/sessions/ses_demo/events?cursor=0&limit=100"
 
-curl "http://localhost:4001/v1/sessions/ses_demo/lifecycle/events?cursor=0&limit=100"
-
-curl "http://localhost:4001/v1/lifecycle/events?tenant_id=acme&session_id=ses_demo&cursor=0&limit=100"
-
 curl "http://localhost:4002/health/ready"
 
 curl "http://localhost:4002/metrics"
@@ -236,41 +225,12 @@ ws.onmessage = (event) => {
 '
 ```
 
-To replay then stream session-scoped lifecycle events:
-
-```bash
-node -e '
-const ws = new WebSocket("ws://localhost:4001/v1/sessions/ses_demo/lifecycle?cursor=0");
-ws.onmessage = (event) => console.log(JSON.parse(event.data));
-'
-```
-
-To replay then stream tenant-scoped lifecycle events:
-
-```bash
-node -e '
-const ws = new WebSocket("ws://localhost:4001/v1/lifecycle?tenant_id=acme&session_id=ses_demo&cursor=0");
-ws.onmessage = (event) => console.log(JSON.parse(event.data));
-'
-```
-
-With the default runtime settings, that socket will see `session.activated` immediately on create,
+With the default runtime settings, the Phoenix `lifecycle` topic will see `session.activated` immediately on create,
 `session.created` after the row is stored, and `session.freezing` plus `session.frozen` once a
 session has been idle for `SESSION_RUNTIME_IDLE_TIMEOUT_MS`. The next read, tail, or append on a
 frozen session emits `session.hydrating` and then `session.activated`. When drain starts, an
-already-open raw lifecycle or tail socket receives `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}`
+already-open raw tail socket or Phoenix topic subscription receives `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}`
 and then closes with code `1012`.
-
-In `jwt` mode, use a `token` query param instead of `tenant_id` and let the token principal
-derive the tenant:
-
-```bash
-node -e '
-const token = "<jwt>";
-const ws = new WebSocket(`ws://localhost:4001/v1/sessions/ses_demo/lifecycle?token=${token}&cursor=0`);
-ws.onmessage = (event) => console.log(JSON.parse(event.data));
-'
-```
 
 To connect with Phoenix channel framing on one shared socket:
 
@@ -322,6 +282,6 @@ The Prometheus surface is intentionally narrow. Right now it exports:
 - `starcite_process_uptime_seconds`
 
 The socket gauges reflect currently open raw and Phoenix transports plus active raw stream
-subscriptions and Phoenix topic joins. Raw tail and lifecycle handlers now keep reading the socket
-for close and ping frames, so those gauges clear promptly when a quiet client disconnects instead
-of waiting for the next broadcast.
+subscriptions and Phoenix topic joins. The raw tail handler now keeps reading the socket for close
+and ping frames, so those gauges clear promptly when a quiet client disconnects instead of waiting
+for the next broadcast.

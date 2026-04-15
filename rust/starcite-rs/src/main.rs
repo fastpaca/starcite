@@ -208,11 +208,6 @@ async fn run() -> Result<(), String> {
 fn build_public_router(telemetry: Telemetry, ops: runtime::OpsState) -> Router<AppState> {
     Router::new()
         .route("/v1/socket/websocket", get(api::phoenix::socket))
-        .route("/v1/lifecycle", get(api::lifecycle_http::lifecycle_events))
-        .route(
-            "/v1/lifecycle/events",
-            get(api::lifecycle_http::read_lifecycle),
-        )
         .route(
             "/v1/sessions",
             post(api::session_http::create_session).get(api::session_http::list_sessions),
@@ -228,14 +223,6 @@ fn build_public_router(telemetry: Telemetry, ops: runtime::OpsState) -> Router<A
         .route(
             "/v1/sessions/{id}/events",
             get(api::event_http::read_events),
-        )
-        .route(
-            "/v1/sessions/{id}/lifecycle",
-            get(api::lifecycle_http::session_lifecycle_events),
-        )
-        .route(
-            "/v1/sessions/{id}/lifecycle/events",
-            get(api::lifecycle_http::read_session_lifecycle),
         )
         .route("/v1/sessions/{id}/tail", get(api::event_http::tail_events))
         .route(

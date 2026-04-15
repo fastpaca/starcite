@@ -6,7 +6,7 @@ use crate::{
         public_payload::{self, PublicGapPayload},
         socket_cursor::ReplayGap,
     },
-    model::{EventResponse, LifecycleResponse},
+    model::EventResponse,
     runtime::{OpsSnapshot, OpsState},
 };
 
@@ -41,17 +41,6 @@ pub(crate) async fn send_events(
         events: events.to_vec(),
     })
     .map_err(|_| ())?;
-    socket
-        .send(Message::Text(message.into()))
-        .await
-        .map_err(|_| ())
-}
-
-pub(crate) async fn send_lifecycle(
-    socket: &mut WebSocket,
-    event: &LifecycleResponse,
-) -> Result<(), ()> {
-    let message = serde_json::to_string(event).map_err(|_| ())?;
     socket
         .send(Message::Text(message.into()))
         .await

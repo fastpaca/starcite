@@ -114,29 +114,19 @@ impl Default for SessionFanout {
 #[derive(Debug, Clone)]
 pub struct LifecycleFanout {
     tenant_channels: Arc<RwLock<HashMap<String, broadcast::Sender<LifecycleResponse>>>>,
-    session_channels: Arc<RwLock<HashMap<String, broadcast::Sender<LifecycleResponse>>>>,
     capacity: usize,
 }
 
 #[derive(Debug, Clone)]
 pub struct LifecycleSubscriptionGuard {
     fanout: LifecycleFanout,
-    key: String,
-    scope: LifecycleScope,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum LifecycleScope {
-    Tenant,
-    Session,
+    tenant_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct LifecycleFanoutSnapshot {
     pub active_tenant_count: usize,
-    pub active_session_count: usize,
     pub tenants: Vec<TenantSubscriptionSnapshot>,
-    pub sessions: Vec<SessionSubscriptionSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -149,7 +139,6 @@ impl LifecycleFanout {
     pub fn new(capacity: usize) -> Self {
         Self {
             tenant_channels: Arc::new(RwLock::new(HashMap::new())),
-            session_channels: Arc::new(RwLock::new(HashMap::new())),
             capacity,
         }
     }
@@ -161,34 +150,15 @@ impl LifecycleFanout {
         self.tenant_sender(tenant_id).await.subscribe()
     }
 
-    pub async fn subscribe_session(
-        &self,
-        session_id: &str,
-    ) -> broadcast::Receiver<LifecycleResponse> {
-        self.session_sender(session_id).await.subscribe()
-    }
-
     pub async fn broadcast(&self, event: LifecycleResponse) {
         let tenant_id = event.event.tenant_id().to_string();
-        let session_id = event.event.session_id().to_string();
-
-        broadcast_existing(&self.tenant_channels, &tenant_id, event.clone()).await;
-        broadcast_existing(&self.session_channels, &session_id, event).await;
+        broadcast_existing(&self.tenant_channels, &tenant_id, event).await;
     }
 
     pub fn tenant_guard(&self, tenant_id: impl Into<String>) -> LifecycleSubscriptionGuard {
         LifecycleSubscriptionGuard {
             fanout: self.clone(),
-            key: tenant_id.into(),
-            scope: LifecycleScope::Tenant,
-        }
-    }
-
-    pub fn session_guard(&self, session_id: impl Into<String>) -> LifecycleSubscriptionGuard {
-        LifecycleSubscriptionGuard {
-            fanout: self.clone(),
-            key: session_id.into(),
-            scope: LifecycleScope::Session,
+            tenant_id: tenant_id.into(),
         }
     }
 
@@ -208,25 +178,8 @@ impl LifecycleFanout {
         sender
     }
 
-    async fn session_sender(&self, session_id: &str) -> broadcast::Sender<LifecycleResponse> {
-        if let Some(sender) = self.session_channels.read().await.get(session_id).cloned() {
-            return sender;
-        }
-
-        let mut channels = self.session_channels.write().await;
-
-        if let Some(sender) = channels.get(session_id).cloned() {
-            return sender;
-        }
-
-        let (sender, _receiver) = broadcast::channel(self.capacity);
-        channels.insert(session_id.to_string(), sender.clone());
-        sender
-    }
-
     pub async fn snapshot(&self) -> LifecycleFanoutSnapshot {
         let tenant_channels = self.tenant_channels.read().await;
-        let session_channels = self.session_channels.read().await;
         let mut tenants = tenant_channels
             .iter()
             .filter(|(_, sender)| sender.receiver_count() > 0)
@@ -235,32 +188,17 @@ impl LifecycleFanout {
                 subscribers: sender.receiver_count(),
             })
             .collect::<Vec<_>>();
-        let mut sessions = session_channels
-            .iter()
-            .filter(|(_, sender)| sender.receiver_count() > 0)
-            .map(|(session_id, sender)| SessionSubscriptionSnapshot {
-                session_id: session_id.clone(),
-                subscribers: sender.receiver_count(),
-            })
-            .collect::<Vec<_>>();
 
         tenants.sort_by(|left, right| left.tenant_id.cmp(&right.tenant_id));
-        sessions.sort_by(|left, right| left.session_id.cmp(&right.session_id));
 
         LifecycleFanoutSnapshot {
             active_tenant_count: tenants.len(),
-            active_session_count: sessions.len(),
             tenants,
-            sessions,
         }
     }
 
     pub async fn prune_idle_tenant(&self, tenant_id: &str) {
         prune_idle_key(&self.tenant_channels, tenant_id).await;
-    }
-
-    pub async fn prune_idle_session(&self, session_id: &str) {
-        prune_idle_key(&self.session_channels, session_id).await;
     }
 }
 
@@ -335,15 +273,11 @@ impl Drop for SessionSubscriptionGuard {
 impl Drop for LifecycleSubscriptionGuard {
     fn drop(&mut self) {
         let fanout = self.fanout.clone();
-        let key = self.key.clone();
-        let scope = self.scope;
+        let tenant_id = self.tenant_id.clone();
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                match scope {
-                    LifecycleScope::Tenant => fanout.prune_idle_tenant(&key).await,
-                    LifecycleScope::Session => fanout.prune_idle_session(&key).await,
-                }
+                fanout.prune_idle_tenant(&tenant_id).await;
             });
         }
     }
@@ -444,21 +378,6 @@ mod tests {
 
         assert_eq!(event, sample_lifecycle());
         assert_eq!(fanout.tenant_channels.read().await.len(), 1);
-        assert!(fanout.session_channels.read().await.is_empty());
-    }
-
-    #[tokio::test]
-    async fn broadcasts_lifecycle_to_session_subscribers() {
-        let fanout = LifecycleFanout::new(8);
-        let mut receiver = fanout.subscribe_session("ses_demo").await;
-
-        fanout.broadcast(sample_lifecycle()).await;
-
-        let event = receiver.recv().await.expect("event should arrive");
-
-        assert_eq!(event, sample_lifecycle());
-        assert!(fanout.tenant_channels.read().await.is_empty());
-        assert_eq!(fanout.session_channels.read().await.len(), 1);
     }
 
     #[tokio::test]
@@ -468,53 +387,34 @@ mod tests {
         fanout.broadcast(sample_lifecycle()).await;
 
         assert!(fanout.tenant_channels.read().await.is_empty());
-        assert!(fanout.session_channels.read().await.is_empty());
     }
 
     #[tokio::test]
     async fn prunes_idle_lifecycle_channels_after_last_receivers_disconnect() {
         let fanout = LifecycleFanout::new(8);
         let tenant = fanout.subscribe_tenant("acme").await;
-        let session = fanout.subscribe_session("ses_demo").await;
 
         assert_eq!(fanout.tenant_channels.read().await.len(), 1);
-        assert_eq!(fanout.session_channels.read().await.len(), 1);
 
         drop(tenant);
-        drop(session);
         fanout.broadcast(sample_lifecycle()).await;
 
         assert!(fanout.tenant_channels.read().await.is_empty());
-        assert!(fanout.session_channels.read().await.is_empty());
     }
 
     #[tokio::test]
     async fn lifecycle_snapshot_reports_subscriber_counts() {
         let fanout = LifecycleFanout::new(8);
         let _tenant = fanout.subscribe_tenant("acme").await;
-        let _session_a = fanout.subscribe_session("ses_a").await;
-        let _session_b1 = fanout.subscribe_session("ses_b").await;
-        let _session_b2 = fanout.subscribe_session("ses_b").await;
 
         assert_eq!(
             fanout.snapshot().await,
             LifecycleFanoutSnapshot {
                 active_tenant_count: 1,
-                active_session_count: 2,
                 tenants: vec![TenantSubscriptionSnapshot {
                     tenant_id: "acme".to_string(),
                     subscribers: 1,
                 }],
-                sessions: vec![
-                    SessionSubscriptionSnapshot {
-                        session_id: "ses_a".to_string(),
-                        subscribers: 1,
-                    },
-                    SessionSubscriptionSnapshot {
-                        session_id: "ses_b".to_string(),
-                        subscribers: 2,
-                    },
-                ],
             }
         );
     }
@@ -525,14 +425,11 @@ mod tests {
 
         {
             let _tenant = fanout.subscribe_tenant("acme").await;
-            let _session = fanout.subscribe_session("ses_demo").await;
             let _tenant_guard = fanout.tenant_guard("acme");
-            let _session_guard = fanout.session_guard("ses_demo");
         }
 
         yield_now().await;
         assert!(fanout.tenant_channels.read().await.is_empty());
-        assert!(fanout.session_channels.read().await.is_empty());
     }
 
     fn sample_event(session_id: &str) -> EventResponse {
