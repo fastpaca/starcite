@@ -513,6 +513,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn required_replication_without_assigned_standby_fails_closed() {
+        let coordinator = ReplicationCoordinator::new(
+            Arc::<str>::from("node-a"),
+            true,
+            Duration::from_millis(500),
+        )
+        .expect("replication coordinator");
+
+        let error = coordinator
+            .replicate(7, &event(), None)
+            .await
+            .expect_err("missing standby should fail");
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::QuorumUnavailable {
+                required: 2,
+                acknowledged: 1,
+            }
+        ));
+    }
+
+    #[tokio::test]
+    async fn optional_replication_without_assigned_standby_stays_local() {
+        let coordinator = ReplicationCoordinator::new(
+            Arc::<str>::from("node-a"),
+            false,
+            Duration::from_millis(500),
+        )
+        .expect("replication coordinator");
+
+        coordinator
+            .replicate(7, &event(), None)
+            .await
+            .expect("local-only replication should succeed");
+    }
+
+    #[tokio::test]
+    async fn invalid_assigned_standby_url_fails_closed() {
+        let coordinator = ReplicationCoordinator::new(
+            Arc::<str>::from("node-a"),
+            true,
+            Duration::from_millis(500),
+        )
+        .expect("replication coordinator");
+        let assigned_standby = ReplicationPeer {
+            node_id: "node-b".to_string(),
+            ops_url: "node-b:4002".to_string(),
+        };
+
+        let error = coordinator
+            .replicate(7, &event(), Some(&assigned_standby))
+            .await
+            .expect_err("invalid assigned standby should fail");
+
+        assert!(matches!(
+            error,
+            crate::error::AppError::QuorumUnavailable {
+                required: 2,
+                acknowledged: 1,
+            }
+        ));
+    }
+
+    #[tokio::test]
     async fn reuses_keepalive_connection_for_second_append() {
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("listener");
         let addr = listener.local_addr().expect("listener addr");
