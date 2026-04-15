@@ -22,7 +22,7 @@ use crate::{
     },
     api::phoenix_protocol::{
         LifecycleOptions, PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload,
-        parse_session_lifecycle_join_payload, parse_tail_join_payload, reply_frame,
+        parse_tail_join_payload, reply_frame,
     },
     api::phoenix_socket::{send_frame, send_node_draining, send_token_expired},
     api::phoenix_topics::{run_lifecycle_topic, run_tail_topic},
@@ -183,74 +183,13 @@ async fn handle_join(
         return;
     }
 
-    if frame.topic.starts_with("lifecycle:") {
-        handle_session_lifecycle_join(frame, state, context, outbound_tx, subscriptions).await;
-    } else if frame.topic == "lifecycle" {
+    if frame.topic == "lifecycle" {
         handle_lifecycle_join(frame, state, context, outbound_tx, subscriptions).await;
     } else if frame.topic.starts_with("tail:") {
         handle_tail_join(frame, state, context, outbound_tx, subscriptions).await;
     } else {
         reject_join_reason(outbound_tx, &frame, "invalid_topic");
     }
-}
-
-async fn handle_session_lifecycle_join(
-    frame: PhoenixFrame,
-    state: &AppState,
-    context: &SocketContext,
-    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
-    subscriptions: &mut HashMap<String, TopicSubscription>,
-) {
-    let session_id = match parse_topic_session_id(&frame.topic, "lifecycle:") {
-        Some(session_id) => session_id,
-        None => {
-            reject_join_reason(outbound_tx, &frame, "invalid_session_id");
-            return;
-        }
-    };
-
-    let cursor = match parse_session_lifecycle_join_payload(&frame.payload) {
-        Ok(cursor) => cursor,
-        Err(error) => {
-            reject_join_error(outbound_tx, &frame, &error);
-            return;
-        }
-    };
-
-    let tenant_id = match resolve_session_tenant_id(state, &session_id).await {
-        Ok(tenant_id) => tenant_id,
-        Err(error) => {
-            reject_join_error(outbound_tx, &frame, &error);
-            return;
-        }
-    };
-
-    if let Err(error) = auth::allow_read_session(&context.auth, &session_id, &tenant_id) {
-        reject_join_error(outbound_tx, &frame, &error);
-        return;
-    }
-
-    let lifecycle = LifecycleOptions {
-        cursor,
-        session_id: Some(session_id.clone()),
-    };
-    touch_existing_session(
-        state,
-        &session_id,
-        &tenant_id,
-        RuntimeTouchReason::PhoenixLifecycle,
-    )
-    .await;
-    let receiver = state.lifecycle.subscribe_session(&session_id).await;
-    spawn_lifecycle_subscription(
-        frame,
-        outbound_tx,
-        subscriptions,
-        tenant_id,
-        lifecycle,
-        state.clone(),
-        receiver,
-    );
 }
 
 async fn handle_lifecycle_join(

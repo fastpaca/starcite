@@ -42,7 +42,7 @@ The experiment here asked what falls out when Starcite is modeled as:
 
 The raw WebSocket endpoints keep the existing public payload shape where it matters:
 
-- `GET /v1/socket/websocket` now accepts Phoenix channel frames so one socket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics
+- `GET /v1/socket/websocket` now accepts Phoenix channel frames so one socket can join the operator `lifecycle` topic plus many `tail:<session_id>` topics
 - lifecycle delivery arrives as `{"cursor": N, "inserted_at": "...", "event": {...}}` frames, with the inner event discriminator serialized as `kind`
 - replay and live delivery arrive as `{"events":[...]}` frames
 - invalid resume cursors emit a `{"type":"gap", ...}` frame with `reason = "resume_invalidated"`
@@ -82,11 +82,10 @@ behavior across the cluster instead of the designated owner's append hot path.
 
 The Phoenix-compatible socket is explicitly incomplete but useful. It supports `heartbeat`,
 `phx_join`, and `phx_leave` with the usual Phoenix frame array shape
-`[join_ref, ref, topic, event, payload]`, replies with `phx_reply`, accepts `cursor` plus
-optional `session_id` on the operator `lifecycle` topic, accepts plain `cursor` on
-`lifecycle:<session_id>` joins, and pushes `token_expired` when an active socket outlives an
-`unsafe_jwt` token. During local shutdown drain it also pushes `node_draining` on active joined
-topics before the socket closes.
+`[join_ref, ref, topic, event, payload]`, replies with `phx_reply`, accepts plain `cursor` on the
+operator `lifecycle` topic and on `tail:<session_id>` joins, and pushes `token_expired` when an
+active socket outlives an `unsafe_jwt` token. During local shutdown drain it also pushes
+`node_draining` on active joined topics before the socket closes.
 
 Auth is now explicit instead of hand-waved:
 
@@ -98,8 +97,9 @@ Auth is now explicit instead of hand-waved:
 - `unsafe_jwt` expects `Authorization: Bearer <jwt>` on HTTP and `token=<jwt>` on WebSocket URLs
 - tenant-scoped lifecycle subscriptions in `unsafe_jwt` require a service principal with
   `session:read` and no `session_id` lock
-- session-scoped lifecycle routes and `lifecycle:<session_id>` topics use normal
-  `allow_read_session` checks, so session-locked tokens can consume them directly
+- session-scoped raw lifecycle routes still use normal `allow_read_session` checks, so
+  session-locked tokens can consume them directly even though Phoenix lifecycle stays on the
+  single tenant-scoped `lifecycle` topic
 
 That gets the Rust rewrite onto the real Starcite policy surface without pretending it already has
 JWKS-backed trust.

@@ -59,11 +59,11 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - A local archive worker now drains an explicit dirty-session queue, advances `sessions.archived_seq`, and prunes hot in-memory events once they are considered archived. The periodic tick is now only a fallback nudge, not the primary discovery path. In this transitional branch the backend rows already exist in Postgres before that flush, so the worker is modeling the hot/cold boundary and eviction behavior rather than removing Postgres from the ack path yet.
 - Only the active owner now enqueues background Postgres flush work. Standby replicas keep the committed hot copy in memory for takeover, and when a worker first becomes owner it seeds its pending flush queue from that retained hot state before acknowledging new appends. That keeps standby quorum commits cheap while still letting Postgres catch up after failover.
 - Committed event and lifecycle writes now fan out across Rust processes through Postgres `LISTEN/NOTIFY`, so live sockets connected to a different Rust node can still receive updates without Redis or a separate message bus.
-- `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `lifecycle:<session_id>` and `tail:<session_id>` topics.
+- `GET /v1/socket/websocket` accepts Phoenix JSON channel frames, so one client WebSocket can join the operator `lifecycle` topic plus many `tail:<session_id>` topics.
 - In `jwt` mode, the tenant-scoped `lifecycle` topic and raw endpoint require a service principal with `session:read` and no `session_id` lock, matching the operator policy shape.
 - Session-scoped lifecycle replay is available over `GET /v1/sessions/:id/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/sessions/:id/lifecycle?cursor=N`.
 - Tenant-scoped lifecycle replay is available over `GET /v1/lifecycle/events?cursor=N&limit=M`, and replay-then-live delivery is available over `GET /v1/lifecycle?cursor=N`.
-- Tenant-scoped lifecycle replay and streaming still accept optional `session_id` filters for compatibility, but the dedicated session routes and Phoenix `lifecycle:<session_id>` topic are the preferred client path.
+- Tenant-scoped lifecycle replay and streaming still accept optional `session_id` filters for compatibility on the raw lifecycle endpoints, but Phoenix lifecycle joins stay on the single operator `lifecycle` topic.
 - Live tail uses a direct WebSocket endpoint (`GET /v1/sessions/:id/tail?cursor=N`) instead of Phoenix Channels.
 - Lifecycle frames follow the canonical payload shape `{"cursor": N, "inserted_at": "...", "event": {...}}`, with the inner event discriminator serialized as `kind`. The Rust rewrite emits both session catalog events (`session.created`, `session.updated`, `session.archived`, `session.unarchived`) and local runtime state transitions (`session.activated`, `session.hydrating`, `session.freezing`, `session.frozen`).
 - Lifecycle storage is still tenant-scoped under the hood, but the public lifecycle surface now exposes both tenant streams and dedicated session streams. When a tenant lifecycle stream uses `session_id`, gap detection is computed against that filtered session head rather than the full tenant head.
@@ -278,7 +278,7 @@ To connect with Phoenix channel framing on one shared socket:
 node -e '
 const ws = new WebSocket("ws://localhost:4001/v1/socket/websocket?vsn=2.0.0&tenant_id=acme");
 ws.onopen = () => {
-  ws.send(JSON.stringify(["1", "1", "lifecycle:ses_demo", "phx_join", { cursor: 0 }]));
+  ws.send(JSON.stringify(["1", "1", "lifecycle", "phx_join", { cursor: 0 }]));
   ws.send(JSON.stringify(["2", "2", "tail:ses_demo", "phx_join", { cursor: 0, batch_size: 128 }]));
   ws.send(JSON.stringify([null, "3", "phoenix", "heartbeat", {}]));
 };
@@ -287,11 +287,11 @@ ws.onmessage = (event) => console.log(JSON.parse(event.data));
 ```
 
 That Phoenix-compatible socket currently supports `heartbeat`, `phx_join`, and `phx_leave`
-for the operator `lifecycle` topic plus `lifecycle:<session_id>` and `tail:<session_id>` topics.
+for the operator `lifecycle` topic plus `tail:<session_id>` topics.
 It keeps the normal Phoenix frame array shape `[join_ref, ref, topic, event, payload]`, replies
 with `phx_reply`, pushes `lifecycle`, `events`, `gap`, `token_expired`, and `node_draining`, lets one socket
-multiplex many session streams, and accepts either `cursor` plus optional `session_id` on the
-operator `lifecycle` topic or plain `cursor` on `lifecycle:<session_id>` joins.
+multiplex many session streams, and accepts plain `cursor` joins on the operator `lifecycle` topic
+and on `tail:<session_id>` topics.
 When drain starts, active Phoenix topic subscriptions receive a `node_draining` push with
 `drain_source` and shutdown `retry_after_ms`, and then the socket closes with code `1012`.
 
@@ -302,7 +302,7 @@ node -e '
 const token = "<jwt>";
 const ws = new WebSocket(`ws://localhost:4001/v1/socket/websocket?vsn=2.0.0&token=${token}`);
 ws.onopen = () => {
-  ws.send(JSON.stringify(["1", "1", "lifecycle:ses_demo", "phx_join", { cursor: 0 }]));
+  ws.send(JSON.stringify(["1", "1", "lifecycle", "phx_join", { cursor: 0 }]));
   ws.send(JSON.stringify(["2", "2", "tail:ses_demo", "phx_join", { cursor: 0 }]));
 };
 ws.onmessage = (event) => console.log(JSON.parse(event.data));

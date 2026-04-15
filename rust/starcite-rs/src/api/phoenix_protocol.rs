@@ -25,31 +25,11 @@ pub(crate) struct PhoenixFrame {
 }
 
 pub(crate) fn parse_lifecycle_join_payload(payload: &Value) -> Result<LifecycleOptions, AppError> {
-    let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-    let mut session_id = None;
     let cursor = parse_lifecycle_cursor(payload)?;
-
-    if let Some(value) = object.get("session_id") {
-        let value = value.as_str().ok_or(AppError::InvalidSessionId)?;
-
-        if value.is_empty() {
-            return Err(AppError::InvalidSessionId);
-        }
-
-        session_id = Some(value.to_string());
-    }
-
-    Ok(LifecycleOptions { cursor, session_id })
-}
-
-pub(crate) fn parse_session_lifecycle_join_payload(payload: &Value) -> Result<Cursor, AppError> {
-    let object = payload.as_object().ok_or(AppError::InvalidEvent)?;
-
-    if object.contains_key("session_id") {
-        return Err(AppError::InvalidSessionId);
-    }
-
-    parse_lifecycle_cursor(payload)
+    Ok(LifecycleOptions {
+        cursor,
+        session_id: None,
+    })
 }
 
 pub(crate) fn parse_tail_join_payload(payload: &Value) -> Result<TailOptions, AppError> {
@@ -157,8 +137,8 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload,
-        parse_session_lifecycle_join_payload, parse_tail_join_payload, push_frame, reply_frame,
+        PhoenixFrame, parse_client_frame, parse_lifecycle_join_payload, parse_tail_join_payload,
+        push_frame, reply_frame,
     };
     use crate::model::Cursor;
 
@@ -206,32 +186,11 @@ mod tests {
     }
 
     #[test]
-    fn lifecycle_join_payload_parses_session_filter() {
+    fn lifecycle_join_payload_ignores_session_filter() {
         let options = parse_lifecycle_join_payload(&json!({"session_id": "ses_demo"}))
-            .expect("session filter should parse");
+            .expect("payload should parse");
 
-        assert_eq!(options.session_id.as_deref(), Some("ses_demo"));
-    }
-
-    #[test]
-    fn session_lifecycle_join_payload_parses_cursor() {
-        let cursor = parse_session_lifecycle_join_payload(&json!({"cursor": 7}))
-            .expect("cursor should parse");
-
-        assert_eq!(cursor, Cursor::new(None, 7));
-    }
-
-    #[test]
-    fn session_lifecycle_join_payload_rejects_object_cursor() {
-        assert!(
-            parse_session_lifecycle_join_payload(&json!({"cursor": {"epoch": 4, "seq": 7}}))
-                .is_err()
-        );
-    }
-
-    #[test]
-    fn session_lifecycle_join_payload_rejects_session_filter() {
-        assert!(parse_session_lifecycle_join_payload(&json!({"session_id": "ses_demo"})).is_err());
+        assert_eq!(options.session_id, None);
     }
 
     #[test]
