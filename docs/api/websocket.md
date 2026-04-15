@@ -34,6 +34,11 @@ Raw tail emits one JSON event object per text frame when `batch_size=1`, or a
 JSON array when `batch_size>1`. Gap frames keep the richer internal reasons and
 use nested `{epoch, seq}` cursor objects.
 
+If a raw tail handshake lands on the wrong node, the HTTP `409 session_not_owned`
+response now also includes `owner_tail_url` alongside the existing `owner_url`
+hint so the client can reconnect directly to the owner node with the current
+query params preserved.
+
 ## Phoenix Socket
 
 Connect a Phoenix client socket to the base socket endpoint:

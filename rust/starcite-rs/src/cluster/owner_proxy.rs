@@ -345,6 +345,26 @@ pub fn build_phoenix_socket_ws_url(
     Some(path)
 }
 
+pub fn build_raw_tail_ws_url(
+    owner_url: &str,
+    session_id: &str,
+    params: &HashMap<String, String>,
+) -> Option<String> {
+    let base = websocket_base_url(owner_url)?;
+    let mut path = format!(
+        "{base}/v1/sessions/{}/tail",
+        percent_encode_component(session_id)
+    );
+    let query = encode_query(params);
+
+    if !query.is_empty() {
+        path.push('?');
+        path.push_str(&query);
+    }
+
+    Some(path)
+}
+
 fn build_request(
     method: &str,
     path: &str,
@@ -560,8 +580,8 @@ fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, ProxyError> {
 #[cfg(test)]
 mod tests {
     use super::{
-        OwnerProxy, build_phoenix_socket_ws_url, find_http_head_end, parse_http_head,
-        parse_http_peer,
+        OwnerProxy, build_phoenix_socket_ws_url, build_raw_tail_ws_url, find_http_head_end,
+        parse_http_head, parse_http_peer,
     };
     use crate::{error::OWNER_URL_HEADER, model::AppendEventRequest};
     use axum::{
@@ -625,6 +645,22 @@ mod tests {
         assert_eq!(
             url,
             "ws://127.0.0.1:4191/v1/socket/websocket?token=jwt-token&vsn=2.0.0"
+        );
+    }
+
+    #[test]
+    fn builds_raw_tail_url_from_owner_public_url() {
+        let params = HashMap::from([
+            ("token".to_string(), "jwt token".to_string()),
+            ("cursor".to_string(), "12:41".to_string()),
+            ("batch_size".to_string(), "8".to_string()),
+        ]);
+        let url = build_raw_tail_ws_url("https://owner.example:4443", "ses_demo", &params)
+            .expect("tail URL");
+
+        assert_eq!(
+            url,
+            "wss://owner.example:4443/v1/sessions/ses_demo/tail?batch_size=8&cursor=12%3A41&token=jwt%20token"
         );
     }
 

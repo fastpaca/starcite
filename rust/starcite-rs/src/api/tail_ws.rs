@@ -1,15 +1,17 @@
 use std::{collections::HashMap, future::pending, pin::Pin, time::Instant};
 
 use axum::{
+    Json,
     extract::{
         Path, Query, State,
         ws::{
             Message, WebSocket, WebSocketUpgrade, close_code, rejection::WebSocketUpgradeRejection,
         },
     },
-    http::HeaderMap,
-    response::IntoResponse,
+    http::{HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
 };
+use serde_json::json;
 use tokio::{
     sync::mpsc,
     task::JoinHandle,
@@ -23,8 +25,10 @@ use crate::{
         phoenix_topics::{TailStreamFrame, run_tail_stream},
         socket_support::{record_read_result, wait_for_drain},
     },
-    auth, data_plane,
-    error::AppError,
+    auth,
+    cluster::owner_proxy::build_raw_tail_ws_url,
+    data_plane,
+    error::{AppError, OWNER_URL_HEADER},
     runtime::RuntimeTouchReason,
     telemetry::{SocketSurface, SocketTransport},
 };
@@ -37,7 +41,7 @@ pub async fn tail(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
     websocket: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
-) -> Result<impl IntoResponse, AppError> {
+) -> Result<Response, AppError> {
     api::request_validation::validate_session_id(&session_id)?;
     let websocket = require_websocket_upgrade(websocket)?;
     let tail = api::query_options::parse_tail_options(&params)?;
@@ -47,13 +51,21 @@ pub async fn tail(
 
     let tenant_id = resolve_session_tenant_id(&state, &session_id).await?;
     auth::allow_read_session(&auth, &session_id, &tenant_id)?;
-    state.ownership.live_or_renew_owned(&session_id).await?;
+    match state.ownership.live_or_renew_owned(&session_id).await {
+        Ok(_) => {}
+        Err(error @ AppError::SessionNotOwned { .. }) => {
+            return Ok(session_not_owned_response(&error, &session_id, &params));
+        }
+        Err(error) => return Err(error),
+    }
 
     touch_existing_session(&state, &session_id, &tenant_id, RuntimeTouchReason::RawTail).await;
 
-    Ok(websocket.on_upgrade(move |socket| async move {
-        run_tail_socket(socket, state, session_id, tail, auth).await;
-    }))
+    Ok(websocket
+        .on_upgrade(move |socket| async move {
+            run_tail_socket(socket, state, session_id, tail, auth).await;
+        })
+        .into_response())
 }
 
 async fn run_tail_socket(
@@ -224,9 +236,101 @@ fn require_websocket_upgrade(
     websocket.map_err(|_| AppError::InvalidWebsocketUpgrade)
 }
 
+fn session_not_owned_response(
+    error: &AppError,
+    session_id: &str,
+    params: &HashMap<String, String>,
+) -> Response {
+    let AppError::SessionNotOwned {
+        owner_id,
+        owner_public_url,
+        epoch,
+    } = error
+    else {
+        unreachable!("raw tail owner hint requires session_not_owned")
+    };
+
+    let mut response = (
+        StatusCode::CONFLICT,
+        Json(json!({
+            "error": error.error_code(),
+            "message": "Session is not owned by this node",
+            "owner_id": owner_id,
+            "owner_url": owner_public_url,
+            "owner_tail_url": owner_public_url
+                .as_deref()
+                .and_then(|owner_url| build_raw_tail_ws_url(owner_url, session_id, params)),
+            "epoch": epoch
+        })),
+    )
+        .into_response();
+
+    if let Some(owner_public_url) = owner_public_url
+        && let Ok(value) = HeaderValue::from_str(owner_public_url)
+    {
+        response.headers_mut().insert(OWNER_URL_HEADER, value);
+    }
+
+    response
+}
+
 async fn wait_for_optional_expiry(expiry: Option<&mut SocketExpiry>) {
     match expiry {
         Some(expiry) => expiry.await,
         None => pending::<()>().await,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use axum::{body, http::StatusCode};
+    use serde_json::{Value, json};
+
+    use super::session_not_owned_response;
+    use crate::error::{AppError, OWNER_URL_HEADER};
+
+    #[tokio::test]
+    async fn session_not_owned_response_includes_owner_tail_url() {
+        let response = session_not_owned_response(
+            &AppError::SessionNotOwned {
+                owner_id: "node-a".to_string(),
+                owner_public_url: Some("https://owner.example:4443".to_string()),
+                epoch: 9,
+            },
+            "ses_demo",
+            &HashMap::from([
+                ("token".to_string(), "jwt token".to_string()),
+                ("cursor".to_string(), "12:41".to_string()),
+                ("batch_size".to_string(), "8".to_string()),
+            ]),
+        );
+
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            response
+                .headers()
+                .get(&OWNER_URL_HEADER)
+                .expect("owner header"),
+            "https://owner.example:4443"
+        );
+
+        let body = body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body");
+        let payload: Value = serde_json::from_slice(&body).expect("json body");
+
+        assert_eq!(
+            payload,
+            json!({
+                "error": "session_not_owned",
+                "message": "Session is not owned by this node",
+                "owner_id": "node-a",
+                "owner_url": "https://owner.example:4443",
+                "owner_tail_url": "wss://owner.example:4443/v1/sessions/ses_demo/tail?batch_size=8&cursor=12%3A41&token=jwt%20token",
+                "epoch": 9
+            })
+        );
     }
 }
