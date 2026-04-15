@@ -7,6 +7,8 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+## [0.0.4] - 2026-04-15
+
 ### Breaking
 
 - Archive durability now uses Postgres as the primary store. Operators must run
