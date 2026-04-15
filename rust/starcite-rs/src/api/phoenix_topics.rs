@@ -31,6 +31,7 @@ struct TailReplayContext<'a> {
     batch_size: u32,
     join_ref: Option<String>,
     epoch: Option<i64>,
+    replay_until_seq: i64,
 }
 
 pub(crate) async fn run_lifecycle_topic(
@@ -332,6 +333,7 @@ async fn sync_tail(
             batch_size,
             join_ref: join_ref.clone(),
             epoch: snapshot.epoch,
+            replay_until_seq: snapshot.last_seq,
         },
         state,
         outbound_tx,
@@ -347,6 +349,10 @@ async fn replay_tail(
     mut cursor: Cursor,
 ) -> Result<Cursor, AppError> {
     loop {
+        if cursor.seq >= context.replay_until_seq {
+            return Ok(cursor);
+        }
+
         let page = match read_path::read_events(
             &state.hot_store,
             &state.pool,
@@ -473,5 +479,325 @@ fn attach_event_epoch(event: EventResponse, epoch: Option<i64>) -> EventResponse
     match epoch {
         Some(epoch) => event.with_epoch(epoch),
         None => event,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{run_tail_topic, sync_tail};
+    use crate::{
+        AppState,
+        auth::AuthService,
+        cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
+        config::{AuthMode, Config},
+        data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
+        model::{Cursor, EventResponse, SessionResponse},
+        runtime::{
+            LifecycleFanout, OpsState, SessionFanout, SessionManager, SessionManagerDeps,
+            SessionRuntime,
+        },
+        telemetry::Telemetry,
+    };
+    use serde_json::{Map, Value};
+    use sqlx::postgres::PgPoolOptions;
+    use std::{sync::Arc, time::Duration};
+    use tokio::{sync::mpsc, task::yield_now, time::timeout};
+
+    fn test_state() -> AppState {
+        let pool = PgPoolOptions::new()
+            .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
+            .expect("lazy pool");
+        let fanout = SessionFanout::default();
+        let lifecycle = LifecycleFanout::default();
+        let hot_store = HotEventStore::new();
+        let archive_queue = ArchiveQueue::new();
+        let pending_flush = PendingFlushQueue::new();
+        let session_store = HotSessionStore::new();
+        let telemetry = Telemetry::new(true);
+        let ops = OpsState::new(30_000);
+        let instance_id = Arc::<str>::from("node-a");
+        let ownership =
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+        let control_plane = ControlPlaneState::new(None, None, Duration::from_secs(5));
+        let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
+        let replication = ReplicationCoordinator::new(
+            instance_id.clone(),
+            false,
+            None,
+            Duration::from_millis(100),
+        )
+        .expect("replication");
+        let session_manager = SessionManager::new(SessionManagerDeps {
+            pool: pool.clone(),
+            fanout: fanout.clone(),
+            hot_store: hot_store.clone(),
+            pending_flush: pending_flush.clone(),
+            session_store: session_store.clone(),
+            ownership: ownership.clone(),
+            replication: replication.clone(),
+            ops: ops.clone(),
+            telemetry: telemetry.clone(),
+            idle_timeout: Duration::from_secs(30),
+        });
+        let runtime = SessionRuntime::new(
+            None,
+            lifecycle.clone(),
+            telemetry.clone(),
+            instance_id.clone(),
+            Duration::from_secs(30),
+        );
+        let auth = AuthService::new(&test_config()).expect("auth");
+
+        AppState {
+            pool,
+            fanout,
+            lifecycle,
+            hot_store,
+            archive_queue,
+            pending_flush,
+            session_store,
+            session_manager,
+            ownership,
+            control_plane,
+            owner_proxy,
+            replication,
+            runtime,
+            ops,
+            auth_mode: AuthMode::None,
+            auth,
+            telemetry,
+            instance_id,
+        }
+    }
+
+    fn test_config() -> Config {
+        Config {
+            listen_addr: "127.0.0.1:4001".parse().expect("listen addr"),
+            ops_listen_addr: "127.0.0.1:4101".parse().expect("ops listen addr"),
+            database_url: "postgres://postgres:postgres@localhost/starcite_test".to_string(),
+            max_connections: 1,
+            archive_flush_interval_ms: 5_000,
+            migrate_on_boot: false,
+            auth_mode: AuthMode::None,
+            auth_issuer: None,
+            auth_audience: None,
+            auth_jwks_url: None,
+            auth_jwt_leeway_seconds: 1,
+            auth_jwks_refresh_ms: 60_000,
+            auth_jwks_hard_expiry_ms: 60_000,
+            telemetry_enabled: true,
+            shutdown_drain_timeout_ms: 30_000,
+            session_runtime_idle_timeout_ms: 30_000,
+            commit_flush_interval_ms: 100,
+            local_async_lease_ttl_ms: 5_000,
+            local_async_node_public_url: None,
+            local_async_node_ops_url: None,
+            local_async_node_ttl_ms: 2_000,
+            local_async_owner_proxy_timeout_ms: 100,
+            local_async_standby_url: None,
+            local_async_replication_timeout_ms: 100,
+        }
+    }
+
+    fn sample_session(last_seq: i64) -> SessionResponse {
+        SessionResponse {
+            id: "ses_demo".to_string(),
+            title: Some("Draft".to_string()),
+            creator_principal: None,
+            metadata: Map::new(),
+            last_seq,
+            created_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            updated_at: "2026-04-13T00:00:00.000000Z".to_string(),
+            version: 1,
+            archived: false,
+        }
+    }
+
+    fn sample_event(session_id: &str, seq: i64) -> EventResponse {
+        EventResponse {
+            session_id: session_id.to_string(),
+            seq,
+            event_type: "content".to_string(),
+            payload: serde_json::json!({"text": format!("m{seq}")})
+                .as_object()
+                .expect("object payload")
+                .clone(),
+            actor: "service:test".to_string(),
+            source: Some("test".to_string()),
+            metadata: Map::new(),
+            refs: Map::new(),
+            idempotency_key: None,
+            producer_id: "writer-1".to_string(),
+            producer_seq: seq,
+            tenant_id: "acme".to_string(),
+            inserted_at: "2026-04-13T00:00:00Z".to_string(),
+            epoch: None,
+            cursor: seq,
+        }
+    }
+
+    async fn seed_session(
+        state: &AppState,
+        session_id: &str,
+        epoch: i64,
+        last_seq: i64,
+        archived_seq: i64,
+    ) {
+        let mut session = sample_session(last_seq);
+        session.id = session_id.to_string();
+        state
+            .session_store
+            .put_session("acme", session, Some(archived_seq))
+            .await;
+        state
+            .ownership
+            .insert_test_lease(session_id, epoch, None)
+            .await;
+    }
+
+    fn drain_frames(
+        receiver: &mut mpsc::UnboundedReceiver<crate::api::phoenix_protocol::PhoenixFrame>,
+    ) -> Vec<crate::api::phoenix_protocol::PhoenixFrame> {
+        let mut frames = Vec::new();
+
+        while let Ok(frame) = receiver.try_recv() {
+            frames.push(frame);
+        }
+
+        frames
+    }
+
+    fn payload_event_seqs(frame: &crate::api::phoenix_protocol::PhoenixFrame) -> Vec<i64> {
+        frame.payload["events"]
+            .as_array()
+            .expect("events array")
+            .iter()
+            .map(|event| event["seq"].as_i64().expect("seq"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn sync_tail_batches_hot_replay_and_attaches_epoch() {
+        let state = test_state();
+        seed_session(&state, "ses_demo", 7, 3, 0).await;
+        state.hot_store.put_event(sample_event("ses_demo", 1)).await;
+        state.hot_store.put_event(sample_event("ses_demo", 2)).await;
+        state.hot_store.put_event(sample_event("ses_demo", 3)).await;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+
+        let cursor = sync_tail(
+            "tail:ses_demo",
+            "ses_demo",
+            2,
+            Some("1".to_string()),
+            &state,
+            &outbound_tx,
+            Cursor::zero(),
+        )
+        .await
+        .expect("tail sync should succeed");
+
+        let frames = drain_frames(&mut outbound_rx);
+        assert_eq!(cursor, Cursor::new(Some(7), 3));
+        assert_eq!(frames.len(), 2);
+        assert_eq!(frames[0].event, "events");
+        assert_eq!(payload_event_seqs(&frames[0]), vec![1, 2]);
+        assert_eq!(frames[0].payload["events"][0]["epoch"], Value::from(7));
+        assert_eq!(frames[0].payload["events"][1]["epoch"], Value::from(7));
+        assert_eq!(frames[1].event, "events");
+        assert_eq!(payload_event_seqs(&frames[1]), vec![3]);
+        assert_eq!(frames[1].payload["events"][0]["epoch"], Value::from(7));
+    }
+
+    #[tokio::test]
+    async fn sync_tail_emits_gap_when_replay_continuity_is_unavailable() {
+        let state = test_state();
+        seed_session(&state, "ses_demo", 7, 3, 0).await;
+        state.hot_store.put_event(sample_event("ses_demo", 1)).await;
+        state.hot_store.put_event(sample_event("ses_demo", 3)).await;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+
+        let cursor = sync_tail(
+            "tail:ses_demo",
+            "ses_demo",
+            1,
+            Some("1".to_string()),
+            &state,
+            &outbound_tx,
+            Cursor::zero(),
+        )
+        .await
+        .expect("continuity gap should be reported");
+
+        let frames = drain_frames(&mut outbound_rx);
+        assert_eq!(cursor, Cursor::new(Some(7), 0));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].payload["reason"], "cursor_expired");
+        assert_eq!(frames[0].payload["from_cursor"], Value::from(0));
+        assert_eq!(frames[0].payload["next_cursor"], Value::from(0));
+        assert_eq!(frames[0].payload["next_cursor_epoch"], Value::from(7));
+        assert_eq!(
+            frames[0].payload["earliest_available_cursor"],
+            Value::from(1)
+        );
+        assert_eq!(
+            frames[0].payload["earliest_available_cursor_epoch"],
+            Value::from(7)
+        );
+    }
+
+    #[tokio::test]
+    async fn run_tail_topic_hands_off_from_replay_to_live_without_duplicate_frames() {
+        let state = test_state();
+        seed_session(&state, "ses_demo", 7, 1, 0).await;
+        state.hot_store.put_event(sample_event("ses_demo", 1)).await;
+        let receiver = state.fanout.subscribe("ses_demo").await;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+
+        let task = tokio::spawn(run_tail_topic(
+            "tail:ses_demo".to_string(),
+            "ses_demo".to_string(),
+            crate::api::query_options::TailOptions {
+                cursor: Cursor::zero(),
+                batch_size: 8,
+            },
+            Some("1".to_string()),
+            state.clone(),
+            receiver,
+            outbound_tx,
+        ));
+
+        let replay = timeout(Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .expect("replay frame should arrive")
+            .expect("replay frame");
+        assert_eq!(replay.event, "events");
+        assert_eq!(payload_event_seqs(&replay), vec![1]);
+
+        yield_now().await;
+
+        state
+            .fanout
+            .broadcast(sample_event("ses_demo", 2).with_epoch(7))
+            .await;
+
+        let live = timeout(Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .expect("live frame should arrive")
+            .expect("live frame");
+        assert_eq!(live.event, "events");
+        assert_eq!(payload_event_seqs(&live), vec![2]);
+        assert_eq!(live.payload["events"].as_array().expect("events").len(), 1);
+        assert_eq!(live.payload["events"][0]["epoch"], Value::from(7));
+
+        let no_duplicate = timeout(Duration::from_millis(50), outbound_rx.recv()).await;
+        assert!(
+            no_duplicate.is_err(),
+            "unexpected duplicate replay/live frame"
+        );
+
+        task.abort();
+        let _ = task.await;
     }
 }
