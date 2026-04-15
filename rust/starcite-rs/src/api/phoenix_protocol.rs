@@ -3,10 +3,7 @@ use super::query_options::TailOptions;
 use serde_json::{Value, json};
 
 use crate::{
-    api::{
-        public_payload,
-        socket_cursor::{ReplayGap, parse_json_cursor},
-    },
+    api::{public_payload, socket_cursor::ReplayGap},
     config::MAX_LIST_LIMIT,
     error::AppError,
     model::{Cursor, LifecycleResponse},
@@ -61,7 +58,7 @@ pub(crate) fn parse_tail_join_payload(payload: &Value) -> Result<TailOptions, Ap
     let mut batch_size = 1_u32;
 
     if let Some(value) = object.get("cursor") {
-        cursor = parse_json_cursor(value)?;
+        cursor = parse_phoenix_cursor(value)?;
     }
 
     if let Some(value) = object.get("batch_size") {
@@ -141,10 +138,18 @@ fn parse_lifecycle_cursor(payload: &Value) -> Result<Cursor, AppError> {
     let mut cursor = Cursor::zero();
 
     if let Some(value) = object.get("cursor") {
-        cursor = parse_json_cursor(value)?;
+        cursor = parse_phoenix_cursor(value)?;
     }
 
     Ok(cursor)
+}
+
+fn parse_phoenix_cursor(value: &Value) -> Result<Cursor, AppError> {
+    value
+        .as_i64()
+        .filter(|seq| *seq >= 0)
+        .map(|seq| Cursor::new(None, seq))
+        .ok_or(AppError::InvalidCursor)
 }
 
 #[cfg(test)]
@@ -184,6 +189,7 @@ mod tests {
     #[test]
     fn tail_join_payload_rejects_non_integer_cursor() {
         assert!(parse_tail_join_payload(&json!({"cursor": "4"})).is_err());
+        assert!(parse_tail_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}})).is_err());
     }
 
     #[test]
@@ -196,6 +202,7 @@ mod tests {
     #[test]
     fn lifecycle_join_payload_rejects_non_integer_cursor() {
         assert!(parse_lifecycle_join_payload(&json!({"cursor": "4"})).is_err());
+        assert!(parse_lifecycle_join_payload(&json!({"cursor": {"epoch": 4, "seq": 4}})).is_err());
     }
 
     #[test]
@@ -212,6 +219,14 @@ mod tests {
             .expect("cursor should parse");
 
         assert_eq!(cursor, Cursor::new(None, 7));
+    }
+
+    #[test]
+    fn session_lifecycle_join_payload_rejects_object_cursor() {
+        assert!(
+            parse_session_lifecycle_join_payload(&json!({"cursor": {"epoch": 4, "seq": 7}}))
+                .is_err()
+        );
     }
 
     #[test]
