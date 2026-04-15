@@ -499,6 +499,25 @@ pub async fn load_event_by_seq(
     row.map(EventResponse::try_from).transpose()
 }
 
+pub async fn load_first_event_seq(
+    pool: &PgPool,
+    session_id: &str,
+) -> Result<Option<i64>, AppError> {
+    sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT seq
+        FROM events
+        WHERE session_id = $1
+        ORDER BY seq ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(AppError::from)
+}
+
 pub async fn acquire_session_lease(
     pool: &PgPool,
     session_id: &str,

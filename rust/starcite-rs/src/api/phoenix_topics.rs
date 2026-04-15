@@ -16,7 +16,7 @@ use crate::{
     data_plane::{
         read_path::{self, ReadEventsError},
         repository,
-        session_store::resolve_session_last_seq,
+        session_store::{resolve_session_archived_seq, resolve_session_last_seq},
     },
     error::AppError,
     model::{Cursor, EventResponse, EventsOptions, LifecycleResponse},
@@ -231,7 +231,7 @@ async fn sync_lifecycle(
     cursor: Cursor,
 ) -> Result<Cursor, AppError> {
     let snapshot = resolve_lifecycle_cursor_snapshot(state, tenant_id).await?;
-    let earliest_available_seq = earliest_available_seq(snapshot);
+    let earliest_available_seq = earliest_available_lifecycle_seq(snapshot);
 
     if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
         let gap = build_gap(reason, cursor, snapshot, earliest_available_seq);
@@ -311,7 +311,8 @@ async fn sync_tail(
     cursor: Cursor,
 ) -> Result<Cursor, AppError> {
     let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
-    let earliest_available_seq = earliest_available_seq(snapshot);
+    let earliest_available_seq =
+        resolve_tail_earliest_available_seq(state, session_id, snapshot.committed_seq).await;
 
     if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
         let gap = build_gap(reason, cursor, snapshot, earliest_available_seq);
@@ -420,7 +421,8 @@ async fn emit_tail_gap(
     from_cursor: Cursor,
 ) -> Result<Cursor, AppError> {
     let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
-    let earliest_available_seq = earliest_available_seq(snapshot);
+    let earliest_available_seq =
+        resolve_tail_earliest_available_seq(state, session_id, snapshot.committed_seq).await;
     let gap = build_gap(
         super::socket_cursor::GapReason::CursorExpired,
         from_cursor,
@@ -444,12 +446,8 @@ async fn resolve_session_cursor_snapshot(
 ) -> Result<CursorSnapshot, AppError> {
     let lease = state.ownership.live_or_renew_owned(session_id).await?;
     let last_seq = resolve_session_last_seq(&state.session_store, &state.pool, session_id).await?;
-    let committed_seq = crate::data_plane::session_store::resolve_session_archived_seq(
-        &state.session_store,
-        &state.pool,
-        session_id,
-    )
-    .await?;
+    let committed_seq =
+        resolve_session_archived_seq(&state.session_store, &state.pool, session_id).await?;
 
     Ok(CursorSnapshot {
         epoch: Some(lease.epoch),
@@ -471,8 +469,47 @@ async fn resolve_lifecycle_cursor_snapshot(
     })
 }
 
-fn earliest_available_seq(snapshot: CursorSnapshot) -> Option<i64> {
+fn earliest_available_lifecycle_seq(snapshot: CursorSnapshot) -> Option<i64> {
     (snapshot.last_seq > 0).then_some(1)
+}
+
+async fn resolve_tail_earliest_available_seq(
+    state: &AppState,
+    session_id: &str,
+    committed_seq: i64,
+) -> Option<i64> {
+    let hot_first_seq = state.hot_store.first_seq(session_id).await;
+
+    match hot_first_seq {
+        Some(1) => Some(1),
+        Some(hot_first_seq) if hot_first_seq > 1 => {
+            Some(resolve_archive_floor_or_hot_floor(state, session_id, hot_first_seq).await)
+        }
+        None if committed_seq > 0 => {
+            Some(resolve_archive_floor_or_hot_floor(state, session_id, committed_seq + 1).await)
+        }
+        _ => None,
+    }
+}
+
+async fn resolve_archive_floor_or_hot_floor(
+    state: &AppState,
+    session_id: &str,
+    hot_floor_seq: i64,
+) -> i64 {
+    archive_floor_or_hot_floor(
+        repository::load_first_event_seq(&state.pool, session_id)
+            .await
+            .ok()
+            .flatten(),
+        hot_floor_seq,
+    )
+}
+
+fn archive_floor_or_hot_floor(archived_floor_seq: Option<i64>, hot_floor_seq: i64) -> i64 {
+    archived_floor_seq
+        .filter(|seq| *seq > 0)
+        .unwrap_or(hot_floor_seq)
 }
 
 fn attach_event_epoch(event: EventResponse, epoch: Option<i64>) -> EventResponse {
@@ -484,9 +521,12 @@ fn attach_event_epoch(event: EventResponse, epoch: Option<i64>) -> EventResponse
 
 #[cfg(test)]
 mod tests {
-    use super::{run_tail_topic, sync_tail};
+    use super::{
+        archive_floor_or_hot_floor, earliest_available_lifecycle_seq, run_tail_topic, sync_tail,
+    };
     use crate::{
         AppState,
+        api::socket_cursor::{CursorSnapshot, GapReason, replay_gap_reason},
         auth::AuthService,
         cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
         config::{AuthMode, Config},
@@ -748,6 +788,37 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn sync_tail_expires_cursor_before_hot_floor() {
+        let state = test_state();
+        seed_session(&state, "ses_demo", 7, 6, 0).await;
+        state.hot_store.put_event(sample_event("ses_demo", 6)).await;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+
+        let cursor = sync_tail(
+            "tail:ses_demo",
+            "ses_demo",
+            1,
+            Some("1".to_string()),
+            &state,
+            &outbound_tx,
+            Cursor::zero(),
+        )
+        .await
+        .expect("cursor before hot floor should expire");
+
+        let frames = drain_frames(&mut outbound_rx);
+        assert_eq!(cursor, Cursor::new(Some(7), 5));
+        assert_eq!(frames.len(), 1);
+        assert_eq!(frames[0].event, "gap");
+        assert_eq!(frames[0].payload["reason"], "cursor_expired");
+        assert_eq!(frames[0].payload["next_cursor"], Value::from(5));
+        assert_eq!(
+            frames[0].payload["earliest_available_cursor"],
+            Value::from(6)
+        );
+    }
+
+    #[tokio::test]
     async fn run_tail_topic_hands_off_from_replay_to_live_without_duplicate_frames() {
         let state = test_state();
         seed_session(&state, "ses_demo", 7, 1, 0).await;
@@ -799,5 +870,61 @@ mod tests {
 
         task.abort();
         let _ = task.await;
+    }
+
+    #[test]
+    fn lifecycle_floor_starts_at_one_when_history_exists() {
+        assert_eq!(
+            earliest_available_lifecycle_seq(CursorSnapshot {
+                epoch: None,
+                last_seq: 3,
+                committed_seq: 3,
+            }),
+            Some(1)
+        );
+        assert_eq!(
+            earliest_available_lifecycle_seq(CursorSnapshot {
+                epoch: None,
+                last_seq: 0,
+                committed_seq: 0,
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn archive_floor_prefers_archived_floor_when_present() {
+        assert_eq!(archive_floor_or_hot_floor(Some(2), 6), 2);
+        assert_eq!(archive_floor_or_hot_floor(None, 6), 6);
+    }
+
+    #[test]
+    fn replay_gap_reason_keeps_same_epoch_cursor_ahead_of_head_recoverable() {
+        let reason = replay_gap_reason(
+            Cursor::new(Some(7), 9),
+            CursorSnapshot {
+                epoch: Some(7),
+                last_seq: 6,
+                committed_seq: 4,
+            },
+            Some(2),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn replay_gap_reason_rolls_back_only_across_epoch_change() {
+        let reason = replay_gap_reason(
+            Cursor::new(Some(6), 9),
+            CursorSnapshot {
+                epoch: Some(7),
+                last_seq: 6,
+                committed_seq: 4,
+            },
+            Some(2),
+        );
+
+        assert_eq!(reason, Some(GapReason::Rollback));
     }
 }

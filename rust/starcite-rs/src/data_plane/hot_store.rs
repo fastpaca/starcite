@@ -112,6 +112,13 @@ impl HotEventStore {
             .and_then(|buffer| buffer.events.last_key_value().map(|(seq, _event)| *seq))
     }
 
+    pub async fn first_seq(&self, session_id: &str) -> Option<i64> {
+        let sessions = self.sessions.read().await;
+        sessions
+            .get(session_id)
+            .and_then(|buffer| buffer.events.first_key_value().map(|(seq, _event)| *seq))
+    }
+
     pub async fn last_producer_seq(&self, session_id: &str, producer_id: &str) -> Option<i64> {
         let sessions = self.sessions.read().await;
         let buffer = sessions.get(session_id)?;
@@ -242,6 +249,17 @@ mod tests {
         assert_eq!(snapshot.sessions[1].session_id, "ses_b");
         assert_eq!(snapshot.sessions[1].first_seq, Some(1));
         assert_eq!(snapshot.sessions[1].last_seq, Some(1));
+    }
+
+    #[tokio::test]
+    async fn first_seq_returns_lowest_hot_sequence() {
+        let store = HotEventStore::new();
+        store.put_event(event("ses_demo", 4)).await;
+        store.put_event(event("ses_demo", 2)).await;
+        store.put_event(event("ses_demo", 7)).await;
+
+        assert_eq!(store.first_seq("ses_demo").await, Some(2));
+        assert_eq!(store.first_seq("ses_missing").await, None);
     }
 
     #[tokio::test]

@@ -50,7 +50,7 @@ pub(crate) fn replay_gap_reason(
     snapshot: CursorSnapshot,
     earliest_available_seq: Option<i64>,
 ) -> Option<GapReason> {
-    if cursor.seq > snapshot.last_seq {
+    if cursor_epoch_mismatch(cursor.epoch, snapshot.epoch) && cursor.seq > snapshot.last_seq {
         return Some(GapReason::Rollback);
     }
 
@@ -122,8 +122,9 @@ fn min_max(value: i64, upper_bound: i64, floor: i64) -> i64 {
 
 fn cursor_epoch_mismatch(cursor_epoch: Option<i64>, active_epoch: Option<i64>) -> bool {
     match (cursor_epoch, active_epoch) {
-        (None, _) | (_, None) => false,
+        (None, _) => false,
         (Some(cursor_epoch), Some(active_epoch)) => cursor_epoch != active_epoch,
+        _ => true,
     }
 }
 
@@ -214,5 +215,35 @@ mod tests {
         assert_eq!(public_gap_reason(gap.reason), "cursor_expired");
         assert_eq!(gap.next_cursor, Cursor::new(Some(4), 2));
         assert_eq!(gap.earliest_available_cursor, Cursor::new(Some(4), 3));
+    }
+
+    #[test]
+    fn cursor_ahead_without_epoch_mismatch_is_not_a_gap() {
+        let reason = replay_gap_reason(
+            Cursor::new(Some(4), 10),
+            CursorSnapshot {
+                epoch: Some(4),
+                last_seq: 3,
+                committed_seq: 1,
+            },
+            Some(1),
+        );
+
+        assert_eq!(reason, None);
+    }
+
+    #[test]
+    fn cursor_epoch_requires_active_epoch_when_present() {
+        let reason = replay_gap_reason(
+            Cursor::new(Some(4), 2),
+            CursorSnapshot {
+                epoch: None,
+                last_seq: 3,
+                committed_seq: 1,
+            },
+            Some(1),
+        );
+
+        assert_eq!(reason, Some(GapReason::EpochStale));
     }
 }
