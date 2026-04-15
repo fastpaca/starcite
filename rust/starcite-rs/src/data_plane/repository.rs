@@ -319,7 +319,9 @@ pub async fn set_archive_state(
     let row = sqlx::query_as::<_, SessionRow>(
         r#"
         UPDATE sessions
-        SET archived = $2
+        SET
+          archived = $2,
+          updated_at = now()
         WHERE id = $1
         RETURNING
           id,
