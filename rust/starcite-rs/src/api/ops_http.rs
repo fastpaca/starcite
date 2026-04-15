@@ -9,7 +9,10 @@ use serde::Serialize;
 
 use crate::{
     AppState, cluster,
-    cluster::replication::{ApplyReplicaRequest, ReplicationAck, ReplicationSnapshot},
+    cluster::replication::{
+        ApplyReplicaRequest, ReplicaSessionState, ReplicaSnapshotRequest, ReplicaSnapshotResponse,
+        ReplicationAck, ReplicationSnapshot,
+    },
     data_plane,
     error::{self, AppError},
     runtime::{
@@ -194,6 +197,52 @@ pub async fn apply_replica(
     ))
 }
 
+pub async fn snapshot_replica(
+    State(state): State<AppState>,
+    body: Result<Json<ReplicaSnapshotRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    reject_internal_replication_when_unavailable(&state)?;
+    let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+    let hot_last_seq = state
+        .hot_store
+        .max_seq(&request.session_id)
+        .await
+        .unwrap_or(0);
+    let cached_last_seq = state
+        .session_store
+        .get_last_seq(&request.session_id)
+        .await
+        .unwrap_or(0)
+        .max(hot_last_seq);
+    let archived_seq = state
+        .session_store
+        .get_archived_seq(&request.session_id)
+        .await
+        .unwrap_or(0)
+        .min(cached_last_seq);
+    let tenant_id = data_plane::session_store::resolve_session_tenant_id(
+        &state.session_store,
+        &state.pool,
+        &request.session_id,
+    )
+    .await?;
+    let events = state
+        .hot_store
+        .events_after_cursor(&request.session_id, archived_seq, u32::MAX)
+        .await;
+    let (last_seq, events) = contiguous_hot_tail(events, archived_seq, cached_last_seq);
+
+    Ok(Json(ReplicaSnapshotResponse {
+        state: ReplicaSessionState {
+            session_id: request.session_id,
+            tenant_id,
+            last_seq,
+            archived_seq,
+        },
+        events,
+    }))
+}
+
 pub async fn reject_when_draining(
     State(ops): State<crate::runtime::OpsState>,
     request: Request<axum::body::Body>,
@@ -228,6 +277,35 @@ fn ready_response(
             retry_after_ms: ops.retry_after_ms,
         }),
     )
+}
+
+fn contiguous_hot_tail(
+    events: Vec<crate::model::EventResponse>,
+    archived_seq: i64,
+    cached_last_seq: i64,
+) -> (i64, Vec<crate::model::EventResponse>) {
+    let mut expected_seq = archived_seq + 1;
+    let mut contiguous = Vec::with_capacity(events.len());
+
+    for event in events {
+        if event.seq != expected_seq {
+            break;
+        }
+
+        expected_seq += 1;
+        contiguous.push(event);
+    }
+
+    let last_seq = if contiguous.is_empty() {
+        cached_last_seq.min(archived_seq)
+    } else {
+        contiguous
+            .last()
+            .map(|event| event.seq)
+            .unwrap_or(archived_seq)
+    };
+
+    (last_seq, contiguous)
 }
 
 fn auth_mode_name(auth_mode: crate::config::AuthMode) -> &'static str {

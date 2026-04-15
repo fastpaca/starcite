@@ -177,10 +177,10 @@ impl ReplicationCoordinator {
             }
         }
 
-        return Err(AppError::QuorumUnavailable {
+        Err(AppError::QuorumUnavailable {
             required: quorum_size(total_members),
             acknowledged: (acknowledgements + 1) as u32,
-        });
+        })
     }
 
     pub async fn fetch_session_snapshot(

@@ -21,17 +21,30 @@ pub struct ArchiveWorker {
     instance_id: Arc<str>,
 }
 
+pub struct ArchiveWorkerDeps {
+    pub pool: PgPool,
+    pub hot_store: HotEventStore,
+    pub session_store: HotSessionStore,
+    pub queue: ArchiveQueue,
+    pub ownership: OwnershipManager,
+    pub session_manager: SessionManager,
+    pub flush_interval: Duration,
+    pub instance_id: Arc<str>,
+}
+
 impl ArchiveWorker {
-    pub fn new(
-        pool: PgPool,
-        hot_store: HotEventStore,
-        session_store: HotSessionStore,
-        queue: ArchiveQueue,
-        ownership: OwnershipManager,
-        session_manager: SessionManager,
-        flush_interval: Duration,
-        instance_id: Arc<str>,
-    ) -> Self {
+    pub fn new(deps: ArchiveWorkerDeps) -> Self {
+        let ArchiveWorkerDeps {
+            pool,
+            hot_store,
+            session_store,
+            queue,
+            ownership,
+            session_manager,
+            flush_interval,
+            instance_id,
+        } = deps;
+
         Self {
             pool,
             hot_store,

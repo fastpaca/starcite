@@ -7,7 +7,7 @@ pub(crate) mod read_path;
 pub(crate) mod repository;
 pub(crate) mod session_store;
 
-pub(crate) use archive::ArchiveWorker;
+pub(crate) use archive::{ArchiveWorker, ArchiveWorkerDeps};
 pub(crate) use archive_queue::{ArchiveQueue, ArchiveQueueSnapshot};
 pub(crate) use flush_queue::{PendingFlushQueue, PendingFlushSnapshot};
 pub(crate) use flusher::FlushWorker;

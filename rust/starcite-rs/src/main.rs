@@ -15,7 +15,8 @@ use axum::{
 use cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator};
 use config::Config;
 use data_plane::{
-    ArchiveQueue, ArchiveWorker, FlushWorker, HotEventStore, HotSessionStore, PendingFlushQueue,
+    ArchiveQueue, ArchiveWorker, ArchiveWorkerDeps, FlushWorker, HotEventStore, HotSessionStore,
+    PendingFlushQueue,
 };
 use sqlx::postgres::PgPoolOptions;
 use std::{sync::Arc, time::Duration};
@@ -153,16 +154,16 @@ async fn run() -> Result<(), String> {
     )
     .spawn();
 
-    ArchiveWorker::new(
-        pool.clone(),
-        state.hot_store.clone(),
-        state.session_store.clone(),
-        state.archive_queue.clone(),
-        state.ownership.clone(),
-        state.session_manager.clone(),
-        Duration::from_millis(config.archive_flush_interval_ms),
-        state.instance_id.clone(),
-    )
+    ArchiveWorker::new(ArchiveWorkerDeps {
+        pool: pool.clone(),
+        hot_store: state.hot_store.clone(),
+        session_store: state.session_store.clone(),
+        queue: state.archive_queue.clone(),
+        ownership: state.ownership.clone(),
+        session_manager: state.session_manager.clone(),
+        flush_interval: Duration::from_millis(config.archive_flush_interval_ms),
+        instance_id: state.instance_id.clone(),
+    })
     .spawn();
 
     control_plane.spawn(pool.clone(), state.instance_id.clone(), ops_state.clone());
@@ -260,6 +261,10 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
         .route(
             "/internal/replication/apply",
             post(api::ops_http::apply_replica),
+        )
+        .route(
+            "/internal/replication/snapshot",
+            post(api::ops_http::snapshot_replica),
         )
         .layer(middleware::from_fn_with_state(
             telemetry,

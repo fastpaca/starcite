@@ -16,7 +16,11 @@ use tokio::{
 };
 
 use crate::{
-    cluster::{OwnershipManager, ReplicationCoordinator, replication::ReplicaSessionState},
+    cluster::{
+        OwnershipManager, ReplicationCoordinator,
+        ownership::OwnedLease,
+        replication::{ReplicaSessionState, ReplicaSnapshotResponse},
+    },
     data_plane,
     data_plane::{
         HotEventStore, HotSessionStore, PendingFlushQueue,
@@ -69,7 +73,7 @@ struct SessionWorkerHandle {
 enum SessionCommand {
     Append {
         tenant_id: String,
-        input: ValidatedAppendEvent,
+        input: Box<ValidatedAppendEvent>,
         reply_tx: oneshot::Sender<Result<AppendOutcome, AppError>>,
     },
     AckArchived {
@@ -167,7 +171,7 @@ impl SessionManager {
             let handle = self.worker_for_append(session_id).await?;
             let command = SessionCommand::Append {
                 tenant_id: tenant_id.clone(),
-                input: input.clone(),
+                input: Box::new(input.clone()),
                 reply_tx,
             };
 
@@ -263,7 +267,8 @@ impl SessionManager {
             return Ok(handle);
         }
 
-        self.ownership.live_or_renew_owned(session_id).await?;
+        let lease = self.ownership.live_or_renew_owned(session_id).await?;
+        self.bootstrap_owned_session(session_id, &lease).await?;
         Ok(self.worker_for(session_id).await)
     }
 
@@ -272,12 +277,75 @@ impl SessionManager {
             return Ok(handle);
         }
 
-        self.ownership.live_or_renew_owned(session_id).await?;
+        let lease = self.ownership.live_or_renew_owned(session_id).await?;
+        self.bootstrap_owned_session(session_id, &lease).await?;
         Ok(self.worker_for(session_id).await)
     }
 
     async fn existing_worker(&self, session_id: &str) -> Option<SessionWorkerHandle> {
         self.workers.lock().await.get(session_id).cloned()
+    }
+
+    async fn bootstrap_owned_session(
+        &self,
+        session_id: &str,
+        lease: &OwnedLease,
+    ) -> Result<(), AppError> {
+        if lease.replicas.is_empty() {
+            return Ok(());
+        }
+
+        let local_last_seq = self
+            .session_store
+            .get_last_seq(session_id)
+            .await
+            .unwrap_or(0)
+            .max(self.hot_store.max_seq(session_id).await.unwrap_or(0));
+        let local_archived_seq = self
+            .session_store
+            .get_archived_seq(session_id)
+            .await
+            .unwrap_or(0);
+        let mut best_snapshot = None::<ReplicaSnapshotResponse>;
+
+        for replica in &lease.replicas {
+            match self
+                .replication
+                .fetch_session_snapshot(lease.epoch, session_id, replica)
+                .await
+            {
+                Ok(snapshot) => {
+                    if best_snapshot
+                        .as_ref()
+                        .is_none_or(|current| snapshot_is_fresher(&snapshot, current))
+                    {
+                        best_snapshot = Some(snapshot);
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(error = ?error, session_id, replica = replica.node_id, "failed to fetch replica snapshot during ownership bootstrap");
+                }
+            }
+        }
+
+        let Some(snapshot) = best_snapshot else {
+            if local_last_seq == 0 && local_archived_seq == 0 {
+                return Err(AppError::QuorumUnavailable {
+                    required: 2,
+                    acknowledged: 0,
+                });
+            }
+
+            return Ok(());
+        };
+
+        if snapshot.state.last_seq <= local_last_seq
+            && snapshot.state.archived_seq <= local_archived_seq
+        {
+            return Ok(());
+        }
+
+        self.apply_bootstrap_snapshot(snapshot).await
     }
 
     fn spawn_worker(
@@ -345,7 +413,7 @@ impl SessionManager {
                             reply_tx,
                         } => {
                             let result = self
-                                .handle_append(&session_id, &tenant_id, &mut state, input)
+                                .handle_append(&session_id, &tenant_id, &mut state, *input)
                                 .await;
                             let _ = reply_tx.send(result);
                         }
@@ -736,6 +804,49 @@ impl SessionManager {
             .await;
     }
 
+    async fn apply_bootstrap_snapshot(
+        &self,
+        snapshot: ReplicaSnapshotResponse,
+    ) -> Result<(), AppError> {
+        let expected_count = snapshot
+            .state
+            .last_seq
+            .saturating_sub(snapshot.state.archived_seq);
+        if expected_count != snapshot.events.len() as i64 {
+            return Err(AppError::Internal);
+        }
+
+        let mut expected_seq = snapshot.state.archived_seq + 1;
+        for event in &snapshot.events {
+            if event.seq != expected_seq {
+                return Err(AppError::Internal);
+            }
+            expected_seq += 1;
+        }
+
+        self.session_store
+            .put_tenant(&snapshot.state.session_id, &snapshot.state.tenant_id)
+            .await;
+        self.hot_store
+            .delete_below(&snapshot.state.session_id, i64::MAX)
+            .await;
+
+        for event in &snapshot.events {
+            self.session_store
+                .bump_producer_seq(
+                    &snapshot.state.session_id,
+                    &snapshot.state.tenant_id,
+                    &event.producer_id,
+                    event.producer_seq,
+                )
+                .await;
+        }
+
+        self.hot_store.put_events(snapshot.events).await;
+        self.apply_frontier(&snapshot.state).await;
+        Ok(())
+    }
+
     async fn publish_commit(&self, event: EventResponse) {
         self.hot_store.put_event(event.clone()).await;
         self.fanout.broadcast(event).await;
@@ -795,6 +906,23 @@ fn deduped_append_outcome(
         event: None,
         tenant_id: tenant_id.to_string(),
     }
+}
+
+fn snapshot_is_fresher(
+    candidate: &ReplicaSnapshotResponse,
+    current: &ReplicaSnapshotResponse,
+) -> bool {
+    candidate
+        .state
+        .last_seq
+        .cmp(&current.state.last_seq)
+        .then_with(|| {
+            candidate
+                .state
+                .archived_seq
+                .cmp(&current.state.archived_seq)
+        })
+        .is_gt()
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
