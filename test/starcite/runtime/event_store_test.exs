@@ -1,21 +1,22 @@
 defmodule Starcite.DataPlane.EventStoreTest do
   use ExUnit.Case, async: false
 
+  import Ecto.Query
+
+  alias Starcite.Repo
   alias Starcite.DataPlane.{EventStore, SessionStore}
   alias Starcite.Session
-  alias Starcite.Storage.EventArchive
-  alias Starcite.Storage.EventArchive.S3.{Config, Layout}
-  alias Starcite.TestSupport.EventArchiveClient
+  alias Starcite.Session.Header
+  alias Starcite.Storage.{EventArchive, SessionCatalog}
 
   setup do
+    ensure_repo_sandbox()
     EventStore.clear()
     SessionStore.clear()
-    EventArchiveClient.reset()
 
     on_exit(fn ->
       EventStore.clear()
       SessionStore.clear()
-      EventArchiveClient.reset()
     end)
 
     :ok
@@ -72,16 +73,15 @@ defmodule Starcite.DataPlane.EventStoreTest do
 
     assert {:ok, 3} = EventArchive.write_events(rows)
     :ok = cache_session_tenant(session_id, "acme")
-    :ok = EventArchiveClient.clear_logs()
-    chunk_key = chunk_key_for(session_id, "acme", 1)
 
     assert {:ok, first} = EventStore.read_archived_events(session_id, 1, 3)
     assert Enum.map(first, & &1.seq) == [1, 2, 3]
-    assert EventArchiveClient.call_count(:get, chunk_key) == 1
+
+    assert {3, _} =
+             Repo.delete_all(from(event in "events", where: event.session_id == ^session_id))
 
     assert {:ok, second} = EventStore.read_archived_events(session_id, 1, 3)
     assert second == first
-    assert EventArchiveClient.call_count(:get, chunk_key) == 1
   end
 
   test "read_archived_events fills only missing cache gaps from persistence" do
@@ -91,8 +91,6 @@ defmodule Starcite.DataPlane.EventStoreTest do
     rows = archived_rows(session_id, inserted_at, 1..6)
     assert {:ok, 6} = EventArchive.write_events(rows)
     :ok = cache_session_tenant(session_id, "acme")
-    :ok = EventArchiveClient.clear_logs()
-    chunk_key = chunk_key_for(session_id, "acme", 1)
 
     cached_subset =
       rows
@@ -100,22 +98,15 @@ defmodule Starcite.DataPlane.EventStoreTest do
       |> Enum.map(&Map.delete(&1, :session_id))
 
     :ok = EventStore.cache_archived_events(session_id, cached_subset)
+    assert {3, _} = delete_archived_rows(session_id, [1, 2, 5])
 
     assert {:ok, events} = EventStore.read_archived_events(session_id, 1, 6)
     assert Enum.map(events, & &1.seq) == [1, 2, 3, 4, 5, 6]
-    assert EventArchiveClient.call_count(:get, chunk_key) == 2
+
+    assert {3, _} = delete_archived_rows(session_id, [3, 4, 6])
 
     assert {:ok, again} = EventStore.read_archived_events(session_id, 1, 6)
     assert Enum.map(again, & &1.seq) == [1, 2, 3, 4, 5, 6]
-    assert EventArchiveClient.call_count(:get, chunk_key) == 2
-  end
-
-  test "read_archived_events returns event archive read failures" do
-    session_id = "ses-archive-read-fail-#{System.unique_integer([:positive, :monotonic])}"
-    :ok = cache_session_tenant(session_id, "acme")
-    :ok = EventArchiveClient.set_read_mode(:unavailable)
-
-    assert {:error, :archive_read_unavailable} = EventStore.read_archived_events(session_id, 1, 3)
   end
 
   test "reclaims archived cache before applying write backpressure" do
@@ -454,6 +445,8 @@ defmodule Starcite.DataPlane.EventStoreTest do
   defp cache_session_tenant(session_id, tenant_id)
        when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
               tenant_id != "" do
+    assert :ok = SessionCatalog.persist_created(Header.new(session_id, tenant_id: tenant_id))
+
     Session.new(session_id, tenant_id: tenant_id)
     |> SessionStore.put_session()
   end
@@ -477,18 +470,27 @@ defmodule Starcite.DataPlane.EventStoreTest do
     end)
   end
 
-  defp chunk_key_for(session_id, tenant_id, seq) do
-    config =
-      Config.build!(
-        Application.get_env(:starcite, :event_archive_opts, []),
-        []
+  defp delete_archived_rows(session_id, seqs)
+       when is_binary(session_id) and session_id != "" and is_list(seqs) do
+    Repo.delete_all(
+      from(event in "events",
+        where: event.session_id == ^session_id and event.seq in ^seqs
       )
-
-    Layout.event_chunk_key(
-      config,
-      tenant_id,
-      session_id,
-      Layout.chunk_start_for(seq, config.chunk_size)
     )
+  end
+
+  defp ensure_repo_sandbox do
+    if Process.whereis(Repo) == nil do
+      _pid = start_supervised!(Repo)
+      :ok
+    end
+
+    case Ecto.Adapters.SQL.Sandbox.checkout(Repo) do
+      :ok -> :ok
+      {:already, _owner} -> :ok
+    end
+
+    Ecto.Adapters.SQL.Sandbox.mode(Repo, {:shared, self()})
+    :ok
   end
 end

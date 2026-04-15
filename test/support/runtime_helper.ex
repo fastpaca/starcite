@@ -8,11 +8,11 @@ defmodule Starcite.Runtime.TestHelper do
   def reset do
     ExUnit.CaptureLog.capture_log(fn ->
       clear_routing_store()
+      clear_persisted_state()
       clear_event_store()
       clear_session_store()
       clear_session_quorum()
       clear_archive_read_cache()
-      clear_test_event_archive()
       reset_repo_sandbox_mode()
       Process.sleep(50)
     end)
@@ -50,10 +50,13 @@ defmodule Starcite.Runtime.TestHelper do
     end
   end
 
-  defp clear_test_event_archive do
-    if Code.ensure_loaded?(Starcite.TestSupport.EventArchiveClient) do
-      _ = Starcite.TestSupport.EventArchiveClient.reset()
+  defp clear_persisted_state do
+    if Code.ensure_loaded?(Starcite.Repo) do
+      _ = Starcite.Repo.delete_all("events")
+      _ = Starcite.Repo.delete_all("sessions")
     end
+  rescue
+    _ -> :ok
   end
 
   defp reset_repo_sandbox_mode do

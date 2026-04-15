@@ -193,32 +193,67 @@ put_env_opt = fn opts, key, env_name, parser ->
   end
 end
 
-event_archive_opts =
-  Application.get_env(:starcite, :event_archive_opts, [])
+archive_legacy_s3_opts =
+  Application.get_env(:starcite, :archive_legacy_s3_opts, [])
   |> Keyword.new()
   |> Keyword.merge(
     []
-    |> put_env_opt.(:bucket, "STARCITE_S3_BUCKET", & &1)
-    |> put_env_opt.(:prefix, "STARCITE_S3_PREFIX", & &1)
-    |> put_env_opt.(:region, "STARCITE_S3_REGION", & &1)
-    |> put_env_opt.(:access_key_id, "STARCITE_S3_ACCESS_KEY_ID", & &1)
-    |> put_env_opt.(:secret_access_key, "STARCITE_S3_SECRET_ACCESS_KEY", & &1)
-    |> put_env_opt.(:security_token, "STARCITE_S3_SESSION_TOKEN", & &1)
-    |> put_env_opt.(:endpoint, "STARCITE_S3_ENDPOINT", & &1)
-    |> put_env_opt.(:max_write_retries, "STARCITE_S3_MAX_WRITE_RETRIES", fn value ->
-      parse_positive_integer!.("STARCITE_S3_MAX_WRITE_RETRIES", value)
+    |> put_env_opt.(:enabled, "STARCITE_ARCHIVE_LEGACY_S3_ENABLED", fn value ->
+      Starcite.Env.parse_bool!(value, "STARCITE_ARCHIVE_LEGACY_S3_ENABLED")
     end)
-    |> put_env_opt.(:path_style, "STARCITE_S3_PATH_STYLE", fn value ->
-      Starcite.Env.parse_bool!(value, "STARCITE_S3_PATH_STYLE")
+    |> put_env_opt.(
+      :boot_backfill,
+      "STARCITE_ARCHIVE_LEGACY_S3_BOOT_BACKFILL_ENABLED",
+      fn value ->
+        Starcite.Env.parse_bool!(value, "STARCITE_ARCHIVE_LEGACY_S3_BOOT_BACKFILL_ENABLED")
+      end
+    )
+    |> put_env_opt.(:migrate_batch_size, "STARCITE_ARCHIVE_LEGACY_S3_BATCH_SIZE", fn value ->
+      parse_positive_integer!.("STARCITE_ARCHIVE_LEGACY_S3_BATCH_SIZE", value)
+    end)
+    |> put_env_opt.(:bucket, "STARCITE_ARCHIVE_LEGACY_S3_BUCKET", & &1)
+    |> put_env_opt.(:prefix, "STARCITE_ARCHIVE_LEGACY_S3_PREFIX", & &1)
+    |> put_env_opt.(:region, "STARCITE_ARCHIVE_LEGACY_S3_REGION", & &1)
+    |> put_env_opt.(:access_key_id, "STARCITE_ARCHIVE_LEGACY_S3_ACCESS_KEY_ID", & &1)
+    |> put_env_opt.(:secret_access_key, "STARCITE_ARCHIVE_LEGACY_S3_SECRET_ACCESS_KEY", & &1)
+    |> put_env_opt.(:security_token, "STARCITE_ARCHIVE_LEGACY_S3_SESSION_TOKEN", & &1)
+    |> put_env_opt.(:endpoint, "STARCITE_ARCHIVE_LEGACY_S3_ENDPOINT", & &1)
+    |> put_env_opt.(
+      :max_write_retries,
+      "STARCITE_ARCHIVE_LEGACY_S3_MAX_WRITE_RETRIES",
+      fn value ->
+        parse_positive_integer!.("STARCITE_ARCHIVE_LEGACY_S3_MAX_WRITE_RETRIES", value)
+      end
+    )
+    |> put_env_opt.(:path_style, "STARCITE_ARCHIVE_LEGACY_S3_PATH_STYLE", fn value ->
+      Starcite.Env.parse_bool!(value, "STARCITE_ARCHIVE_LEGACY_S3_PATH_STYLE")
     end)
   )
 
-config :starcite, :event_archive_opts, event_archive_opts
+config :starcite, :archive_legacy_s3_opts, archive_legacy_s3_opts
 
 if archive_flush_interval = System.get_env("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS") do
   config :starcite,
          :archive_flush_interval_ms,
          parse_positive_integer!.("STARCITE_ARCHIVE_FLUSH_INTERVAL_MS", archive_flush_interval)
+end
+
+if archive_db_write_batch_size = System.get_env("STARCITE_ARCHIVE_DB_WRITE_BATCH_SIZE") do
+  config :starcite,
+         :archive_db_write_batch_size,
+         parse_positive_integer!.(
+           "STARCITE_ARCHIVE_DB_WRITE_BATCH_SIZE",
+           archive_db_write_batch_size
+         )
+end
+
+if archive_db_read_batch_size = System.get_env("STARCITE_ARCHIVE_DB_READ_BATCH_SIZE") do
+  config :starcite,
+         :archive_db_read_batch_size,
+         parse_positive_integer!.(
+           "STARCITE_ARCHIVE_DB_READ_BATCH_SIZE",
+           archive_db_read_batch_size
+         )
 end
 
 if event_store_max_size = System.get_env("STARCITE_EVENT_STORE_MAX_SIZE") do
@@ -454,16 +489,7 @@ if config_env() == :prod do
   if repo_url in [nil, ""] do
     raise """
     environment variable DATABASE_URL or STARCITE_POSTGRES_URL is missing.
-    Starcite requires a configured Postgres metadata database for the session catalog.
-    """
-  end
-
-  bucket = Keyword.get(event_archive_opts, :bucket)
-
-  if bucket in [nil, ""] do
-    raise """
-    environment variable STARCITE_S3_BUCKET is missing.
-    Starcite requires a configured S3 bucket for the event archive.
+    Starcite requires a configured Postgres database for the session catalog and archived events.
     """
   end
 

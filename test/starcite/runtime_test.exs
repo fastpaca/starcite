@@ -10,6 +10,7 @@ defmodule Starcite.RuntimeTest do
   alias Starcite.Routing.Store, as: RoutingStore
   alias Starcite.Routing.Watcher
   alias Starcite.Session
+  alias Starcite.Session.Header
   alias Starcite.Storage.{EventArchive, SessionCatalog}
 
   setup do
@@ -1638,7 +1639,7 @@ defmodule Starcite.RuntimeTest do
     end
   end
 
-  defp insert_cold_rows(session_id, events) when is_binary(session_id) and is_list(events) do
+  defp insert_cold_rows(session_id, [%{} | _] = events) when is_binary(session_id) do
     base_rows =
       Enum.map(events, fn event ->
         %{
@@ -1662,8 +1663,29 @@ defmodule Starcite.RuntimeTest do
       Enum.zip(base_rows, events)
       |> Enum.map(fn {row, event} -> Map.put(row, :tenant_id, event_tenant_id!(event)) end)
 
+    ensure_archive_session(session_id, hd(rows).tenant_id)
     assert {:ok, inserted} = EventArchive.write_events(rows)
     assert inserted == length(rows)
+  end
+
+  defp ensure_archive_session(session_id, tenant_id)
+       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
+              tenant_id != "" do
+    case SessionCatalog.get_archive_context(session_id) do
+      {:ok, %{tenant_id: ^tenant_id}} ->
+        :ok
+
+      {:ok, %{tenant_id: existing_tenant_id}} ->
+        flunk(
+          "archive session already exists with tenant #{inspect(existing_tenant_id)} for #{inspect(session_id)}"
+        )
+
+      {:error, :session_not_found} ->
+        assert :ok = SessionCatalog.persist_created(Header.new(session_id, tenant_id: tenant_id))
+
+      {:error, reason} ->
+        flunk("unable to load archive session #{inspect(session_id)}: #{inspect(reason)}")
+    end
   end
 
   defp flush_archive_until(session_id, archived_seq)

@@ -48,6 +48,11 @@ defmodule Starcite.Storage.SessionCatalog do
           required(:archived_seq) => non_neg_integer()
         }
 
+  @type archive_context :: %{
+          required(:tenant_id) => String.t(),
+          required(:archived_seq) => non_neg_integer()
+        }
+
   @type header_update :: %{
           optional(:title) => String.t() | nil,
           optional(:metadata) => map(),
@@ -194,6 +199,20 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   def get_progress(_session_id), do: {:error, :invalid_session_id}
+
+  @spec get_archive_context(String.t()) :: {:ok, archive_context()} | {:error, term()}
+  def get_archive_context(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, row} <- get_record(session_id),
+         tenant_id when is_binary(tenant_id) and tenant_id != "" <- row.tenant_id,
+         archived_seq when is_integer(archived_seq) and archived_seq >= 0 <- row.archived_seq do
+      {:ok, %{tenant_id: tenant_id, archived_seq: archived_seq}}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :session_catalog_unavailable}
+    end
+  end
+
+  def get_archive_context(_session_id), do: {:error, :invalid_session_id}
 
   @spec archive_session(String.t()) :: {:ok, archive_update_result()} | {:error, term()}
   def archive_session(session_id) when is_binary(session_id) and session_id != "" do

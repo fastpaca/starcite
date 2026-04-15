@@ -18,7 +18,7 @@ defmodule Starcite.DataPlane.Supervisor do
         {Starcite.DataPlane.SessionStore, []},
         # Stable owner for ETS event mirror table
         {Starcite.DataPlane.EventStore, []},
-        {Starcite.Storage.EventArchive, event_archive_opts()},
+        {Starcite.Storage.EventArchive, []},
         {Starcite.Archive,
          [
            name: archive_name(),
@@ -39,8 +39,6 @@ defmodule Starcite.DataPlane.Supervisor do
               "invalid value for archive_flush_interval_ms: #{inspect(val)} (expected positive integer)"
     end
   end
-
-  defp event_archive_opts, do: Application.get_env(:starcite, :event_archive_opts, [])
 
   defp archive_name, do: Application.get_env(:starcite, :archive_name, Starcite.Archive)
 end

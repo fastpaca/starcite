@@ -1,9 +1,6 @@
 defmodule Starcite.Storage.EventArchive.S3.Client do
   @moduledoc """
-  Thin typed wrapper around ExAws S3 operations used by the event archive.
-
-  This module only translates ExAws HTTP responses into small result tuples so
-  the adapter can stay focused on archive semantics.
+  Thin wrapper around ExAws S3 operations used during legacy S3 cutover.
   """
 
   alias ExAws.S3
@@ -39,21 +36,6 @@ defmodule Starcite.Storage.EventArchive.S3.Client do
 
       {:error, _reason} ->
         {:error, :unavailable}
-    end
-  end
-
-  @spec list_keys(config(), String.t()) :: {:ok, [String.t()]} | {:error, :unavailable}
-  def list_keys(config, prefix) do
-    try do
-      keys =
-        S3.list_objects_v2(config.bucket, prefix: prefix, max_keys: 1_000)
-        |> ExAws.stream!(config.request_opts)
-        |> Stream.map(& &1.key)
-        |> Enum.reject(&(&1 in [nil, ""]))
-
-      {:ok, keys}
-    rescue
-      _ -> {:error, :unavailable}
     end
   end
 
