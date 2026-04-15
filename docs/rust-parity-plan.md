@@ -1,10 +1,8 @@
 # Rust Parity Rewrite Target
 
-The current `rust/starcite-rs` crate is a useful experiment, but it is not a
-faithful rewrite of Starcite's low-latency architecture. It moved Postgres onto
-the append ack path and collapsed the tiered storage model into one database.
-That is a different system, and it should not be treated as the target shape
-for a production rewrite.
+This document defines the parity bar for the Rust rewrite. Earlier versions of
+`rust/starcite-rs` drifted into a different architecture, and future changes can
+drift again unless the target is pinned explicitly.
 
 This document defines the actual parity target for a Rust rewrite of the
 existing Starcite app.
@@ -100,23 +98,21 @@ For the Rust parity target, the archive sink can be Postgres instead of S3, but
 the queueing model should stay the same: flush committed hot-path state to the
 backend store after the ack, not before it.
 
-## What The Current Rust Experiment Got Wrong
+## Remaining Drift To Watch
 
-- It made Postgres the primary append log.
-- It made replay a direct database read instead of a tiered read path.
-- It replaced quorum replication with database durability.
-- It replaced async archive semantics with one durable store.
-- It preserved API shape in many places while changing the latency model under
-  it.
+The current Rust branch has moved closer to parity, but there are still real
+boundaries to protect:
 
-That experiment can still be useful for:
+- the hot path is still a narrow `local_async` shape with one synchronous
+  standby chosen by the Postgres control plane, not the old broader routed
+  quorum topology
+- transport/auth/ops parity is ahead of routing/replication/archive telemetry
+  parity
+- external IdP interoperability is still only covered by the in-process JWKS
+  harness
 
-- typed request/response contracts
-- WebSocket framing and Phoenix transport compatibility
-- auth boundary cleanup
-- ops surfaces and telemetry plumbing
-
-It should not be mistaken for the final rewrite direction.
+Those are deliberate current limits. They should stay visible instead of being
+accidentally normalized into "good enough parity."
 
 ## Rust Rewrite Sequence
 
@@ -132,6 +128,6 @@ The next Rust work should follow this order:
 
 ## Practical Rule For This Branch
 
-For low-tail performance discussions, treat `rust/starcite-rs` as a discarded
-architecture experiment until it starts preserving the existing write/read
-boundaries instead of replacing them.
+For low-tail performance discussions, judge `rust/starcite-rs` by whether it is
+preserving the write/read boundaries above, not by whether it happens to keep a
+similar API shape while moving durability or replay back onto the wrong path.
