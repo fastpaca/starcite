@@ -25,6 +25,14 @@ use crate::{
 
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
 
+struct TailReplayContext<'a> {
+    topic: &'a str,
+    session_id: &'a str,
+    batch_size: u32,
+    join_ref: Option<String>,
+    epoch: Option<i64>,
+}
+
 pub(crate) async fn run_lifecycle_topic(
     topic: String,
     tenant_id: String,
@@ -318,33 +326,31 @@ async fn sync_tail(
     }
 
     replay_tail(
-        topic,
-        session_id,
-        batch_size,
-        join_ref.clone(),
+        TailReplayContext {
+            topic,
+            session_id,
+            batch_size,
+            join_ref: join_ref.clone(),
+            epoch: snapshot.epoch,
+        },
         state,
         outbound_tx,
         cursor,
-        snapshot.epoch,
     )
     .await
 }
 
 async fn replay_tail(
-    topic: &str,
-    session_id: &str,
-    batch_size: u32,
-    join_ref: Option<String>,
+    context: TailReplayContext<'_>,
     state: &AppState,
     outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
     mut cursor: Cursor,
-    epoch: Option<i64>,
 ) -> Result<Cursor, AppError> {
     loop {
         let page = match read_path::read_events(
             &state.hot_store,
             &state.pool,
-            session_id,
+            context.session_id,
             EventsOptions {
                 cursor: cursor.seq,
                 limit: TAIL_REPLAY_LIMIT,
@@ -355,9 +361,9 @@ async fn replay_tail(
             Ok(page) => page,
             Err(ReadEventsError::ContinuityUnavailable) => {
                 return emit_tail_gap(
-                    topic,
-                    session_id,
-                    join_ref.clone(),
+                    context.topic,
+                    context.session_id,
+                    context.join_ref.clone(),
                     state,
                     outbound_tx,
                     cursor,
@@ -371,11 +377,11 @@ async fn replay_tail(
             return Ok(cursor);
         }
 
-        for events in page.events.chunks(batch_size as usize) {
+        for events in page.events.chunks(context.batch_size as usize) {
             let events = events
                 .iter()
                 .cloned()
-                .map(|event| attach_event_epoch(event, epoch))
+                .map(|event| attach_event_epoch(event, context.epoch))
                 .collect::<Vec<_>>();
             cursor = events
                 .last()
@@ -383,8 +389,8 @@ async fn replay_tail(
                 .unwrap_or(cursor);
             let started_at = Instant::now();
             let result = outbound_tx.send(push_frame(
-                join_ref.clone(),
-                topic.to_string(),
+                context.join_ref.clone(),
+                context.topic.to_string(),
                 "events",
                 json!({"events": events}),
             ));

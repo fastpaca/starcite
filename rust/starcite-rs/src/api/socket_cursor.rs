@@ -25,10 +25,6 @@ pub(crate) struct ReplayGap {
     pub(crate) earliest_available_cursor: Cursor,
 }
 
-pub(crate) fn parse_query_cursor(raw: &str) -> Result<Cursor, AppError> {
-    parse_cursor_string(raw)
-}
-
 pub(crate) fn parse_json_cursor(payload: &Value) -> Result<Cursor, AppError> {
     match payload {
         Value::Number(number) => number
@@ -131,28 +127,6 @@ fn cursor_epoch_mismatch(cursor_epoch: Option<i64>, active_epoch: Option<i64>) -
     }
 }
 
-fn parse_cursor_string(raw: &str) -> Result<Cursor, AppError> {
-    let trimmed = raw.trim();
-    if trimmed.is_empty() {
-        return Err(AppError::InvalidCursor);
-    }
-
-    if let Some((epoch_raw, seq_raw)) = trimmed.split_once(':') {
-        let epoch = parse_non_negative_i64(epoch_raw)?;
-        let seq = parse_non_negative_i64(seq_raw)?;
-        return Ok(Cursor::new(Some(epoch), seq));
-    }
-
-    parse_non_negative_i64(trimmed).map(|seq| Cursor::new(None, seq))
-}
-
-fn parse_non_negative_i64(raw: &str) -> Result<i64, AppError> {
-    raw.parse::<i64>()
-        .ok()
-        .filter(|value| *value >= 0)
-        .ok_or(AppError::InvalidCursor)
-}
-
 fn parse_optional_json_epoch(value: Option<&Value>) -> Result<Option<i64>, AppError> {
     match value {
         None | Some(Value::Null) => Ok(None),
@@ -170,22 +144,10 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        CursorSnapshot, GapReason, build_gap, parse_json_cursor, parse_query_cursor,
-        public_gap_reason, replay_gap_reason,
+        CursorSnapshot, GapReason, build_gap, parse_json_cursor, public_gap_reason,
+        replay_gap_reason,
     };
     use crate::model::Cursor;
-
-    #[test]
-    fn query_cursor_supports_seq_only_and_epoch_seq() {
-        assert_eq!(
-            parse_query_cursor("12").expect("seq cursor"),
-            Cursor::new(None, 12)
-        );
-        assert_eq!(
-            parse_query_cursor("7:12").expect("epoch cursor"),
-            Cursor::new(Some(7), 12)
-        );
-    }
 
     #[test]
     fn json_cursor_supports_integer_and_object_shapes() {
