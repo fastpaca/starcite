@@ -146,9 +146,13 @@ pub async fn authenticate_http(
     match auth.mode() {
         AuthMode::None => Ok(AuthContext::none()),
         AuthMode::Jwt => {
-            let value = headers
-                .get(axum::http::header::AUTHORIZATION)
-                .ok_or(AppError::MissingBearerToken)?;
+            let mut values = headers.get_all(axum::http::header::AUTHORIZATION).iter();
+            let value = values.next().ok_or(AppError::MissingBearerToken)?;
+
+            if values.next().is_some() {
+                return Err(AppError::InvalidBearerToken);
+            }
+
             let raw = value.to_str().map_err(|_| AppError::InvalidBearerToken)?;
             let token = extract_bearer_token(raw)?;
             authenticate_jwt(token, auth).await
@@ -656,9 +660,15 @@ fn validate_issued_at(iat: Option<&Value>, leeway_seconds: u64) -> Result<(), Ap
 }
 
 fn extract_bearer_token(header: &str) -> Result<&str, AppError> {
-    match header.split_once(' ') {
-        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") && !token.is_empty() => {
-            Ok(token)
+    match header.trim().split_once(' ') {
+        Some((scheme, token)) if scheme.eq_ignore_ascii_case("bearer") => {
+            let token = token.trim();
+
+            if token.is_empty() || token.contains(',') || token.contains(' ') {
+                Err(AppError::InvalidBearerToken)
+            } else {
+                Ok(token)
+            }
         }
         _ => Err(AppError::InvalidBearerToken),
     }
@@ -833,6 +843,53 @@ mod tests {
 
         assert!(matches!(
             super::authenticate_socket(&params, &auth_service).await,
+            Err(AppError::InvalidBearerToken)
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_auth_rejects_multiple_authorization_headers() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let mut headers = HeaderMap::new();
+        headers.append(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
+        );
+        headers.append(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {token}")).expect("header"),
+        );
+
+        assert!(matches!(
+            authenticate_http(&headers, &auth_service).await,
+            Err(AppError::InvalidBearerToken)
+        ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn http_auth_rejects_bearer_token_with_embedded_spaces() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_static("Bearer token with-space"),
+        );
+
+        assert!(matches!(
+            authenticate_http(&headers, &auth_service).await,
             Err(AppError::InvalidBearerToken)
         ));
 
