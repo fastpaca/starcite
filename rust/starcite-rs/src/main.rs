@@ -158,6 +158,8 @@ async fn run() -> Result<(), String> {
         state.hot_store.clone(),
         state.session_store.clone(),
         state.archive_queue.clone(),
+        state.ownership.clone(),
+        state.session_manager.clone(),
         Duration::from_millis(config.archive_flush_interval_ms),
         state.instance_id.clone(),
     )
@@ -170,7 +172,6 @@ async fn run() -> Result<(), String> {
         fanout,
         state.lifecycle.clone(),
         hot_store,
-        archive_queue,
         session_store,
         instance_id,
     );

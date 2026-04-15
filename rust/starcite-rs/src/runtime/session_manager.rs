@@ -63,13 +63,20 @@ pub struct SessionManagerDeps {
 #[derive(Clone)]
 struct SessionWorkerHandle {
     worker_id: u64,
-    sender: mpsc::Sender<AppendCommand>,
+    sender: mpsc::Sender<SessionCommand>,
 }
 
-struct AppendCommand {
-    tenant_id: String,
-    input: ValidatedAppendEvent,
-    reply_tx: oneshot::Sender<Result<AppendOutcome, AppError>>,
+enum SessionCommand {
+    Append {
+        tenant_id: String,
+        input: ValidatedAppendEvent,
+        reply_tx: oneshot::Sender<Result<AppendOutcome, AppError>>,
+    },
+    AckArchived {
+        tenant_id: String,
+        archived_seq: i64,
+        reply_tx: oneshot::Sender<Result<(), AppError>>,
+    },
 }
 
 #[derive(Debug, Default)]
@@ -158,9 +165,40 @@ impl SessionManager {
         for _attempt in 0..2 {
             let (reply_tx, reply_rx) = oneshot::channel();
             let handle = self.worker_for_append(session_id).await?;
-            let command = AppendCommand {
+            let command = SessionCommand::Append {
                 tenant_id: tenant_id.clone(),
                 input: input.clone(),
+                reply_tx,
+            };
+
+            match handle.sender.send(command).await {
+                Ok(()) => match reply_rx.await {
+                    Ok(result) => return result,
+                    Err(_error) => {
+                        self.prune_worker(session_id, handle.worker_id).await;
+                    }
+                },
+                Err(_error) => {
+                    self.prune_worker(session_id, handle.worker_id).await;
+                }
+            }
+        }
+
+        Err(AppError::Internal)
+    }
+
+    pub async fn ack_archived(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        archived_seq: i64,
+    ) -> Result<(), AppError> {
+        for _attempt in 0..2 {
+            let (reply_tx, reply_rx) = oneshot::channel();
+            let handle = self.worker_for_archive(session_id).await?;
+            let command = SessionCommand::AckArchived {
+                tenant_id: tenant_id.to_string(),
+                archived_seq,
                 reply_tx,
             };
 
@@ -229,6 +267,15 @@ impl SessionManager {
         Ok(self.worker_for(session_id).await)
     }
 
+    async fn worker_for_archive(&self, session_id: &str) -> Result<SessionWorkerHandle, AppError> {
+        if let Some(handle) = self.existing_worker(session_id).await {
+            return Ok(handle);
+        }
+
+        self.ownership.live_or_renew_owned(session_id).await?;
+        Ok(self.worker_for(session_id).await)
+    }
+
     async fn existing_worker(&self, session_id: &str) -> Option<SessionWorkerHandle> {
         self.workers.lock().await.get(session_id).cloned()
     }
@@ -237,7 +284,7 @@ impl SessionManager {
         &self,
         session_id: String,
         worker_id: u64,
-        receiver: mpsc::Receiver<AppendCommand>,
+        receiver: mpsc::Receiver<SessionCommand>,
     ) {
         let manager = self.clone();
 
@@ -250,7 +297,7 @@ impl SessionManager {
         &self,
         session_id: String,
         worker_id: u64,
-        mut receiver: mpsc::Receiver<AppendCommand>,
+        mut receiver: mpsc::Receiver<SessionCommand>,
     ) {
         let mut idle = Box::pin(sleep(self.idle_timeout));
         let mut draining = self.ops.subscribe_draining();
@@ -291,10 +338,28 @@ impl SessionManager {
                         .as_mut()
                         .reset(TokioInstant::now() + self.idle_timeout);
 
-                    let result = self
-                        .handle_append(&session_id, &command.tenant_id, &mut state, command.input)
-                        .await;
-                    let _ = command.reply_tx.send(result);
+                    match command {
+                        SessionCommand::Append {
+                            tenant_id,
+                            input,
+                            reply_tx,
+                        } => {
+                            let result = self
+                                .handle_append(&session_id, &tenant_id, &mut state, input)
+                                .await;
+                            let _ = reply_tx.send(result);
+                        }
+                        SessionCommand::AckArchived {
+                            tenant_id,
+                            archived_seq,
+                            reply_tx,
+                        } => {
+                            let result = self
+                                .handle_archive_ack(&session_id, &tenant_id, &mut state, archived_seq)
+                                .await;
+                            let _ = reply_tx.send(result);
+                        }
+                    }
                 }
             }
         }
@@ -309,6 +374,57 @@ impl SessionManager {
     ) -> Result<AppendOutcome, AppError> {
         self.append_local_async(session_id, tenant_id, state, input)
             .await
+    }
+
+    async fn handle_archive_ack(
+        &self,
+        session_id: &str,
+        tenant_id: &str,
+        state: &mut SessionWorkerState,
+        archived_seq: i64,
+    ) -> Result<(), AppError> {
+        let lease = self.ownership.live_or_renew_owned(session_id).await?;
+        let current_archived_seq = self
+            .session_store
+            .get_archived_seq(session_id)
+            .await
+            .unwrap_or(0);
+
+        if archived_seq <= current_archived_seq {
+            return Ok(());
+        }
+
+        let last_seq = match state.last_seq {
+            Some(last_seq) => last_seq,
+            None => {
+                let last_seq = data_plane::session_store::resolve_session_last_seq(
+                    &self.session_store,
+                    &self.pool,
+                    session_id,
+                )
+                .await?;
+                state.remember_last_seq(last_seq);
+                last_seq
+            }
+        };
+        let archived_seq = archived_seq.min(last_seq);
+
+        if archived_seq <= current_archived_seq {
+            return Ok(());
+        }
+
+        let frontier = ReplicaSessionState {
+            session_id: session_id.to_string(),
+            tenant_id: tenant_id.to_string(),
+            last_seq,
+            archived_seq,
+        };
+
+        self.replication
+            .replicate_session_state(lease.epoch, frontier.clone(), &[], &lease.replicas)
+            .await?;
+        self.apply_frontier(&frontier).await;
+        Ok(())
     }
 
     async fn append_local_async(
@@ -574,7 +690,7 @@ impl SessionManager {
             self.apply_commit(event, false).await;
         }
 
-        self.apply_replica_frontier(&state).await;
+        self.apply_frontier(&state).await;
         ReplicaApplyDisposition::Applied
     }
 
@@ -605,7 +721,7 @@ impl SessionManager {
             .await;
     }
 
-    async fn apply_replica_frontier(&self, state: &ReplicaSessionState) {
+    async fn apply_frontier(&self, state: &ReplicaSessionState) {
         self.session_store
             .put_tenant(&state.session_id, &state.tenant_id)
             .await;
@@ -1033,6 +1149,55 @@ mod tests {
         assert_eq!(
             manager.session_store.get_archived_seq("ses_demo").await,
             Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn ack_archived_updates_frontier_and_prunes_hot_tail() {
+        let manager = manager(Duration::from_secs(1));
+        manager
+            .ownership
+            .insert_test_lease("ses_demo", 7, Vec::new())
+            .await;
+        manager
+            .session_store
+            .put_session("acme", sample_session(4), Some(0))
+            .await;
+        manager
+            .hot_store
+            .put_event(sample_event("ses_demo", 1, 1))
+            .await;
+        manager
+            .hot_store
+            .put_event(sample_event("ses_demo", 2, 2))
+            .await;
+        manager
+            .hot_store
+            .put_event(sample_event("ses_demo", 3, 3))
+            .await;
+        manager
+            .hot_store
+            .put_event(sample_event("ses_demo", 4, 4))
+            .await;
+
+        manager
+            .ack_archived("ses_demo", "acme", 3)
+            .await
+            .expect("archive frontier should advance");
+
+        assert_eq!(
+            manager.session_store.get_archived_seq("ses_demo").await,
+            Some(3)
+        );
+        assert_eq!(
+            manager
+                .hot_store
+                .events_after_cursor("ses_demo", 0, 10)
+                .await
+                .into_iter()
+                .map(|event| event.seq)
+                .collect::<Vec<_>>(),
+            vec![4]
         );
     }
 }

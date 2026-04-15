@@ -7,14 +7,16 @@ use super::{
     archive_queue::ArchiveQueue, hot_store::HotEventStore, repository,
     session_store::HotSessionStore,
 };
-use crate::error::AppError;
+use crate::{cluster::OwnershipManager, error::AppError, runtime::SessionManager};
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct ArchiveWorker {
     pool: PgPool,
     hot_store: HotEventStore,
     session_store: HotSessionStore,
     queue: ArchiveQueue,
+    ownership: OwnershipManager,
+    session_manager: SessionManager,
     flush_interval: Duration,
     instance_id: Arc<str>,
 }
@@ -25,6 +27,8 @@ impl ArchiveWorker {
         hot_store: HotEventStore,
         session_store: HotSessionStore,
         queue: ArchiveQueue,
+        ownership: OwnershipManager,
+        session_manager: SessionManager,
         flush_interval: Duration,
         instance_id: Arc<str>,
     ) -> Self {
@@ -33,6 +37,8 @@ impl ArchiveWorker {
             hot_store,
             session_store,
             queue,
+            ownership,
+            session_manager,
             flush_interval,
             instance_id,
         }
@@ -66,40 +72,47 @@ impl ArchiveWorker {
     }
 
     async fn flush_session(&self, session_id: &str) -> Result<(), AppError> {
+        if self.ownership.owned_epoch(session_id).await.is_none() {
+            return Ok(());
+        }
+
         let Some(max_hot_seq) = self.hot_store.max_seq(session_id).await else {
             return Ok(());
         };
 
+        let local_archived_seq = self
+            .session_store
+            .get_archived_seq(session_id)
+            .await
+            .unwrap_or(0);
         let state = repository::get_archive_state(&self.pool, session_id).await?;
         let Some(target_seq) =
-            next_flush_target(state.archived_seq, state.last_seq, Some(max_hot_seq))
+            next_flush_target(local_archived_seq, state.last_seq, Some(max_hot_seq))
         else {
             return Ok(());
         };
 
-        let archived_seq =
-            repository::mark_archived_seq(&self.pool, session_id, target_seq).await?;
-        self.session_store
-            .update_archived_seq(session_id, archived_seq)
-            .await;
-        let prune_floor = archived_seq.saturating_add(1);
-        let deleted = self.hot_store.delete_below(session_id, prune_floor).await;
+        let archived_seq = if state.archived_seq < target_seq {
+            repository::mark_archived_seq(&self.pool, session_id, target_seq).await?
+        } else {
+            state.archived_seq
+        };
 
-        tracing::debug!(
-            session_id,
-            archived_seq,
-            deleted_hot_events = deleted,
-            "archive worker pruned local hot events"
-        );
+        self.session_manager
+            .ack_archived(session_id, &state.tenant_id, archived_seq)
+            .await?;
 
-        repository::publish_archive_progress(
+        if let Err(error) = repository::publish_archive_progress(
             &self.pool,
             self.instance_id.as_ref(),
             session_id,
             &state.tenant_id,
             archived_seq,
         )
-        .await?;
+        .await
+        {
+            tracing::warn!(error = ?error, session_id, archived_seq, "failed to publish archive frontier");
+        }
 
         Ok(())
     }

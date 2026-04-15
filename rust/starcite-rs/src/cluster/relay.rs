@@ -6,7 +6,7 @@ use tokio::time::sleep;
 
 use crate::{
     data_plane,
-    data_plane::{ArchiveQueue, HotEventStore, HotSessionStore},
+    data_plane::{HotEventStore, HotSessionStore},
     runtime::{LifecycleFanout, SessionFanout},
 };
 
@@ -20,7 +20,6 @@ struct ListenerState {
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
-    archive_queue: ArchiveQueue,
     session_store: HotSessionStore,
     instance_id: Arc<str>,
 }
@@ -51,7 +50,6 @@ pub fn spawn(
     fanout: SessionFanout,
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
-    archive_queue: ArchiveQueue,
     session_store: HotSessionStore,
     instance_id: Arc<str>,
 ) {
@@ -60,7 +58,6 @@ pub fn spawn(
         fanout,
         lifecycle,
         hot_store,
-        archive_queue,
         session_store,
         instance_id,
     };
@@ -137,7 +134,6 @@ async fn handle_notification(state: &ListenerState, channel: &str, payload: &str
             {
                 Ok(Some(event)) => {
                     state.hot_store.put_event(event.clone()).await;
-                    state.archive_queue.enqueue(&event.session_id).await;
                     state
                         .session_store
                         .bump_last_seq(&event.session_id, &event.tenant_id, event.seq)
