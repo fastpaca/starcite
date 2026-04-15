@@ -80,7 +80,9 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{SocketContext, resolve_lifecycle_tenant_id, tail_join_error_payload};
+    use super::{
+        SocketContext, error_reason, resolve_lifecycle_tenant_id, tail_join_error_payload,
+    };
     use crate::{auth::AuthContext, config::AuthMode, error::AppError};
 
     #[test]
@@ -160,5 +162,17 @@ mod tests {
                 .expect("auth tenant id"),
             "acme"
         );
+    }
+
+    #[test]
+    fn auth_failures_collapse_to_unauthorized_socket_reason() {
+        for error in [
+            AppError::MissingBearerToken,
+            AppError::InvalidBearerToken,
+            AppError::InvalidToken,
+            AppError::TokenExpired,
+        ] {
+            assert_eq!(error_reason(&error), "unauthorized");
+        }
     }
 }
