@@ -243,6 +243,45 @@ pub async fn snapshot_replica(
     }))
 }
 
+pub async fn relay_event(
+    State(state): State<AppState>,
+    body: Result<Json<cluster::relay::DirectEventRelayRequest>, JsonRejection>,
+) -> Result<impl IntoResponse, AppError> {
+    reject_internal_replication_when_unavailable(&state)?;
+    let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
+    let session_id = request.event.session_id.clone();
+    let seq = request.event.seq;
+
+    let status = match cluster::relay::apply_relayed_event(
+        &state.hot_store,
+        &state.session_store,
+        &state.fanout,
+        request.event,
+    )
+    .await
+    {
+        cluster::relay::EventRelayDisposition::Applied => "applied",
+        cluster::relay::EventRelayDisposition::Duplicate => "duplicate",
+        cluster::relay::EventRelayDisposition::Archived => "archived",
+        cluster::relay::EventRelayDisposition::Gap { expected_seq } => {
+            tracing::warn!(
+                session_id,
+                seq,
+                expected_seq,
+                "rejecting direct event relay due to seq gap"
+            );
+            "gap"
+        }
+    };
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(cluster::relay::DirectEventRelayAck {
+            status: status.to_string(),
+        }),
+    ))
+}
+
 pub async fn reject_when_draining(
     State(ops): State<crate::runtime::OpsState>,
     request: Request<axum::body::Body>,
@@ -357,8 +396,8 @@ mod tests {
         AppState,
         auth::AuthService,
         cluster::{
-            ControlPlaneReadinessDetail, ControlPlaneState, OwnerProxy, OwnershipManager,
-            ReplicationCoordinator,
+            ControlPlaneReadinessDetail, ControlPlaneState, DirectEventRelay, OwnerProxy,
+            OwnershipManager, ReplicationCoordinator,
         },
         config::{AuthMode, Config},
         data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
@@ -391,6 +430,7 @@ mod tests {
         let replication =
             ReplicationCoordinator::new(instance_id.clone(), false, Duration::from_millis(100))
                 .expect("replication");
+        let direct_event_relay = DirectEventRelay::disabled();
         let session_manager = SessionManager::new(SessionManagerDeps {
             pool: pool.clone(),
             fanout: fanout.clone(),
@@ -399,6 +439,7 @@ mod tests {
             session_store: session_store.clone(),
             ownership: ownership.clone(),
             replication: replication.clone(),
+            direct_relay: direct_event_relay.clone(),
             ops: ops.clone(),
             telemetry: telemetry.clone(),
             idle_timeout: Duration::from_secs(30),
@@ -425,6 +466,7 @@ mod tests {
             control_plane,
             owner_proxy,
             replication,
+            direct_event_relay,
             runtime,
             ops,
             auth_mode: AuthMode::None,

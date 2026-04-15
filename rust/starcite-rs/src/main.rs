@@ -12,7 +12,9 @@ use axum::{
     Router, middleware,
     routing::{get, post},
 };
-use cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator};
+use cluster::{
+    ControlPlaneState, DirectEventRelay, OwnerProxy, OwnershipManager, ReplicationCoordinator,
+};
 use config::Config;
 use data_plane::{
     ArchiveQueue, ArchiveWorker, ArchiveWorkerDeps, FlushWorker, HotEventStore, HotSessionStore,
@@ -40,6 +42,7 @@ pub struct AppState {
     pub control_plane: cluster::ControlPlaneState,
     pub owner_proxy: cluster::OwnerProxy,
     pub replication: cluster::ReplicationCoordinator,
+    pub direct_event_relay: cluster::DirectEventRelay,
     pub runtime: runtime::SessionRuntime,
     pub ops: runtime::OpsState,
     pub auth_mode: config::AuthMode,
@@ -104,6 +107,12 @@ async fn run() -> Result<(), String> {
         control_plane.enabled(),
         Duration::from_millis(config.local_async_replication_timeout_ms),
     )?;
+    let direct_event_relay = DirectEventRelay::new(
+        pool.clone(),
+        instance_id.clone(),
+        control_plane.enabled(),
+        Duration::from_millis(config.local_async_replication_timeout_ms),
+    )?;
     let session_manager = runtime::SessionManager::new(runtime::SessionManagerDeps {
         pool: pool.clone(),
         fanout: fanout.clone(),
@@ -112,6 +121,7 @@ async fn run() -> Result<(), String> {
         session_store: session_store.clone(),
         ownership: ownership.clone(),
         replication: replication.clone(),
+        direct_relay: direct_event_relay.clone(),
         ops: ops_state.clone(),
         telemetry: telemetry.clone(),
         idle_timeout: Duration::from_millis(config.session_runtime_idle_timeout_ms),
@@ -137,6 +147,7 @@ async fn run() -> Result<(), String> {
         control_plane: control_plane.clone(),
         owner_proxy,
         replication,
+        direct_event_relay,
         runtime,
         ops: ops_state.clone(),
         auth_mode: config.auth_mode,
@@ -266,6 +277,7 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
             "/internal/replication/snapshot",
             post(api::ops_http::snapshot_replica),
         )
+        .route("/internal/fanout/event", post(api::ops_http::relay_event))
         .layer(middleware::from_fn_with_state(
             telemetry,
             telemetry::measure_http,

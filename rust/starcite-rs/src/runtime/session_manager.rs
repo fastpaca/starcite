@@ -17,7 +17,7 @@ use tokio::{
 
 use crate::{
     cluster::{
-        OwnershipManager, ReplicationCoordinator,
+        DirectEventRelay, OwnershipManager, ReplicationCoordinator,
         ownership::OwnedLease,
         replication::{ReplicaSessionState, ReplicaSnapshotResponse},
     },
@@ -45,6 +45,7 @@ pub struct SessionManager {
     session_store: HotSessionStore,
     ownership: OwnershipManager,
     replication: ReplicationCoordinator,
+    direct_relay: DirectEventRelay,
     ops: OpsState,
     telemetry: Telemetry,
     idle_timeout: Duration,
@@ -59,6 +60,7 @@ pub struct SessionManagerDeps {
     pub session_store: HotSessionStore,
     pub ownership: OwnershipManager,
     pub replication: ReplicationCoordinator,
+    pub direct_relay: DirectEventRelay,
     pub ops: OpsState,
     pub telemetry: Telemetry,
     pub idle_timeout: Duration,
@@ -137,6 +139,7 @@ impl SessionManager {
             session_store,
             ownership,
             replication,
+            direct_relay,
             ops,
             telemetry,
             idle_timeout,
@@ -151,6 +154,7 @@ impl SessionManager {
             session_store,
             ownership,
             replication,
+            direct_relay,
             ops,
             telemetry,
             idle_timeout,
@@ -708,7 +712,7 @@ impl SessionManager {
     }
 
     pub async fn apply_owner_commit(&self, event: EventResponse) {
-        self.apply_commit(event, true).await;
+        self.apply_commit(event, true, true).await;
     }
 
     pub async fn apply_replica_state(
@@ -755,21 +759,25 @@ impl SessionManager {
         }
 
         for event in unapplied_events {
-            self.apply_commit(event, false).await;
+            self.apply_commit(event, false, false).await;
         }
 
         self.apply_frontier(&state).await;
         ReplicaApplyDisposition::Applied
     }
 
-    async fn apply_commit(&self, event: EventResponse, enqueue_flush: bool) {
+    async fn apply_commit(&self, event: EventResponse, enqueue_flush: bool, relay_cluster: bool) {
         self.cache_commit(&event).await;
 
         if enqueue_flush {
             self.pending_flush.enqueue(event.clone()).await;
         }
 
-        self.publish_commit(event).await;
+        self.publish_commit(event.clone()).await;
+
+        if relay_cluster {
+            self.direct_relay.enqueue(event);
+        }
     }
 
     async fn cache_commit(&self, event: &EventResponse) {
@@ -936,7 +944,10 @@ pub enum ReplicaApplyDisposition {
 mod tests {
     use super::{SessionManager, SessionManagerDeps, SessionWorkerHandle, SessionWorkerState};
     use crate::{
-        cluster::{OwnershipManager, ReplicationCoordinator, replication::ReplicaSessionState},
+        cluster::{
+            DirectEventRelay, OwnershipManager, ReplicationCoordinator,
+            replication::ReplicaSessionState,
+        },
         data_plane::{HotEventStore, HotSessionStore, PendingFlushQueue},
         error::AppError,
         model::{AppendEventRequest, Cursor, EventResponse, Principal, SessionResponse},
@@ -975,6 +986,7 @@ mod tests {
                 Duration::from_millis(500),
             )
             .expect("replication"),
+            direct_relay: DirectEventRelay::disabled(),
             ops: OpsState::new(30_000),
             telemetry: Telemetry::new(true),
             idle_timeout,

@@ -47,6 +47,21 @@ impl HotEventStore {
         buffer.events.insert(event.seq, event);
     }
 
+    pub async fn put_event_if_absent(&self, event: EventResponse) -> bool {
+        let mut sessions = self.sessions.write().await;
+        let buffer = sessions
+            .entry(event.session_id.clone())
+            .or_insert_with(SessionBuffer::default);
+
+        match buffer.events.entry(event.seq) {
+            std::collections::btree_map::Entry::Vacant(entry) => {
+                entry.insert(event);
+                true
+            }
+            std::collections::btree_map::Entry::Occupied(_) => false,
+        }
+    }
+
     pub async fn put_events<I>(&self, events: I)
     where
         I: IntoIterator<Item = EventResponse>,

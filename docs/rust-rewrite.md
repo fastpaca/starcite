@@ -146,11 +146,13 @@ keeps successful appends on small session and producer rows plus the one new eve
 still falling back to an exact historical event lookup for replay-vs-conflict decisions when a
 producer sends an older sequence.
 
-Live delivery is no longer purely process-local either. Committed event and lifecycle writes now
+Live delivery is no longer purely process-local either. Lifecycle writes and archive progress still
 emit Postgres `NOTIFY` payloads, and every Rust process runs a `LISTEN` loop that reloads the
-committed row from Postgres and rebroadcasts it into local fanout. That means a client connected to
-one Rust node can still receive live events or lifecycle updates produced by another Rust node
-sharing the same database, without adding Redis or a separate broker.
+committed row from Postgres and rebroadcasts it into local fanout. Session event commits now also
+best-effort relay directly to live peer nodes over the ops listener after the owner publishes
+locally, so cross-node live event delivery no longer has to wait for Postgres flush. Postgres
+relay still repairs delayed or missed peer delivery after flush, without adding Redis or a
+separate broker.
 
 One read-path parity slice has landed too: each Rust process now keeps a local in-memory hot event
 store populated by local appends and relayed remote commits. Phoenix `tail:<session_id>` catch-up

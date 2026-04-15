@@ -9,4 +9,5 @@ pub(crate) use control_plane::{
 };
 pub(crate) use owner_proxy::OwnerProxy;
 pub(crate) use ownership::{OwnershipManager, OwnershipSnapshot};
+pub(crate) use relay::DirectEventRelay;
 pub(crate) use replication::ReplicationCoordinator;
