@@ -24,13 +24,14 @@ pub struct OwnershipManager {
     instance_id: Arc<str>,
     lease_ttl: Duration,
     renew_before: Duration,
+    desired_replica_count: u32,
 }
 
 #[derive(Debug, Clone)]
 struct LocalLease {
     epoch: i64,
     expires_at: Instant,
-    standby: Option<ReplicationPeer>,
+    replicas: Vec<ReplicationPeer>,
 }
 
 #[derive(Debug, Clone)]
@@ -61,17 +62,22 @@ pub struct OwnershipSessionSnapshot {
     pub session_id: String,
     pub epoch: i64,
     pub expires_in_ms: u64,
-    pub standby_node_id: Option<String>,
+    pub replica_node_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OwnedLease {
     pub epoch: i64,
-    pub standby: Option<ReplicationPeer>,
+    pub replicas: Vec<ReplicationPeer>,
 }
 
 impl OwnershipManager {
-    pub fn new(pool: PgPool, instance_id: Arc<str>, lease_ttl: Duration) -> Self {
+    pub fn new(
+        pool: PgPool,
+        instance_id: Arc<str>,
+        lease_ttl: Duration,
+        desired_replica_count: u32,
+    ) -> Self {
         Self {
             leases: Arc::new(Mutex::new(HashMap::new())),
             remote_owners: Arc::new(Mutex::new(HashMap::new())),
@@ -79,6 +85,7 @@ impl OwnershipManager {
             instance_id,
             lease_ttl,
             renew_before: renew_before(lease_ttl),
+            desired_replica_count,
         }
     }
 
@@ -87,7 +94,7 @@ impl OwnershipManager {
             self.forget_remote_owner_hint(session_id).await;
             return Ok(OwnedLease {
                 epoch: lease.epoch,
-                standby: lease.standby,
+                replicas: lease.replicas,
             });
         }
 
@@ -118,6 +125,7 @@ impl OwnershipManager {
             session_id,
             self.instance_id.as_ref(),
             self.lease_ttl.as_millis().min(i64::MAX as u128) as i64,
+            self.desired_replica_count,
         )
         .await?;
 
@@ -132,10 +140,15 @@ impl OwnershipManager {
         let lease = LocalLease {
             epoch: row.epoch,
             expires_at: lease_deadline(row.expires_at),
-            standby: row
-                .standby_node_id
-                .zip(row.standby_ops_url)
-                .map(|(node_id, ops_url)| ReplicationPeer { node_id, ops_url }),
+            replicas: row
+                .replica_peers
+                .0
+                .into_iter()
+                .map(|peer| ReplicationPeer {
+                    node_id: peer.node_id,
+                    ops_url: peer.ops_url,
+                })
+                .collect(),
         };
         self.leases
             .lock()
@@ -144,7 +157,7 @@ impl OwnershipManager {
 
         Ok(OwnedLease {
             epoch: lease.epoch,
-            standby: lease.standby,
+            replicas: lease.replicas,
         })
     }
 
@@ -175,7 +188,7 @@ impl OwnershipManager {
             .await
             .map(|lease| OwnedLease {
                 epoch: lease.epoch,
-                standby: lease.standby,
+                replicas: lease.replicas,
             })
     }
 
@@ -204,10 +217,11 @@ impl OwnershipManager {
                     .saturating_duration_since(now)
                     .as_millis()
                     .min(u64::MAX as u128) as u64,
-                standby_node_id: lease
-                    .standby
-                    .as_ref()
-                    .map(|standby| standby.node_id.clone()),
+                replica_node_ids: lease
+                    .replicas
+                    .iter()
+                    .map(|replica| replica.node_id.clone())
+                    .collect(),
             })
             .collect::<Vec<_>>();
 
@@ -234,14 +248,14 @@ impl OwnershipManager {
         &self,
         session_id: &str,
         epoch: i64,
-        standby: Option<ReplicationPeer>,
+        replicas: Vec<ReplicationPeer>,
     ) {
         self.leases.lock().await.insert(
             session_id.to_string(),
             LocalLease {
                 epoch,
                 expires_at: Instant::now() + self.lease_ttl,
-                standby,
+                replicas,
             },
         );
     }
@@ -357,14 +371,20 @@ fn preferred_takeover_owner(
         return None;
     }
 
-    let standby_id = hint.live_standby_node_id.as_ref()?;
-    if standby_id == requester_id {
+    if hint
+        .live_replicas
+        .0
+        .iter()
+        .any(|replica| replica.node_id == requester_id)
+    {
         return None;
     }
 
+    let replica = hint.live_replicas.0.first()?;
+
     Some(TakeoverRedirect {
-        owner_id: standby_id.clone(),
-        owner_public_url: hint.live_standby_public_url.clone(),
+        owner_id: replica.node_id.clone(),
+        owner_public_url: replica.public_url.clone(),
         epoch: hint.epoch.saturating_add(1),
     })
 }
@@ -409,7 +429,7 @@ mod tests {
             .connect_lazy("postgres://postgres:postgres@localhost/starcite_test")
             .expect("lazy pool");
 
-        OwnershipManager::new(pool, Arc::<str>::from("node-a"), lease_ttl)
+        OwnershipManager::new(pool, Arc::<str>::from("node-a"), lease_ttl, 3)
     }
 
     #[test]
@@ -431,13 +451,17 @@ mod tests {
     }
 
     #[test]
-    fn expired_lease_redirects_non_standby_to_live_standby() {
+    fn expired_lease_redirects_non_replica_to_live_replica() {
         let redirect = preferred_takeover_owner(
             &SessionLeaseTakeoverHint {
                 epoch: 7,
                 expires_at: Utc::now() - ChronoDuration::seconds(1),
-                live_standby_node_id: Some("node-b".to_string()),
-                live_standby_public_url: Some("http://node-b:4001".to_string()),
+                live_replicas: sqlx::types::Json(vec![
+                    crate::data_plane::repository::SessionLeasePublicPeer {
+                        node_id: "node-b".to_string(),
+                        public_url: Some("http://node-b:4001".to_string()),
+                    },
+                ]),
             },
             "node-c",
         )
@@ -452,13 +476,17 @@ mod tests {
     }
 
     #[test]
-    fn expired_lease_allows_live_standby_to_claim() {
+    fn expired_lease_allows_live_replica_to_claim() {
         let redirect = preferred_takeover_owner(
             &SessionLeaseTakeoverHint {
                 epoch: 7,
                 expires_at: Utc::now() - ChronoDuration::seconds(1),
-                live_standby_node_id: Some("node-b".to_string()),
-                live_standby_public_url: Some("http://node-b:4001".to_string()),
+                live_replicas: sqlx::types::Json(vec![
+                    crate::data_plane::repository::SessionLeasePublicPeer {
+                        node_id: "node-b".to_string(),
+                        public_url: Some("http://node-b:4001".to_string()),
+                    },
+                ]),
             },
             "node-b",
         );
@@ -467,13 +495,12 @@ mod tests {
     }
 
     #[test]
-    fn expired_lease_without_live_standby_does_not_redirect() {
+    fn expired_lease_without_live_replica_does_not_redirect() {
         let redirect = preferred_takeover_owner(
             &SessionLeaseTakeoverHint {
                 epoch: 7,
                 expires_at: Utc::now() - ChronoDuration::seconds(1),
-                live_standby_node_id: None,
-                live_standby_public_url: None,
+                live_replicas: sqlx::types::Json(Vec::new()),
             },
             "node-c",
         );
@@ -492,7 +519,7 @@ mod tests {
                 LocalLease {
                     epoch: 2,
                     expires_at: now + Duration::from_secs(5),
-                    standby: None,
+                    replicas: Vec::new(),
                 },
             );
             leases.insert(
@@ -500,7 +527,7 @@ mod tests {
                 LocalLease {
                     epoch: 1,
                     expires_at: now + Duration::from_secs(5),
-                    standby: None,
+                    replicas: Vec::new(),
                 },
             );
         }
@@ -523,7 +550,7 @@ mod tests {
                 LocalLease {
                     epoch: 4,
                     expires_at: now + Duration::from_secs(2),
-                    standby: None,
+                    replicas: Vec::new(),
                 },
             );
         }
@@ -548,7 +575,7 @@ mod tests {
                 LocalLease {
                     epoch: 4,
                     expires_at: now + Duration::from_secs(2),
-                    standby: None,
+                    replicas: Vec::new(),
                 },
             );
         }
@@ -598,7 +625,7 @@ mod tests {
                 LocalLease {
                     epoch: 4,
                     expires_at: now - Duration::from_millis(1),
-                    standby: None,
+                    replicas: Vec::new(),
                 },
             );
         }

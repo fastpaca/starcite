@@ -96,6 +96,7 @@ async fn run() -> Result<(), String> {
         pool.clone(),
         instance_id.clone(),
         Duration::from_millis(config.local_async_lease_ttl_ms),
+        config.local_async_replication_factor,
     );
     let replication = ReplicationCoordinator::new(
         instance_id.clone(),
@@ -256,8 +257,8 @@ fn build_ops_router(telemetry: Telemetry) -> Router<AppState> {
             post(api::ops_http::begin_drain).delete(api::ops_http::clear_drain),
         )
         .route(
-            "/internal/replication/append",
-            post(api::ops_http::append_replica),
+            "/internal/replication/apply",
+            post(api::ops_http::apply_replica),
         )
         .layer(middleware::from_fn_with_state(
             telemetry,

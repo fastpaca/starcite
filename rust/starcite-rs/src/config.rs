@@ -34,6 +34,7 @@ pub struct Config {
     pub local_async_node_ttl_ms: u64,
     pub local_async_owner_proxy_timeout_ms: u64,
     pub local_async_replication_timeout_ms: u64,
+    pub local_async_replication_factor: u32,
 }
 
 impl Config {
@@ -153,6 +154,16 @@ impl Config {
             .map(|raw| parse_positive_u64("LOCAL_ASYNC_REPLICATION_TIMEOUT_MS", &raw))
             .transpose()?
             .unwrap_or(500);
+        let default_replication_factor = if local_async_node_ops_url.is_some() {
+            3
+        } else {
+            1
+        };
+        let local_async_replication_factor = env::var("LOCAL_ASYNC_REPLICATION_FACTOR")
+            .ok()
+            .map(|raw| parse_positive_u32("LOCAL_ASYNC_REPLICATION_FACTOR", &raw))
+            .transpose()?
+            .unwrap_or(default_replication_factor);
 
         Ok(Self {
             listen_addr,
@@ -178,6 +189,7 @@ impl Config {
             local_async_node_ttl_ms,
             local_async_owner_proxy_timeout_ms,
             local_async_replication_timeout_ms,
+            local_async_replication_factor,
         })
     }
 }

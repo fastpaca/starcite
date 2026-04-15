@@ -667,7 +667,7 @@ mod tests {
         let ops = OpsState::new(30_000);
         let instance_id = Arc::<str>::from("node-a");
         let ownership =
-            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5), 3);
         let control_plane = ControlPlaneState::new(None, None, Duration::from_secs(5));
         let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
         let replication =
@@ -741,6 +741,7 @@ mod tests {
             local_async_node_ttl_ms: 2_000,
             local_async_owner_proxy_timeout_ms: 100,
             local_async_replication_timeout_ms: 100,
+            local_async_replication_factor: 3,
         }
     }
 
@@ -796,7 +797,7 @@ mod tests {
             .await;
         state
             .ownership
-            .insert_test_lease(session_id, epoch, None)
+            .insert_test_lease(session_id, epoch, Vec::new())
             .await;
     }
 

@@ -9,21 +9,14 @@ use serde::Serialize;
 
 use crate::{
     AppState, cluster,
-    cluster::replication::{AppendReplicaRequest, ReplicationAck, ReplicationSnapshot},
+    cluster::replication::{ApplyReplicaRequest, ReplicationAck, ReplicationSnapshot},
     data_plane,
     error::{self, AppError},
     runtime::{
-        LifecycleFanoutSnapshot, OpsSnapshot, RuntimeSnapshot, SessionFanoutSnapshot,
-        SessionManagerSnapshot,
+        LifecycleFanoutSnapshot, OpsSnapshot, ReplicaApplyDisposition, RuntimeSnapshot,
+        SessionFanoutSnapshot, SessionManagerSnapshot,
     },
 };
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ReplicaAppendDisposition {
-    AlreadyCommitted,
-    CommitNext,
-    SeqGap { expected_seq: i64 },
-}
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 struct LiveResponse {
@@ -149,22 +142,23 @@ pub async fn clear_drain(State(state): State<AppState>) -> Result<impl IntoRespo
     }
 }
 
-pub async fn append_replica(
+pub async fn apply_replica(
     State(state): State<AppState>,
-    body: Result<Json<AppendReplicaRequest>, JsonRejection>,
+    body: Result<Json<ApplyReplicaRequest>, JsonRejection>,
 ) -> Result<impl IntoResponse, AppError> {
     reject_internal_replication_when_unavailable(&state)?;
     let Json(request) = body.map_err(|_| AppError::InvalidEvent)?;
-    reject_stale_replica_epoch(&state, &request.event.session_id, request.epoch).await?;
+    reject_stale_replica_epoch(&state, &request.state.session_id, request.epoch).await?;
+    let owner_id = request.owner_id.clone();
+    let epoch = request.epoch;
+    let state_payload = request.state.clone();
 
-    let last_seq = state
-        .session_store
-        .get_last_seq(&request.event.session_id)
+    match state
+        .session_manager
+        .apply_replica_state(request.state, request.events)
         .await
-        .unwrap_or(0);
-
-    match classify_replica_append(last_seq, request.event.seq) {
-        ReplicaAppendDisposition::AlreadyCommitted => {
+    {
+        ReplicaApplyDisposition::AlreadyCommitted => {
             return Ok((
                 StatusCode::OK,
                 Json(ReplicationAck {
@@ -172,16 +166,15 @@ pub async fn append_replica(
                 }),
             ));
         }
-        ReplicaAppendDisposition::CommitNext => {}
-        ReplicaAppendDisposition::SeqGap { expected_seq } => {
+        ReplicaApplyDisposition::Applied => {}
+        ReplicaApplyDisposition::SeqGap { expected_seq } => {
             tracing::warn!(
-                owner_id = request.owner_id,
-                epoch = request.epoch,
-                session_id = request.event.session_id,
-                last_seq,
+                session_id = state_payload.session_id,
+                owner_id,
+                epoch,
                 expected_seq,
-                incoming_seq = request.event.seq,
-                "replica append rejected due to seq gap"
+                incoming_last_seq = state_payload.last_seq,
+                "replica apply rejected due to seq gap"
             );
 
             return Ok((
@@ -192,11 +185,6 @@ pub async fn append_replica(
             ));
         }
     }
-
-    state
-        .session_manager
-        .apply_replica_commit(request.event.with_epoch(request.epoch))
-        .await;
 
     Ok((
         StatusCode::ACCEPTED,
@@ -215,20 +203,6 @@ pub async fn reject_when_draining(
         AppError::node_draining(&ops.snapshot()).into_response()
     } else {
         next.run(request).await
-    }
-}
-
-fn classify_replica_append(last_seq: i64, incoming_seq: i64) -> ReplicaAppendDisposition {
-    if last_seq >= incoming_seq {
-        ReplicaAppendDisposition::AlreadyCommitted
-    } else {
-        let expected_seq = last_seq + 1;
-
-        if incoming_seq == expected_seq {
-            ReplicaAppendDisposition::CommitNext
-        } else {
-            ReplicaAppendDisposition::SeqGap { expected_seq }
-        }
     }
 }
 
@@ -300,10 +274,7 @@ mod tests {
     use axum::{Json, http::StatusCode};
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{
-        ReplicaAppendDisposition, classify_replica_append, ready_response,
-        reject_stale_replica_epoch,
-    };
+    use super::{ready_response, reject_stale_replica_epoch};
     use crate::{
         AppState,
         auth::AuthService,
@@ -335,7 +306,7 @@ mod tests {
         let ops = OpsState::new(30_000);
         let instance_id = Arc::<str>::from("node-a");
         let ownership =
-            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5));
+            OwnershipManager::new(pool.clone(), instance_id.clone(), Duration::from_secs(5), 3);
         let control_plane =
             ControlPlaneState::new(public_url.map(str::to_string), None, Duration::from_secs(5));
         let owner_proxy = OwnerProxy::new(Duration::from_millis(100), None);
@@ -410,6 +381,7 @@ mod tests {
             local_async_node_ttl_ms: 2_000,
             local_async_owner_proxy_timeout_ms: 100,
             local_async_replication_timeout_ms: 100,
+            local_async_replication_factor: 3,
         }
     }
 
@@ -447,30 +419,13 @@ mod tests {
         assert!(body.retry_after_ms.is_some());
     }
 
-    #[test]
-    fn replica_append_classifies_replayed_and_next_seq() {
-        assert_eq!(
-            classify_replica_append(7, 7),
-            ReplicaAppendDisposition::AlreadyCommitted
-        );
-        assert_eq!(
-            classify_replica_append(7, 8),
-            ReplicaAppendDisposition::CommitNext
-        );
-    }
-
-    #[test]
-    fn replica_append_rejects_seq_gaps() {
-        assert_eq!(
-            classify_replica_append(7, 9),
-            ReplicaAppendDisposition::SeqGap { expected_seq: 8 }
-        );
-    }
-
     #[tokio::test]
     async fn stale_replica_epoch_is_rejected_with_local_owner_hint() {
         let state = test_state(Some("http://node-a:4001"));
-        state.ownership.insert_test_lease("ses_demo", 9, None).await;
+        state
+            .ownership
+            .insert_test_lease("ses_demo", 9, Vec::new())
+            .await;
 
         let error = reject_stale_replica_epoch(&state, "ses_demo", 7)
             .await
@@ -491,7 +446,10 @@ mod tests {
     #[tokio::test]
     async fn same_or_newer_replica_epoch_is_allowed() {
         let state = test_state(None);
-        state.ownership.insert_test_lease("ses_demo", 9, None).await;
+        state
+            .ownership
+            .insert_test_lease("ses_demo", 9, Vec::new())
+            .await;
 
         reject_stale_replica_epoch(&state, "ses_demo", 9)
             .await

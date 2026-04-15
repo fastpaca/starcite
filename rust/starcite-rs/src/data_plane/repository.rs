@@ -1,5 +1,8 @@
+use std::collections::HashSet;
+
 use chrono::{DateTime, Utc};
-use sqlx::{PgPool, Postgres, QueryBuilder};
+use serde::{Deserialize, Serialize};
+use sqlx::{PgConnection, PgPool, Postgres, QueryBuilder, types::Json};
 
 use crate::{
     cluster::relay::{
@@ -21,8 +24,7 @@ pub struct SessionLeaseRow {
     pub owner_public_url: Option<String>,
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
-    pub standby_node_id: Option<String>,
-    pub standby_ops_url: Option<String>,
+    pub replica_peers: Json<Vec<SessionLeasePeer>>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -35,8 +37,19 @@ pub struct ControlNodeRow {
 pub struct SessionLeaseTakeoverHint {
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
-    pub live_standby_node_id: Option<String>,
-    pub live_standby_public_url: Option<String>,
+    pub live_replicas: Json<Vec<SessionLeasePublicPeer>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionLeasePeer {
+    pub node_id: String,
+    pub ops_url: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionLeasePublicPeer {
+    pub node_id: String,
+    pub public_url: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -525,170 +538,103 @@ pub async fn acquire_session_lease(
     session_id: &str,
     owner_id: &str,
     ttl_ms: i64,
+    desired_replica_count: u32,
 ) -> Result<SessionLeaseRow, AppError> {
-    sqlx::query_as::<_, SessionLeaseRow>(
-        r#"
-        WITH live_nodes AS (
-          SELECT
-            node_id,
-            public_url,
-            ops_url
-          FROM control_nodes
-          WHERE draining = FALSE
-            AND expires_at > now()
-        ),
-        existing_lease AS (
-          SELECT
-            session_leases.owner_id,
-            session_leases.epoch,
-            session_leases.expires_at,
-            session_leases.standby_node_id,
-            live_standby.node_id AS live_standby_node_id
-          FROM session_leases
-          LEFT JOIN live_nodes AS live_standby
-            ON live_standby.node_id = session_leases.standby_node_id
-          WHERE session_leases.session_id = $1
-        ),
-        designated_owner AS (
-          SELECT node_id
-          FROM live_nodes
-          ORDER BY md5($1 || ':' || COALESCE(public_url, node_id)), node_id
-          LIMIT 1
-        ),
-        target_owner AS (
-          SELECT COALESCE(
-            (
-              SELECT CASE
-                WHEN existing_lease.owner_id = $2 THEN $2
-                WHEN existing_lease.expires_at <= now()
-                  AND existing_lease.live_standby_node_id = $2
-                THEN $2
-                WHEN existing_lease.expires_at <= now()
-                THEN COALESCE((SELECT node_id FROM designated_owner), $2)
-                ELSE $2
-              END
-              FROM existing_lease
-            ),
-            COALESCE((SELECT node_id FROM designated_owner), $2)
-          ) AS node_id
-        ),
-        standby_load AS (
-          SELECT
-            standby_node_id,
-            COUNT(*) AS active_lease_count
-          FROM session_leases
-          WHERE standby_node_id IS NOT NULL
-            AND expires_at > now()
-          GROUP BY standby_node_id
-        ),
-        candidate_standby AS (
-          SELECT
-            live_nodes.node_id
-          FROM live_nodes
-          LEFT JOIN standby_load
-            ON standby_load.standby_node_id = live_nodes.node_id
-          WHERE live_nodes.node_id <> (SELECT node_id FROM target_owner)
-          ORDER BY
-            COALESCE(standby_load.active_lease_count, 0) ASC,
-            live_nodes.node_id ASC
-          LIMIT 1
-        ),
-        preferred_standby AS (
-          SELECT COALESCE(
-            (
-              SELECT existing_lease.owner_id
-              FROM existing_lease
-              JOIN live_nodes AS live_owner
-                ON live_owner.node_id = existing_lease.owner_id
-              WHERE existing_lease.owner_id <> (SELECT node_id FROM target_owner)
-              LIMIT 1
-            ),
-            (
-              SELECT existing_lease.standby_node_id
-              FROM existing_lease
-              JOIN live_nodes AS live_standby
-                ON live_standby.node_id = existing_lease.standby_node_id
-              WHERE existing_lease.standby_node_id <> (SELECT node_id FROM target_owner)
-              LIMIT 1
-            ),
-            (SELECT node_id FROM candidate_standby)
-          ) AS node_id
-        ),
-        upserted AS (
-          INSERT INTO session_leases (
-            session_id,
-            owner_id,
-            epoch,
-            expires_at,
-            standby_node_id
-          )
-          VALUES (
-            $1,
-            (SELECT node_id FROM target_owner),
-            1,
-            now() + ($3 * interval '1 millisecond'),
-            (SELECT node_id FROM preferred_standby)
-          )
-          ON CONFLICT (session_id)
-          DO UPDATE
-          SET
-            owner_id = CASE
-              WHEN session_leases.owner_id = $2
-                OR session_leases.expires_at <= now()
-              THEN (SELECT node_id FROM target_owner)
-              ELSE session_leases.owner_id
-            END,
-            epoch = CASE
-              WHEN session_leases.owner_id = $2
-              THEN session_leases.epoch
-              WHEN session_leases.expires_at <= now()
-              THEN session_leases.epoch + 1
-              ELSE session_leases.epoch
-            END,
-            expires_at = CASE
-              WHEN session_leases.owner_id = $2
-                OR session_leases.expires_at <= now()
-              THEN now() + ($3 * interval '1 millisecond')
-              ELSE session_leases.expires_at
-            END,
-            standby_node_id = CASE
-              WHEN session_leases.owner_id = $2
-                OR session_leases.expires_at <= now()
-              THEN (SELECT node_id FROM preferred_standby)
-              ELSE session_leases.standby_node_id
-            END,
-            updated_at = CASE
-              WHEN session_leases.owner_id = $2
-                OR session_leases.expires_at <= now()
-              THEN now()
-              ELSE session_leases.updated_at
-            END
-          RETURNING
-            owner_id,
-            epoch,
-            expires_at,
-            standby_node_id
+    let mut tx = pool.begin().await?;
+    let live_nodes = load_live_control_nodes(tx.as_mut(), session_id).await?;
+    let live_node_ids = live_nodes
+        .iter()
+        .map(|node| node.node_id.clone())
+        .collect::<HashSet<_>>();
+    let existing = load_session_lease_record(tx.as_mut(), session_id).await?;
+    let now = Utc::now();
+    let designated_owner = live_nodes
+        .first()
+        .map(|node| node.node_id.clone())
+        .unwrap_or_else(|| owner_id.to_string());
+    let target_owner = choose_target_owner(
+        existing.as_ref(),
+        owner_id,
+        &designated_owner,
+        &live_node_ids,
+        now,
+    );
+    let should_write = existing
+        .as_ref()
+        .is_none_or(|lease| lease.owner_id == owner_id || lease.expires_at <= now);
+
+    if let Some(existing) = existing.as_ref() {
+        if should_write {
+            let next_epoch = if existing.owner_id == owner_id {
+                existing.epoch
+            } else {
+                existing.epoch.saturating_add(1)
+            };
+            let replica_node_ids = rebalance_replica_nodes(
+                normalized_replica_nodes(existing),
+                &target_owner,
+                &live_nodes,
+                desired_replica_count,
+            );
+
+            sqlx::query(
+                r#"
+                UPDATE session_leases
+                SET
+                  owner_id = $2,
+                  epoch = $3,
+                  expires_at = now() + ($4 * interval '1 millisecond'),
+                  replica_node_ids = $5,
+                  updated_at = now()
+                WHERE session_id = $1
+                "#,
+            )
+            .bind(session_id)
+            .bind(&target_owner)
+            .bind(next_epoch)
+            .bind(ttl_ms)
+            .bind(&replica_node_ids)
+            .execute(&mut *tx)
+            .await?;
+        }
+    } else {
+        let replica_node_ids = rebalance_replica_nodes(
+            Vec::new(),
+            &target_owner,
+            &live_nodes,
+            desired_replica_count,
+        );
+
+        sqlx::query(
+            r#"
+            INSERT INTO session_leases (
+              session_id,
+              owner_id,
+              epoch,
+              expires_at,
+              replica_node_ids
+            )
+            VALUES (
+              $1,
+              $2,
+              1,
+              now() + ($3 * interval '1 millisecond'),
+              $4
+            )
+            ON CONFLICT (session_id) DO NOTHING
+            "#,
         )
-        SELECT
-          upserted.owner_id,
-          owner_control.public_url AS owner_public_url,
-          upserted.epoch,
-          upserted.expires_at,
-          upserted.standby_node_id,
-          standby_control.ops_url AS standby_ops_url
-        FROM upserted
-        LEFT JOIN control_nodes AS owner_control
-          ON owner_control.node_id = upserted.owner_id
-        LEFT JOIN control_nodes AS standby_control
-          ON standby_control.node_id = upserted.standby_node_id
-        "#,
-    )
-    .bind(session_id)
-    .bind(owner_id)
-    .bind(ttl_ms)
-    .fetch_one(pool)
-    .await
-    .map_err(AppError::from)
+        .bind(session_id)
+        .bind(&target_owner)
+        .bind(ttl_ms)
+        .bind(&replica_node_ids)
+        .execute(&mut *tx)
+        .await?;
+    }
+
+    let row = load_session_lease_row(tx.as_mut(), session_id).await?;
+    tx.commit().await?;
+    Ok(row)
 }
 
 pub async fn load_session_lease_takeover_hint(
@@ -700,19 +646,265 @@ pub async fn load_session_lease_takeover_hint(
         SELECT
           session_leases.epoch,
           session_leases.expires_at,
-          standby_control.node_id AS live_standby_node_id,
-          standby_control.public_url AS live_standby_public_url
+          COALESCE(
+            jsonb_agg(
+              jsonb_build_object(
+                'node_id', live_replica.node_id,
+                'public_url', live_replica.public_url
+              )
+              ORDER BY replica.ord
+            ) FILTER (
+              WHERE live_replica.node_id IS NOT NULL
+                AND replica.node_id <> session_leases.owner_id
+            ),
+            '[]'::jsonb
+          ) AS live_replicas
         FROM session_leases
-        LEFT JOIN control_nodes AS standby_control
-          ON standby_control.node_id = session_leases.standby_node_id
-         AND standby_control.draining = FALSE
-         AND standby_control.expires_at > now()
+        LEFT JOIN LATERAL unnest(session_leases.replica_node_ids) WITH ORDINALITY AS replica(node_id, ord)
+          ON TRUE
+        LEFT JOIN control_nodes AS live_replica
+          ON live_replica.node_id = replica.node_id
+         AND live_replica.draining = FALSE
+         AND live_replica.expires_at > now()
         WHERE session_leases.session_id = $1
+        GROUP BY
+          session_leases.epoch,
+          session_leases.expires_at
         "#,
     )
     .bind(session_id)
     .fetch_optional(pool)
     .await?)
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct LiveControlNodeRow {
+    node_id: String,
+    active_lease_count: i64,
+    owner_rank: String,
+}
+
+#[derive(Debug, Clone)]
+struct LiveControlNode {
+    node_id: String,
+    active_lease_count: i64,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
+struct SessionLeaseRecord {
+    owner_id: String,
+    epoch: i64,
+    expires_at: DateTime<Utc>,
+    replica_node_ids: Vec<String>,
+}
+
+async fn load_live_control_nodes(
+    tx: &mut PgConnection,
+    session_id: &str,
+) -> Result<Vec<LiveControlNode>, AppError> {
+    let rows = sqlx::query_as::<_, LiveControlNodeRow>(
+        r#"
+        WITH active_replica_load AS (
+          SELECT
+            replica.node_id,
+            COUNT(*)::bigint AS active_lease_count
+          FROM session_leases
+          CROSS JOIN LATERAL unnest(replica_node_ids) AS replica(node_id)
+          WHERE expires_at > now()
+          GROUP BY replica.node_id
+        )
+        SELECT
+          control_nodes.node_id,
+          COALESCE(active_replica_load.active_lease_count, 0) AS active_lease_count,
+          md5($1 || ':' || COALESCE(control_nodes.public_url, control_nodes.node_id)) AS owner_rank
+        FROM control_nodes
+        LEFT JOIN active_replica_load
+          ON active_replica_load.node_id = control_nodes.node_id
+        WHERE control_nodes.draining = FALSE
+          AND control_nodes.expires_at > now()
+        ORDER BY owner_rank ASC, control_nodes.node_id ASC
+        "#,
+    )
+    .bind(session_id)
+    .fetch_all(&mut *tx)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let _ = row.owner_rank;
+            LiveControlNode {
+                node_id: row.node_id,
+                active_lease_count: row.active_lease_count,
+            }
+        })
+        .collect())
+}
+
+async fn load_session_lease_record(
+    tx: &mut PgConnection,
+    session_id: &str,
+) -> Result<Option<SessionLeaseRecord>, AppError> {
+    sqlx::query_as::<_, SessionLeaseRecord>(
+        r#"
+        SELECT
+          owner_id,
+          epoch,
+          expires_at,
+          replica_node_ids
+        FROM session_leases
+        WHERE session_id = $1
+        FOR UPDATE
+        "#,
+    )
+    .bind(session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(AppError::from)
+}
+
+async fn load_session_lease_row(
+    tx: &mut PgConnection,
+    session_id: &str,
+) -> Result<SessionLeaseRow, AppError> {
+    sqlx::query_as::<_, SessionLeaseRow>(
+        r#"
+        SELECT
+          session_leases.owner_id,
+          owner_control.public_url AS owner_public_url,
+          session_leases.epoch,
+          session_leases.expires_at,
+          COALESCE(
+            jsonb_agg(
+              jsonb_build_object(
+                'node_id', replica_control.node_id,
+                'ops_url', replica_control.ops_url
+              )
+              ORDER BY replica.ord
+            ) FILTER (
+              WHERE replica_control.node_id IS NOT NULL
+                AND replica.node_id <> session_leases.owner_id
+            ),
+            '[]'::jsonb
+          ) AS replica_peers
+        FROM session_leases
+        LEFT JOIN control_nodes AS owner_control
+          ON owner_control.node_id = session_leases.owner_id
+        LEFT JOIN LATERAL unnest(session_leases.replica_node_ids) WITH ORDINALITY AS replica(node_id, ord)
+          ON TRUE
+        LEFT JOIN control_nodes AS replica_control
+          ON replica_control.node_id = replica.node_id
+         AND replica_control.draining = FALSE
+         AND replica_control.expires_at > now()
+        WHERE session_leases.session_id = $1
+        GROUP BY
+          session_leases.owner_id,
+          owner_control.public_url,
+          session_leases.epoch,
+          session_leases.expires_at
+        "#,
+    )
+    .bind(session_id)
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(AppError::from)
+}
+
+fn choose_target_owner(
+    existing: Option<&SessionLeaseRecord>,
+    requester_id: &str,
+    designated_owner: &str,
+    live_node_ids: &HashSet<String>,
+    now: DateTime<Utc>,
+) -> String {
+    match existing {
+        Some(existing) if existing.owner_id == requester_id => requester_id.to_string(),
+        Some(existing) if existing.expires_at <= now => {
+            let live_replica = normalized_replica_nodes(existing)
+                .into_iter()
+                .find(|node_id| node_id != &existing.owner_id && live_node_ids.contains(node_id));
+
+            if live_replica.as_deref() == Some(requester_id) {
+                requester_id.to_string()
+            } else if let Some(live_replica) = live_replica {
+                live_replica
+            } else {
+                designated_owner.to_string()
+            }
+        }
+        Some(existing) => existing.owner_id.clone(),
+        None => designated_owner.to_string(),
+    }
+}
+
+fn normalized_replica_nodes(existing: &SessionLeaseRecord) -> Vec<String> {
+    let mut replica_node_ids = existing
+        .replica_node_ids
+        .iter()
+        .filter(|node_id| !node_id.is_empty())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    if !replica_node_ids
+        .iter()
+        .any(|node_id| node_id == &existing.owner_id)
+    {
+        replica_node_ids.insert(0, existing.owner_id.clone());
+    }
+
+    dedupe_nodes(replica_node_ids)
+}
+
+fn rebalance_replica_nodes(
+    current_replicas: Vec<String>,
+    target_owner: &str,
+    live_nodes: &[LiveControlNode],
+    desired_replica_count: u32,
+) -> Vec<String> {
+    let desired_replica_count = desired_replica_count.max(1) as usize;
+    let live_node_ids = live_nodes
+        .iter()
+        .map(|node| node.node_id.as_str())
+        .collect::<HashSet<_>>();
+
+    let mut replicas = vec![target_owner.to_string()];
+    for node_id in current_replicas {
+        if node_id != target_owner
+            && live_node_ids.contains(node_id.as_str())
+            && !replicas.iter().any(|current| current == &node_id)
+        {
+            replicas.push(node_id);
+        }
+    }
+
+    let mut additional = live_nodes
+        .iter()
+        .filter(|node| node.node_id != target_owner)
+        .filter(|node| !replicas.iter().any(|current| current == &node.node_id))
+        .collect::<Vec<_>>();
+    additional.sort_by(|left, right| {
+        left.active_lease_count
+            .cmp(&right.active_lease_count)
+            .then_with(|| left.node_id.cmp(&right.node_id))
+    });
+
+    for node in additional {
+        replicas.push(node.node_id.clone());
+        if replicas.len() >= desired_replica_count {
+            break;
+        }
+    }
+
+    dedupe_nodes(replicas)
+}
+
+fn dedupe_nodes(nodes: Vec<String>) -> Vec<String> {
+    let mut seen = HashSet::new();
+
+    nodes
+        .into_iter()
+        .filter(|node_id| seen.insert(node_id.clone()))
+        .collect()
 }
 
 pub async fn release_session_lease(

@@ -16,7 +16,7 @@ use tokio::{
 };
 
 use crate::{
-    cluster::{OwnershipManager, ReplicationCoordinator},
+    cluster::{OwnershipManager, ReplicationCoordinator, replication::ReplicaSessionState},
     data_plane,
     data_plane::{
         HotEventStore, HotSessionStore, PendingFlushQueue,
@@ -419,7 +419,17 @@ impl SessionManager {
             started_at.elapsed().as_millis() as u64,
         );
         self.replication
-            .replicate(lease.epoch, &event, lease.standby.as_ref())
+            .replicate_session_state(
+                lease.epoch,
+                ReplicaSessionState {
+                    session_id: session_id.to_string(),
+                    tenant_id: tenant_id.to_string(),
+                    last_seq: next_seq,
+                    archived_seq: committed_seq,
+                },
+                std::slice::from_ref(&event),
+                &lease.replicas,
+            )
             .await?;
         state.remember_last_seq(next_seq);
         state.remember_producer_seq(&event.producer_id, event.producer_seq);
@@ -517,8 +527,55 @@ impl SessionManager {
         self.apply_commit(event, true).await;
     }
 
-    pub async fn apply_replica_commit(&self, event: EventResponse) {
-        self.apply_commit(event, false).await;
+    pub async fn apply_replica_state(
+        &self,
+        state: ReplicaSessionState,
+        events: Vec<EventResponse>,
+    ) -> ReplicaApplyDisposition {
+        let current_last_seq = self
+            .session_store
+            .get_last_seq(&state.session_id)
+            .await
+            .unwrap_or(0);
+        let current_archived_seq = self
+            .session_store
+            .get_archived_seq(&state.session_id)
+            .await
+            .unwrap_or(0);
+
+        if state.last_seq <= current_last_seq && state.archived_seq <= current_archived_seq {
+            return ReplicaApplyDisposition::AlreadyCommitted;
+        }
+
+        let unapplied_events = events
+            .into_iter()
+            .filter(|event| event.seq > current_last_seq)
+            .collect::<Vec<_>>();
+
+        if let Some(first_event) = unapplied_events.first() {
+            let expected_seq = current_last_seq + 1;
+            if first_event.seq != expected_seq {
+                return ReplicaApplyDisposition::SeqGap { expected_seq };
+            }
+
+            for (offset, event) in unapplied_events.iter().enumerate() {
+                let expected_seq = current_last_seq + offset as i64 + 1;
+                if event.seq != expected_seq {
+                    return ReplicaApplyDisposition::SeqGap { expected_seq };
+                }
+            }
+        } else if state.last_seq > current_last_seq {
+            return ReplicaApplyDisposition::SeqGap {
+                expected_seq: current_last_seq + 1,
+            };
+        }
+
+        for event in unapplied_events {
+            self.apply_commit(event, false).await;
+        }
+
+        self.apply_replica_frontier(&state).await;
+        ReplicaApplyDisposition::Applied
     }
 
     async fn apply_commit(&self, event: EventResponse, enqueue_flush: bool) {
@@ -545,6 +602,21 @@ impl SessionManager {
                 &event.producer_id,
                 event.producer_seq,
             )
+            .await;
+    }
+
+    async fn apply_replica_frontier(&self, state: &ReplicaSessionState) {
+        self.session_store
+            .put_tenant(&state.session_id, &state.tenant_id)
+            .await;
+        self.session_store
+            .bump_last_seq(&state.session_id, &state.tenant_id, state.last_seq)
+            .await;
+        self.session_store
+            .update_archived_seq(&state.session_id, state.archived_seq)
+            .await;
+        self.hot_store
+            .delete_below(&state.session_id, state.archived_seq.saturating_add(1))
             .await;
     }
 
@@ -609,11 +681,18 @@ fn deduped_append_outcome(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplicaApplyDisposition {
+    AlreadyCommitted,
+    Applied,
+    SeqGap { expected_seq: i64 },
+}
+
 #[cfg(test)]
 mod tests {
     use super::{SessionManager, SessionManagerDeps, SessionWorkerHandle, SessionWorkerState};
     use crate::{
-        cluster::{OwnershipManager, ReplicationCoordinator},
+        cluster::{OwnershipManager, ReplicationCoordinator, replication::ReplicaSessionState},
         data_plane::{HotEventStore, HotSessionStore, PendingFlushQueue},
         error::AppError,
         model::{AppendEventRequest, Cursor, EventResponse, Principal, SessionResponse},
@@ -644,6 +723,7 @@ mod tests {
                 pool.clone(),
                 Arc::<str>::from("node-a"),
                 Duration::from_secs(5),
+                3,
             ),
             replication: ReplicationCoordinator::new(
                 Arc::<str>::from("node-a"),
@@ -819,9 +899,21 @@ mod tests {
     #[tokio::test]
     async fn replica_commit_tracks_producer_cursor_without_enqueuing_flush() {
         let manager = manager(Duration::from_secs(1));
+        manager
+            .session_store
+            .put_session("acme", sample_session(3), Some(0))
+            .await;
 
         manager
-            .apply_replica_commit(sample_event("ses_demo", 4, 9))
+            .apply_replica_state(
+                ReplicaSessionState {
+                    session_id: "ses_demo".to_string(),
+                    tenant_id: "acme".to_string(),
+                    last_seq: 4,
+                    archived_seq: 0,
+                },
+                vec![sample_event("ses_demo", 4, 9)],
+            )
             .await;
 
         assert_eq!(
@@ -842,7 +934,7 @@ mod tests {
         let manager = manager_with_replication(Duration::from_secs(1), true);
         manager
             .ownership
-            .insert_test_lease("ses_demo", 4, None)
+            .insert_test_lease("ses_demo", 4, Vec::new())
             .await;
         manager
             .session_store
@@ -894,7 +986,7 @@ mod tests {
         let manager = manager(Duration::from_secs(1));
         manager
             .ownership
-            .insert_test_lease("ses_demo", 7, None)
+            .insert_test_lease("ses_demo", 7, Vec::new())
             .await;
         manager
             .session_store

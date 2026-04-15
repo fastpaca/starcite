@@ -10,12 +10,13 @@ use tokio::{
 
 use crate::{error::AppError, model::EventResponse};
 
-const APPEND_PATH: &str = "/internal/replication/append";
+const APPLY_PATH: &str = "/internal/replication/apply";
+const SNAPSHOT_PATH: &str = "/internal/replication/snapshot";
 const MAX_IDLE_CONNECTIONS_PER_PEER: usize = 8;
 
 #[derive(Debug, Clone)]
 pub struct ReplicationCoordinator {
-    require_standby: bool,
+    require_peer_replication: bool,
     instance_id: Arc<str>,
     timeout: Duration,
     idle_connections: Arc<Mutex<HashMap<String, Vec<TcpStream>>>>,
@@ -31,7 +32,7 @@ struct ControlPeer {
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct ReplicationSnapshot {
     pub enabled: bool,
-    pub standby_required: bool,
+    pub peer_replication_required: bool,
     pub timeout_ms: u64,
 }
 
@@ -41,16 +42,38 @@ pub struct ReplicationPeer {
     pub ops_url: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaSessionState {
+    pub session_id: String,
+    pub tenant_id: String,
+    pub last_seq: i64,
+    pub archived_seq: i64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct AppendReplicaRequest {
+pub struct ApplyReplicaRequest {
     pub owner_id: String,
     pub epoch: i64,
-    pub event: EventResponse,
+    pub state: ReplicaSessionState,
+    pub events: Vec<EventResponse>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReplicationAck {
     pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaSnapshotRequest {
+    pub owner_id: String,
+    pub epoch: i64,
+    pub session_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct ReplicaSnapshotResponse {
+    pub state: ReplicaSessionState,
+    pub events: Vec<EventResponse>,
 }
 
 #[derive(Debug)]
@@ -97,94 +120,131 @@ impl ReplicationClientError {
 impl ReplicationCoordinator {
     pub fn new(
         instance_id: Arc<str>,
-        require_standby: bool,
+        require_peer_replication: bool,
         timeout: Duration,
     ) -> Result<Self, String> {
         Ok(Self {
-            require_standby,
+            require_peer_replication,
             instance_id,
             timeout,
             idle_connections: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
-    pub async fn replicate(
+    pub async fn replicate_session_state(
         &self,
         epoch: i64,
-        event: &EventResponse,
-        assigned_standby: Option<&ReplicationPeer>,
+        state: ReplicaSessionState,
+        events: &[EventResponse],
+        assigned_replicas: &[ReplicationPeer],
     ) -> Result<(), AppError> {
-        let Some(standby) = self.control_peer(assigned_standby)? else {
+        let peers = self.control_peers(assigned_replicas)?;
+        if peers.is_empty() {
             return Ok(());
+        }
+
+        let total_members = peers.len() + 1;
+        let required_remote_acks = required_remote_acks(total_members);
+        let request = ApplyReplicaRequest {
+            owner_id: self.instance_id.to_string(),
+            epoch,
+            state,
+            events: events.to_vec(),
         };
+        let mut acknowledgements = 0_usize;
 
-        self.post_json(
-            &standby,
-            APPEND_PATH,
-            &AppendReplicaRequest {
-                owner_id: self.instance_id.to_string(),
-                epoch,
-                event: event.clone(),
-            },
-        )
-        .await
-        .map_err(|error| self.quorum_error(error, &standby, "append", event))?;
+        for peer in &peers {
+            match self.post_json(peer, APPLY_PATH, &request).await {
+                Ok(()) => {
+                    acknowledgements += 1;
+                    if acknowledgements >= required_remote_acks {
+                        return Ok(());
+                    }
+                }
+                Err(error) => {
+                    let session_id = &request.state.session_id;
+                    let last_seq = request.state.last_seq;
+                    tracing::warn!(
+                        error = error.message(),
+                        peer = peer.base_url,
+                        session_id,
+                        last_seq,
+                        required_remote_acks,
+                        acknowledgements,
+                        "replica session-state apply failed"
+                    );
+                }
+            }
+        }
 
-        Ok(())
+        return Err(AppError::QuorumUnavailable {
+            required: quorum_size(total_members),
+            acknowledged: (acknowledgements + 1) as u32,
+        });
+    }
+
+    pub async fn fetch_session_snapshot(
+        &self,
+        epoch: i64,
+        session_id: &str,
+        replica: &ReplicationPeer,
+    ) -> Result<ReplicaSnapshotResponse, AppError> {
+        let peer =
+            parse_control_peer(&replica.ops_url).map_err(|_| AppError::OwnerProxyUnavailable {
+                owner_url: replica.ops_url.clone(),
+            })?;
+        let body = self
+            .post_json_with_response(
+                &peer,
+                SNAPSHOT_PATH,
+                &ReplicaSnapshotRequest {
+                    owner_id: self.instance_id.to_string(),
+                    epoch,
+                    session_id: session_id.to_string(),
+                },
+            )
+            .await
+            .map_err(|_error| AppError::OwnerProxyUnavailable {
+                owner_url: replica.ops_url.clone(),
+            })?;
+
+        serde_json::from_str(&body).map_err(|_error| AppError::OwnerProxyUnavailable {
+            owner_url: replica.ops_url.clone(),
+        })
     }
 
     pub fn snapshot(&self) -> ReplicationSnapshot {
         ReplicationSnapshot {
-            enabled: self.require_standby,
-            standby_required: self.require_standby,
+            enabled: self.require_peer_replication,
+            peer_replication_required: self.require_peer_replication,
             timeout_ms: self.timeout.as_millis().min(u64::MAX as u128) as u64,
         }
     }
 
-    fn quorum_error(
+    fn control_peers(
         &self,
-        error: ReplicationClientError,
-        standby: &ControlPeer,
-        phase: &str,
-        event: &EventResponse,
-    ) -> AppError {
-        let message = error.message();
-        tracing::warn!(
-            error = message,
-            standby = standby.base_url,
-            phase,
-            session_id = event.session_id,
-            seq = event.seq,
-            "standby replication failed"
-        );
-
-        AppError::QuorumUnavailable {
-            required: 2,
-            acknowledged: 1,
-        }
-    }
-
-    fn control_peer(
-        &self,
-        assigned_standby: Option<&ReplicationPeer>,
-    ) -> Result<Option<ControlPeer>, AppError> {
-        if let Some(assigned_standby) = assigned_standby {
-            return parse_control_peer(&assigned_standby.ops_url)
-                .map(Some)
-                .map_err(|_| AppError::QuorumUnavailable {
+        assigned_replicas: &[ReplicationPeer],
+    ) -> Result<Vec<ControlPeer>, AppError> {
+        if assigned_replicas.is_empty() {
+            if self.require_peer_replication {
+                return Err(AppError::QuorumUnavailable {
                     required: 2,
                     acknowledged: 1,
                 });
+            }
+
+            return Ok(Vec::new());
         }
 
-        if self.require_standby {
-            Err(AppError::QuorumUnavailable {
-                required: 2,
-                acknowledged: 1,
+        assigned_replicas
+            .iter()
+            .map(|replica| {
+                parse_control_peer(&replica.ops_url).map_err(|_| AppError::QuorumUnavailable {
+                    required: 2,
+                    acknowledged: 1,
+                })
             })
-        } else {
-            Ok(None)
-        }
+            .collect()
     }
 
     async fn post_json<T: Serialize>(
@@ -193,6 +253,17 @@ impl ReplicationCoordinator {
         path: &str,
         body: &T,
     ) -> Result<(), ReplicationClientError> {
+        self.post_json_with_response(peer, path, body)
+            .await
+            .map(|_body| ())
+    }
+
+    async fn post_json_with_response<T: Serialize>(
+        &self,
+        peer: &ControlPeer,
+        path: &str,
+        body: &T,
+    ) -> Result<String, ReplicationClientError> {
         let payload = serde_json::to_string(body).map_err(ReplicationClientError::Encode)?;
         let request = format!(
             "POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Type: application/json\r\nContent-Length: {content_length}\r\nConnection: keep-alive\r\n\r\n{payload}",
@@ -216,7 +287,7 @@ impl ReplicationCoordinator {
                     }
 
                     if (200..300).contains(&response.status) {
-                        return Ok(());
+                        return Ok(response.body);
                     }
 
                     return Err(ReplicationClientError::HttpStatus {
@@ -380,6 +451,14 @@ fn is_retryable_transport_error(error: &ReplicationClientError) -> bool {
     )
 }
 
+fn quorum_size(replica_count: usize) -> u32 {
+    (replica_count / 2 + 1) as u32
+}
+
+fn required_remote_acks(total_members: usize) -> usize {
+    quorum_size(total_members).saturating_sub(1) as usize
+}
+
 fn find_http_head_end(bytes: &[u8]) -> Option<usize> {
     bytes.windows(4).position(|window| window == b"\r\n\r\n")
 }
@@ -420,8 +499,8 @@ fn parse_http_head(bytes: &[u8]) -> Result<ParsedHttpHead, ReplicationClientErro
 #[cfg(test)]
 mod tests {
     use super::{
-        AppendReplicaRequest, ReplicationCoordinator, ReplicationPeer, find_http_head_end,
-        parse_control_peer, parse_http_head,
+        ApplyReplicaRequest, ReplicaSessionState, ReplicationCoordinator, ReplicationPeer,
+        find_http_head_end, parse_control_peer, parse_http_head,
     };
     use crate::model::EventResponse;
     use serde_json::Map;
@@ -459,6 +538,15 @@ mod tests {
         }
     }
 
+    fn replica_state(last_seq: i64, archived_seq: i64) -> ReplicaSessionState {
+        ReplicaSessionState {
+            session_id: "ses_demo".to_string(),
+            tenant_id: "acme".to_string(),
+            last_seq,
+            archived_seq,
+        }
+    }
+
     #[test]
     fn parses_control_peer_base_url() {
         let peer = parse_control_peer("http://127.0.0.1:4194").expect("peer");
@@ -476,15 +564,16 @@ mod tests {
 
     #[test]
     fn replica_requests_round_trip_through_json() {
-        let append = AppendReplicaRequest {
+        let append = ApplyReplicaRequest {
             owner_id: "node-a".to_string(),
             epoch: 2,
-            event: event(),
+            state: replica_state(1, 0),
+            events: vec![event()],
         };
         let append_json = serde_json::to_string(&append).expect("append json");
 
         assert_eq!(
-            serde_json::from_str::<AppendReplicaRequest>(&append_json).expect("append decode"),
+            serde_json::from_str::<ApplyReplicaRequest>(&append_json).expect("append decode"),
             append
         );
     }
@@ -513,7 +602,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn required_replication_without_assigned_standby_fails_closed() {
+    async fn required_replication_without_assigned_replica_fails_closed() {
         let coordinator = ReplicationCoordinator::new(
             Arc::<str>::from("node-a"),
             true,
@@ -522,9 +611,9 @@ mod tests {
         .expect("replication coordinator");
 
         let error = coordinator
-            .replicate(7, &event(), None)
+            .replicate_session_state(7, replica_state(1, 0), &[event()], &[])
             .await
-            .expect_err("missing standby should fail");
+            .expect_err("missing replica should fail");
 
         assert!(matches!(
             error,
@@ -536,7 +625,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn optional_replication_without_assigned_standby_stays_local() {
+    async fn optional_replication_without_assigned_replica_stays_local() {
         let coordinator = ReplicationCoordinator::new(
             Arc::<str>::from("node-a"),
             false,
@@ -545,28 +634,28 @@ mod tests {
         .expect("replication coordinator");
 
         coordinator
-            .replicate(7, &event(), None)
+            .replicate_session_state(7, replica_state(1, 0), &[event()], &[])
             .await
             .expect("local-only replication should succeed");
     }
 
     #[tokio::test]
-    async fn invalid_assigned_standby_url_fails_closed() {
+    async fn invalid_assigned_replica_url_fails_closed() {
         let coordinator = ReplicationCoordinator::new(
             Arc::<str>::from("node-a"),
             true,
             Duration::from_millis(500),
         )
         .expect("replication coordinator");
-        let assigned_standby = ReplicationPeer {
+        let assigned_replica = ReplicationPeer {
             node_id: "node-b".to_string(),
             ops_url: "node-b:4002".to_string(),
         };
 
         let error = coordinator
-            .replicate(7, &event(), Some(&assigned_standby))
+            .replicate_session_state(7, replica_state(1, 0), &[event()], &[assigned_replica])
             .await
-            .expect_err("invalid assigned standby should fail");
+            .expect_err("invalid assigned replica should fail");
 
         assert!(matches!(
             error,
@@ -632,17 +721,27 @@ mod tests {
         )
         .expect("replication coordinator");
         let event = event();
-        let assigned_standby = ReplicationPeer {
+        let assigned_replica = ReplicationPeer {
             node_id: "node-b".to_string(),
             ops_url: format!("http://127.0.0.1:{}", addr.port()),
         };
 
         coordinator
-            .replicate(7, &event, Some(&assigned_standby))
+            .replicate_session_state(
+                7,
+                replica_state(event.seq, 0),
+                std::slice::from_ref(&event),
+                &[assigned_replica.clone()],
+            )
             .await
             .expect("first replicate");
         coordinator
-            .replicate(7, &event, Some(&assigned_standby))
+            .replicate_session_state(
+                7,
+                replica_state(event.seq, 0),
+                std::slice::from_ref(&event),
+                &[assigned_replica],
+            )
             .await
             .expect("second replicate");
 

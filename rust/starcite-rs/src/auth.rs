@@ -1372,6 +1372,7 @@ mod tests {
             local_async_node_ttl_ms: 2_000,
             local_async_owner_proxy_timeout_ms: 1_000,
             local_async_replication_timeout_ms: 500,
+            local_async_replication_factor: 3,
         }
     }
 

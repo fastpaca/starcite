@@ -9,5 +9,7 @@ pub(crate) use fanout::{
 };
 pub(crate) use lifecycle::{publish_catalog_lifecycle, publish_lifecycle};
 pub(crate) use ops::{OpsSnapshot, OpsState};
-pub(crate) use session_manager::{SessionManager, SessionManagerDeps, SessionManagerSnapshot};
+pub(crate) use session_manager::{
+    ReplicaApplyDisposition, SessionManager, SessionManagerDeps, SessionManagerSnapshot,
+};
 pub(crate) use session_runtime::{RuntimeSnapshot, RuntimeTouchReason, SessionRuntime};
