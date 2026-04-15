@@ -1,10 +1,9 @@
 use std::collections::HashMap;
 
 use crate::{
-    api::socket_cursor::parse_query_cursor,
     config::{DEFAULT_LIST_LIMIT, MAX_LIST_LIMIT},
     error::AppError,
-    model::{ArchivedFilter, Cursor, EventsOptions, ListOptions, parse_query_scalar},
+    model::{ArchivedFilter, Cursor, ListOptions, parse_query_scalar},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -56,52 +55,6 @@ pub(crate) fn parse_list_options(params: HashMap<String, String>) -> Result<List
     })
 }
 
-pub(crate) fn parse_events_options(
-    params: HashMap<String, String>,
-) -> Result<EventsOptions, AppError> {
-    let mut cursor = 0_i64;
-    let mut limit = DEFAULT_LIST_LIMIT;
-
-    for (key, value) in params {
-        match key.as_str() {
-            "cursor" => {
-                cursor = value.parse::<i64>().map_err(|_| AppError::InvalidCursor)?;
-
-                if cursor < 0 {
-                    return Err(AppError::InvalidCursor);
-                }
-            }
-            "limit" => limit = parse_limit(&value)?,
-            _ => {}
-        }
-    }
-
-    Ok(EventsOptions { cursor, limit })
-}
-
-pub(crate) fn parse_tail_options(params: HashMap<String, String>) -> Result<TailOptions, AppError> {
-    let mut cursor = Cursor::zero();
-    let mut batch_size = 1_u32;
-
-    for (key, value) in params {
-        match key.as_str() {
-            "cursor" => cursor = parse_query_cursor(&value)?,
-            "batch_size" => {
-                batch_size = value
-                    .parse::<u32>()
-                    .map_err(|_| AppError::InvalidTailBatchSize)?;
-
-                if !(1..=MAX_LIST_LIMIT).contains(&batch_size) {
-                    return Err(AppError::InvalidTailBatchSize);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    Ok(TailOptions { cursor, batch_size })
-}
-
 pub(crate) fn parse_archived_filter(raw: &str) -> Result<ArchivedFilter, AppError> {
     match raw {
         "false" => Ok(ArchivedFilter::Active),
@@ -133,11 +86,8 @@ mod tests {
 
     use serde_json::json;
 
-    use super::{
-        TailOptions, parse_archived_filter, parse_events_options, parse_list_options,
-        parse_tail_options,
-    };
-    use crate::model::{ArchivedFilter, Cursor};
+    use super::{parse_archived_filter, parse_list_options};
+    use crate::model::ArchivedFilter;
 
     #[test]
     fn list_query_supports_bracket_metadata_filters() {
@@ -150,49 +100,6 @@ mod tests {
 
         assert_eq!(opts.limit, 50);
         assert_eq!(opts.metadata.get("marker"), Some(&json!("hot")));
-    }
-
-    #[test]
-    fn events_query_defaults_cursor_to_zero() {
-        let opts = parse_events_options(HashMap::new()).expect("query should parse");
-        assert_eq!(opts.cursor, 0);
-    }
-
-    #[test]
-    fn tail_cursor_uses_same_validation_as_events_query() {
-        let params = HashMap::from([("cursor".to_string(), "12".to_string())]);
-
-        let options = parse_tail_options(params).expect("tail query should parse");
-        assert_eq!(
-            options,
-            TailOptions {
-                cursor: Cursor::new(None, 12),
-                batch_size: 1,
-            }
-        );
-    }
-
-    #[test]
-    fn tail_query_supports_batch_size() {
-        let params = HashMap::from([
-            ("cursor".to_string(), "7".to_string()),
-            ("batch_size".to_string(), "64".to_string()),
-        ]);
-
-        let options = parse_tail_options(params).expect("tail query should parse");
-        assert_eq!(
-            options,
-            TailOptions {
-                cursor: Cursor::new(None, 7),
-                batch_size: 64,
-            }
-        );
-    }
-
-    #[test]
-    fn tail_query_rejects_invalid_batch_size() {
-        let params = HashMap::from([("batch_size".to_string(), "0".to_string())]);
-        assert!(parse_tail_options(params).is_err());
     }
 
     #[test]
