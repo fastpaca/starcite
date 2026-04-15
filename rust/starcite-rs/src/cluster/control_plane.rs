@@ -173,7 +173,10 @@ impl ControlPlaneState {
             LocalReadinessGate::Ready => {}
             LocalReadinessGate::Disabled => return Ok(ControlPlaneReadiness::ready()),
             LocalReadinessGate::Blocked(reason) => {
-                return Ok(ControlPlaneReadiness::not_ready(reason, None));
+                return Ok(ControlPlaneReadiness::not_ready(
+                    reason,
+                    routing_sync_detail(reason),
+                ));
             }
         }
 
@@ -212,6 +215,13 @@ impl ControlPlaneReadinessDetail {
     pub fn draining() -> Self {
         Self {
             status: Some("draining"),
+            lease_until_ms: None,
+        }
+    }
+
+    pub fn unknown() -> Self {
+        Self {
+            status: Some("unknown"),
             lease_until_ms: None,
         }
     }
@@ -293,6 +303,13 @@ fn evaluate_control_node(expires_at: DateTime<Utc>, draining: bool) -> ControlPl
     }
 }
 
+fn routing_sync_detail(reason: &'static str) -> Option<ControlPlaneReadinessDetail> {
+    match reason {
+        "routing_sync" => Some(ControlPlaneReadinessDetail::unknown()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Duration as ChronoDuration;
@@ -300,7 +317,7 @@ mod tests {
     use super::{
         ControlPlaneHealth, ControlPlaneReadiness, ControlPlaneReadinessDetail, ControlPlaneState,
         bootstrap_interval, evaluate_control_node, heartbeat_snapshot, local_readiness_gate,
-        refresh_interval,
+        refresh_interval, routing_sync_detail,
     };
     use chrono::Utc;
     use std::time::{Duration, Instant};
@@ -396,5 +413,14 @@ mod tests {
             evaluate_control_node(Utc::now() + ChronoDuration::seconds(5), false),
             ControlPlaneReadiness::ready()
         );
+    }
+
+    #[test]
+    fn routing_sync_gate_keeps_unknown_detail() {
+        assert_eq!(
+            routing_sync_detail("routing_sync"),
+            Some(ControlPlaneReadinessDetail::unknown())
+        );
+        assert_eq!(routing_sync_detail("draining"), None);
     }
 }
