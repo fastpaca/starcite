@@ -49,6 +49,8 @@ pub enum AppError {
     InvalidLimit,
     #[error("invalid tail batch size value")]
     InvalidTailBatchSize,
+    #[error("websocket upgrade required")]
+    InvalidWebsocketUpgrade,
     #[error("invalid cursor value")]
     InvalidCursor,
     #[error("session was not found")]
@@ -118,6 +120,7 @@ impl AppError {
             Self::InvalidTenantId => "invalid_tenant_id",
             Self::InvalidLimit => "invalid_limit",
             Self::InvalidTailBatchSize => "invalid_tail_batch_size",
+            Self::InvalidWebsocketUpgrade => "invalid_websocket_upgrade",
             Self::InvalidCursor => "invalid_cursor",
             Self::SessionNotFound => "session_not_found",
             Self::SessionExists => "session_exists",
@@ -153,6 +156,7 @@ impl AppError {
             | Self::InvalidTenantId
             | Self::InvalidLimit
             | Self::InvalidTailBatchSize
+            | Self::InvalidWebsocketUpgrade
             | Self::InvalidCursor => StatusCode::BAD_REQUEST,
             Self::SessionNotFound => StatusCode::NOT_FOUND,
             Self::SessionExists
@@ -235,6 +239,10 @@ impl AppError {
             Self::InvalidTailBatchSize => json!({
                 "error": self.error_code(),
                 "message": "Invalid tail batch size value"
+            }),
+            Self::InvalidWebsocketUpgrade => json!({
+                "error": self.error_code(),
+                "message": "WebSocket upgrade required"
             }),
             Self::InvalidCursor => json!({
                 "error": self.error_code(),

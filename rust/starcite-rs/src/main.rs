@@ -217,6 +217,7 @@ fn build_public_router(telemetry: Telemetry, ops: runtime::OpsState) -> Router<A
             "/v1/sessions/{id}",
             get(api::session_http::show_session).patch(api::session_http::update_session),
         )
+        .route("/v1/sessions/{id}/tail", get(api::tail_ws::tail))
         .route(
             "/v1/sessions/{id}/append",
             post(api::event_http::append_event),

@@ -34,6 +34,7 @@ The experiment here asked what falls out when Starcite is modeled as:
 - tenant-scoped lifecycle replay plus live delivery through the Phoenix `lifecycle` topic on `GET /v1/socket/websocket`
 - local in-process runtime lifecycle with `session.activated`, `session.hydrating`, `session.freezing`, and `session.frozen`
 - replay-then-live tail through Phoenix `tail:<session_id>` topics on `GET /v1/socket/websocket`
+- replay-then-live raw tail on `GET /v1/sessions/:id/tail`
 - SQL migrations and a dedicated Docker Compose file
 
 The Phoenix-compatible socket transport keeps the existing public payload shape where it matters:
@@ -45,6 +46,8 @@ The Phoenix-compatible socket transport keeps the existing public payload shape 
 - in `jwt` mode, Phoenix topic subscriptions emit `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token passes its `exp`
 - when local shutdown drain begins, Phoenix topic subscriptions emit `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the connection closes
 - Phoenix `tail:<session_id>` joins use payload fields `cursor`, optional `cursor_epoch`, and `batch_size`
+- raw tail accepts `cursor` as either `seq` or `epoch:seq`, plus optional `cursor_epoch` and `batch_size`
+- raw tail delivers one JSON event object per frame when `batch_size=1`, a JSON array when `batch_size>1`, and emits raw `gap` payloads with nested `{epoch, seq}` cursors plus the internal reasons `cursor_expired`, `epoch_stale`, and `rollback`
 - `GET /metrics` plus `/health/*` are served on `STARCITE_OPS_PORT`, not the public API listener
 - `GET /debug/state` is served on `STARCITE_OPS_PORT` and exposes local drain source, runtime, and fanout state for this one process
 - `POST /debug/drain` is served on `STARCITE_OPS_PORT` and flips the local process into `draining` without terminating it, which is useful for local drain drills
@@ -90,7 +93,7 @@ Auth is now explicit instead of hand-waved:
   issuer, audience, scope, tenant, session lock, and expiry across HTTP plus WebSocket transports
 - `STARCITE_ENABLE_TELEMETRY=true` enables Prometheus exposition and in-process metric recording;
   `false` leaves only the uptime gauge
-- `jwt` expects `Authorization: Bearer <jwt>` on HTTP and `token=<jwt>` on WebSocket URLs
+- `jwt` expects `Authorization: Bearer <jwt>` on HTTP, the same bearer header or `access_token=<jwt>` / `token=<jwt>` on the raw tail URL, and `token=<jwt>` on the Phoenix socket URL
 - tenant-scoped lifecycle subscriptions in `jwt` require a service principal with
   `session:read` and no `session_id` lock
 

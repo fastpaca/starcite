@@ -17,6 +17,7 @@ This is a parallel implementation inside the existing repo, not a drop-in replac
 - `GET /debug/state` on the ops listener
 - `POST /debug/drain` and `DELETE /debug/drain` on the ops listener
 - `GET /v1/socket/websocket` over WebSocket with Phoenix channel framing
+- `GET /v1/sessions/:id/tail` over raw WebSocket
 - `GET /v1/sessions/:id`
 - `PATCH /v1/sessions/:id`
 - `POST /v1/sessions/:id/append`
@@ -32,7 +33,7 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - The only supported write model acknowledges appends from local hot owner state and flushes them to Postgres in the background. That flusher persists each pending session batch in one Postgres transaction instead of one transaction per event. Each active session is guarded by a Postgres-backed lease, and Postgres also acts as the durable control plane for standby assignment when nodes heartbeat their ops URLs.
 - `STARCITE_ENABLE_TELEMETRY=true` exposes Prometheus text metrics on `GET /metrics` and records a focused subset of the Phoenix telemetry contract: edge HTTP, edge-stage controller entry, auth, ingest-edge outcomes, append request timings, tail plus lifecycle delivery timings, active socket gauges, local session runtime counters, and dynamic gauges for node drain state plus runtime/fanout occupancy, including runtime sessions grouped by last touch reason.
 - `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` puts the process into local `draining` mode on `SIGTERM` or `Ctrl-C`, flips readiness non-ready immediately, rejects new public requests plus socket handshakes with `node_draining`, includes `drain_source` and shutdown `retry_after_ms` hints in those drain responses, emits the same drain metadata to already-open raw and Phoenix topic subscriptions, waits the configured drain window, and only then shuts the listeners down.
-- In `jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`, while the raw WebSocket endpoints plus the Phoenix-compatible socket expect `token` in the query string. `access_token` is rejected on the Phoenix-compatible socket.
+- In `jwt` mode, HTTP endpoints expect `Authorization: Bearer <jwt>`. The raw tail WebSocket accepts the same bearer header or a query-string token (`access_token` or `token`) for browser callers, while the Phoenix-compatible socket accepts only `token` and still rejects `access_token`.
 - The append hot path now keeps per-session producer cursors in Postgres, so a normal successful append does not need to consult historical event rows just to discover the next `producer_seq`.
 - The rewrite now keeps a local in-memory hot event store per process. Local appends and relayed remote commits both populate that hot store, and Phoenix `tail:<session_id>` catch-up replay reads hot state first and only falls back to Postgres when the requested range is not locally contiguous.
 - The rewrite now also keeps a local hot session store per process. Session create, update, archive state, relayed lifecycle catalog events, and relayed appends keep that cache current, so hot session reads and session-scoped auth checks can resolve tenant and header state without treating Postgres as the first lookup every time.
@@ -59,8 +60,11 @@ The API shape stays close to the current Starcite REST surface. The main intenti
 - Lifecycle frames follow the canonical payload shape `{"cursor": N, "inserted_at": "...", "event": {...}}`, with the inner event discriminator serialized as `kind`. The Rust rewrite emits both session catalog events (`session.created`, `session.updated`, `session.archived`, `session.unarchived`) and local runtime state transitions (`session.activated`, `session.hydrating`, `session.freezing`, `session.frozen`).
 - Lifecycle storage is tenant-scoped and the public lifecycle surface now matches that shape: one operator `lifecycle` topic with replay and live delivery over the Phoenix socket.
 - Phoenix `tail:<session_id>` joins use payload fields `cursor`, optional `cursor_epoch`, and `batch_size`.
+- `GET /v1/sessions/:id/tail` accepts `cursor` as either `seq` or `epoch:seq`, plus optional `cursor_epoch` and `batch_size`.
 - Tail replay/live frames keep the canonical `{"events":[...]}` envelope, and session-scoped events now carry `epoch` when the runtime knows the active fencing epoch.
+- Raw tail replay/live frames keep the old direct-tail contract: a single JSON event object per text frame when `batch_size=1`, or a JSON array when `batch_size>1`, and each event carries an epoch-aware `cursor` object.
 - Tail gap frames keep the canonical `{"type":"gap",...}` shape and now include epoch metadata alongside each cursor field (`from_cursor_epoch`, `next_cursor_epoch`, `committed_cursor_epoch`, `earliest_available_cursor_epoch`) so clients can resume against the current owner epoch after fencing changes.
+- Raw tail gap frames preserve the richer internal reasons (`cursor_expired`, `epoch_stale`, `rollback`) and keep each cursor field as a nested `{epoch, seq}` object.
 - A wrong-node Phoenix `tail:<session_id>` join returns a `phx_reply` error payload with `reason = "session_not_owned"` and `owner_socket_url` for the owner node's `/v1/socket/websocket` endpoint, preserving the current socket query params.
 - In `jwt` mode, Phoenix topic subscriptions push `{"type":"token_expired","reason":"token_expired"}` and terminate once the active token crosses its `exp` boundary.
 - When local shutdown drain begins, Phoenix topic subscriptions push `{"type":"node_draining","reason":"node_draining","drain_source":"shutdown","retry_after_ms":N}` before the process closes the connection.

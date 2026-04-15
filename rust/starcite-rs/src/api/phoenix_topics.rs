@@ -5,7 +5,7 @@ use super::{
         LifecycleOptions, PhoenixFrame, build_gap_payload, lifecycle_payload, push_frame,
     },
     query_options::TailOptions,
-    socket_cursor::{CursorSnapshot, build_gap, replay_gap_reason},
+    socket_cursor::{CursorSnapshot, ReplayGap, build_gap, replay_gap_reason},
     socket_support::record_read_result,
 };
 use serde_json::json;
@@ -26,12 +26,15 @@ use crate::{
 const TAIL_REPLAY_LIMIT: u32 = 1_000;
 
 struct TailReplayContext<'a> {
-    topic: &'a str,
     session_id: &'a str,
     batch_size: u32,
-    join_ref: Option<String>,
     epoch: Option<i64>,
     replay_until_seq: i64,
+}
+
+pub(crate) enum TailStreamFrame {
+    Events(Vec<EventResponse>),
+    Gap(ReplayGap),
 }
 
 pub(crate) async fn run_lifecycle_topic(
@@ -137,29 +140,72 @@ pub(crate) async fn run_tail_topic(
     tail: TailOptions,
     join_ref: Option<String>,
     state: AppState,
-    mut receiver: broadcast::Receiver<EventResponse>,
+    receiver: broadcast::Receiver<EventResponse>,
     outbound_tx: mpsc::UnboundedSender<PhoenixFrame>,
 ) {
     let _subscription = state
         .telemetry
         .track_socket_subscription(SocketTransport::Phoenix, SocketSurface::Tail);
     let _fanout_guard = state.fanout.session_guard(session_id.clone());
+    let emit_state = state.clone();
+    let emit_topic = topic.clone();
+    let emit_join_ref = join_ref.clone();
+
+    run_tail_stream(
+        session_id,
+        tail,
+        state,
+        receiver,
+        move |frame, operation| match frame {
+            TailStreamFrame::Events(events) => {
+                let started_at = Instant::now();
+                let result = outbound_tx.send(push_frame(
+                    emit_join_ref.clone(),
+                    emit_topic.clone(),
+                    "events",
+                    json!({"events": events}),
+                ));
+
+                if let Some(operation) = operation {
+                    record_read_result(
+                        &emit_state,
+                        operation,
+                        started_at,
+                        result.as_ref().map(|_| ()).map_err(|_| ()),
+                    );
+                }
+
+                result.map_err(|_| AppError::Internal)
+            }
+            TailStreamFrame::Gap(gap) => outbound_tx
+                .send(push_frame(
+                    emit_join_ref.clone(),
+                    emit_topic.clone(),
+                    "gap",
+                    build_gap_payload(&gap),
+                ))
+                .map_err(|_| AppError::Internal),
+        },
+    )
+    .await;
+}
+
+pub(crate) async fn run_tail_stream<F>(
+    session_id: String,
+    tail: TailOptions,
+    state: AppState,
+    mut receiver: broadcast::Receiver<EventResponse>,
+    mut emit: F,
+) where
+    F: FnMut(TailStreamFrame, Option<ReadOperation>) -> Result<(), AppError>,
+{
+    let _fanout_guard = state.fanout.session_guard(session_id.clone());
     let mut cursor = tail.cursor;
 
-    match sync_tail(
-        &topic,
-        &session_id,
-        tail.batch_size,
-        join_ref.clone(),
-        &state,
-        &outbound_tx,
-        cursor,
-    )
-    .await
-    {
+    match sync_tail_with_emitter(&session_id, tail.batch_size, &state, &mut emit, cursor).await {
         Ok(next_cursor) => cursor = next_cursor,
         Err(error) => {
-            tracing::warn!(error = ?error, session_id, "phoenix tail replay failed");
+            tracing::warn!(error = ?error, session_id, "tail replay failed");
             return;
         }
     }
@@ -174,21 +220,13 @@ pub(crate) async fn run_tail_topic(
                 Ok(event) if event.seq <= cursor.seq => continue,
                 Ok(event) => {
                     cursor = event.cursor_token();
-                    let started_at = Instant::now();
-                    let result = outbound_tx.send(push_frame(
-                        join_ref.clone(),
-                        topic.clone(),
-                        "events",
-                        json!({"events": [event]}),
-                    ));
-                    record_read_result(
-                        &state,
-                        ReadOperation::TailLive,
-                        started_at,
-                        result.as_ref().map(|_| ()).map_err(|_| ()),
-                    );
 
-                    if result.is_err() {
+                    if emit(
+                        TailStreamFrame::Events(vec![event]),
+                        Some(ReadOperation::TailLive),
+                    )
+                    .is_err()
+                    {
                         return;
                     }
                 }
@@ -197,16 +235,14 @@ pub(crate) async fn run_tail_topic(
                         session_id,
                         skipped,
                         cursor = ?cursor,
-                        "phoenix tail broadcast lagged, replaying from store"
+                        "tail broadcast lagged, replaying from store"
                     );
 
-                    match sync_tail(
-                        &topic,
+                    match sync_tail_with_emitter(
                         &session_id,
                         tail.batch_size,
-                        join_ref.clone(),
                         &state,
-                        &outbound_tx,
+                        &mut emit,
                         cursor,
                     )
                     .await
@@ -216,7 +252,7 @@ pub(crate) async fn run_tail_topic(
                             tracing::warn!(
                                 error = ?error,
                                 session_id,
-                                "phoenix tail replay after lag failed"
+                                "tail replay after lag failed"
                             );
                             return;
                         }
@@ -232,16 +268,14 @@ pub(crate) async fn run_tail_topic(
                 tracing::warn!(
                     session_id,
                     cursor = ?cursor,
-                    "phoenix tail hot store advanced without live fanout, replaying from store"
+                    "tail hot store advanced without live fanout, replaying from store"
                 );
 
-                match sync_tail(
-                    &topic,
+                match sync_tail_with_emitter(
                     &session_id,
                     tail.batch_size,
-                    join_ref.clone(),
                     &state,
-                    &outbound_tx,
+                    &mut emit,
                     cursor,
                 )
                 .await
@@ -251,7 +285,7 @@ pub(crate) async fn run_tail_topic(
                         tracing::warn!(
                             error = ?error,
                             session_id,
-                            "phoenix tail replay after catchup check failed"
+                            "tail replay after catchup check failed"
                         );
                         return;
                     }
@@ -340,6 +374,7 @@ async fn replay_lifecycle(
     }
 }
 
+#[cfg(test)]
 async fn sync_tail(
     topic: &str,
     session_id: &str,
@@ -349,45 +384,92 @@ async fn sync_tail(
     outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
     cursor: Cursor,
 ) -> Result<Cursor, AppError> {
+    let emit_state = state.clone();
+    let emit_topic = topic.to_string();
+    let emit_join_ref = join_ref.clone();
+
+    sync_tail_with_emitter(
+        session_id,
+        batch_size,
+        state,
+        &mut move |frame, operation| match frame {
+            TailStreamFrame::Events(events) => {
+                let started_at = Instant::now();
+                let result = outbound_tx.send(push_frame(
+                    emit_join_ref.clone(),
+                    emit_topic.clone(),
+                    "events",
+                    json!({"events": events}),
+                ));
+
+                if let Some(operation) = operation {
+                    record_read_result(
+                        &emit_state,
+                        operation,
+                        started_at,
+                        result.as_ref().map(|_| ()).map_err(|_| ()),
+                    );
+                }
+
+                result.map_err(|_| AppError::Internal)
+            }
+            TailStreamFrame::Gap(gap) => outbound_tx
+                .send(push_frame(
+                    emit_join_ref.clone(),
+                    emit_topic.clone(),
+                    "gap",
+                    build_gap_payload(&gap),
+                ))
+                .map_err(|_| AppError::Internal),
+        },
+        cursor,
+    )
+    .await
+}
+
+async fn sync_tail_with_emitter<F>(
+    session_id: &str,
+    batch_size: u32,
+    state: &AppState,
+    emit: &mut F,
+    cursor: Cursor,
+) -> Result<Cursor, AppError>
+where
+    F: FnMut(TailStreamFrame, Option<ReadOperation>) -> Result<(), AppError>,
+{
     let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
     let earliest_available_seq =
         resolve_tail_earliest_available_seq(state, session_id, snapshot.committed_seq).await;
 
     if let Some(reason) = replay_gap_reason(cursor, snapshot, earliest_available_seq) {
         let gap = build_gap(reason, cursor, snapshot, earliest_available_seq);
-        outbound_tx
-            .send(push_frame(
-                join_ref,
-                topic.to_string(),
-                "gap",
-                build_gap_payload(&gap),
-            ))
-            .map_err(|_| AppError::Internal)?;
+        emit(TailStreamFrame::Gap(gap.clone()), None)?;
         return Ok(gap.next_cursor);
     }
 
     replay_tail(
         TailReplayContext {
-            topic,
             session_id,
             batch_size,
-            join_ref: join_ref.clone(),
             epoch: snapshot.epoch,
             replay_until_seq: snapshot.last_seq,
         },
         state,
-        outbound_tx,
+        emit,
         cursor,
     )
     .await
 }
 
-async fn replay_tail(
+async fn replay_tail<F>(
     context: TailReplayContext<'_>,
     state: &AppState,
-    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    emit: &mut F,
     mut cursor: Cursor,
-) -> Result<Cursor, AppError> {
+) -> Result<Cursor, AppError>
+where
+    F: FnMut(TailStreamFrame, Option<ReadOperation>) -> Result<(), AppError>,
+{
     loop {
         if cursor.seq >= context.replay_until_seq {
             return Ok(cursor);
@@ -406,15 +488,7 @@ async fn replay_tail(
         {
             Ok(page) => page,
             Err(ReadEventsError::ContinuityUnavailable) => {
-                return emit_tail_gap(
-                    context.topic,
-                    context.session_id,
-                    context.join_ref.clone(),
-                    state,
-                    outbound_tx,
-                    cursor,
-                )
-                .await;
+                return emit_tail_gap(context.session_id, state, emit, cursor).await;
             }
             Err(ReadEventsError::App(error)) => return Err(error),
         };
@@ -433,32 +507,23 @@ async fn replay_tail(
                 .last()
                 .map(EventResponse::cursor_token)
                 .unwrap_or(cursor);
-            let started_at = Instant::now();
-            let result = outbound_tx.send(push_frame(
-                context.join_ref.clone(),
-                context.topic.to_string(),
-                "events",
-                json!({"events": events}),
-            ));
-            record_read_result(
-                state,
-                ReadOperation::TailCatchup,
-                started_at,
-                result.as_ref().map(|_| ()).map_err(|_| ()),
-            );
-            result.map_err(|_| AppError::Internal)?;
+            emit(
+                TailStreamFrame::Events(events),
+                Some(ReadOperation::TailCatchup),
+            )?;
         }
     }
 }
 
-async fn emit_tail_gap(
-    topic: &str,
+async fn emit_tail_gap<F>(
     session_id: &str,
-    join_ref: Option<String>,
     state: &AppState,
-    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    emit: &mut F,
     from_cursor: Cursor,
-) -> Result<Cursor, AppError> {
+) -> Result<Cursor, AppError>
+where
+    F: FnMut(TailStreamFrame, Option<ReadOperation>) -> Result<(), AppError>,
+{
     let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
     let earliest_available_seq =
         resolve_tail_earliest_available_seq(state, session_id, snapshot.committed_seq).await;
@@ -468,14 +533,7 @@ async fn emit_tail_gap(
         snapshot,
         earliest_available_seq,
     );
-    outbound_tx
-        .send(push_frame(
-            join_ref,
-            topic.to_string(),
-            "gap",
-            build_gap_payload(&gap),
-        ))
-        .map_err(|_| AppError::Internal)?;
+    emit(TailStreamFrame::Gap(gap.clone()), None)?;
     Ok(gap.next_cursor)
 }
 

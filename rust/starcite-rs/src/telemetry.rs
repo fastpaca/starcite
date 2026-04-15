@@ -245,6 +245,7 @@ pub enum SessionReason {
 
 #[derive(Debug, Clone, Copy)]
 pub enum SocketTransport {
+    Raw,
     Phoenix,
 }
 
@@ -992,12 +993,14 @@ fn runtime_touch_reason_label(reason: RuntimeTouchReason) -> &'static str {
         RuntimeTouchReason::Create => "create",
         RuntimeTouchReason::HttpRead => "http_read",
         RuntimeTouchReason::HttpWrite => "http_write",
+        RuntimeTouchReason::RawTail => "raw_tail",
         RuntimeTouchReason::PhoenixTail => "phoenix_tail",
     }
 }
 
 fn socket_transport_label(transport: SocketTransport) -> &'static str {
     match transport {
+        SocketTransport::Raw => "raw",
         SocketTransport::Phoenix => "phoenix",
     }
 }

@@ -13,3 +13,4 @@ pub(crate) mod request_validation;
 pub(crate) mod session_http;
 pub(crate) mod socket_cursor;
 pub(crate) mod socket_support;
+pub(crate) mod tail_ws;

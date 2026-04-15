@@ -1,10 +1,40 @@
 # WebSocket API
 
-Starcite exposes session tails over Phoenix Channels so one client WebSocket can
-join many session streams at once. There is no standalone raw `/tail` WebSocket
-endpoint.
+Starcite exposes session tails over two WebSocket transports:
 
-## Socket
+- direct raw tails on `GET /v1/sessions/:id/tail`
+- Phoenix Channels on `GET /v1/socket/websocket`
+
+## Raw Tail
+
+Connect directly to one session tail:
+
+```
+ws://HOST/v1/sessions/:id/tail?cursor=41
+```
+
+Epoch-aware resume:
+
+```
+ws://HOST/v1/sessions/:id/tail?cursor=12:41
+```
+
+Optional query params:
+
+- `batch_size` (`1..1000`, default `1`)
+- `cursor_epoch` when you want to pair an integer `cursor` with an explicit epoch
+- `access_token` or `token` for browser-oriented auth transport
+
+JWT auth for raw tail accepts:
+
+- `Authorization: Bearer <jwt>` on the upgrade request
+- `access_token=<jwt>` or `token=<jwt>` in the query string
+
+Raw tail emits one JSON event object per text frame when `batch_size=1`, or a
+JSON array when `batch_size>1`. Gap frames keep the richer internal reasons and
+use nested `{epoch, seq}` cursor objects.
+
+## Phoenix Socket
 
 Connect a Phoenix client socket to the base socket endpoint:
 
@@ -16,7 +46,7 @@ Pass the JWT as the socket auth param:
 
 - `token`
 
-`access_token` is rejected.
+`access_token` is rejected on the Phoenix socket.
 
 Example:
 

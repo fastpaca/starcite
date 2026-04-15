@@ -96,7 +96,7 @@ async fn send_socket_close(
         .map_err(|_| ())
 }
 
-fn build_node_draining_payload(ops: &OpsSnapshot) -> Value {
+pub(crate) fn build_node_draining_payload(ops: &OpsSnapshot) -> Value {
     let mut payload = serde_json::Map::from_iter([(
         "reason".to_string(),
         Value::String("node_draining".to_string()),

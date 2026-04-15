@@ -31,6 +31,17 @@ pub(crate) async fn authenticate_socket(
     result
 }
 
+pub(crate) async fn authenticate_raw_socket(
+    state: &AppState,
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+) -> Result<auth::AuthContext, AppError> {
+    let started_at = Instant::now();
+    let result = auth::authenticate_raw_socket(headers, params, &state.auth).await;
+    record_auth_result(&state.telemetry, state.auth.mode(), started_at, &result);
+    result
+}
+
 pub(crate) fn record_ingest_result<T>(
     state: &AppState,
     operation: IngestOperation,

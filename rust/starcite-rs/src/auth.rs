@@ -176,6 +176,29 @@ pub async fn authenticate_socket(
     }
 }
 
+pub async fn authenticate_raw_socket(
+    headers: &HeaderMap,
+    params: &HashMap<String, String>,
+    auth: &AuthService,
+) -> Result<AuthContext, AppError> {
+    match auth.mode() {
+        AuthMode::None => Ok(AuthContext::none()),
+        AuthMode::Jwt => {
+            if headers.contains_key(axum::http::header::AUTHORIZATION) {
+                return authenticate_http(headers, auth).await;
+            }
+
+            let token = params
+                .get("access_token")
+                .or_else(|| params.get("token"))
+                .filter(|token| !token.is_empty())
+                .ok_or(AppError::MissingBearerToken)?;
+
+            authenticate_jwt(token, auth).await
+        }
+    }
+}
+
 pub fn can_create_session(auth: &AuthContext) -> Result<(), AppError> {
     match auth.kind {
         AuthMode::None => Ok(()),
@@ -813,6 +836,60 @@ mod tests {
             super::authenticate_socket(&params, &auth_service).await,
             Err(AppError::InvalidBearerToken)
         ));
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn raw_socket_auth_accepts_access_token_param() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let token = token_for(
+            base_claims("service:rust-rewrite", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let headers = HeaderMap::new();
+        let params = HashMap::from([("access_token".to_string(), token)]);
+
+        let auth = super::authenticate_raw_socket(&headers, &params, &auth_service)
+            .await
+            .expect("raw socket token should authenticate");
+
+        assert_eq!(auth.principal.tenant_id, "acme");
+        assert_eq!(auth.principal.id, "rust-rewrite");
+
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn raw_socket_auth_prefers_authorization_header() {
+        let secret = "super-secret";
+        let (jwks_url, _state, server) = spawn_jwks_server(jwks(secret, "kid-1")).await;
+        let auth_service = AuthService::new(&jwt_config(&jwks_url)).expect("auth config");
+        let header_token = token_for(
+            base_claims("service:header-auth", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let query_token = token_for(
+            base_claims("service:query-auth", "session:read"),
+            secret,
+            "kid-1",
+        );
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {header_token}")).expect("header"),
+        );
+        let params = HashMap::from([("access_token".to_string(), query_token)]);
+
+        let auth = super::authenticate_raw_socket(&headers, &params, &auth_service)
+            .await
+            .expect("header token should authenticate");
+
+        assert_eq!(auth.principal.id, "header-auth");
 
         server.abort();
     }
