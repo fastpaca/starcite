@@ -86,25 +86,14 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         return response;
     }
 
-    match sqlx::query_scalar::<_, i64>("SELECT 1::bigint")
-        .fetch_one(&state.pool)
+    match state
+        .control_plane
+        .readiness(&state.pool, state.instance_id.as_ref())
         .await
     {
-        Ok(_) => match state
-            .control_plane
-            .readiness(&state.pool, state.instance_id.as_ref())
-            .await
-        {
-            Ok(readiness) => {
-                ready_response(&ops, readiness.reason, readiness.detail).into_response()
-            }
-            Err(error) => {
-                tracing::error!(error = ?error, "readiness control-plane lookup failed");
-                ready_response(&ops, Some("database_unavailable"), None).into_response()
-            }
-        },
+        Ok(readiness) => ready_response(&ops, readiness.reason, readiness.detail).into_response(),
         Err(error) => {
-            tracing::error!(error = ?error, "readiness query failed");
+            tracing::error!(error = ?error, "readiness control-plane lookup failed");
             ready_response(&ops, Some("database_unavailable"), None).into_response()
         }
     }
