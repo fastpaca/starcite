@@ -122,6 +122,10 @@ with `reason = "draining"` plus `drain_source = "shutdown"` and a live `retry_af
 public HTTP requests and new WebSocket handshakes fail with `node_draining`, `x-starcite-drain-source`,
 and shutdown `Retry-After` headers, existing raw sockets emit a terminal `node_draining` frame
 with the same metadata and then close with code `1012`, existing Phoenix topic subscriptions
+see the same terminal drain signal, and non-draining readiness now consults the local
+Postgres `control_nodes` row so stale or missing control-plane registration shows up as
+`lease_expired` or `routing_sync` instead of looking healthy just because the last local
+heartbeat attempt succeeded.
 receive a `node_draining` push with the same metadata and then the socket closes with code `1012`,
 and the listeners stay up for
 `STARCITE_SHUTDOWN_DRAIN_TIMEOUT_MS` before the actual server shutdown future resolves. The same

@@ -3,6 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::{DateTime, Utc};
 use serde::Serialize;
 use sqlx::PgPool;
 use tokio::time::sleep;
@@ -27,6 +28,20 @@ pub struct ControlPlaneSnapshot {
     pub heartbeat_status: &'static str,
     pub reason: Option<&'static str>,
     pub last_heartbeat_age_ms: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct ControlPlaneReadinessDetail {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lease_until_ms: Option<i64>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ControlPlaneReadiness {
+    pub reason: Option<&'static str>,
+    pub detail: Option<ControlPlaneReadinessDetail>,
 }
 
 #[derive(Debug, Clone)]
@@ -145,6 +160,61 @@ impl ControlPlaneState {
     pub fn readiness_reason(&self) -> Option<&'static str> {
         self.snapshot().reason
     }
+
+    pub async fn readiness(
+        &self,
+        pool: &PgPool,
+        instance_id: &str,
+    ) -> Result<ControlPlaneReadiness, crate::error::AppError> {
+        match local_readiness_gate(
+            &self.heartbeat.read().expect("control plane heartbeat lock"),
+            self.node_ttl,
+        ) {
+            LocalReadinessGate::Ready => {}
+            LocalReadinessGate::Disabled => return Ok(ControlPlaneReadiness::ready()),
+            LocalReadinessGate::Blocked(reason) => {
+                return Ok(ControlPlaneReadiness::not_ready(reason, None));
+            }
+        }
+
+        Ok(
+            match repository::load_control_node(pool, instance_id).await? {
+                Some(node) => evaluate_control_node(node.expires_at, node.draining),
+                None => ControlPlaneReadiness::not_ready(
+                    "routing_sync",
+                    Some(ControlPlaneReadinessDetail {
+                        status: Some("unknown"),
+                        lease_until_ms: None,
+                    }),
+                ),
+            },
+        )
+    }
+}
+
+impl ControlPlaneReadiness {
+    pub fn ready() -> Self {
+        Self {
+            reason: None,
+            detail: None,
+        }
+    }
+
+    pub fn not_ready(reason: &'static str, detail: Option<ControlPlaneReadinessDetail>) -> Self {
+        Self {
+            reason: Some(reason),
+            detail,
+        }
+    }
+}
+
+impl ControlPlaneReadinessDetail {
+    pub fn draining() -> Self {
+        Self {
+            status: Some("draining"),
+            lease_until_ms: None,
+        }
+    }
 }
 
 fn refresh_interval(node_ttl: Duration) -> Duration {
@@ -181,12 +251,58 @@ fn heartbeat_snapshot(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LocalReadinessGate {
+    Disabled,
+    Ready,
+    Blocked(&'static str),
+}
+
+fn local_readiness_gate(health: &ControlPlaneHealth, node_ttl: Duration) -> LocalReadinessGate {
+    let (ready, _status, reason, _age_ms) = heartbeat_snapshot(health, node_ttl);
+
+    if matches!(health, ControlPlaneHealth::Disabled) {
+        LocalReadinessGate::Disabled
+    } else if ready {
+        LocalReadinessGate::Ready
+    } else {
+        LocalReadinessGate::Blocked(reason.unwrap_or("routing_sync"))
+    }
+}
+
+fn evaluate_control_node(expires_at: DateTime<Utc>, draining: bool) -> ControlPlaneReadiness {
+    if draining {
+        return ControlPlaneReadiness::not_ready(
+            "draining",
+            Some(ControlPlaneReadinessDetail::draining()),
+        );
+    }
+
+    let lease_until_ms = expires_at.timestamp_millis();
+
+    if expires_at <= Utc::now() {
+        ControlPlaneReadiness::not_ready(
+            "lease_expired",
+            Some(ControlPlaneReadinessDetail {
+                status: Some("ready"),
+                lease_until_ms: Some(lease_until_ms),
+            }),
+        )
+    } else {
+        ControlPlaneReadiness::ready()
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use chrono::Duration as ChronoDuration;
+
     use super::{
-        ControlPlaneHealth, ControlPlaneState, bootstrap_interval, heartbeat_snapshot,
+        ControlPlaneHealth, ControlPlaneReadiness, ControlPlaneReadinessDetail, ControlPlaneState,
+        bootstrap_interval, evaluate_control_node, heartbeat_snapshot, local_readiness_gate,
         refresh_interval,
     };
+    use chrono::Utc;
     use std::time::{Duration, Instant};
 
     #[test]
@@ -237,5 +353,48 @@ mod tests {
         assert_eq!(status, "stale");
         assert_eq!(reason, Some("routing_sync"));
         assert!(age_ms.is_some());
+    }
+
+    #[test]
+    fn local_readiness_gate_preserves_disabled_mode() {
+        assert_eq!(
+            local_readiness_gate(&ControlPlaneHealth::Disabled, Duration::from_secs(3)),
+            super::LocalReadinessGate::Disabled
+        );
+    }
+
+    #[test]
+    fn control_node_readiness_reports_draining() {
+        assert_eq!(
+            evaluate_control_node(Utc::now() + ChronoDuration::seconds(5), true),
+            ControlPlaneReadiness::not_ready(
+                "draining",
+                Some(ControlPlaneReadinessDetail::draining())
+            )
+        );
+    }
+
+    #[test]
+    fn control_node_readiness_reports_expired_lease() {
+        let expires_at = Utc::now() - ChronoDuration::seconds(1);
+
+        assert_eq!(
+            evaluate_control_node(expires_at, false),
+            ControlPlaneReadiness::not_ready(
+                "lease_expired",
+                Some(ControlPlaneReadinessDetail {
+                    status: Some("ready"),
+                    lease_until_ms: Some(expires_at.timestamp_millis()),
+                })
+            )
+        );
+    }
+
+    #[test]
+    fn control_node_readiness_reports_ready_for_live_row() {
+        assert_eq!(
+            evaluate_control_node(Utc::now() + ChronoDuration::seconds(5), false),
+            ControlPlaneReadiness::ready()
+        );
     }
 }

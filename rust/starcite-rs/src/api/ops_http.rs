@@ -37,6 +37,8 @@ struct ReadyResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     reason: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    detail: Option<cluster::ControlPlaneReadinessDetail>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     drain_source: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     retry_after_ms: Option<u64>,
@@ -74,7 +76,12 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
     let ops = state.ops.snapshot();
 
     if ops.draining {
-        let mut response = ready_response(&ops, Some("draining")).into_response();
+        let mut response = ready_response(
+            &ops,
+            Some("draining"),
+            Some(cluster::ControlPlaneReadinessDetail::draining()),
+        )
+        .into_response();
         error::apply_drain_headers(response.headers_mut(), ops.drain_source, ops.retry_after_ms);
         return response;
     }
@@ -83,13 +90,22 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
         .fetch_one(&state.pool)
         .await
     {
-        Ok(_) => match state.control_plane.readiness_reason() {
-            Some(reason) => ready_response(&ops, Some(reason)).into_response(),
-            None => ready_response(&ops, None).into_response(),
+        Ok(_) => match state
+            .control_plane
+            .readiness(&state.pool, state.instance_id.as_ref())
+            .await
+        {
+            Ok(readiness) => {
+                ready_response(&ops, readiness.reason, readiness.detail).into_response()
+            }
+            Err(error) => {
+                tracing::error!(error = ?error, "readiness control-plane lookup failed");
+                ready_response(&ops, Some("database_unavailable"), None).into_response()
+            }
         },
         Err(error) => {
             tracing::error!(error = ?error, "readiness query failed");
-            ready_response(&ops, Some("database_unavailable")).into_response()
+            ready_response(&ops, Some("database_unavailable"), None).into_response()
         }
     }
 }
@@ -230,6 +246,7 @@ fn classify_replica_append(last_seq: i64, incoming_seq: i64) -> ReplicaAppendDis
 fn ready_response(
     ops: &OpsSnapshot,
     reason: Option<&'static str>,
+    detail: Option<cluster::ControlPlaneReadinessDetail>,
 ) -> (StatusCode, Json<ReadyResponse>) {
     let status = if reason.is_some() {
         StatusCode::SERVICE_UNAVAILABLE
@@ -243,6 +260,7 @@ fn ready_response(
             status: if reason.is_some() { "starting" } else { "ok" },
             mode: ops.mode,
             reason,
+            detail,
             drain_source: ops.drain_source,
             retry_after_ms: ops.retry_after_ms,
         }),
@@ -291,17 +309,18 @@ mod tests {
     use axum::{Json, http::StatusCode};
 
     use super::{ReplicaAppendDisposition, classify_replica_append, ready_response};
-    use crate::runtime::OpsState;
+    use crate::{cluster::ControlPlaneReadinessDetail, runtime::OpsState};
 
     #[test]
     fn ready_response_reports_ready_mode() {
         let ops = OpsState::new(30_000).snapshot();
-        let (status, Json(body)) = ready_response(&ops, None);
+        let (status, Json(body)) = ready_response(&ops, None, None);
 
         assert_eq!(status, StatusCode::OK);
         assert_eq!(body.status, "ok");
         assert_eq!(body.mode, "ready");
         assert_eq!(body.reason, None);
+        assert_eq!(body.detail, None);
         assert_eq!(body.drain_source, None);
         assert_eq!(body.retry_after_ms, None);
     }
@@ -311,12 +330,17 @@ mod tests {
         let ops_state = OpsState::new(30_000);
         ops_state.begin_shutdown_drain();
         let ops = ops_state.snapshot();
-        let (status, Json(body)) = ready_response(&ops, Some("draining"));
+        let (status, Json(body)) = ready_response(
+            &ops,
+            Some("draining"),
+            Some(ControlPlaneReadinessDetail::draining()),
+        );
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(body.status, "starting");
         assert_eq!(body.mode, "draining");
         assert_eq!(body.reason, Some("draining"));
+        assert_eq!(body.detail, Some(ControlPlaneReadinessDetail::draining()));
         assert_eq!(body.drain_source, Some("shutdown"));
         assert!(body.retry_after_ms.is_some());
     }

@@ -26,6 +26,12 @@ pub struct SessionLeaseRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
+pub struct ControlNodeRow {
+    pub draining: bool,
+    pub expires_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SessionLeaseTakeoverHint {
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
@@ -768,6 +774,22 @@ pub async fn control_plane_table_exists(pool: &PgPool) -> Result<bool, AppError>
         "#,
     )
     .fetch_one(pool)
+    .await?)
+}
+
+pub async fn load_control_node(
+    pool: &PgPool,
+    node_id: &str,
+) -> Result<Option<ControlNodeRow>, AppError> {
+    Ok(sqlx::query_as::<_, ControlNodeRow>(
+        r#"
+        SELECT draining, expires_at
+        FROM control_nodes
+        WHERE node_id = $1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
     .await?)
 }
 
