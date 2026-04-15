@@ -1,4 +1,4 @@
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use super::{
     phoenix_protocol::{
@@ -164,35 +164,75 @@ pub(crate) async fn run_tail_topic(
         }
     }
 
-    loop {
-        match receiver.recv().await {
-            Ok(event) if event.seq <= cursor.seq => continue,
-            Ok(event) => {
-                cursor = event.cursor_token();
-                let started_at = Instant::now();
-                let result = outbound_tx.send(push_frame(
-                    join_ref.clone(),
-                    topic.clone(),
-                    "events",
-                    json!({"events": [event]}),
-                ));
-                record_read_result(
-                    &state,
-                    ReadOperation::TailLive,
-                    started_at,
-                    result.as_ref().map(|_| ()).map_err(|_| ()),
-                );
+    let mut catchup_tick = tokio::time::interval(tail_catchup_interval());
+    catchup_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    catchup_tick.tick().await;
 
-                if result.is_err() {
-                    return;
+    loop {
+        tokio::select! {
+            message = receiver.recv() => match message {
+                Ok(event) if event.seq <= cursor.seq => continue,
+                Ok(event) => {
+                    cursor = event.cursor_token();
+                    let started_at = Instant::now();
+                    let result = outbound_tx.send(push_frame(
+                        join_ref.clone(),
+                        topic.clone(),
+                        "events",
+                        json!({"events": [event]}),
+                    ));
+                    record_read_result(
+                        &state,
+                        ReadOperation::TailLive,
+                        started_at,
+                        result.as_ref().map(|_| ()).map_err(|_| ()),
+                    );
+
+                    if result.is_err() {
+                        return;
+                    }
                 }
-            }
-            Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                Err(broadcast::error::RecvError::Lagged(skipped)) => {
+                    tracing::warn!(
+                        session_id,
+                        skipped,
+                        cursor = ?cursor,
+                        "phoenix tail broadcast lagged, replaying from store"
+                    );
+
+                    match sync_tail(
+                        &topic,
+                        &session_id,
+                        tail.batch_size,
+                        join_ref.clone(),
+                        &state,
+                        &outbound_tx,
+                        cursor,
+                    )
+                    .await
+                    {
+                        Ok(next_cursor) => cursor = next_cursor,
+                        Err(error) => {
+                            tracing::warn!(
+                                error = ?error,
+                                session_id,
+                                "phoenix tail replay after lag failed"
+                            );
+                            return;
+                        }
+                    }
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
+            },
+            _ = catchup_tick.tick() => {
+                if !tail_requires_catchup(state.hot_store.max_seq(&session_id).await, cursor.seq) {
+                    continue;
+                }
+
                 tracing::warn!(
                     session_id,
-                    skipped,
                     cursor = ?cursor,
-                    "phoenix tail broadcast lagged, replaying from store"
+                    "phoenix tail hot store advanced without live fanout, replaying from store"
                 );
 
                 match sync_tail(
@@ -211,13 +251,12 @@ pub(crate) async fn run_tail_topic(
                         tracing::warn!(
                             error = ?error,
                             session_id,
-                            "phoenix tail replay after lag failed"
+                            "phoenix tail replay after catchup check failed"
                         );
                         return;
                     }
                 }
             }
-            Err(broadcast::error::RecvError::Closed) => return,
         }
     }
 }
@@ -473,6 +512,18 @@ fn earliest_available_lifecycle_seq(snapshot: CursorSnapshot) -> Option<i64> {
     (snapshot.last_seq > 0).then_some(1)
 }
 
+fn tail_requires_catchup(max_hot_seq: Option<i64>, cursor_seq: i64) -> bool {
+    max_hot_seq.is_some_and(|max_hot_seq| max_hot_seq > cursor_seq)
+}
+
+fn tail_catchup_interval() -> Duration {
+    if cfg!(test) {
+        Duration::from_millis(25)
+    } else {
+        Duration::from_secs(5)
+    }
+}
+
 async fn resolve_tail_earliest_available_seq(
     state: &AppState,
     session_id: &str,
@@ -523,6 +574,7 @@ fn attach_event_epoch(event: EventResponse, epoch: Option<i64>) -> EventResponse
 mod tests {
     use super::{
         archive_floor_or_hot_floor, earliest_available_lifecycle_seq, run_tail_topic, sync_tail,
+        tail_requires_catchup,
     };
     use crate::{
         AppState,
@@ -872,6 +924,51 @@ mod tests {
         let _ = task.await;
     }
 
+    #[tokio::test]
+    async fn run_tail_topic_periodically_catches_up_without_broadcast_signal() {
+        let state = test_state();
+        seed_session(&state, "ses_demo", 7, 1, 0).await;
+        state.hot_store.put_event(sample_event("ses_demo", 1)).await;
+        let receiver = state.fanout.subscribe("ses_demo").await;
+        let (outbound_tx, mut outbound_rx) = mpsc::unbounded_channel();
+
+        let task = tokio::spawn(run_tail_topic(
+            "tail:ses_demo".to_string(),
+            "ses_demo".to_string(),
+            crate::api::query_options::TailOptions {
+                cursor: Cursor::zero(),
+                batch_size: 8,
+            },
+            Some("1".to_string()),
+            state.clone(),
+            receiver,
+            outbound_tx,
+        ));
+
+        let replay = timeout(Duration::from_secs(1), outbound_rx.recv())
+            .await
+            .expect("replay frame should arrive")
+            .expect("replay frame");
+        assert_eq!(payload_event_seqs(&replay), vec![1]);
+
+        state.hot_store.put_event(sample_event("ses_demo", 2)).await;
+        state
+            .session_store
+            .bump_last_seq("ses_demo", "acme", 2)
+            .await;
+
+        let catchup = timeout(Duration::from_millis(250), outbound_rx.recv())
+            .await
+            .expect("catchup frame should arrive")
+            .expect("catchup frame");
+        assert_eq!(catchup.event, "events");
+        assert_eq!(payload_event_seqs(&catchup), vec![2]);
+        assert_eq!(catchup.payload["events"][0]["epoch"], Value::from(7));
+
+        task.abort();
+        let _ = task.await;
+    }
+
     #[test]
     fn lifecycle_floor_starts_at_one_when_history_exists() {
         assert_eq!(
@@ -896,6 +993,13 @@ mod tests {
     fn archive_floor_prefers_archived_floor_when_present() {
         assert_eq!(archive_floor_or_hot_floor(Some(2), 6), 2);
         assert_eq!(archive_floor_or_hot_floor(None, 6), 6);
+    }
+
+    #[test]
+    fn tail_requires_catchup_only_when_hot_store_is_ahead() {
+        assert!(tail_requires_catchup(Some(6), 5));
+        assert!(!tail_requires_catchup(Some(5), 5));
+        assert!(!tail_requires_catchup(None, 5));
     }
 
     #[test]
