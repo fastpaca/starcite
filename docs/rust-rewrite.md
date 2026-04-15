@@ -125,7 +125,9 @@ local drills without terminating the process. That is still much simpler than th
 drain, but it gives the experiment an honest edge behavior during termination.
 
 Because this rewrite keeps the full event log in Postgres, it does not currently emit
-`cursor_expired` gaps. There is no hot-tail trimming boundary to fall behind.
+`cursor_expired` due to archive trimming. It can still emit `cursor_expired` when the hot/cold
+replay path cannot produce a contiguous ordered range, matching the old resume contract more
+closely than dropping the socket with an internal error.
 
 The in-process fanout is now demand-driven instead of append-driven. A tail or lifecycle
 subscription allocates its Tokio broadcast channel lazily on first subscribe, plain broadcasts do

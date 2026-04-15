@@ -13,7 +13,11 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::{
     AppState,
-    data_plane::{read_path, repository, session_store::resolve_session_last_seq},
+    data_plane::{
+        read_path::{self, ReadEventsError},
+        repository,
+        session_store::resolve_session_last_seq,
+    },
     error::AppError,
     model::{Cursor, EventResponse, EventsOptions, LifecycleResponse},
     telemetry::{ReadOperation, SocketSurface, SocketTransport},
@@ -337,7 +341,7 @@ async fn replay_tail(
     epoch: Option<i64>,
 ) -> Result<Cursor, AppError> {
     loop {
-        let page = read_path::read_events(
+        let page = match read_path::read_events(
             &state.hot_store,
             &state.pool,
             session_id,
@@ -346,7 +350,22 @@ async fn replay_tail(
                 limit: TAIL_REPLAY_LIMIT,
             },
         )
-        .await?;
+        .await
+        {
+            Ok(page) => page,
+            Err(ReadEventsError::ContinuityUnavailable) => {
+                return emit_tail_gap(
+                    topic,
+                    session_id,
+                    join_ref.clone(),
+                    state,
+                    outbound_tx,
+                    cursor,
+                )
+                .await;
+            }
+            Err(ReadEventsError::App(error)) => return Err(error),
+        };
 
         if page.events.is_empty() {
             return Ok(cursor);
@@ -378,6 +397,33 @@ async fn replay_tail(
             result.map_err(|_| AppError::Internal)?;
         }
     }
+}
+
+async fn emit_tail_gap(
+    topic: &str,
+    session_id: &str,
+    join_ref: Option<String>,
+    state: &AppState,
+    outbound_tx: &mpsc::UnboundedSender<PhoenixFrame>,
+    from_cursor: Cursor,
+) -> Result<Cursor, AppError> {
+    let snapshot = resolve_session_cursor_snapshot(state, session_id).await?;
+    let earliest_available_seq = earliest_available_seq(snapshot);
+    let gap = build_gap(
+        super::socket_cursor::GapReason::CursorExpired,
+        from_cursor,
+        snapshot,
+        earliest_available_seq,
+    );
+    outbound_tx
+        .send(push_frame(
+            join_ref,
+            topic.to_string(),
+            "gap",
+            build_gap_payload(&gap),
+        ))
+        .map_err(|_| AppError::Internal)?;
+    Ok(gap.next_cursor)
 }
 
 async fn resolve_session_cursor_snapshot(

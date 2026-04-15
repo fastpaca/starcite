@@ -8,12 +8,18 @@ use crate::{
     model::{EventResponse, EventsOptions, EventsPage},
 };
 
+#[derive(Debug)]
+pub enum ReadEventsError {
+    ContinuityUnavailable,
+    App(AppError),
+}
+
 pub async fn read_events(
     hot_store: &HotEventStore,
     pool: &PgPool,
     session_id: &str,
     opts: EventsOptions,
-) -> Result<EventsPage, AppError> {
+) -> Result<EventsPage, ReadEventsError> {
     let hot_events = hot_store
         .events_after_cursor(session_id, opts.cursor, opts.limit)
         .await;
@@ -34,11 +40,12 @@ async fn maybe_read_cold_events(
     session_id: &str,
     opts: &EventsOptions,
     hot_events: &[EventResponse],
-) -> Result<Vec<EventResponse>, AppError> {
+) -> Result<Vec<EventResponse>, ReadEventsError> {
     if hot_events.is_empty() {
-        return Ok(repository::read_events(pool, session_id, opts.clone())
-            .await?
-            .events);
+        return repository::read_events(pool, session_id, opts.clone())
+            .await
+            .map(|page| page.events)
+            .map_err(map_cold_read_error);
     }
 
     if hot_events
@@ -50,7 +57,7 @@ async fn maybe_read_cold_events(
 
     let cold_limit = cold_limit(hot_store, session_id, opts, hot_events).await;
 
-    Ok(repository::read_events(
+    repository::read_events(
         pool,
         session_id,
         EventsOptions {
@@ -58,8 +65,9 @@ async fn maybe_read_cold_events(
             limit: cold_limit,
         },
     )
-    .await?
-    .events)
+    .await
+    .map(|page| page.events)
+    .map_err(map_cold_read_error)
 }
 
 async fn cold_limit(
@@ -90,7 +98,7 @@ fn merge_events(
     hot_events: Vec<EventResponse>,
     cursor: i64,
     limit: u32,
-) -> Result<Vec<EventResponse>, AppError> {
+) -> Result<Vec<EventResponse>, ReadEventsError> {
     let mut merged = BTreeMap::new();
 
     for event in cold_events.into_iter().chain(hot_events) {
@@ -106,19 +114,19 @@ fn merge_events(
     Ok(events)
 }
 
-fn ensure_gap_free(cursor: i64, events: &[EventResponse]) -> Result<(), AppError> {
+fn ensure_gap_free(cursor: i64, events: &[EventResponse]) -> Result<(), ReadEventsError> {
     let Some(first) = events.first() else {
         return Ok(());
     };
 
     if first.seq != cursor + 1 {
-        return Err(AppError::Internal);
+        return Err(ReadEventsError::ContinuityUnavailable);
     }
 
     let mut previous = first.seq;
     for event in events.iter().skip(1) {
         if event.seq != previous + 1 {
-            return Err(AppError::Internal);
+            return Err(ReadEventsError::ContinuityUnavailable);
         }
 
         previous = event.seq;
@@ -127,10 +135,17 @@ fn ensure_gap_free(cursor: i64, events: &[EventResponse]) -> Result<(), AppError
     Ok(())
 }
 
+fn map_cold_read_error(error: AppError) -> ReadEventsError {
+    match error {
+        AppError::Sqlx(_) | AppError::DatabaseUnavailable => ReadEventsError::ContinuityUnavailable,
+        error => ReadEventsError::App(error),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ensure_gap_free, merge_events};
-    use crate::model::EventResponse;
+    use super::{ReadEventsError, ensure_gap_free, map_cold_read_error, merge_events};
+    use crate::{error::AppError, model::EventResponse};
     use serde_json::Map;
 
     fn event(session_id: &str, seq: i64) -> EventResponse {
@@ -177,13 +192,25 @@ mod tests {
     #[test]
     fn gap_free_check_rejects_missing_first_event() {
         let error = ensure_gap_free(4, &[event("ses_demo", 6)]).expect_err("missing first event");
-        assert_eq!(error.error_code(), "internal_error");
+        assert!(matches!(error, ReadEventsError::ContinuityUnavailable));
     }
 
     #[test]
     fn gap_free_check_rejects_internal_hole() {
         let error = ensure_gap_free(0, &[event("ses_demo", 1), event("ses_demo", 3)])
             .expect_err("internal hole");
-        assert_eq!(error.error_code(), "internal_error");
+        assert!(matches!(error, ReadEventsError::ContinuityUnavailable));
+    }
+
+    #[test]
+    fn cold_read_sqlx_error_maps_to_continuity_unavailable() {
+        let error = map_cold_read_error(AppError::DatabaseUnavailable);
+        assert!(matches!(error, ReadEventsError::ContinuityUnavailable));
+    }
+
+    #[test]
+    fn cold_read_internal_error_is_preserved() {
+        let error = map_cold_read_error(AppError::Internal);
+        assert!(matches!(error, ReadEventsError::App(AppError::Internal)));
     }
 }
