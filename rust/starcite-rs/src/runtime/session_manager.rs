@@ -23,7 +23,7 @@ use crate::{
         repository::{self, AppendOutcome, ProducerSequenceCheck},
     },
     error::AppError,
-    model::{AppendReply, EventResponse, ValidatedAppendEvent, iso8601},
+    model::{AppendReply, Cursor, EventResponse, ValidatedAppendEvent, iso8601},
 };
 
 use super::{fanout::SessionFanout, ops::OpsState};
@@ -369,6 +369,7 @@ impl SessionManager {
                         state.remember_producer_seq(&producer_id, current);
                         Ok(deduped_append_outcome(
                             &existing,
+                            lease.epoch,
                             last_seq,
                             committed_seq,
                             tenant_id,
@@ -423,8 +424,9 @@ impl SessionManager {
                 seq: next_seq,
                 last_seq: next_seq,
                 deduped: false,
-                cursor: next_seq,
-                committed_cursor: committed_seq,
+                epoch: Some(lease.epoch),
+                cursor: Cursor::new(Some(lease.epoch), next_seq),
+                committed_cursor: Cursor::new(Some(lease.epoch), committed_seq),
             },
             event: Some(event),
             tenant_id: tenant_id.to_string(),
@@ -578,6 +580,7 @@ fn matches_local_event(
 
 fn deduped_append_outcome(
     existing: &EventResponse,
+    epoch: i64,
     last_seq: i64,
     committed_seq: i64,
     tenant_id: &str,
@@ -587,8 +590,9 @@ fn deduped_append_outcome(
             seq: existing.seq,
             last_seq,
             deduped: true,
-            cursor: existing.cursor,
-            committed_cursor: committed_seq,
+            epoch: Some(epoch),
+            cursor: Cursor::new(Some(epoch), existing.cursor),
+            committed_cursor: Cursor::new(Some(epoch), committed_seq),
         },
         event: None,
         tenant_id: tenant_id.to_string(),

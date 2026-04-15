@@ -8,6 +8,7 @@ pub(crate) mod phoenix_context;
 pub(crate) mod phoenix_protocol;
 pub(crate) mod phoenix_socket;
 pub(crate) mod phoenix_topics;
+pub(crate) mod public_payload;
 pub(crate) mod query_options;
 pub(crate) mod raw_socket;
 pub(crate) mod request_metrics;

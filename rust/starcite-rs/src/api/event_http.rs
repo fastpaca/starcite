@@ -63,7 +63,11 @@ pub async fn append_event(
                 )
                 .await;
 
-                Ok((StatusCode::CREATED, Json(outcome.reply)).into_response())
+                Ok((
+                    StatusCode::CREATED,
+                    Json(api::public_payload::append_reply(&outcome.reply)),
+                )
+                    .into_response())
             }
             Err(AppError::SessionNotOwned {
                 owner_public_url: Some(owner_public_url),

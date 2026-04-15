@@ -2,7 +2,10 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, close_code};
 use serde::Serialize;
 
 use crate::{
-    api::socket_cursor::{ReplayGap, public_gap_reason},
+    api::{
+        public_payload::{self, PublicGapPayload},
+        socket_cursor::ReplayGap,
+    },
     model::{EventResponse, LifecycleResponse},
     runtime::{OpsSnapshot, OpsState},
 };
@@ -30,28 +33,6 @@ struct NodeDrainingFrame {
     retry_after_ms: Option<u64>,
 }
 
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-pub(crate) struct TailGapFrame {
-    #[serde(rename = "type")]
-    frame_type: &'static str,
-    reason: &'static str,
-    from_cursor: i64,
-    next_cursor: i64,
-    committed_cursor: i64,
-    earliest_available_cursor: i64,
-}
-
-pub(crate) fn build_gap_frame(gap: &ReplayGap) -> TailGapFrame {
-    TailGapFrame {
-        frame_type: "gap",
-        reason: public_gap_reason(gap.reason),
-        from_cursor: gap.from_cursor.seq,
-        next_cursor: gap.next_cursor.seq,
-        committed_cursor: gap.committed_cursor.seq,
-        earliest_available_cursor: gap.earliest_available_cursor.seq,
-    }
-}
-
 pub(crate) async fn send_events(
     socket: &mut WebSocket,
     events: &[EventResponse],
@@ -77,7 +58,11 @@ pub(crate) async fn send_lifecycle(
         .map_err(|_| ())
 }
 
-pub(crate) async fn send_gap(socket: &mut WebSocket, gap: &TailGapFrame) -> Result<(), ()> {
+pub(crate) fn build_gap_frame(gap: &ReplayGap) -> PublicGapPayload {
+    public_payload::gap(gap)
+}
+
+pub(crate) async fn send_gap(socket: &mut WebSocket, gap: &PublicGapPayload) -> Result<(), ()> {
     let message = serde_json::to_string(gap).map_err(|_| ())?;
     socket
         .send(Message::Text(message.into()))

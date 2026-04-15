@@ -433,13 +433,14 @@ pub struct LifecyclePage {
     pub next_cursor: Option<i64>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AppendReply {
     pub seq: i64,
     pub last_seq: i64,
     pub deduped: bool,
-    pub cursor: i64,
-    pub committed_cursor: i64,
+    pub epoch: Option<i64>,
+    pub cursor: Cursor,
+    pub committed_cursor: Cursor,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

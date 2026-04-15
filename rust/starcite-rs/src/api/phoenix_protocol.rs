@@ -3,7 +3,10 @@ use super::query_options::TailOptions;
 use serde_json::{Value, json};
 
 use crate::{
-    api::socket_cursor::{ReplayGap, parse_json_cursor, public_gap_reason},
+    api::{
+        public_payload,
+        socket_cursor::{ReplayGap, parse_json_cursor},
+    },
     config::MAX_LIST_LIMIT,
     error::AppError,
     model::{Cursor, LifecycleResponse},
@@ -130,14 +133,7 @@ pub(crate) fn lifecycle_payload(event: &LifecycleResponse) -> Result<Value, AppE
 }
 
 pub(crate) fn build_gap_payload(gap: &ReplayGap) -> Value {
-    json!({
-        "type": "gap",
-        "reason": public_gap_reason(gap.reason),
-        "from_cursor": gap.from_cursor.seq,
-        "next_cursor": gap.next_cursor.seq,
-        "committed_cursor": gap.committed_cursor.seq,
-        "earliest_available_cursor": gap.earliest_available_cursor.seq
-    })
+    public_payload::gap_value(gap).expect("public gap payload should serialize")
 }
 
 fn parse_lifecycle_cursor(payload: &Value) -> Result<Cursor, AppError> {
