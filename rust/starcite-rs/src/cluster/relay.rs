@@ -1,9 +1,8 @@
 use std::{sync::Arc, time::Duration};
 
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, postgres::PgListener};
-use tokio::{sync::mpsc, time::sleep};
+use tokio::time::sleep;
 
 use crate::{
     data_plane,
@@ -15,8 +14,6 @@ use crate::{
 pub const EVENT_NOTIFICATION_CHANNEL: &str = "starcite_event_fanout";
 pub const LIFECYCLE_NOTIFICATION_CHANNEL: &str = "starcite_lifecycle_fanout";
 pub const ARCHIVE_NOTIFICATION_CHANNEL: &str = "starcite_archive_progress";
-const DIRECT_EVENT_RELAY_PATH: &str = "/internal/fanout/event";
-const DIRECT_EVENT_RELAY_QUEUE_CAPACITY: usize = 4_096;
 
 #[derive(Clone)]
 struct ListenerState {
@@ -25,18 +22,6 @@ struct ListenerState {
     lifecycle: LifecycleFanout,
     hot_store: HotEventStore,
     session_store: HotSessionStore,
-    instance_id: Arc<str>,
-}
-
-#[derive(Debug, Clone)]
-pub struct DirectEventRelay {
-    sender: Option<mpsc::Sender<EventResponse>>,
-}
-
-#[derive(Clone)]
-struct DirectEventRelayState {
-    pool: PgPool,
-    client: Client,
     instance_id: Arc<str>,
 }
 
@@ -61,84 +46,12 @@ pub struct ArchiveNotification {
     pub archived_seq: i64,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DirectEventRelayRequest {
-    pub emitter_id: String,
-    pub event: EventResponse,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct DirectEventRelayAck {
-    pub status: String,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EventRelayDisposition {
+enum EventRelayDisposition {
     Applied,
     Duplicate,
     Archived,
     Gap { expected_seq: i64 },
-}
-
-impl DirectEventRelay {
-    pub fn new(
-        pool: PgPool,
-        instance_id: Arc<str>,
-        enabled: bool,
-        timeout: Duration,
-    ) -> Result<Self, String> {
-        if !enabled {
-            return Ok(Self::disabled());
-        }
-
-        let client = Client::builder()
-            .pool_max_idle_per_host(8)
-            .timeout(timeout)
-            .build()
-            .map_err(|error| format!("failed to build direct event relay client: {error}"))?;
-        let (sender, receiver) = mpsc::channel(DIRECT_EVENT_RELAY_QUEUE_CAPACITY);
-        let state = DirectEventRelayState {
-            pool,
-            client,
-            instance_id,
-        };
-
-        tokio::spawn(async move {
-            run_direct_event_relay(state, receiver).await;
-        });
-
-        Ok(Self {
-            sender: Some(sender),
-        })
-    }
-
-    pub fn disabled() -> Self {
-        Self { sender: None }
-    }
-
-    pub fn enqueue(&self, event: EventResponse) {
-        let Some(sender) = &self.sender else {
-            return;
-        };
-
-        match sender.try_send(event) {
-            Ok(()) => {}
-            Err(mpsc::error::TrySendError::Full(event)) => {
-                tracing::warn!(
-                    session_id = event.session_id,
-                    seq = event.seq,
-                    "dropping direct event relay because queue is full"
-                );
-            }
-            Err(mpsc::error::TrySendError::Closed(event)) => {
-                tracing::warn!(
-                    session_id = event.session_id,
-                    seq = event.seq,
-                    "dropping direct event relay because worker is closed"
-                );
-            }
-        }
-    }
 }
 
 pub fn spawn(
@@ -338,7 +251,7 @@ async fn handle_notification(state: &ListenerState, channel: &str, payload: &str
     }
 }
 
-pub async fn apply_relayed_event(
+async fn apply_relayed_event(
     hot_store: &HotEventStore,
     session_store: &HotSessionStore,
     fanout: &SessionFanout,
@@ -403,78 +316,6 @@ where
     }
 
     Ok(())
-}
-
-async fn run_direct_event_relay(
-    state: DirectEventRelayState,
-    mut receiver: mpsc::Receiver<EventResponse>,
-) {
-    while let Some(event) = receiver.recv().await {
-        state.broadcast_event(event).await;
-    }
-}
-
-impl DirectEventRelayState {
-    async fn broadcast_event(&self, event: EventResponse) {
-        let peers = match data_plane::repository::load_live_control_peers(
-            &self.pool,
-            self.instance_id.as_ref(),
-        )
-        .await
-        {
-            Ok(peers) => peers,
-            Err(error) => {
-                tracing::warn!(
-                    error = ?error,
-                    session_id = event.session_id,
-                    seq = event.seq,
-                    "failed to load direct event relay peers"
-                );
-                return;
-            }
-        };
-
-        if peers.is_empty() {
-            return;
-        }
-
-        let request = DirectEventRelayRequest {
-            emitter_id: self.instance_id.to_string(),
-            event,
-        };
-
-        for peer in peers {
-            let url = format!(
-                "{}{}",
-                peer.ops_url.trim_end_matches('/'),
-                DIRECT_EVENT_RELAY_PATH
-            );
-
-            match self.client.post(&url).json(&request).send().await {
-                Ok(response) if response.status().is_success() => {}
-                Ok(response) => {
-                    tracing::warn!(
-                        peer = peer.node_id,
-                        url,
-                        status = %response.status(),
-                        session_id = request.event.session_id,
-                        seq = request.event.seq,
-                        "direct event relay request failed"
-                    );
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        error = ?error,
-                        peer = peer.node_id,
-                        url,
-                        session_id = request.event.session_id,
-                        seq = request.event.seq,
-                        "direct event relay transport failed"
-                    );
-                }
-            }
-        }
-    }
 }
 
 #[cfg(test)]

@@ -34,12 +34,6 @@ pub struct ControlNodeRow {
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
-pub struct LiveControlPeer {
-    pub node_id: String,
-    pub ops_url: String,
-}
-
-#[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SessionLeaseTakeoverHint {
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
@@ -1009,27 +1003,6 @@ pub async fn load_control_node(
     )
     .bind(node_id)
     .fetch_optional(pool)
-    .await?)
-}
-
-pub async fn load_live_control_peers(
-    pool: &PgPool,
-    exclude_node_id: &str,
-) -> Result<Vec<LiveControlPeer>, AppError> {
-    Ok(sqlx::query_as::<_, LiveControlPeer>(
-        r#"
-        SELECT
-          node_id,
-          ops_url
-        FROM control_nodes
-        WHERE draining = FALSE
-          AND expires_at > now()
-          AND node_id <> $1
-        ORDER BY node_id ASC
-        "#,
-    )
-    .bind(exclude_node_id)
-    .fetch_all(pool)
     .await?)
 }
 

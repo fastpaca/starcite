@@ -487,10 +487,7 @@ mod tests {
             query_options::TailOptions,
         },
         auth::{AuthContext, AuthService},
-        cluster::{
-            ControlPlaneState, DirectEventRelay, OwnerProxy, OwnershipManager,
-            ReplicationCoordinator,
-        },
+        cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
         config::{AuthMode, Config},
         data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
         model::{Cursor, Principal, SessionResponse},
@@ -521,7 +518,6 @@ mod tests {
         let replication =
             ReplicationCoordinator::new(instance_id.clone(), false, Duration::from_millis(100))
                 .expect("replication");
-        let direct_event_relay = DirectEventRelay::disabled();
         let session_manager = SessionManager::new(SessionManagerDeps {
             pool: pool.clone(),
             fanout: fanout.clone(),
@@ -530,7 +526,6 @@ mod tests {
             session_store: session_store.clone(),
             ownership: ownership.clone(),
             replication: replication.clone(),
-            direct_relay: direct_event_relay.clone(),
             ops: ops.clone(),
             telemetry: telemetry.clone(),
             idle_timeout: Duration::from_secs(30),
@@ -557,7 +552,6 @@ mod tests {
             control_plane,
             owner_proxy,
             replication,
-            direct_event_relay,
             runtime,
             ops,
             auth_mode: AuthMode::None,
