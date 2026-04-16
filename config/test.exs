@@ -24,6 +24,5 @@ config :starcite,
   routing_replication_factor: 1,
   cluster_node_ids: [:nonode@nohost],
   telemetry_enabled: true,
-  archive_legacy_s3_opts: [],
   archive_name: Starcite.Runtime.Archive,
   archive_flush_interval_ms: 3_600_000

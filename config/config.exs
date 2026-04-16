@@ -18,7 +18,6 @@ config :starcite,
   archive_flush_interval_ms: 5_000,
   archive_db_write_batch_size: 1_000,
   archive_db_read_batch_size: 1_000,
-  archive_legacy_s3_opts: [],
   archive_name: Starcite.Archive,
   event_store_cache_chunk_size: 256,
   event_store_max_bytes: 2_147_483_648,
@@ -60,12 +59,6 @@ config :logger, :default_formatter,
 # Use Jason for JSON parsing in Phoenix
 config :phoenix, :json_library, Jason
 config :phoenix, :filter_parameters, ["password", "access_token"]
-
-config :ex_aws,
-  http_client: ExAws.Request.Req,
-  json_codec: Jason
-
-config :ex_aws, :req_opts, receive_timeout: 30_000
 
 config :libcluster, topologies: []
 

@@ -7,6 +7,12 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+### Removed
+
+- Dropped the legacy S3 archive bridge, including runtime config, archive
+  fallback/backfill logic, and migration-only archive tasks. Archived events
+  are now Postgres-only in all supported release shapes.
+
 ## [0.0.4] - 2026-04-15
 
 ### Breaking
