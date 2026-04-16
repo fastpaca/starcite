@@ -84,7 +84,11 @@ pub async fn ready(State(state): State<AppState>) -> impl IntoResponse {
 
     match state
         .control_plane
-        .readiness(&state.pool, state.instance_id.as_ref())
+        .readiness(
+            &state.pool,
+            state.instance_id.as_ref(),
+            state.replication.minimum_live_nodes_for_quorum(),
+        )
         .await
     {
         Ok(readiness) => ready_response(&ops, readiness.reason, readiness.detail).into_response(),
@@ -269,7 +273,7 @@ fn ready_response(
     (
         status,
         Json(ReadyResponse {
-            status: if reason.is_some() { "starting" } else { "ok" },
+            status: readiness_status(reason),
             mode: ops.mode,
             reason,
             detail,
@@ -277,6 +281,14 @@ fn ready_response(
             retry_after_ms: ops.retry_after_ms,
         }),
     )
+}
+
+fn readiness_status(reason: Option<&'static str>) -> &'static str {
+    match reason {
+        None => "ok",
+        Some("routing_sync") => "starting",
+        Some(_) => "unavailable",
+    }
 }
 
 fn contiguous_hot_tail(
@@ -352,7 +364,7 @@ mod tests {
     use axum::{Json, http::StatusCode};
     use sqlx::postgres::PgPoolOptions;
 
-    use super::{ready_response, reject_stale_replica_epoch};
+    use super::{readiness_status, ready_response, reject_stale_replica_epoch};
     use crate::{
         AppState,
         auth::AuthService,
@@ -489,12 +501,20 @@ mod tests {
         );
 
         assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-        assert_eq!(body.status, "starting");
+        assert_eq!(body.status, "unavailable");
         assert_eq!(body.mode, "draining");
         assert_eq!(body.reason, Some("draining"));
         assert_eq!(body.detail, Some(ControlPlaneReadinessDetail::draining()));
         assert_eq!(body.drain_source, Some("shutdown"));
         assert!(body.retry_after_ms.is_some());
+    }
+
+    #[test]
+    fn readiness_status_only_reports_starting_for_routing_sync() {
+        assert_eq!(readiness_status(None), "ok");
+        assert_eq!(readiness_status(Some("routing_sync")), "starting");
+        assert_eq!(readiness_status(Some("write_quorum")), "unavailable");
+        assert_eq!(readiness_status(Some("draining")), "unavailable");
     }
 
     #[tokio::test]

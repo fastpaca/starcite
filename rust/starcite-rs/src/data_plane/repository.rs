@@ -1006,6 +1006,21 @@ pub async fn load_control_node(
     .await?)
 }
 
+pub async fn count_live_control_nodes(pool: &PgPool) -> Result<u32, AppError> {
+    let count = sqlx::query_scalar::<_, i64>(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM control_nodes
+        WHERE draining = FALSE
+          AND expires_at > now()
+        "#,
+    )
+    .fetch_one(pool)
+    .await?;
+
+    Ok(count.clamp(0, i64::from(u32::MAX)) as u32)
+}
+
 pub async fn load_producer_cursor(
     pool: &PgPool,
     session_id: &str,

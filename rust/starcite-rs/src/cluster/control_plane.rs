@@ -36,6 +36,10 @@ pub struct ControlPlaneReadinessDetail {
     pub status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub lease_until_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live_nodes: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required_nodes: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -165,6 +169,7 @@ impl ControlPlaneState {
         &self,
         pool: &PgPool,
         instance_id: &str,
+        required_live_nodes: u32,
     ) -> Result<ControlPlaneReadiness, crate::error::AppError> {
         match local_readiness_gate(
             &self.heartbeat.read().expect("control plane heartbeat lock"),
@@ -180,18 +185,20 @@ impl ControlPlaneState {
             }
         }
 
-        Ok(
-            match repository::load_control_node(pool, instance_id).await? {
-                Some(node) => evaluate_control_node(node.expires_at, node.draining),
-                None => ControlPlaneReadiness::not_ready(
-                    "routing_sync",
-                    Some(ControlPlaneReadinessDetail {
-                        status: Some("unknown"),
-                        lease_until_ms: None,
-                    }),
-                ),
-            },
-        )
+        let routing_readiness = match repository::load_control_node(pool, instance_id).await? {
+            Some(node) => evaluate_control_node(node.expires_at, node.draining),
+            None => ControlPlaneReadiness::not_ready(
+                "routing_sync",
+                Some(ControlPlaneReadinessDetail::unknown()),
+            ),
+        };
+
+        if routing_readiness.reason.is_some() || required_live_nodes <= 1 {
+            return Ok(routing_readiness);
+        }
+
+        let live_nodes = repository::count_live_control_nodes(pool).await?;
+        Ok(evaluate_write_quorum(live_nodes, required_live_nodes))
     }
 }
 
@@ -216,6 +223,8 @@ impl ControlPlaneReadinessDetail {
         Self {
             status: Some("draining"),
             lease_until_ms: None,
+            live_nodes: None,
+            required_nodes: None,
         }
     }
 
@@ -223,6 +232,17 @@ impl ControlPlaneReadinessDetail {
         Self {
             status: Some("unknown"),
             lease_until_ms: None,
+            live_nodes: None,
+            required_nodes: None,
+        }
+    }
+
+    pub fn write_quorum(live_nodes: u32, required_nodes: u32) -> Self {
+        Self {
+            status: Some("write_quorum"),
+            lease_until_ms: None,
+            live_nodes: Some(live_nodes),
+            required_nodes: Some(required_nodes),
         }
     }
 }
@@ -296,7 +316,23 @@ fn evaluate_control_node(expires_at: DateTime<Utc>, draining: bool) -> ControlPl
             Some(ControlPlaneReadinessDetail {
                 status: Some("ready"),
                 lease_until_ms: Some(lease_until_ms),
+                live_nodes: None,
+                required_nodes: None,
             }),
+        )
+    } else {
+        ControlPlaneReadiness::ready()
+    }
+}
+
+fn evaluate_write_quorum(live_nodes: u32, required_nodes: u32) -> ControlPlaneReadiness {
+    if live_nodes < required_nodes {
+        ControlPlaneReadiness::not_ready(
+            "write_quorum",
+            Some(ControlPlaneReadinessDetail::write_quorum(
+                live_nodes,
+                required_nodes,
+            )),
         )
     } else {
         ControlPlaneReadiness::ready()
@@ -316,8 +352,8 @@ mod tests {
 
     use super::{
         ControlPlaneHealth, ControlPlaneReadiness, ControlPlaneReadinessDetail, ControlPlaneState,
-        bootstrap_interval, evaluate_control_node, heartbeat_snapshot, local_readiness_gate,
-        refresh_interval, routing_sync_detail,
+        bootstrap_interval, evaluate_control_node, evaluate_write_quorum, heartbeat_snapshot,
+        local_readiness_gate, refresh_interval, routing_sync_detail,
     };
     use chrono::Utc;
     use std::time::{Duration, Instant};
@@ -402,6 +438,8 @@ mod tests {
                 Some(ControlPlaneReadinessDetail {
                     status: Some("ready"),
                     lease_until_ms: Some(expires_at.timestamp_millis()),
+                    live_nodes: None,
+                    required_nodes: None,
                 })
             )
         );
@@ -422,5 +460,17 @@ mod tests {
             Some(ControlPlaneReadinessDetail::unknown())
         );
         assert_eq!(routing_sync_detail("draining"), None);
+    }
+
+    #[test]
+    fn write_quorum_readiness_requires_enough_live_nodes() {
+        assert_eq!(
+            evaluate_write_quorum(1, 2),
+            ControlPlaneReadiness::not_ready(
+                "write_quorum",
+                Some(ControlPlaneReadinessDetail::write_quorum(1, 2))
+            )
+        );
+        assert_eq!(evaluate_write_quorum(2, 2), ControlPlaneReadiness::ready());
     }
 }

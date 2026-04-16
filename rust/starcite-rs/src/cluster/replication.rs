@@ -221,6 +221,10 @@ impl ReplicationCoordinator {
         }
     }
 
+    pub fn minimum_live_nodes_for_quorum(&self) -> u32 {
+        if self.require_peer_replication { 2 } else { 1 }
+    }
+
     fn control_peers(
         &self,
         assigned_replicas: &[ReplicationPeer],
