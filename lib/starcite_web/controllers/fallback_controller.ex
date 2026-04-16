@@ -12,6 +12,28 @@ defmodule StarciteWeb.FallbackController do
     error(conn, :conflict, "session_exists", "Session already exists")
   end
 
+  def call(conn, {:error, :projection_item_not_found}) do
+    error(conn, :not_found, "projection_item_not_found", "Projection item was not found")
+  end
+
+  def call(conn, {:error, :projection_item_version_not_found}) do
+    error(
+      conn,
+      :not_found,
+      "projection_item_version_not_found",
+      "Projection item version was not found"
+    )
+  end
+
+  def call(conn, {:error, reason})
+      when reason in [
+             :projection_item_duplicate,
+             :projection_item_overlap,
+             :projection_item_exists
+           ] do
+    error(conn, :conflict, to_string(reason), projection_reason_message(reason))
+  end
+
   def call(conn, {:error, {:expected_version_conflict, expected, current}})
       when is_integer(expected) and is_integer(current) do
     error(
@@ -152,6 +174,7 @@ defmodule StarciteWeb.FallbackController do
              :invalid_event,
              :invalid_metadata,
              :invalid_refs,
+             :invalid_projection_item,
              :invalid_cursor,
              :invalid_tail_batch_size,
              :invalid_limit,
@@ -172,6 +195,7 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_event), do: "Invalid event payload"
   defp reason_message(:invalid_metadata), do: "Invalid metadata payload"
   defp reason_message(:invalid_refs), do: "Invalid refs payload"
+  defp reason_message(:invalid_projection_item), do: "Invalid projection item payload"
   defp reason_message(:invalid_cursor), do: "Invalid cursor value"
   defp reason_message(:invalid_tail_batch_size), do: "Invalid tail batch size value"
   defp reason_message(:invalid_limit), do: "Invalid limit value"
@@ -181,6 +205,15 @@ defmodule StarciteWeb.FallbackController do
   defp reason_message(:invalid_websocket_upgrade), do: "WebSocket upgrade required"
   defp reason_message(:invalid_session), do: "Invalid session payload"
   defp reason_message(:invalid_session_id), do: "Invalid session id"
+
+  defp projection_reason_message(:projection_item_duplicate),
+    do: "Projection batch contains duplicate item ids"
+
+  defp projection_reason_message(:projection_item_overlap),
+    do: "Projection item intervals overlap"
+
+  defp projection_reason_message(:projection_item_exists),
+    do: "Projection item version already exists"
 
   defp error(conn, status, error, message, extra \\ %{}) when is_map(extra) do
     conn

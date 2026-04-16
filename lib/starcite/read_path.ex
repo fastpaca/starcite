@@ -7,6 +7,7 @@ defmodule Starcite.ReadPath do
   alias Starcite.Cursor
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Session
+  alias Starcite.Session.Projections
   alias Starcite.Session.View
 
   @default_tail_batch_size 1_000
@@ -20,10 +21,16 @@ defmodule Starcite.ReadPath do
 
   def get_session(_id), do: {:error, :invalid_session_id}
 
+  @spec get_session_routed(String.t()) ::
+          {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
+  def get_session_routed(id) when is_binary(id) and id != "" do
+    get_session_routed(id, true)
+  end
+
+  def get_session_routed(_id), do: {:error, :invalid_session_id}
+
   @spec get_session_routed(String.t(), boolean()) ::
           {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
-  def get_session_routed(id, prefer_leader \\ true)
-
   def get_session_routed(id, prefer_leader)
       when is_binary(id) and id != "" and is_boolean(prefer_leader) do
     SessionRouter.call(
@@ -40,6 +47,82 @@ defmodule Starcite.ReadPath do
   end
 
   def get_session_routed(_id, _prefer_leader), do: {:error, :invalid_session_id}
+
+  @doc false
+  @spec get_session_replica(String.t()) ::
+          {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
+  def get_session_replica(id) when is_binary(id) and id != "" do
+    get_session_routed(id, false)
+  end
+
+  def get_session_replica(_id), do: {:error, :invalid_session_id}
+
+  @spec latest_projection_items(String.t() | Session.t()) ::
+          {:ok, [Projections.item()]} | {:error, term()}
+  def latest_projection_items(%Session{} = session),
+    do: {:ok, Session.latest_projection_items(session)}
+
+  def latest_projection_items(id) when is_binary(id) and id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      latest_projection_items(session)
+    end
+  end
+
+  def latest_projection_items(_id), do: {:error, :invalid_session_id}
+
+  @spec get_projection_item(String.t() | Session.t(), String.t()) ::
+          {:ok, Projections.item()} | {:error, term()}
+  def get_projection_item(%Session{projections: %Projections{} = projections}, item_id)
+      when is_binary(item_id) and item_id != "" do
+    Projections.get_item(projections, item_id)
+  end
+
+  def get_projection_item(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      get_projection_item(session, item_id)
+    end
+  end
+
+  def get_projection_item(_id, _item_id), do: {:error, :invalid_projection_item}
+
+  @spec list_projection_item_versions(String.t() | Session.t(), String.t()) ::
+          {:ok, [Projections.item()]} | {:error, term()}
+  def list_projection_item_versions(%Session{projections: %Projections{} = projections}, item_id)
+      when is_binary(item_id) and item_id != "" do
+    Projections.item_versions(projections, item_id)
+  end
+
+  def list_projection_item_versions(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      list_projection_item_versions(session, item_id)
+    end
+  end
+
+  def list_projection_item_versions(_id, _item_id), do: {:error, :invalid_projection_item}
+
+  @spec get_projection_item_version(String.t() | Session.t(), String.t(), pos_integer()) ::
+          {:ok, Projections.item()} | {:error, term()}
+  def get_projection_item_version(
+        %Session{projections: %Projections{} = projections},
+        item_id,
+        version
+      )
+      when is_binary(item_id) and item_id != "" and is_integer(version) and version > 0 do
+    Projections.get_item_version(projections, item_id, version)
+  end
+
+  def get_projection_item_version(id, item_id, version)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" and
+             is_integer(version) and version > 0 do
+    with {:ok, session} <- get_session_routed(id, true) do
+      get_projection_item_version(session, item_id, version)
+    end
+  end
+
+  def get_projection_item_version(_id, _item_id, _version),
+    do: {:error, :invalid_projection_item}
 
   @type gap_reason :: :cursor_expired | :epoch_stale | :rollback
   @type replay_view :: :raw | :composed
@@ -114,6 +197,17 @@ defmodule Starcite.ReadPath do
   end
 
   def get_events_from_cursor(_id, _cursor, _limit, _prefer_leader), do: {:error, :invalid_cursor}
+
+  @doc false
+  @spec get_events_from_cursor_replica(String.t(), non_neg_integer(), pos_integer()) ::
+          {:ok, [map()]} | {:error, term()}
+  def get_events_from_cursor_replica(id, cursor, limit)
+      when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
+             limit > 0 do
+    get_events_from_cursor(id, cursor, limit, false)
+  end
+
+  def get_events_from_cursor_replica(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
   @doc false
   def rpc_get_session(id) when is_binary(id) and id != "" do

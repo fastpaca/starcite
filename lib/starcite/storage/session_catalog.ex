@@ -219,6 +219,8 @@ defmodule Starcite.Storage.SessionCatalog do
     end
   end
 
+  def get_archive_context(_session_id), do: {:error, :invalid_session_id}
+
   @spec get_projection_version(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
   def get_projection_version(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, row} <- get_record(session_id),
@@ -231,7 +233,6 @@ defmodule Starcite.Storage.SessionCatalog do
     end
   end
 
-  def get_archive_context(_session_id), do: {:error, :invalid_session_id}
   def get_projection_version(_session_id), do: {:error, :invalid_session_id}
 
   @spec archive_session(String.t()) :: {:ok, archive_update_result()} | {:error, term()}

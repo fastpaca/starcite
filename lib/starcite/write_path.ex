@@ -304,6 +304,19 @@ defmodule Starcite.WritePath do
 
   def put_projection_items(_id, _items), do: {:error, :invalid_projection_item}
 
+  @spec put_projection_item(String.t(), map()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
+  def put_projection_item(id, item)
+      when is_binary(id) and id != "" and is_map(item) do
+    case put_projection_items(id, [item]) do
+      {:ok, [stored_item]} -> {:ok, stored_item}
+      {:error, _reason} = error -> error
+      {:timeout, _reason} = timeout -> timeout
+    end
+  end
+
+  def put_projection_item(_id, _item), do: {:error, :invalid_projection_item}
+
   @doc false
   @spec put_projection_items_local(String.t(), [map()]) ::
           {:ok, [map()]} | {:error, term()} | {:timeout, term()}

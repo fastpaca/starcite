@@ -10,14 +10,16 @@ defmodule StarciteWeb.TailParams do
 
   @type parsed :: %{
           required(:cursor) => map(),
-          required(:frame_batch_size) => pos_integer()
+          required(:frame_batch_size) => pos_integer(),
+          required(:view) => :raw | :composed
         }
 
   @spec parse(map()) :: {:ok, parsed()} | {:error, atom()}
   def parse(params) when is_map(params) do
     with {:ok, cursor} <- parse_cursor(params),
-         {:ok, frame_batch_size} <- parse_frame_batch_size_param(params) do
-      {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}}
+         {:ok, frame_batch_size} <- parse_frame_batch_size_param(params),
+         {:ok, view} <- parse_view_param(params) do
+      {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size, view: view}}
     end
   end
 
@@ -43,4 +45,9 @@ defmodule StarciteWeb.TailParams do
        do: {:ok, batch_size}
 
   defp parse_frame_batch_size(_batch_size), do: {:error, :invalid_tail_batch_size}
+
+  defp parse_view_param(%{"view" => "raw"}), do: {:ok, :raw}
+  defp parse_view_param(%{"view" => "composed"}), do: {:ok, :composed}
+  defp parse_view_param(%{"view" => _other}), do: {:error, :invalid_tail_view}
+  defp parse_view_param(%{}), do: {:ok, :composed}
 end

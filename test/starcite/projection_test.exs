@@ -1,9 +1,9 @@
-defmodule Starcite.ProjectionTest do
+defmodule Starcite.ProjectionsTest do
   use ExUnit.Case, async: false
 
   alias Starcite.DataPlane.SessionStore
   alias Starcite.Storage.SessionCatalog
-  alias Starcite.{Projection, ReadPath, Session, WritePath}
+  alias Starcite.{ReadPath, Session, WritePath}
 
   setup do
     Starcite.Runtime.TestHelper.reset()
@@ -25,7 +25,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _item} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 2,
@@ -52,7 +52,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _item} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-default",
                version: 1,
                from_seq: 2,
@@ -84,7 +84,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_items(session_id, [
+             WritePath.put_projection_items(session_id, [
                %{
                  item_id: "msg-1",
                  version: 1,
@@ -104,7 +104,7 @@ defmodule Starcite.ProjectionTest do
              ])
 
     assert {:ok, _} =
-             Projection.put_items(session_id, [
+             WritePath.put_projection_items(session_id, [
                %{
                  item_id: "msg-1",
                  version: 2,
@@ -123,7 +123,7 @@ defmodule Starcite.ProjectionTest do
                }
              ])
 
-    assert {:ok, items} = Projection.latest_items(session_id)
+    assert {:ok, items} = ReadPath.latest_projection_items(session_id)
 
     assert Enum.map(items, fn item -> {item.item_id, item.version, item.from_seq, item.to_seq} end) ==
              [
@@ -146,7 +146,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 1,
@@ -156,7 +156,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-2",
                version: 1,
                from_seq: 3,
@@ -166,7 +166,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:error, :projection_item_overlap} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 2,
                from_seq: 2,
@@ -190,7 +190,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:error, :projection_item_overlap} =
-             Projection.put_items(session_id, [
+             WritePath.put_projection_items(session_id, [
                %{
                  item_id: "msg-1",
                  version: 1,
@@ -224,7 +224,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, %{version: 1}} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 1,
@@ -234,7 +234,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, %{version: 2}} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 2,
                from_seq: 1,
@@ -244,10 +244,10 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, %{version: 2, from_seq: 1, to_seq: 2}} =
-             Projection.get_item(session_id, "msg-1")
+             ReadPath.get_projection_item(session_id, "msg-1")
 
     assert {:ok, %{version: 1, from_seq: 1, to_seq: 1}} =
-             Projection.get_item_version(session_id, "msg-1", 1)
+             ReadPath.get_projection_item_version(session_id, "msg-1", 1)
   end
 
   test "archived-safe projection writes persist to the session catalog" do
@@ -264,7 +264,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _items} =
-             Projection.put_items(session_id, [
+             WritePath.put_projection_items(session_id, [
                %{
                  item_id: "msg-1",
                  version: 1,
@@ -292,7 +292,8 @@ defmodule Starcite.ProjectionTest do
 
     :ok = SessionStore.clear()
 
-    assert {:ok, [%{item_id: "msg-1"}, %{item_id: "msg-2"}]} = Projection.latest_items(session_id)
+    assert {:ok, [%{item_id: "msg-1"}, %{item_id: "msg-2"}]} =
+             ReadPath.latest_projection_items(session_id)
   end
 
   test "archived-safe projection versions remain readable after session cache eviction" do
@@ -309,7 +310,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 1,
@@ -319,7 +320,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 2,
                from_seq: 1,
@@ -333,12 +334,13 @@ defmodule Starcite.ProjectionTest do
     :ok = SessionStore.clear()
 
     assert {:ok, %{item_id: "msg-1", version: 2, metadata: %{"kind" => "message"}}} =
-             Projection.get_item(session_id, "msg-1")
+             ReadPath.get_projection_item(session_id, "msg-1")
 
-    assert {:ok, [%{version: 1}, %{version: 2}]} = Projection.item_versions(session_id, "msg-1")
+    assert {:ok, [%{version: 1}, %{version: 2}]} =
+             ReadPath.list_projection_item_versions(session_id, "msg-1")
 
     assert {:ok, %{version: 1, payload: %{"text" => "one two"}}} =
-             Projection.get_item_version(session_id, "msg-1", 1)
+             ReadPath.get_projection_item_version(session_id, "msg-1", 1)
   end
 
   test "composed replay prefers latest versions and stitches projected and raw intervals" do
@@ -355,7 +357,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 2,
@@ -365,7 +367,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 2,
                from_seq: 2,
@@ -375,7 +377,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-2",
                version: 1,
                from_seq: 5,
@@ -412,7 +414,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 2,
@@ -442,7 +444,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_items(session_id, [
+             WritePath.put_projection_items(session_id, [
                %{
                  item_id: "msg-1",
                  version: 1,
@@ -461,9 +463,12 @@ defmodule Starcite.ProjectionTest do
                }
              ])
 
-    assert :ok = Projection.delete_item(session_id, "msg-1")
-    assert {:error, :projection_item_not_found} = Projection.get_item(session_id, "msg-1")
-    assert {:ok, [%{item_id: "msg-2"}]} = Projection.latest_items(session_id)
+    assert :ok = WritePath.delete_projection_item(session_id, "msg-1")
+
+    assert {:error, :projection_item_not_found} =
+             ReadPath.get_projection_item(session_id, "msg-1")
+
+    assert {:ok, [%{item_id: "msg-2"}]} = ReadPath.latest_projection_items(session_id)
   end
 
   test "delete_item removes projection state from the session catalog" do
@@ -480,7 +485,7 @@ defmodule Starcite.ProjectionTest do
     end
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 1,
                from_seq: 1,
@@ -490,7 +495,7 @@ defmodule Starcite.ProjectionTest do
              })
 
     assert {:ok, _} =
-             Projection.put_item(session_id, %{
+             WritePath.put_projection_item(session_id, %{
                item_id: "msg-1",
                version: 2,
                from_seq: 1,
@@ -499,19 +504,23 @@ defmodule Starcite.ProjectionTest do
                metadata: %{}
              })
 
-    assert :ok = Projection.delete_item(session_id, "msg-1")
+    assert :ok = WritePath.delete_projection_item(session_id, "msg-1")
 
     assert {:ok, catalog_session} = SessionCatalog.get_session(session_id)
     assert [] = Session.latest_projection_items(catalog_session)
 
     :ok = SessionStore.clear()
 
-    assert {:error, :projection_item_not_found} = Projection.get_item(session_id, "msg-1")
-    assert {:ok, []} = Projection.latest_items(session_id)
-    assert {:error, :projection_item_not_found} = Projection.item_versions(session_id, "msg-1")
+    assert {:error, :projection_item_not_found} =
+             ReadPath.get_projection_item(session_id, "msg-1")
+
+    assert {:ok, []} = ReadPath.latest_projection_items(session_id)
 
     assert {:error, :projection_item_not_found} =
-             Projection.get_item_version(session_id, "msg-1", 1)
+             ReadPath.list_projection_item_versions(session_id, "msg-1")
+
+    assert {:error, :projection_item_not_found} =
+             ReadPath.get_projection_item_version(session_id, "msg-1", 1)
   end
 
   defp unique_id(prefix) do

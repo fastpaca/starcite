@@ -6,7 +6,7 @@ defmodule StarciteWeb.SessionControllerTest do
 
   alias Starcite.AuthTestSupport
   alias Starcite.DataPlane.SessionStore
-  alias Starcite.Projection
+  alias Starcite.ReadPath
   alias Starcite.Repo
   alias Starcite.WritePath
   alias StarciteWeb.Auth.JWKS
@@ -904,7 +904,7 @@ defmodule StarciteWeb.SessionControllerTest do
       assert second_item["from_seq"] == 3
       assert second_item["to_seq"] == 3
 
-      assert {:ok, latest_items} = Projection.latest_items(id)
+      assert {:ok, latest_items} = ReadPath.latest_projection_items(id)
       assert Enum.map(latest_items, & &1.item_id) == ["msg-1", "msg-2"]
     end
 
@@ -924,7 +924,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _item} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1100,7 +1100,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1110,7 +1110,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1120,7 +1120,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-2",
                  version: 1,
                  from_seq: 3,
@@ -1152,7 +1152,7 @@ defmodule StarciteWeb.SessionControllerTest do
         })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1193,7 +1193,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1203,7 +1203,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1239,7 +1239,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1249,7 +1249,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1281,7 +1281,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1291,7 +1291,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1328,7 +1328,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1338,7 +1338,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1374,7 +1374,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1384,7 +1384,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
@@ -1394,7 +1394,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-2",
                  version: 1,
                  from_seq: 3,
@@ -1406,8 +1406,8 @@ defmodule StarciteWeb.SessionControllerTest do
       conn = json_conn(:delete, "/v1/sessions/#{id}/projections/msg-1", nil)
 
       assert conn.status == 204
-      assert {:error, :projection_item_not_found} = Projection.get_item(id, "msg-1")
-      assert {:ok, [%{item_id: "msg-2"}]} = Projection.latest_items(id)
+      assert {:error, :projection_item_not_found} = ReadPath.get_projection_item(id, "msg-1")
+      assert {:ok, [%{item_id: "msg-2"}]} = ReadPath.latest_projection_items(id)
     end
 
     test "deletes all stored versions from the public projection API" do
@@ -1426,7 +1426,7 @@ defmodule StarciteWeb.SessionControllerTest do
       end
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 1,
                  from_seq: 1,
@@ -1436,7 +1436,7 @@ defmodule StarciteWeb.SessionControllerTest do
                })
 
       assert {:ok, _} =
-               Projection.put_item(id, %{
+               WritePath.put_projection_item(id, %{
                  item_id: "msg-1",
                  version: 2,
                  from_seq: 1,
