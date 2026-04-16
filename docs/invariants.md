@@ -5,7 +5,7 @@ plus batched `SessionLog` data plane.
 
 ## Purpose
 - Define the states that must never be violated.
-- Anchor each invariant to the current runtime and test coverage.
+- Anchor each invariant to the current runtime behavior.
 - Make it obvious which guarantees are contractual, which are implementation details,
   and which gaps still need coverage.
 
@@ -19,11 +19,6 @@ plus batched `SessionLog` data plane.
 - `nodedown` is not authoritative for ownership movement.
 - Lease expiry is authoritative for catastrophic failover.
 
-Current coverage:
-- [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
-
 ### Claim placement
 - New claims must only consider nodes that are both:
   - `status == :ready`
@@ -35,9 +30,6 @@ Current coverage:
   sessions are concurrently being failed over.
 - Concurrent create traffic must remain available while lease-expiry failover is
   reassigning old owners.
-
-Current coverage:
-- [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
 
 ### Transfer state
 - `:moving` is a per-session transfer state, not a node state.
@@ -51,10 +43,6 @@ Current coverage:
   - `active_owned_sessions > 0`, or
   - `moving_sessions > 0`
 
-Current coverage:
-- [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
-
 ## Data-Plane Invariants
 
 ### Ownership fencing
@@ -65,34 +53,18 @@ Current coverage:
 - Concurrent append traffic must remain available while lease-expiry failover is
   reassigning an expired owner.
 
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
-- short rolling drain/restart/create/append drill in
-  [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
-
 ### Sequence and ordering
 - `seq` is monotonic within an active `(session_id, epoch)` lineage.
 - Successful appends produce contiguous visible sequence numbers.
 - `expected_seq` requests act as ordering barriers.
 - Producer replay conflicts must not create duplicate visible events.
 
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/session_test.exs)
-- [producer_index_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/session/producer_index_test.exs)
-
 ### Ack visibility contract
-- If replication quorum is not met, append must not leak into:
-  - session state
-  - replay
-  - cursor snapshot
+- If replication quorum is not met, append must not leak into session state.
+- If replication quorum is not met, append must not leak into replay.
+- If replication quorum is not met, append must not leak into cursor snapshot.
 - Crash before quorum must not create a ghost write.
 - Crash after quorum but before reply must not create a duplicate visible write on retry.
-
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ### Replica monotonicity
 - Lower-epoch replica state must never overwrite higher-epoch state.
@@ -101,19 +73,11 @@ Current coverage:
   - `archived_seq`
 - Replica convergence is monotonic.
 
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
-
 ### Archive watermark
 - `archived_seq` / committed frontier must never regress.
 - Repeated archive acks at the same cursor are idempotent.
 - Archive ack above `last_seq` clamps to `last_seq`.
 - Hot event eviction may only move forward with the archive frontier.
-
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [archive_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/archive_test.exs)
 
 ## Read / Resume Invariants
 
@@ -121,11 +85,6 @@ Current coverage:
 - If a committed event is delivered on the embedded cursor-update fast path, tail must
   not need replay fallback to surface it.
 - Replay queue and live buffer must remain explicit; no silent loss or skip is allowed.
-
-Current coverage:
-- [tail_socket_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite_web/tail_socket_test.exs)
-- distributed rolling drain/restart/create/append/live-tail chaos drill in
-  [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ### Gap semantics
 - Resume discontinuity must be explicit via a `gap` frame.
@@ -139,10 +98,6 @@ Current coverage:
   - `committed_cursor`
   - `earliest_available_cursor`
 
-Current coverage:
-- [tail_socket_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite_web/tail_socket_test.exs)
-- API contract docs in [websocket.md](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/docs/api/websocket.md)
-
 ## Security Invariants
 
 ### Session and tenant isolation
@@ -151,11 +106,6 @@ Current coverage:
 - Owner-side append authorization must fence tenant mismatch even if ingress skips a
   pre-read for performance.
 
-Current coverage:
-- [api_auth_jwt_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite_web/api_auth_jwt_test.exs)
-- [session_controller_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite_web/controllers/session_controller_test.exs)
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-
 ## Operational Invariants
 
 ### Shutdown and restart
@@ -163,10 +113,6 @@ Current coverage:
 - Restart must not silently reintroduce an incompletely drained node into the ready set.
 - Mixed state after restart must be visible as `:draining` / `:drained`, never faked
   as `:ready`.
-
-Current coverage:
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ### Audit telemetry
 - Transfer start and commit must emit counters.
@@ -181,12 +127,6 @@ Current coverage:
 - Append boundary telemetry must exist at the two critical crash boundaries:
   - `before_quorum_replicate`
   - `after_commit_before_reply`
-
-Current coverage:
-- [store_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/store_test.exs)
-- [session_router_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/routing/session_router_test.exs)
-- [runtime_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/runtime_test.exs)
-- [session_quorum_test.exs](/Users/selund/git/fastpaca/starcite/.worktrees/feat-direct-streaming-and-routing/test/starcite/data_plane/session_quorum_test.exs)
 
 ## Known Gaps
 - No long-running multi-hour soak with rolling restart/drain/create/append/tail invariants.

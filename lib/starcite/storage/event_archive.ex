@@ -4,29 +4,19 @@ defmodule Starcite.Storage.EventArchive do
 
   Archived events are written to the Postgres `events` table. This module owns
   archived-read caching on top of that durable store.
-
-  During a legacy-S3 cutover window, reads can fall back to legacy S3 and
-  backfill Postgres, and archive writes can temporarily double-write to both
-  stores.
   """
 
   use GenServer
-  require Logger
 
   import Ecto.Query
 
   alias Starcite.Repo
   alias Starcite.Storage.ArchiveEventRecord
-  alias Starcite.Storage.EventArchive.S3
-  alias Starcite.Storage.SessionCatalog
 
   @cache :starcite_archive_read_cache
   @default_cache_chunk_size 256
   @default_write_batch_size 1_000
   @default_read_batch_size 1_000
-  @default_legacy_s3_batch_size 1_000
-  @boot_backfill_scan_batch_size 100
-  @boot_backfill_lock_key 8_212_965_103_174_221
   @postgres_safe_parameter_limit 60_000
   @write_columns_per_row 13
 
@@ -64,60 +54,19 @@ defmodule Starcite.Storage.EventArchive do
   end
 
   @impl true
-  def init(_opts) do
-    if legacy_s3_boot_backfill_enabled?() do
-      send(self(), :run_legacy_s3_backfill)
-    end
-
-    {:ok, %{}}
-  end
-
-  @impl true
-  def handle_info(:run_legacy_s3_backfill, state) do
-    :ok = run_legacy_s3_backfill()
-    {:noreply, state}
-  end
+  def init(_opts), do: {:ok, %{}}
 
   @spec write_events([event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
   @doc """
   Persist archive event rows to Postgres. Duplicate `(session_id, seq)` rows are
-  ignored so repeated flushes remain idempotent. When legacy S3 cutover is
-  enabled, writes must also succeed against S3 before the batch is considered
-  durable.
+  ignored so repeated flushes remain idempotent.
   """
   def write_events([]), do: {:ok, 0}
 
   def write_events(rows) when is_list(rows) do
     with {:ok, normalized_rows} <- normalize_write_rows(rows),
          :ok <- validate_session_tenants(normalized_rows) do
-      with {:ok, inserted} <- write_events_postgres_rows(normalized_rows),
-           :ok <- maybe_write_events_legacy_s3(normalized_rows) do
-        {:ok, inserted}
-      end
-    else
-      {:error, _reason} = error ->
-        error
-    end
-  rescue
-    _ -> {:error, :archive_write_unavailable}
-  end
-
-  @spec write_events_postgres([event_row()]) :: {:ok, non_neg_integer()} | {:error, term()}
-  @doc """
-  Persist archive event rows to Postgres only.
-
-  This exists for one-off migration tooling and S3 backfill paths that should
-  not write back into the legacy store.
-  """
-  def write_events_postgres([]), do: {:ok, 0}
-
-  def write_events_postgres(rows) when is_list(rows) do
-    with {:ok, normalized_rows} <- normalize_write_rows(rows),
-         :ok <- validate_session_tenants(normalized_rows) do
       write_events_postgres_rows(normalized_rows)
-    else
-      {:error, _reason} = error ->
-        error
     end
   rescue
     _ -> {:error, :archive_write_unavailable}
@@ -130,19 +79,7 @@ defmodule Starcite.Storage.EventArchive do
   def read_events(session_id, from_seq, to_seq)
       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and from_seq > 0 and
              is_integer(to_seq) and to_seq >= from_seq do
-    session_id
-    |> read_postgres_events(from_seq, to_seq)
-    |> maybe_backfill_from_legacy_s3(session_id, from_seq, to_seq)
-  end
-
-  @doc false
-  @spec run_legacy_s3_backfill() :: :ok
-  def run_legacy_s3_backfill do
-    if legacy_s3_boot_backfill_enabled?() do
-      maybe_run_legacy_s3_backfill()
-    else
-      :ok
-    end
+    read_postgres_events(session_id, from_seq, to_seq)
   end
 
   @spec get_cached_event(String.t(), pos_integer()) :: {:ok, map()} | :error
@@ -263,59 +200,6 @@ defmodule Starcite.Storage.EventArchive do
         |> Enum.sort_by(& &1.seq)
 
       {:ok, merged}
-    end
-  end
-
-  defp maybe_backfill_from_legacy_s3({:ok, events}, session_id, from_seq, to_seq)
-       when is_list(events) and is_binary(session_id) and session_id != "" and
-              is_integer(from_seq) and is_integer(to_seq) do
-    if legacy_s3_enabled?() do
-      case SessionCatalog.get_archive_context(session_id) do
-        {:ok, %{tenant_id: tenant_id, archived_seq: archived_seq}} ->
-          expected_to_seq = min(to_seq, archived_seq)
-
-          if archived_range_complete?(events, from_seq, expected_to_seq) do
-            {:ok, events}
-          else
-            backfill_requested_range_from_legacy_s3(
-              session_id,
-              tenant_id,
-              archived_seq,
-              from_seq,
-              to_seq
-            )
-          end
-
-        {:error, _reason} ->
-          {:ok, events}
-      end
-    else
-      {:ok, events}
-    end
-  end
-
-  defp maybe_backfill_from_legacy_s3({:error, _reason}, session_id, from_seq, to_seq)
-       when is_binary(session_id) and session_id != "" and is_integer(from_seq) and
-              is_integer(to_seq) do
-    if legacy_s3_enabled?() do
-      case SessionCatalog.get_archive_context(session_id) do
-        {:ok, %{archived_seq: archived_seq}} when archived_seq < from_seq ->
-          {:ok, []}
-
-        {:ok, %{tenant_id: tenant_id, archived_seq: archived_seq}} ->
-          backfill_requested_range_from_legacy_s3(
-            session_id,
-            tenant_id,
-            archived_seq,
-            from_seq,
-            to_seq
-          )
-
-        {:error, _reason} ->
-          {:error, :archive_read_unavailable}
-      end
-    else
-      {:error, :archive_read_unavailable}
     end
   end
 
@@ -545,379 +429,6 @@ defmodule Starcite.Storage.EventArchive do
     |> case do
       %{} -> :ok
       {:error, _reason} = error -> error
-    end
-  end
-
-  defp maybe_write_events_legacy_s3(rows) when is_list(rows) do
-    if legacy_s3_enabled?() do
-      case S3.write_events(rows, legacy_s3_storage_opts()) do
-        {:ok, _inserted} -> :ok
-        {:error, _reason} -> {:error, :archive_write_unavailable}
-      end
-    else
-      :ok
-    end
-  end
-
-  defp archived_range_complete?(_events, from_seq, expected_to_seq)
-       when is_integer(from_seq) and is_integer(expected_to_seq) and expected_to_seq < from_seq,
-       do: true
-
-  defp archived_range_complete?(events, from_seq, expected_to_seq)
-       when is_list(events) and is_integer(from_seq) and is_integer(expected_to_seq) and
-              expected_to_seq >= from_seq do
-    expected_count = expected_to_seq - from_seq + 1
-
-    length(events) == expected_count and
-      Enum.map(events, & &1.seq) == Enum.to_list(from_seq..expected_to_seq)
-  end
-
-  defp backfill_requested_range_from_legacy_s3(
-         _session_id,
-         _tenant_id,
-         archived_seq,
-         from_seq,
-         _to_seq
-       )
-       when is_integer(archived_seq) and archived_seq >= 0 and is_integer(from_seq) and
-              from_seq > archived_seq do
-    {:ok, []}
-  end
-
-  defp backfill_requested_range_from_legacy_s3(
-         session_id,
-         tenant_id,
-         archived_seq,
-         from_seq,
-         to_seq
-       )
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and
-              is_integer(archived_seq) and archived_seq >= 0 and is_integer(from_seq) and
-              from_seq > 0 and
-              is_integer(to_seq) and to_seq >= from_seq do
-    requested_to_seq = min(to_seq, archived_seq)
-
-    case backfill_session_from_legacy_s3(
-           session_id,
-           tenant_id,
-           archived_seq,
-           from_seq,
-           requested_to_seq
-         ) do
-      {:ok, requested_events, _inserted} -> {:ok, requested_events}
-      {:error, _reason} -> {:error, :archive_read_unavailable}
-    end
-  end
-
-  defp backfill_session_from_legacy_s3(
-         _session_id,
-         _tenant_id,
-         0,
-         _requested_from_seq,
-         _requested_to_seq
-       ),
-       do: {:ok, [], 0}
-
-  defp backfill_session_from_legacy_s3(
-         session_id,
-         tenant_id,
-         archived_seq,
-         requested_from_seq,
-         requested_to_seq
-       )
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and
-              is_integer(archived_seq) and archived_seq > 0 and is_integer(requested_from_seq) and
-              requested_from_seq > 0 and is_integer(requested_to_seq) and requested_to_seq >= 0 do
-    1
-    |> bounded_ranges(archived_seq, legacy_s3_batch_size())
-    |> Enum.reduce_while({:ok, 1, 0, []}, fn {batch_from, batch_to},
-                                             {:ok, expected_seq, inserted_total, requested_acc} ->
-      with {:ok, events} <-
-             S3.read_events(
-               session_id,
-               tenant_id,
-               batch_from,
-               batch_to,
-               legacy_s3_storage_opts()
-             ),
-           {:ok, next_expected_seq} <- validate_migrated_batch(events, expected_seq),
-           {:ok, inserted} <- write_events_postgres(add_session_id(session_id, events)) do
-        requested_acc =
-          collect_requested_events(
-            requested_acc,
-            events,
-            requested_from_seq,
-            requested_to_seq
-          )
-
-        {:cont, {:ok, next_expected_seq, inserted_total + inserted, requested_acc}}
-      else
-        {:error, _reason} = error ->
-          {:halt, error}
-      end
-    end)
-    |> case do
-      {:ok, expected_seq, inserted_total, requested_events}
-      when expected_seq == archived_seq + 1 ->
-        requested_events = Enum.reverse(requested_events)
-
-        if requested_events != [] do
-          :ok = cache_events(session_id, requested_events)
-        end
-
-        {:ok, requested_events, inserted_total}
-
-      {:ok, _expected_seq, _inserted_total, _requested_events} ->
-        {:error, :archive_read_unavailable}
-
-      {:error, _reason} = error ->
-        error
-    end
-  end
-
-  defp validate_migrated_batch(events, expected_seq)
-       when is_list(events) and is_integer(expected_seq) and expected_seq > 0 do
-    events
-    |> Enum.reduce_while(expected_seq, fn
-      %{seq: seq}, next_expected when is_integer(seq) and seq == next_expected ->
-        {:cont, next_expected + 1}
-
-      %{seq: _seq}, _next_expected ->
-        {:halt, :gap}
-
-      _event, _next_expected ->
-        {:halt, :gap}
-    end)
-    |> case do
-      :gap ->
-        {:error, :archive_read_unavailable}
-
-      next_expected when is_integer(next_expected) and next_expected >= expected_seq ->
-        {:ok, next_expected}
-    end
-  end
-
-  defp collect_requested_events(acc, events, requested_from_seq, requested_to_seq)
-       when is_list(acc) and is_list(events) and is_integer(requested_from_seq) and
-              is_integer(requested_to_seq) do
-    Enum.reduce(events, acc, fn
-      %{seq: seq} = event, inner
-      when is_integer(seq) and seq >= requested_from_seq and seq <= requested_to_seq ->
-        [event | inner]
-
-      _event, inner ->
-        inner
-    end)
-  end
-
-  defp add_session_id(session_id, events)
-       when is_binary(session_id) and session_id != "" and is_list(events) do
-    Enum.map(events, &Map.put(&1, :session_id, session_id))
-  end
-
-  defp maybe_run_legacy_s3_backfill do
-    if Repo.checked_out?() do
-      do_run_legacy_s3_backfill()
-    else
-      Repo.checkout(fn ->
-        do_run_legacy_s3_backfill()
-      end)
-    end
-
-    :ok
-  rescue
-    error ->
-      Logger.warning("legacy S3 boot backfill crashed: #{Exception.message(error)}")
-      :ok
-  end
-
-  defp do_run_legacy_s3_backfill do
-    case acquire_backfill_lock() do
-      :ok ->
-        Logger.info("legacy S3 boot backfill starting")
-
-        try do
-          {sessions, inserted_rows} = run_legacy_s3_backfill_batches(nil, 0, 0)
-
-          Logger.info(
-            "legacy S3 boot backfill finished sessions=#{sessions} inserted_rows=#{inserted_rows}"
-          )
-        after
-          :ok = release_backfill_lock()
-        end
-
-      :busy ->
-        Logger.info("legacy S3 boot backfill skipped because another node is running it")
-
-      :error ->
-        Logger.warning("legacy S3 boot backfill unavailable")
-    end
-  end
-
-  defp run_legacy_s3_backfill_batches(cursor, migrated_sessions, inserted_rows) do
-    case load_backfill_sessions(cursor, @boot_backfill_scan_batch_size) do
-      [] ->
-        {migrated_sessions, inserted_rows}
-
-      sessions ->
-        {migrated_sessions, inserted_rows} =
-          Enum.reduce(sessions, {migrated_sessions, inserted_rows}, fn
-            %{id: session_id, tenant_id: tenant_id, archived_seq: archived_seq},
-            {sessions_acc, rows_acc} ->
-              case maybe_backfill_session_from_legacy_s3(session_id, tenant_id, archived_seq) do
-                {:ok, inserted} ->
-                  {sessions_acc + 1, rows_acc + inserted}
-
-                {:error, reason} ->
-                  Logger.warning(
-                    "legacy S3 backfill failed session_id=#{session_id} reason=#{inspect(reason)}"
-                  )
-
-                  {sessions_acc, rows_acc}
-              end
-          end)
-
-        %{id: next_cursor} = List.last(sessions)
-        run_legacy_s3_backfill_batches(next_cursor, migrated_sessions, inserted_rows)
-    end
-  end
-
-  defp maybe_backfill_session_from_legacy_s3(_session_id, _tenant_id, archived_seq)
-       when is_integer(archived_seq) and archived_seq <= 0,
-       do: {:ok, 0}
-
-  defp maybe_backfill_session_from_legacy_s3(session_id, tenant_id, archived_seq)
-       when is_binary(session_id) and session_id != "" and is_binary(tenant_id) and
-              tenant_id != "" and
-              is_integer(archived_seq) and archived_seq > 0 do
-    if archive_session_backfilled?(session_id, archived_seq) do
-      {:ok, 0}
-    else
-      case backfill_session_from_legacy_s3(
-             session_id,
-             tenant_id,
-             archived_seq,
-             archived_seq + 1,
-             archived_seq
-           ) do
-        {:ok, _requested_events, inserted} -> {:ok, inserted}
-        {:error, _reason} = error -> error
-      end
-    end
-  end
-
-  defp archive_session_backfilled?(session_id, archived_seq)
-       when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
-              archived_seq >= 0 do
-    query =
-      from(event in ArchiveEventRecord,
-        where: event.session_id == ^session_id,
-        select: {count(event.seq), max(event.seq)}
-      )
-
-    case Repo.one(query) do
-      {count, max_seq} when is_integer(count) and count >= 0 ->
-        count == archived_seq and normalize_max_seq(max_seq) == archived_seq
-
-      _ ->
-        false
-    end
-  rescue
-    _ -> false
-  end
-
-  defp normalize_max_seq(nil), do: 0
-  defp normalize_max_seq(max_seq) when is_integer(max_seq) and max_seq >= 0, do: max_seq
-  defp normalize_max_seq(_max_seq), do: -1
-
-  defp load_backfill_sessions(cursor, limit)
-       when (is_nil(cursor) or (is_binary(cursor) and cursor != "")) and is_integer(limit) and
-              limit > 0 do
-    "sessions"
-    |> then(fn query ->
-      if is_nil(cursor), do: query, else: where(query, [s], field(s, :id) > ^cursor)
-    end)
-    |> where([s], field(s, :archived_seq) > 0)
-    |> order_by([s], asc: field(s, :id))
-    |> limit(^limit)
-    |> select([s], %{
-      id: field(s, :id),
-      tenant_id: field(s, :tenant_id),
-      archived_seq: field(s, :archived_seq)
-    })
-    |> Repo.all()
-  rescue
-    _ -> []
-  end
-
-  defp acquire_backfill_lock do
-    case Repo.query("SELECT pg_try_advisory_lock($1)", [@boot_backfill_lock_key]) do
-      {:ok, %{rows: [[true]]}} -> :ok
-      {:ok, %{rows: [[false]]}} -> :busy
-      _ -> :error
-    end
-  rescue
-    _ -> :error
-  end
-
-  defp release_backfill_lock do
-    case Repo.query("SELECT pg_advisory_unlock($1)", [@boot_backfill_lock_key]) do
-      {:ok, _result} -> :ok
-      _ -> :ok
-    end
-  rescue
-    _ -> :ok
-  end
-
-  defp legacy_s3_enabled? do
-    case Keyword.get(legacy_s3_opts(), :enabled, false) do
-      true ->
-        true
-
-      false ->
-        false
-
-      value ->
-        raise ArgumentError,
-              "invalid value for :enabled in :archive_legacy_s3_opts: #{inspect(value)}"
-    end
-  end
-
-  defp legacy_s3_boot_backfill_enabled? do
-    legacy_s3_enabled?() and
-      case Keyword.get(legacy_s3_opts(), :boot_backfill, false) do
-        true ->
-          true
-
-        false ->
-          false
-
-        value ->
-          raise ArgumentError,
-                "invalid value for :boot_backfill in :archive_legacy_s3_opts: #{inspect(value)}"
-      end
-  end
-
-  defp legacy_s3_opts do
-    Application.get_env(:starcite, :archive_legacy_s3_opts, [])
-    |> Keyword.new()
-  end
-
-  defp legacy_s3_storage_opts do
-    legacy_s3_opts()
-    |> Keyword.drop([:enabled, :boot_backfill, :migrate_batch_size])
-  end
-
-  defp legacy_s3_batch_size do
-    case Keyword.get(legacy_s3_opts(), :migrate_batch_size, @default_legacy_s3_batch_size) do
-      value when is_integer(value) and value > 0 ->
-        value
-
-      value ->
-        raise ArgumentError,
-              "invalid value for :migrate_batch_size in :archive_legacy_s3_opts: #{inspect(value)} (expected positive integer)"
     end
   end
 
