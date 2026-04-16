@@ -35,8 +35,10 @@ pub struct ControlNodeRow {
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct SessionLeaseTakeoverHint {
+    pub owner_id: String,
     pub epoch: i64,
     pub expires_at: DateTime<Utc>,
+    pub owner_live: bool,
     pub live_replicas: Json<Vec<SessionLeasePublicPeer>>,
 }
 
@@ -539,6 +541,7 @@ pub async fn acquire_session_lease(
     owner_id: &str,
     ttl_ms: i64,
     desired_replica_count: u32,
+    forced_dead_owner_id: Option<&str>,
 ) -> Result<SessionLeaseRow, AppError> {
     let mut tx = pool.begin().await?;
     let live_nodes = load_live_control_nodes(tx.as_mut(), session_id).await?;
@@ -558,14 +561,18 @@ pub async fn acquire_session_lease(
         &designated_owner,
         &live_node_ids,
         now,
+        forced_dead_owner_id,
     );
     let should_write = existing
         .as_ref()
-        .is_none_or(|lease| lease.owner_id == owner_id || lease.expires_at <= now);
+        .is_none_or(|lease| {
+            lease.owner_id == owner_id
+                || lease_takeover_allowed(lease, &live_node_ids, now, forced_dead_owner_id)
+        });
 
     if let Some(existing) = existing.as_ref() {
         if should_write {
-            let next_epoch = if existing.owner_id == owner_id {
+            let next_epoch = if existing.owner_id == target_owner {
                 existing.epoch
             } else {
                 existing.epoch.saturating_add(1)
@@ -644,8 +651,13 @@ pub async fn load_session_lease_takeover_hint(
     Ok(sqlx::query_as::<_, SessionLeaseTakeoverHint>(
         r#"
         SELECT
+          session_leases.owner_id,
           session_leases.epoch,
           session_leases.expires_at,
+          COALESCE(
+            owner_control.draining = FALSE AND owner_control.expires_at > now(),
+            FALSE
+          ) AS owner_live,
           COALESCE(
             jsonb_agg(
               jsonb_build_object(
@@ -660,6 +672,8 @@ pub async fn load_session_lease_takeover_hint(
             '[]'::jsonb
           ) AS live_replicas
         FROM session_leases
+        LEFT JOIN control_nodes AS owner_control
+          ON owner_control.node_id = session_leases.owner_id
         LEFT JOIN LATERAL unnest(session_leases.replica_node_ids) WITH ORDINALITY AS replica(node_id, ord)
           ON TRUE
         LEFT JOIN control_nodes AS live_replica
@@ -668,8 +682,11 @@ pub async fn load_session_lease_takeover_hint(
          AND live_replica.expires_at > now()
         WHERE session_leases.session_id = $1
         GROUP BY
+          session_leases.owner_id,
           session_leases.epoch,
-          session_leases.expires_at
+          session_leases.expires_at,
+          owner_control.draining,
+          owner_control.expires_at
         "#,
     )
     .bind(session_id)
@@ -816,10 +833,11 @@ fn choose_target_owner(
     designated_owner: &str,
     live_node_ids: &HashSet<String>,
     now: DateTime<Utc>,
+    forced_dead_owner_id: Option<&str>,
 ) -> String {
     match existing {
         Some(existing) if existing.owner_id == requester_id => requester_id.to_string(),
-        Some(existing) if existing.expires_at <= now => {
+        Some(existing) if lease_takeover_allowed(existing, live_node_ids, now, forced_dead_owner_id) => {
             let live_replica = normalized_replica_nodes(existing)
                 .into_iter()
                 .find(|node_id| node_id != &existing.owner_id && live_node_ids.contains(node_id));
@@ -835,6 +853,17 @@ fn choose_target_owner(
         Some(existing) => existing.owner_id.clone(),
         None => designated_owner.to_string(),
     }
+}
+
+fn lease_takeover_allowed(
+    existing: &SessionLeaseRecord,
+    live_node_ids: &HashSet<String>,
+    now: DateTime<Utc>,
+    forced_dead_owner_id: Option<&str>,
+) -> bool {
+    existing.expires_at <= now
+        || !live_node_ids.contains(&existing.owner_id)
+        || forced_dead_owner_id == Some(existing.owner_id.as_str())
 }
 
 fn normalized_replica_nodes(existing: &SessionLeaseRecord) -> Vec<String> {
@@ -1521,7 +1550,14 @@ fn map_insert_error(error: sqlx::Error) -> AppError {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProducerSequenceCheck, classify_producer_sequence};
+    use std::collections::HashSet;
+
+    use chrono::{Duration as ChronoDuration, Utc};
+
+    use super::{
+        ProducerSequenceCheck, SessionLeaseRecord, choose_target_owner, classify_producer_sequence,
+        lease_takeover_allowed,
+    };
 
     #[test]
     fn producer_sequence_accepts_first_append() {
@@ -1561,5 +1597,98 @@ mod tests {
             classify_producer_sequence(Some(4), 7),
             ProducerSequenceCheck::Gap { expected: 5 }
         );
+    }
+
+    #[test]
+    fn expired_lease_can_be_taken_over() {
+        let existing = SessionLeaseRecord {
+            owner_id: "node-a".to_string(),
+            epoch: 7,
+            expires_at: Utc::now() - ChronoDuration::seconds(1),
+            replica_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+        };
+        let live_node_ids = HashSet::from(["node-a".to_string(), "node-b".to_string()]);
+
+        assert!(lease_takeover_allowed(
+            &existing,
+            &live_node_ids,
+            Utc::now(),
+            None
+        ));
+    }
+
+    #[test]
+    fn dead_owner_can_be_taken_over_before_lease_expiry() {
+        let existing = SessionLeaseRecord {
+            owner_id: "node-a".to_string(),
+            epoch: 7,
+            expires_at: Utc::now() + ChronoDuration::seconds(30),
+            replica_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+        };
+        let live_node_ids = HashSet::from(["node-b".to_string(), "node-c".to_string()]);
+
+        assert!(lease_takeover_allowed(&existing, &live_node_ids, Utc::now(), None));
+    }
+
+    #[test]
+    fn chooses_live_replica_when_owner_is_dead() {
+        let existing = SessionLeaseRecord {
+            owner_id: "node-a".to_string(),
+            epoch: 7,
+            expires_at: Utc::now() + ChronoDuration::seconds(30),
+            replica_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+        };
+        let live_node_ids = HashSet::from(["node-b".to_string(), "node-c".to_string()]);
+
+        let target_owner = choose_target_owner(
+            Some(&existing),
+            "node-c",
+            "node-c",
+            &live_node_ids,
+            Utc::now(),
+            None,
+        );
+
+        assert_eq!(target_owner, "node-b");
+    }
+
+    #[test]
+    fn live_replica_claims_dead_owner_lease_for_itself() {
+        let existing = SessionLeaseRecord {
+            owner_id: "node-a".to_string(),
+            epoch: 7,
+            expires_at: Utc::now() + ChronoDuration::seconds(30),
+            replica_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+        };
+        let live_node_ids = HashSet::from(["node-b".to_string(), "node-c".to_string()]);
+
+        let target_owner = choose_target_owner(
+            Some(&existing),
+            "node-b",
+            "node-c",
+            &live_node_ids,
+            Utc::now(),
+            None,
+        );
+
+        assert_eq!(target_owner, "node-b");
+    }
+
+    #[test]
+    fn forced_dead_owner_override_allows_early_takeover() {
+        let existing = SessionLeaseRecord {
+            owner_id: "node-a".to_string(),
+            epoch: 7,
+            expires_at: Utc::now() + ChronoDuration::seconds(30),
+            replica_node_ids: vec!["node-a".to_string(), "node-b".to_string()],
+        };
+        let live_node_ids = HashSet::from(["node-a".to_string(), "node-b".to_string()]);
+
+        assert!(lease_takeover_allowed(
+            &existing,
+            &live_node_ids,
+            Utc::now(),
+            Some("node-a")
+        ));
     }
 }

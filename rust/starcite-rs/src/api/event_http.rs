@@ -11,6 +11,7 @@ use axum::{
 use crate::{
     AppState, api, auth, data_plane,
     error::AppError,
+    model::ValidatedAppendEvent,
     runtime::RuntimeTouchReason,
     telemetry::{IngestOperation, RequestPhase},
 };
@@ -40,42 +41,15 @@ pub async fn append_event(
         auth::allow_append_session(&auth, &session_id, &tenant_id)?;
         let validated = auth::validate_append_request(request, &auth)?;
         let ack_started_at = Instant::now();
-        let outcome = state
-            .session_manager
-            .append(&session_id, &tenant_id, validated)
-            .await;
-        let response = match outcome {
-            Ok(outcome) => {
-                touch_existing_session(
-                    &state,
-                    &session_id,
-                    &outcome.tenant_id,
-                    RuntimeTouchReason::HttpWrite,
-                )
-                .await;
-
-                Ok((
-                    StatusCode::CREATED,
-                    Json(api::public_payload::append_reply(&outcome.reply)),
-                )
-                    .into_response())
-            }
-            Err(AppError::SessionNotOwned {
-                owner_public_url: Some(owner_public_url),
-                ..
-            }) => {
-                state.session_manager.drop_worker_handle(&session_id).await;
-                forward_known_append_request(
-                    &state,
-                    &session_id,
-                    &owner_public_url,
-                    &body,
-                    authorization,
-                )
-                .await
-            }
-            Err(error) => Err(error),
-        };
+        let response = append_or_forward_request(
+            &state,
+            &session_id,
+            &tenant_id,
+            validated,
+            &body,
+            authorization,
+        )
+        .await;
         api::request_metrics::record_request_result(
             &state,
             RequestPhase::Ack,
@@ -100,6 +74,74 @@ pub async fn append_event(
         &result,
     );
     result
+}
+
+async fn append_or_forward_request(
+    state: &AppState,
+    session_id: &str,
+    tenant_id: &str,
+    validated: ValidatedAppendEvent,
+    body: &[u8],
+    authorization: Option<&HeaderValue>,
+) -> Result<Response, AppError> {
+    let mut last_proxy_unavailable = None;
+
+    for attempt in 0..2 {
+        match state
+            .session_manager
+            .append(session_id, tenant_id, validated.clone())
+            .await
+        {
+            Ok(outcome) => {
+                touch_existing_session(
+                    state,
+                    session_id,
+                    &outcome.tenant_id,
+                    RuntimeTouchReason::HttpWrite,
+                )
+                .await;
+
+                return Ok((
+                    StatusCode::CREATED,
+                    Json(api::public_payload::append_reply(&outcome.reply)),
+                )
+                    .into_response());
+            }
+            Err(AppError::SessionNotOwned {
+                owner_id,
+                owner_public_url: Some(owner_public_url),
+                ..
+            }) => {
+                state.session_manager.drop_worker_handle(session_id).await;
+
+                if let Some(proxied) = forward_known_append_request(
+                    state,
+                    session_id,
+                    Some(&owner_id),
+                    &owner_public_url,
+                    body,
+                    authorization,
+                )
+                .await?
+                {
+                    return Ok(proxied);
+                }
+
+                last_proxy_unavailable = Some(AppError::OwnerProxyUnavailable {
+                    owner_url: owner_public_url.clone(),
+                });
+
+                if attempt == 0 {
+                    continue;
+                }
+
+                return Err(last_proxy_unavailable.take().expect("proxy unavailable"));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    Err(last_proxy_unavailable.unwrap_or(AppError::Internal))
 }
 
 async fn resolve_session_tenant_id(state: &AppState, session_id: &str) -> Result<String, AppError> {
@@ -135,13 +177,15 @@ async fn forward_cached_append_request(
 async fn forward_known_append_request(
     state: &AppState,
     session_id: &str,
+    owner_id: Option<&str>,
     owner_public_url: &str,
     body: &[u8],
     authorization: Option<&HeaderValue>,
-) -> Result<Response, AppError> {
+) -> Result<Option<Response>, AppError> {
     edge_routing::forward_known_append_path(
         state,
         session_id,
+        owner_id,
         owner_public_url,
         body,
         authorization,
