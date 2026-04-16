@@ -7,6 +7,8 @@ into versioned sections when cutting `vX.Y.Z` tags.
 
 ## [Unreleased]
 
+## [0.0.5] - 2026-04-16
+
 ### Removed
 
 - Dropped the legacy S3 archive bridge, including runtime config, archive
