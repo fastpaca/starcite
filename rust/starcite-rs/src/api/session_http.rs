@@ -8,11 +8,13 @@ use axum::{
 };
 
 use crate::{
-    AppState, api, auth, data_plane,
+    AppState, api, auth,
+    cluster::ControlPlaneReadinessDetail,
+    data_plane,
     data_plane::repository,
     error::AppError,
     model::{CreateSessionRequest, LifecycleEvent, SessionResponse, UpdateSessionRequest},
-    runtime::RuntimeTouchReason,
+    runtime::{OpsSnapshot, RuntimeTouchReason},
     telemetry::IngestOperation,
 };
 
@@ -27,6 +29,7 @@ pub async fn create_session(
         let Json(request) = body.map_err(|_| AppError::InvalidSession)?;
         let validated = auth::validate_create_request(request, &auth)?;
         tenant_id = validated.tenant_id.clone();
+        reject_create_when_write_unavailable(&state).await?;
         let session = repository::create_session(&state.pool, validated.clone()).await?;
         cache_session(&state, &validated.tenant_id, &session, Some(0)).await;
 
@@ -232,6 +235,47 @@ async fn publish_archive_lifecycle(
     .await;
 }
 
+async fn reject_create_when_write_unavailable(state: &AppState) -> Result<(), AppError> {
+    let required_live_nodes = state.replication.minimum_live_nodes_for_quorum();
+
+    match state
+        .control_plane
+        .readiness(&state.pool, state.instance_id.as_ref(), required_live_nodes)
+        .await
+    {
+        Ok(readiness) => write_availability_error(
+            readiness.reason,
+            readiness.detail.as_ref(),
+            required_live_nodes,
+            &state.ops.snapshot(),
+        )
+        .map_or(Ok(()), Err),
+        Err(error) => {
+            tracing::error!(error = ?error, "create-session write-availability lookup failed");
+            Err(AppError::DatabaseUnavailable)
+        }
+    }
+}
+
+fn write_availability_error(
+    reason: Option<&'static str>,
+    detail: Option<&ControlPlaneReadinessDetail>,
+    required_live_nodes: u32,
+    ops: &OpsSnapshot,
+) -> Option<AppError> {
+    match reason {
+        None => None,
+        Some("draining") => Some(AppError::node_draining(ops)),
+        Some("write_quorum") => Some(AppError::QuorumUnavailable {
+            required: detail
+                .and_then(|detail| detail.required_nodes)
+                .unwrap_or(required_live_nodes.max(1)),
+            acknowledged: detail.and_then(|detail| detail.live_nodes).unwrap_or(0),
+        }),
+        Some(_) => Some(AppError::DatabaseUnavailable),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{sync::Arc, time::Duration};
@@ -242,11 +286,14 @@ mod tests {
     };
     use sqlx::postgres::PgPoolOptions;
 
-    use super::show_session;
+    use super::{show_session, write_availability_error};
     use crate::{
         AppState,
         auth::AuthService,
-        cluster::{ControlPlaneState, OwnerProxy, OwnershipManager, ReplicationCoordinator},
+        cluster::{
+            ControlPlaneReadinessDetail, ControlPlaneState, OwnerProxy, OwnershipManager,
+            ReplicationCoordinator,
+        },
         config::{AuthMode, Config},
         data_plane::{ArchiveQueue, HotEventStore, HotSessionStore, PendingFlushQueue},
         error::AppError,
@@ -399,5 +446,70 @@ mod tests {
             .expect_err("empty session ids must fail loudly");
 
         assert!(matches!(error, AppError::InvalidSessionId));
+    }
+
+    #[test]
+    fn write_availability_error_allows_ready_state() {
+        let ops = OpsState::new(30_000);
+
+        assert!(write_availability_error(None, None, 2, &ops.snapshot()).is_none());
+    }
+
+    #[test]
+    fn write_availability_error_maps_quorum_loss_to_quorum_unavailable() {
+        let ops = OpsState::new(30_000);
+
+        let error = write_availability_error(
+            Some("write_quorum"),
+            Some(&ControlPlaneReadinessDetail::write_quorum(1, 2)),
+            2,
+            &ops.snapshot(),
+        )
+        .expect("write quorum loss should block create");
+
+        assert!(matches!(
+            error,
+            AppError::QuorumUnavailable {
+                required: 2,
+                acknowledged: 1
+            }
+        ));
+    }
+
+    #[test]
+    fn write_availability_error_maps_draining_to_node_draining() {
+        let ops = OpsState::new(30_000);
+        ops.begin_shutdown_drain();
+
+        let error = write_availability_error(
+            Some("draining"),
+            Some(&ControlPlaneReadinessDetail::draining()),
+            2,
+            &ops.snapshot(),
+        )
+        .expect("draining state should block create");
+
+        assert!(matches!(
+            error,
+            AppError::NodeDraining {
+                drain_source: Some("shutdown"),
+                retry_after_ms: Some(_)
+            }
+        ));
+    }
+
+    #[test]
+    fn write_availability_error_maps_routing_sync_to_database_unavailable() {
+        let ops = OpsState::new(30_000);
+
+        let error = write_availability_error(
+            Some("routing_sync"),
+            Some(&ControlPlaneReadinessDetail::unknown()),
+            2,
+            &ops.snapshot(),
+        )
+        .expect("routing sync state should block create");
+
+        assert!(matches!(error, AppError::DatabaseUnavailable));
     }
 }
