@@ -125,6 +125,80 @@ defmodule StarciteWeb.TailChannelTest do
     assert_push "events", %{events: [%{seq: 2, cursor: 2, payload: %{text: "two"}}]}
   end
 
+  test "defaults to composed replay when a projection item covers raw events" do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+    for text <- ["one", "two", "three", "four"] do
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: text},
+          actor: "agent:test"
+        })
+    end
+
+    assert {:ok, _item} =
+             WritePath.put_projection_item(session_id, %{
+               item_id: "msg-1",
+               version: 1,
+               from_seq: 2,
+               to_seq: 3,
+               payload: %{"role" => "assistant", "text" => "two three"},
+               metadata: %{"kind" => "message"}
+             })
+
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-9", %{auth: auth_context()})
+      |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{})
+
+    assert_push "events", %{events: [%{seq: 1} = first_event]}
+    assert first_event.payload == %{text: "one"}
+
+    assert_push "events", %{events: [%{seq: 3, from_seq: 2} = projection_item]}
+    assert projection_item.type == "projection"
+    assert projection_item.item_id == "msg-1"
+    assert projection_item.version == 1
+    assert projection_item.payload == %{"role" => "assistant", "text" => "two three"}
+    assert projection_item.cursor == 3
+
+    assert_push "events", %{events: [%{seq: 4} = final_event]}
+    assert final_event.payload == %{text: "four"}
+  end
+
+  test "raw replay opt-out returns every event even when projection items exist" do
+    session_id = unique_id("ses")
+    {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
+
+    for text <- ["one", "two", "three"] do
+      {:ok, _} =
+        append_event(session_id, %{
+          type: "content",
+          payload: %{text: text},
+          actor: "agent:test"
+        })
+    end
+
+    assert {:ok, _item} =
+             WritePath.put_projection_item(session_id, %{
+               item_id: "msg-raw",
+               version: 1,
+               from_seq: 1,
+               to_seq: 2,
+               payload: %{"role" => "assistant", "text" => "one two"},
+               metadata: %{}
+             })
+
+    {:ok, _, _socket} =
+      socket(StarciteWeb.UserSocket, "client-10", %{auth: auth_context()})
+      |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{
+        "view" => "raw",
+        "batch_size" => 10
+      })
+
+    assert_push "events", %{events: [%{seq: 1}, %{seq: 2}, %{seq: 3}]}
+  end
+
   test "rejects non-seq cursor and invalid batch size shapes" do
     session_id = unique_id("ses")
     {:ok, _} = WritePath.create_session(id: session_id, tenant_id: "acme")
@@ -142,6 +216,10 @@ defmodule StarciteWeb.TailChannelTest do
     assert {:error, %{reason: "invalid_tail_batch_size"}} =
              socket(StarciteWeb.UserSocket, "client-8", %{auth: auth_context()})
              |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"batch_size" => "2"})
+
+    assert {:error, %{reason: "invalid_tail_view"}} =
+             socket(StarciteWeb.UserSocket, "client-11", %{auth: auth_context()})
+             |> subscribe_and_join(TailChannel, "tail:#{session_id}", %{"view" => "weird"})
   end
 
   defp unique_id(prefix) do

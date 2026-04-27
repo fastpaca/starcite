@@ -7,6 +7,8 @@ defmodule Starcite.ReadPath do
   alias Starcite.Cursor
   alias Starcite.DataPlane.{EventStore, SessionQuorum, SessionStore}
   alias Starcite.Session
+  alias Starcite.Session.Projections
+  alias Starcite.Session.View
 
   @default_tail_batch_size 1_000
 
@@ -22,21 +24,108 @@ defmodule Starcite.ReadPath do
   @spec get_session_routed(String.t()) ::
           {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
   def get_session_routed(id) when is_binary(id) and id != "" do
-    route_session_read(id, true)
+    get_session_routed(id, true)
   end
 
   def get_session_routed(_id), do: {:error, :invalid_session_id}
+
+  @spec get_session_routed(String.t(), boolean()) ::
+          {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
+  def get_session_routed(id, prefer_leader)
+      when is_binary(id) and id != "" and is_boolean(prefer_leader) do
+    SessionRouter.call(
+      id,
+      __MODULE__,
+      :rpc_get_session,
+      [id],
+      __MODULE__,
+      :rpc_get_session,
+      [id],
+      prefer_leader: prefer_leader,
+      defer_local_when_unconfirmed: prefer_leader
+    )
+  end
+
+  def get_session_routed(_id, _prefer_leader), do: {:error, :invalid_session_id}
 
   @doc false
   @spec get_session_replica(String.t()) ::
           {:ok, Session.t()} | {:error, term()} | {:timeout, term()}
   def get_session_replica(id) when is_binary(id) and id != "" do
-    route_session_read(id, false)
+    get_session_routed(id, false)
   end
 
   def get_session_replica(_id), do: {:error, :invalid_session_id}
 
+  @spec latest_projection_items(String.t() | Session.t()) ::
+          {:ok, [Projections.item()]} | {:error, term()}
+  def latest_projection_items(%Session{} = session),
+    do: {:ok, Session.latest_projection_items(session)}
+
+  def latest_projection_items(id) when is_binary(id) and id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      latest_projection_items(session)
+    end
+  end
+
+  def latest_projection_items(_id), do: {:error, :invalid_session_id}
+
+  @spec get_projection_item(String.t() | Session.t(), String.t()) ::
+          {:ok, Projections.item()} | {:error, term()}
+  def get_projection_item(%Session{projections: %Projections{} = projections}, item_id)
+      when is_binary(item_id) and item_id != "" do
+    Projections.get_item(projections, item_id)
+  end
+
+  def get_projection_item(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      get_projection_item(session, item_id)
+    end
+  end
+
+  def get_projection_item(_id, _item_id), do: {:error, :invalid_projection_item}
+
+  @spec list_projection_item_versions(String.t() | Session.t(), String.t()) ::
+          {:ok, [Projections.item()]} | {:error, term()}
+  def list_projection_item_versions(%Session{projections: %Projections{} = projections}, item_id)
+      when is_binary(item_id) and item_id != "" do
+    Projections.item_versions(projections, item_id)
+  end
+
+  def list_projection_item_versions(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    with {:ok, session} <- get_session_routed(id, true) do
+      list_projection_item_versions(session, item_id)
+    end
+  end
+
+  def list_projection_item_versions(_id, _item_id), do: {:error, :invalid_projection_item}
+
+  @spec get_projection_item_version(String.t() | Session.t(), String.t(), pos_integer()) ::
+          {:ok, Projections.item()} | {:error, term()}
+  def get_projection_item_version(
+        %Session{projections: %Projections{} = projections},
+        item_id,
+        version
+      )
+      when is_binary(item_id) and item_id != "" and is_integer(version) and version > 0 do
+    Projections.get_item_version(projections, item_id, version)
+  end
+
+  def get_projection_item_version(id, item_id, version)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" and
+             is_integer(version) and version > 0 do
+    with {:ok, session} <- get_session_routed(id, true) do
+      get_projection_item_version(session, item_id, version)
+    end
+  end
+
+  def get_projection_item_version(_id, _item_id, _version),
+    do: {:error, :invalid_projection_item}
+
   @type gap_reason :: :cursor_expired | :epoch_stale | :rollback
+  @type replay_view :: :raw | :composed
   @type gap_signal :: %{
           required(:reason) => gap_reason(),
           required(:from_cursor) => Cursor.t(),
@@ -51,12 +140,41 @@ defmodule Starcite.ReadPath do
 
   def replay_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
-    with {:ok, normalized_cursor} <- Cursor.normalize(cursor) do
-      route_replay_read(id, normalized_cursor, limit)
-    end
+    do_replay(id, cursor, limit, :composed)
   end
 
   def replay_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
+
+  @spec replay_from_cursor(String.t(), term(), pos_integer(), replay_view()) ::
+          {:ok, [map()]} | {:gap, gap_signal()} | {:error, term()}
+  def replay_from_cursor(id, cursor, limit, view)
+      when view in [:raw, :composed] do
+    do_replay(id, cursor, limit, view)
+  end
+
+  defp do_replay(id, cursor, limit, view)
+       when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
+    with {:ok, normalized_cursor} <- Cursor.normalize(cursor),
+         {:ok, session} <- get_session_routed(id, true),
+         snapshot <- View.replay_snapshot(session),
+         {:ok, earliest_available_seq} <- earliest_available_seq(id, snapshot.committed_seq) do
+      case replay_gap_reason(normalized_cursor, snapshot, earliest_available_seq) do
+        nil ->
+          do_replay_from_cursor(
+            id,
+            normalized_cursor,
+            limit,
+            session,
+            snapshot,
+            earliest_available_seq,
+            view
+          )
+
+        reason ->
+          {:gap, gap_signal(reason, normalized_cursor, snapshot, earliest_available_seq)}
+      end
+    end
+  end
 
   @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer()) ::
           {:ok, [map()]} | {:error, term()}
@@ -65,10 +183,20 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    route_events_read(id, cursor, limit, true)
+    get_events_from_cursor(id, cursor, limit, true)
   end
 
   def get_events_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
+
+  @spec get_events_from_cursor(String.t(), non_neg_integer(), pos_integer(), boolean()) ::
+          {:ok, [map()]} | {:error, term()}
+  def get_events_from_cursor(id, cursor, limit, prefer_leader)
+      when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
+             limit > 0 and is_boolean(prefer_leader) do
+    route_events_read(id, cursor, limit, prefer_leader)
+  end
+
+  def get_events_from_cursor(_id, _cursor, _limit, _prefer_leader), do: {:error, :invalid_cursor}
 
   @doc false
   @spec get_events_from_cursor_replica(String.t(), non_neg_integer(), pos_integer()) ::
@@ -76,7 +204,7 @@ defmodule Starcite.ReadPath do
   def get_events_from_cursor_replica(id, cursor, limit)
       when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and is_integer(limit) and
              limit > 0 do
-    route_events_read(id, cursor, limit, false)
+    get_events_from_cursor(id, cursor, limit, false)
   end
 
   def get_events_from_cursor_replica(_id, _cursor, _limit), do: {:error, :invalid_cursor}
@@ -94,30 +222,6 @@ defmodule Starcite.ReadPath do
              limit > 0 do
     do_get_events_from_cursor(id, cursor, limit)
   end
-
-  @doc false
-  def rpc_replay_from_cursor(id, cursor, limit)
-      when is_binary(id) and id != "" and is_integer(limit) and limit > 0 do
-    with {:ok, normalized_cursor} <- Cursor.normalize(cursor),
-         {:ok, snapshot} <- local_cursor_snapshot(id),
-         {:ok, earliest_available_seq} <- earliest_available_seq(id, snapshot.committed_seq) do
-      case replay_gap_reason(normalized_cursor, snapshot, earliest_available_seq) do
-        nil ->
-          do_replay_from_cursor_local(
-            id,
-            normalized_cursor,
-            limit,
-            snapshot,
-            earliest_available_seq
-          )
-
-        reason ->
-          {:gap, gap_signal(reason, normalized_cursor, snapshot, earliest_available_seq)}
-      end
-    end
-  end
-
-  def rpc_replay_from_cursor(_id, _cursor, _limit), do: {:error, :invalid_cursor}
 
   defp do_get_events_from_cursor(id, cursor, limit) do
     with {:ok, hot_events} <- read_hot_events(id, cursor, limit),
@@ -206,10 +310,20 @@ defmodule Starcite.ReadPath do
     end
   end
 
-  defp do_replay_from_cursor_local(id, cursor, limit, snapshot, earliest_available_seq)
+  defp do_replay_from_cursor(
+         id,
+         cursor,
+         limit,
+         session,
+         snapshot,
+         earliest_available_seq,
+         view
+       )
        when is_binary(id) and is_map(cursor) and is_integer(limit) and limit > 0 and
-              is_map(snapshot) do
-    case do_get_events_from_cursor(id, cursor.seq, limit) do
+              is_map(snapshot) and is_struct(session, Session) and view in [:raw, :composed] do
+    case View.from_cursor(session, cursor.seq, limit, view, fn from_seq, to_seq ->
+           get_events_from_cursor(id, from_seq - 1, to_seq - from_seq + 1)
+         end) do
       {:ok, events} ->
         {:ok, attach_epoch(events, snapshot.epoch)}
 
@@ -348,45 +462,6 @@ defmodule Starcite.ReadPath do
     end
   end
 
-  defp local_cursor_snapshot(id) when is_binary(id) and id != "" do
-    with {:ok, %Session{} = session} <- SessionQuorum.get_session(id) do
-      {:ok,
-       %{
-         epoch: session.epoch,
-         last_seq: session.last_seq,
-         committed_seq: session.archived_seq
-       }}
-    end
-  end
-
-  defp route_session_read(id, prefer_leader)
-       when is_binary(id) and id != "" and is_boolean(prefer_leader) do
-    SessionRouter.call(
-      id,
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      __MODULE__,
-      :rpc_get_session,
-      [id],
-      prefer_leader: prefer_leader
-    )
-  end
-
-  defp route_replay_read(id, cursor, limit)
-       when is_binary(id) and id != "" and is_map(cursor) and is_integer(limit) and limit > 0 do
-    SessionRouter.call(
-      id,
-      __MODULE__,
-      :rpc_replay_from_cursor,
-      [id, cursor, limit],
-      __MODULE__,
-      :rpc_replay_from_cursor,
-      [id, cursor, limit],
-      prefer_leader: false
-    )
-  end
-
   defp route_events_read(id, cursor, limit, prefer_leader)
        when is_binary(id) and id != "" and is_integer(cursor) and cursor >= 0 and
               is_integer(limit) and limit > 0 and is_boolean(prefer_leader) do
@@ -398,7 +473,8 @@ defmodule Starcite.ReadPath do
       __MODULE__,
       :rpc_get_events_from_cursor,
       [id, cursor, limit],
-      prefer_leader: prefer_leader
+      prefer_leader: prefer_leader,
+      defer_local_when_unconfirmed: prefer_leader
     )
   end
 end

@@ -289,6 +289,69 @@ defmodule Starcite.WritePath do
     end)
   end
 
+  @spec put_projection_items(String.t(), [map()]) ::
+          {:ok, [map()]} | {:error, term()} | {:timeout, term()}
+  def put_projection_items(id, items)
+      when is_binary(id) and id != "" and is_list(items) and items != [] do
+    route_to_replica(
+      id,
+      :put_projection_items_local,
+      [id, items],
+      :put_projection_items_local,
+      [id, items]
+    )
+  end
+
+  def put_projection_items(_id, _items), do: {:error, :invalid_projection_item}
+
+  @spec put_projection_item(String.t(), map()) ::
+          {:ok, map()} | {:error, term()} | {:timeout, term()}
+  def put_projection_item(id, item)
+      when is_binary(id) and id != "" and is_map(item) do
+    case put_projection_items(id, [item]) do
+      {:ok, [stored_item]} -> {:ok, stored_item}
+      {:error, _reason} = error -> error
+      {:timeout, _reason} = timeout -> timeout
+    end
+  end
+
+  def put_projection_item(_id, _item), do: {:error, :invalid_projection_item}
+
+  @doc false
+  @spec put_projection_items_local(String.t(), [map()]) ::
+          {:ok, [map()]} | {:error, term()} | {:timeout, term()}
+  def put_projection_items_local(id, items)
+      when is_binary(id) and id != "" and is_list(items) and items != [] do
+    SessionQuorum.put_projection_items(id, items)
+  end
+
+  def put_projection_items_local(_id, _items), do: {:error, :invalid_projection_item}
+
+  @spec delete_projection_item(String.t(), String.t()) ::
+          :ok | {:error, term()} | {:timeout, term()}
+  def delete_projection_item(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    route_to_replica(
+      id,
+      :delete_projection_item_local,
+      [id, item_id],
+      :delete_projection_item_local,
+      [id, item_id]
+    )
+  end
+
+  def delete_projection_item(_id, _item_id), do: {:error, :invalid_projection_item}
+
+  @doc false
+  @spec delete_projection_item_local(String.t(), String.t()) ::
+          :ok | {:error, term()} | {:timeout, term()}
+  def delete_projection_item_local(id, item_id)
+      when is_binary(id) and id != "" and is_binary(item_id) and item_id != "" do
+    SessionQuorum.delete_projection_item(id, item_id)
+  end
+
+  def delete_projection_item_local(_id, _item_id), do: {:error, :invalid_projection_item}
+
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(id, upto_seq) when is_binary(id) and is_integer(upto_seq) and upto_seq >= 0 do

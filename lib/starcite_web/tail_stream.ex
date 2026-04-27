@@ -26,6 +26,7 @@ defmodule StarciteWeb.TailStream do
           required(:cursor) => non_neg_integer(),
           required(:cursor_epoch) => non_neg_integer() | nil,
           required(:frame_batch_size) => pos_integer(),
+          required(:view) => :raw | :composed,
           required(:replay_queue) => :queue.queue(),
           required(:replay_done) => boolean(),
           required(:live_buffer) => map(),
@@ -45,11 +46,12 @@ defmodule StarciteWeb.TailStream do
         session_id: session_id,
         cursor: cursor,
         frame_batch_size: frame_batch_size,
+        view: view,
         principal: principal,
         auth_context: %Context{} = auth_context
       })
       when is_binary(session_id) and session_id != "" and is_map(cursor) and
-             is_integer(frame_batch_size) and frame_batch_size > 0 and
+             is_integer(frame_batch_size) and frame_batch_size > 0 and view in [:raw, :composed] and
              (is_struct(principal, Principal) or is_nil(principal)) do
     :ok = PubSub.subscribe(Starcite.PubSub, CursorUpdate.topic(session_id))
     auth_expires_at = auth_expires_at(auth_context)
@@ -62,6 +64,7 @@ defmodule StarciteWeb.TailStream do
       cursor: cursor_seq,
       cursor_epoch: cursor_epoch,
       frame_batch_size: frame_batch_size,
+      view: view,
       replay_queue: :queue.new(),
       replay_done: false,
       live_buffer: %{},
@@ -157,7 +160,8 @@ defmodule StarciteWeb.TailStream do
            ReadPath.replay_from_cursor(
              state.session_id,
              Cursor.new(state.cursor_epoch, state.cursor),
-             @replay_batch_size
+             @replay_batch_size,
+             state.view
            )
          end) do
       {:ok, []} ->

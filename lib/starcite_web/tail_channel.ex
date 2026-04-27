@@ -20,7 +20,8 @@ defmodule StarciteWeb.TailChannel do
   def join("tail:" <> session_id, params, %{assigns: %{auth: %Context{} = auth}} = socket)
       when is_binary(session_id) and session_id != "" and is_map(params) do
     with :ok <- Context.ensure_current(auth),
-         {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size}} <- TailParams.parse(params),
+         {:ok, %{cursor: cursor, frame_batch_size: frame_batch_size, view: view}} <-
+           TailParams.parse(params),
          :ok <- Policy.authorize_session_access(auth, session_id, :read),
          {:ok, session} <- ReadPath.get_session_replica(session_id),
          :ok <- Policy.authorize_session_resource(auth, session, :read),
@@ -29,6 +30,7 @@ defmodule StarciteWeb.TailChannel do
              session_id: session_id,
              cursor: cursor,
              frame_batch_size: frame_batch_size,
+             view: view,
              principal: auth.principal,
              auth_context: auth
            }) do

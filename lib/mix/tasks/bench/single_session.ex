@@ -335,7 +335,7 @@ defmodule Mix.Tasks.Bench.SingleSession do
   defp replay_from_cursor!(session_id, cursor, limit)
        when is_binary(session_id) and session_id != "" and is_integer(cursor) and cursor >= 0 and
               is_integer(limit) and limit > 0 do
-    case ReadPath.replay_from_cursor(session_id, cursor, limit) do
+    case ReadPath.replay_from_cursor(session_id, cursor, limit, :raw) do
       {:ok, _events} ->
         :ok
 

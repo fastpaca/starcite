@@ -7,35 +7,72 @@ defmodule Starcite.DataPlane.SessionLog do
   lifecycle around this state.
   """
 
+  require Logger
+
   alias Starcite.DataPlane.{CursorUpdate, EventStore, SessionStore}
   alias Starcite.Observability.Telemetry
   alias Starcite.Session
+  alias Starcite.Session.{Events, Projections, View}
+  alias Starcite.Storage.SessionCatalog
+
+  @enforce_keys [:session, :producer_cursors, :replicate_fun, :role, :mirrored_projection_version]
+  defstruct [:session, :producer_cursors, :replicate_fun, :role, :mirrored_projection_version]
 
   @type role :: :owner | :follower
-  @type t :: %{
-          required(:session) => Session.t(),
-          required(:producer_cursors) => map(),
-          required(:replicate_fun) => (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
-          required(:role) => role()
+  @type t :: %__MODULE__{
+          session: Session.t(),
+          producer_cursors: map(),
+          replicate_fun: (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
+          role: role(),
+          mirrored_projection_version: non_neg_integer()
         }
 
   @spec new(Session.t(), role(), (Session.t(), [map()], [node()] -> :ok | {:error, term()})) ::
           t()
   def new(%Session{} = session, role, replicate_fun)
       when role in [:owner, :follower] and is_function(replicate_fun, 3) do
-    %{
-      session: Session.normalize_epoch(session),
+    new(session, role, replicate_fun, session.projection_version)
+  end
+
+  @spec new(
+          Session.t(),
+          role(),
+          (Session.t(), [map()], [node()] -> :ok | {:error, term()}),
+          non_neg_integer()
+        ) :: t()
+  def new(%Session{} = session, role, replicate_fun, mirrored_projection_version)
+      when role in [:owner, :follower] and is_function(replicate_fun, 3) do
+    %__MODULE__{
+      session: Events.normalize_epoch(session),
       producer_cursors: %{},
       replicate_fun: replicate_fun,
-      role: role
+      role: role,
+      mirrored_projection_version: mirrored_projection_version
     }
   end
 
   @spec session(t()) :: Session.t()
-  def session(%{session: %Session{} = session}), do: session
+  def session(%__MODULE__{session: %Session{} = session}), do: session
 
   @spec role(t()) :: role()
-  def role(%{role: role}) when role in [:owner, :follower], do: role
+  def role(%__MODULE__{role: role}) when role in [:owner, :follower], do: role
+
+  @spec projection_mirror_dirty?(t()) :: boolean()
+  def projection_mirror_dirty?(%__MODULE__{
+        session: %Session{projection_version: projection_version},
+        mirrored_projection_version: mirrored_projection_version
+      })
+      when is_integer(projection_version) and projection_version >= 0 and
+             is_integer(mirrored_projection_version) and mirrored_projection_version >= 0 do
+    projection_version > mirrored_projection_version
+  end
+
+  @spec repair_projection_mirror(t()) :: {:ok, t()} | {:error, term(), t()}
+  def repair_projection_mirror(%__MODULE__{role: :owner} = data) do
+    persist_projection_state_mirror(data, data.session, force: true)
+  end
+
+  def repair_projection_mirror(%__MODULE__{} = data), do: {:ok, data}
 
   @spec handle_batch([term()], t()) :: {t(), [term()]}
   def handle_batch(batch, data) when is_list(batch) do
@@ -44,7 +81,7 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp process_batch([], data, actions), do: {data, actions}
 
-  defp process_batch(batch, %{role: :owner} = data, actions) do
+  defp process_batch(batch, %__MODULE__{role: :owner} = data, actions) do
     case collect_append_group(batch) do
       {[], _rest} ->
         [op | rest] = batch
@@ -122,29 +159,113 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp process_single({:info, _message}, data, actions), do: {data, actions}
 
-  defp process_single({:call, from, :get_role}, %{role: role} = data, actions) do
-    {data, actions ++ [{:reply, from, role}]}
+  defp process_single({:call, from, message}, data, actions) do
+    process_call(from, message, data, actions)
   end
 
-  defp process_single({:call, from, :describe}, %{role: role, session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, %{role: role, session: session}}}]}
+  defp process_single(_other, data, actions), do: {data, actions}
+
+  defp process_call(from, :get_role, %__MODULE__{role: role} = data, actions) do
+    reply(data, actions, from, role)
   end
 
-  defp process_single({:call, from, :get_session}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, session}}]}
+  defp process_call(
+         from,
+         :describe,
+         %__MODULE__{role: role, session: session} = data,
+         actions
+       ) do
+    reply(data, actions, from, {:ok, %{role: role, session: session}})
   end
 
-  defp process_single({:call, from, :fetch_cursor_snapshot}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, cursor_snapshot(session)}}]}
+  defp process_call(from, :get_session, %__MODULE__{session: session} = data, actions) do
+    reply(data, actions, from, {:ok, session})
   end
 
-  defp process_single({:call, from, :fetch_archived_seq}, %{session: session} = data, actions) do
-    {data, actions ++ [{:reply, from, {:ok, session.archived_seq}}]}
+  defp process_call(
+         from,
+         :fetch_cursor_snapshot,
+         %__MODULE__{session: session} = data,
+         actions
+       ) do
+    reply(data, actions, from, {:ok, cursor_snapshot(session)})
   end
 
-  defp process_single(
-         {:call, from, {:append_event, input, expected_seq, replicas}},
-         %{role: :owner} = data,
+  defp process_call(
+         from,
+         :fetch_archived_seq,
+         %__MODULE__{session: session} = data,
+         actions
+       ) do
+    reply(data, actions, from, {:ok, session.archived_seq})
+  end
+
+  defp process_call(
+         from,
+         {:put_projection_items, items, replicas},
+         %__MODULE__{role: :owner, session: session} = data,
+         actions
+       )
+       when is_list(items) and items != [] and is_list(replicas) do
+    with {:ok, next_session, stored_items} <- Session.put_projection_items(session, items),
+         normalized_session = Events.normalize_epoch(next_session),
+         :ok <- replicate_state(data, normalized_session, [], replicas),
+         {:ok, next_data} <- commit_session(data, normalized_session, []) do
+      reply(next_data, actions, from, {:ok, stored_items})
+    else
+      {:error, _reason} = error ->
+        reply(data, actions, from, error)
+    end
+  end
+
+  defp process_call(
+         from,
+         {:put_projection_items, _items, _replicas},
+         %__MODULE__{role: :owner} = data,
+         actions
+       ) do
+    reply(data, actions, from, {:error, :invalid_projection_item})
+  end
+
+  defp process_call(from, {:put_projection_items, _items, _replicas}, data, actions) do
+    reply_not_owner(data, actions, from)
+  end
+
+  defp process_call(
+         from,
+         {:delete_projection_item, item_id, replicas},
+         %__MODULE__{role: :owner, session: session} = data,
+         actions
+       )
+       when is_binary(item_id) and item_id != "" and is_list(replicas) do
+    with {:ok, next_session} <- Session.delete_projection_item(session, item_id),
+         normalized_session = Events.normalize_epoch(next_session),
+         :ok <- replicate_state(data, normalized_session, [], replicas),
+         {:ok, next_data} <- commit_session(data, normalized_session, []) do
+      reply(next_data, actions, from, :ok)
+    else
+      {:error, _reason} = error ->
+        reply(data, actions, from, error)
+    end
+  end
+
+  defp process_call(
+         from,
+         {:delete_projection_item, _item_id, _replicas},
+         %__MODULE__{role: :owner} = data,
+         actions
+       ) do
+    reply(data, actions, from, {:error, :invalid_projection_item})
+  end
+
+  defp process_call(from, {:delete_projection_item, _item_id, _replicas}, data, actions) do
+    reply_not_owner(data, actions, from)
+  end
+
+  defp process_call(
+         from,
+         {:append_event, input, expected_seq, replicas},
+         %__MODULE__{role: :owner} = data,
          actions
        )
        when is_map(input) and is_list(replicas) do
@@ -161,9 +282,10 @@ defmodule Starcite.DataPlane.SessionLog do
     )
   end
 
-  defp process_single(
-         {:call, from, {:append_events, inputs, expected_seq, replicas}},
-         %{role: :owner} = data,
+  defp process_call(
+         from,
+         {:append_events, inputs, expected_seq, replicas},
+         %__MODULE__{role: :owner} = data,
          actions
        )
        when is_list(inputs) and inputs != [] and is_list(replicas) do
@@ -180,49 +302,42 @@ defmodule Starcite.DataPlane.SessionLog do
     )
   end
 
-  defp process_single(
-         {:call, from, {:append_event, _input, _expected_seq, _replicas}},
-         %{role: :owner} = data,
+  defp process_call(
+         from,
+         {:append_event, _input, _expected_seq, _replicas},
+         %__MODULE__{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    reply(data, actions, from, {:error, :invalid_event})
   end
 
-  defp process_single(
-         {:call, from, {:append_events, _inputs, _expected_seq, _replicas}},
-         %{role: :owner} = data,
+  defp process_call(
+         from,
+         {:append_events, _inputs, _expected_seq, _replicas},
+         %__MODULE__{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    reply(data, actions, from, {:error, :invalid_event})
   end
 
-  defp process_single(
-         {:call, from, {:append_event, _input, _expected_seq, _replicas}},
-         data,
-         actions
-       ) do
-    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+  defp process_call(from, {:append_event, _input, _expected_seq, _replicas}, data, actions) do
+    reply_not_owner(data, actions, from)
   end
 
-  defp process_single(
-         {:call, from, {:append_events, _inputs, _expected_seq, _replicas}},
-         data,
-         actions
-       ) do
-    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+  defp process_call(from, {:append_events, _inputs, _expected_seq, _replicas}, data, actions) do
+    reply_not_owner(data, actions, from)
   end
 
-  defp process_single(
-         {:call, from, {:ack_archived, upto_seq, replicas}},
-         %{role: :owner, session: session} = data,
+  defp process_call(
+         from,
+         {:ack_archived, upto_seq, replicas},
+         %__MODULE__{role: :owner, session: session} = data,
          actions
        )
        when is_integer(upto_seq) and upto_seq >= 0 and is_list(replicas) do
     previous_archived_seq = session.archived_seq
     {updated_session, _trimmed} = Session.persist_ack(session, upto_seq)
-    next_session = Session.normalize_epoch(updated_session)
+    next_session = Events.normalize_epoch(updated_session)
 
     case replicate_state(data, next_session, [], replicas) do
       :ok ->
@@ -241,42 +356,41 @@ defmodule Starcite.DataPlane.SessionLog do
           tail_size
         )
 
-        :ok = SessionStore.put_session(next_session)
-
         reply = %{
           archived_seq: next_session.archived_seq,
           trimmed: evicted,
           committed_cursor: %{epoch: next_session.epoch, seq: next_session.archived_seq}
         }
 
-        {%{data | session: next_session}, actions ++ [{:reply, from, {:ok, reply}}]}
+        {:ok, next_data} = commit_session(data, next_session, [])
+        reply(next_data, actions, from, {:ok, reply})
 
       {:error, _reason} = error ->
-        {data, actions ++ [{:reply, from, error}]}
+        reply(data, actions, from, error)
     end
   end
 
-  defp process_single(
-         {:call, from, {:ack_archived, _upto_seq, _replicas}},
-         %{role: :owner} = data,
+  defp process_call(
+         from,
+         {:ack_archived, _upto_seq, _replicas},
+         %__MODULE__{role: :owner} = data,
          actions
        ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+    reply(data, actions, from, {:error, :invalid_event})
   end
 
-  defp process_single({:call, from, {:ack_archived, _upto_seq, _replicas}}, data, actions) do
-    :ok = Telemetry.routing_fence(data.session.id, :session_log, :not_owner)
-    {data, actions ++ [{:reply, from, {:error, :not_owner}}]}
+  defp process_call(from, {:ack_archived, _upto_seq, _replicas}, data, actions) do
+    reply_not_owner(data, actions, from)
   end
 
-  defp process_single(
-         {:call, from,
-          {:apply_replica, %Session{id: session_id} = incoming_session, incoming_events}},
-         %{session: current_session} = data,
+  defp process_call(
+         from,
+         {:apply_replica, %Session{id: session_id} = incoming_session, incoming_events},
+         %__MODULE__{session: current_session} = data,
          actions
        )
        when is_binary(session_id) and session_id != "" and is_list(incoming_events) do
-    normalized_session = Session.normalize_epoch(incoming_session)
+    normalized_session = Events.normalize_epoch(incoming_session)
     normalized_events = put_events_epoch(incoming_events, normalized_session.epoch)
 
     if should_apply_replication?(normalized_session, current_session) do
@@ -296,37 +410,39 @@ defmodule Starcite.DataPlane.SessionLog do
           normalized_session.archived_seq
         )
 
+      next_data = %{
+        data
+        | session: normalized_session,
+          role: :follower,
+          mirrored_projection_version:
+            min(data.mirrored_projection_version, normalized_session.projection_version)
+      }
+
       :ok = SessionStore.put_session(normalized_session)
 
-      {%{data | session: normalized_session, role: :follower}, actions ++ [{:reply, from, :ok}]}
+      reply(next_data, actions, from, :ok)
     else
-      {data, actions ++ [{:reply, from, :ok}]}
+      reply(data, actions, from, :ok)
     end
   end
 
-  defp process_single(
-         {:call, from, {:apply_replica, _incoming_session, _incoming_events}},
-         data,
-         actions
-       ) do
-    {data, actions ++ [{:reply, from, {:error, :invalid_event}}]}
+  defp process_call(from, {:apply_replica, _incoming_session, _incoming_events}, data, actions) do
+    reply(data, actions, from, {:error, :invalid_event})
   end
 
-  defp process_single({:call, from, _message}, data, actions) do
-    {data, actions ++ [{:reply, from, {:error, :unsupported_command}}]}
+  defp process_call(from, _message, data, actions) do
+    reply(data, actions, from, {:error, :unsupported_command})
   end
-
-  defp process_single(_other, data, actions), do: {data, actions}
 
   defp process_single_append(
          request,
-         %{session: session, producer_cursors: producer_cursors} = data,
+         %__MODULE__{session: session, producer_cursors: producer_cursors} = data,
          actions
        ) do
     with :ok <- guard_expected_seq(session, request.expected_seq),
          {:ok, next_session, next_cursors, next_events, outcome} <-
            execute_append_request(session, producer_cursors, request) do
-      next_session = Session.normalize_epoch(next_session)
+      next_session = Events.normalize_epoch(next_session)
       events = put_events_epoch(next_events, next_session.epoch)
 
       commit_single_append(
@@ -347,7 +463,7 @@ defmodule Starcite.DataPlane.SessionLog do
 
   defp process_append_group(
          requests,
-         %{session: session, producer_cursors: producer_cursors} = data,
+         %__MODULE__{session: session, producer_cursors: producer_cursors} = data,
          actions
        ) do
     replicas = hd(requests).replicas
@@ -360,7 +476,7 @@ defmodule Starcite.DataPlane.SessionLog do
         case execute_append_request(current_session, current_cursors, request) do
           {:ok, updated_session, updated_cursors, request_events, outcome} ->
             {
-              Session.normalize_epoch(updated_session),
+              Events.normalize_epoch(updated_session),
               updated_cursors,
               events ++ request_events,
               outcomes ++ [outcome]
@@ -475,11 +591,11 @@ defmodule Starcite.DataPlane.SessionLog do
          outcome,
          _replicas
        ) do
-    {:ok, publish_session} = commit_session(next_session, [])
+    {:ok, next_data} = commit_session(data, next_session, [])
+    publish_session = next_data.session
     reply = finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
-    {%{data | session: publish_session, producer_cursors: next_cursors},
-     actions ++ [{:reply, from, {:ok, reply}}]}
+    {%{next_data | producer_cursors: next_cursors}, actions ++ [{:reply, from, {:ok, reply}}]}
   end
 
   defp commit_single_append(
@@ -494,12 +610,13 @@ defmodule Starcite.DataPlane.SessionLog do
        )
        when is_list(events) do
     case replicate_and_commit(data, next_session, events, replicas) do
-      {:ok, publish_session} ->
+      {:ok, next_data} ->
+        publish_session = next_data.session
+
         reply =
           finalize_success_outcome(outcome, publish_session.epoch, publish_session.archived_seq)
 
-        {%{data | session: publish_session, producer_cursors: next_cursors},
-         actions ++ [{:reply, from, {:ok, reply}}]}
+        {%{next_data | producer_cursors: next_cursors}, actions ++ [{:reply, from, {:ok, reply}}]}
 
       {:error, _reason} = error ->
         {data, actions ++ [{:reply, from, error}]}
@@ -507,14 +624,15 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp commit_append_group(data, actions, next_session, next_cursors, [], outcomes, _replicas) do
-    {:ok, publish_session} = commit_session(next_session, [])
+    {:ok, next_data} = commit_session(data, next_session, [])
+    publish_session = next_data.session
 
     reply_actions =
       Enum.map(outcomes, fn outcome ->
         {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
       end)
 
-    {%{data | session: publish_session, producer_cursors: next_cursors}, actions ++ reply_actions}
+    {%{next_data | producer_cursors: next_cursors}, actions ++ reply_actions}
   end
 
   defp commit_append_group(
@@ -528,14 +646,15 @@ defmodule Starcite.DataPlane.SessionLog do
        )
        when is_list(committed_events) do
     case replicate_and_commit(data, next_session, committed_events, replicas) do
-      {:ok, publish_session} ->
+      {:ok, next_data} ->
+        publish_session = next_data.session
+
         reply_actions =
           Enum.map(outcomes, fn outcome ->
             {:reply, outcome_from(outcome), finalize_outcome(outcome, publish_session)}
           end)
 
-        {%{data | session: publish_session, producer_cursors: next_cursors},
-         actions ++ reply_actions}
+        {%{next_data | producer_cursors: next_cursors}, actions ++ reply_actions}
 
       {:error, _reason} = error ->
         reply_actions =
@@ -548,7 +667,7 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp replicate_and_commit(data, next_session, events, replicas)
-       when is_map(data) and is_struct(next_session, Session) and is_list(events) do
+       when is_struct(data, __MODULE__) and is_struct(next_session, Session) and is_list(events) do
     :ok =
       Telemetry.append_boundary(
         next_session.id,
@@ -558,15 +677,31 @@ defmodule Starcite.DataPlane.SessionLog do
       )
 
     with :ok <- replicate_state(data, next_session, events, replicas) do
-      commit_session(next_session, events)
+      commit_session(data, next_session, events)
     end
   end
 
-  defp commit_session(%Session{} = next_session, events) when is_list(events) do
+  defp commit_session(%__MODULE__{} = data, %Session{} = next_session, events, opts \\ [])
+       when is_list(events) and is_list(opts) do
     publish_session = preserve_publication_watermark(next_session)
     :ok = put_appended_events(next_session.id, next_session.tenant_id, events)
     if events != [], do: :ok = publish_events(publish_session, events)
     :ok = SessionStore.put_session(publish_session)
+
+    next_data =
+      case persist_projection_state_mirror(data, publish_session, opts) do
+        {:ok, mirrored_data} ->
+          mirrored_data
+
+        {:error, reason, dirty_data} ->
+          Logger.warning(
+            "projection mirror persist failed for session #{publish_session.id}: #{inspect(reason)}"
+          )
+
+          dirty_data
+      end
+
+    next_data = %{next_data | session: publish_session}
 
     if events != [] do
       :ok =
@@ -578,15 +713,80 @@ defmodule Starcite.DataPlane.SessionLog do
         )
     end
 
-    {:ok, publish_session}
+    {:ok, next_data}
+  end
+
+  # Projection state is committed through the live session log. The catalog is a
+  # cold-start mirror, so persistence here is downstream of the session commit.
+  defp persist_projection_state_mirror(
+         %__MODULE__{
+           role: :owner,
+           mirrored_projection_version: mirrored_projection_version
+         } = data,
+         %Session{
+           id: session_id,
+           archived_seq: archived_seq,
+           projections: projections,
+           projection_version: projection_version
+         },
+         opts
+       )
+       when is_binary(session_id) and session_id != "" and is_integer(archived_seq) and
+              archived_seq >= 0 and is_list(opts) do
+    if persist_projection_state_mirror?(
+         mirrored_projection_version,
+         projection_version,
+         projections,
+         archived_seq,
+         opts
+       ) do
+      case SessionCatalog.put_progress_batch([
+             %{session_id: session_id, archived_seq: archived_seq}
+           ]) do
+        :ok ->
+          case SessionCatalog.put_projection_state(session_id, projections, projection_version) do
+            :ok ->
+              {:ok, %{data | mirrored_projection_version: projection_version}}
+
+            {:error, reason} ->
+              {:error, reason, data}
+          end
+
+        {:error, reason} ->
+          {:error, reason, data}
+      end
+    else
+      {:ok, data}
+    end
+  end
+
+  defp persist_projection_state_mirror(%__MODULE__{} = data, %Session{}, _opts), do: {:ok, data}
+
+  defp persist_projection_state_mirror?(
+         mirrored_projection_version,
+         projection_version,
+         %Projections{} = projections,
+         archived_seq,
+         opts
+       )
+       when is_integer(mirrored_projection_version) and mirrored_projection_version >= 0 and
+              is_integer(projection_version) and projection_version >= 0 and
+              is_integer(archived_seq) and archived_seq >= 0 and is_list(opts) do
+    Projections.mirrorable?(projections, archived_seq) and
+      (Keyword.get(opts, :force, false) or projection_version > mirrored_projection_version)
   end
 
   defp cursor_snapshot(%Session{} = session) do
-    %{
-      epoch: session.epoch,
-      last_seq: session.last_seq,
-      committed_seq: session.archived_seq
-    }
+    View.replay_snapshot(session)
+  end
+
+  defp reply(data, actions, from, payload) do
+    {data, actions ++ [{:reply, from, payload}]}
+  end
+
+  defp reply_not_owner(%__MODULE__{session: %Session{id: session_id}} = data, actions, from) do
+    :ok = Telemetry.routing_fence(session_id, :session_log, :not_owner)
+    reply(data, actions, from, {:error, :not_owner})
   end
 
   defp guard_expected_seq(_session, nil), do: :ok
@@ -611,7 +811,7 @@ defmodule Starcite.DataPlane.SessionLog do
   defp append_one_to_session(%Session{} = session, producer_cursors, input)
        when is_map(producer_cursors) and is_map(input) do
     with :ok <- guard_event_tenant(session, input) do
-      case Session.append_event(session, producer_cursors, input) do
+      case Events.append_event(session, producer_cursors, input) do
         {:appended, updated_session, updated_cursors, event} ->
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
           {:ok, updated_session, updated_cursors, reply, event}
@@ -636,7 +836,7 @@ defmodule Starcite.DataPlane.SessionLog do
          events
        ) do
     with :ok <- guard_event_tenant(session, input) do
-      case Session.append_event(session, producer_cursors, input) do
+      case Events.append_event(session, producer_cursors, input) do
         {:appended, updated_session, updated_cursors, event} ->
           reply = %{seq: event.seq, last_seq: updated_session.last_seq, deduped: false}
 
@@ -739,8 +939,8 @@ defmodule Starcite.DataPlane.SessionLog do
   end
 
   defp should_apply_replication?(%Session{} = incoming, %Session{} = current) do
-    incoming_epoch = Session.normalize_epoch_value(incoming.epoch)
-    current_epoch = Session.normalize_epoch_value(current.epoch)
+    incoming_epoch = Events.normalize_epoch_value(incoming.epoch)
+    current_epoch = Events.normalize_epoch_value(current.epoch)
 
     cond do
       incoming_epoch > current_epoch ->

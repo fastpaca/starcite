@@ -14,6 +14,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.{SessionRouter, Store}
   alias Starcite.Session
+  alias Starcite.Session.Events
   alias Starcite.Storage.SessionCatalog
 
   @dialyzer {:nowarn_function,
@@ -21,7 +22,11 @@ defmodule Starcite.DataPlane.SessionQuorum do
                append_event: 3,
                append_events: 3,
                ack_archived: 2,
-               fetch_cursor_snapshot: 1
+               fetch_cursor_snapshot: 1,
+               put_projection_items: 2,
+               delete_projection_item: 2,
+               do_put_projection_items: 4,
+               do_delete_projection_item: 4
              ]}
 
   @runtime_registry Starcite.DataPlane.SessionRuntimeRegistry
@@ -110,6 +115,71 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   def append_events(_session_id, _inputs, _opts), do: {:error, :invalid_event}
 
+  @spec put_projection_items(String.t(), [map()]) ::
+          {:ok, [map()]} | {:error, term()} | {:timeout, term()}
+  def put_projection_items(session_id, items)
+      when is_binary(session_id) and session_id != "" and is_list(items) and items != [] do
+    do_put_projection_items(
+      require_local_owner_assignment(session_id),
+      session_id,
+      items,
+      lookup_runtime(session_id)
+    )
+  end
+
+  def put_projection_items(_session_id, _items), do: {:error, :invalid_projection_item}
+
+  @spec delete_projection_item(String.t(), String.t()) ::
+          :ok | {:error, term()} | {:timeout, term()}
+  def delete_projection_item(session_id, item_id)
+      when is_binary(session_id) and session_id != "" and is_binary(item_id) and item_id != "" do
+    do_delete_projection_item(
+      require_local_owner_assignment(session_id),
+      session_id,
+      item_id,
+      lookup_runtime(session_id)
+    )
+  end
+
+  def delete_projection_item(_session_id, _item_id), do: {:error, :invalid_projection_item}
+
+  defp do_put_projection_items({:ok, assignment}, session_id, items, runtime_lookup)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) and is_list(items) and
+              items != [] do
+    with {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
+         {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
+      call_runtime(
+        session_id,
+        current_pid,
+        {:put_projection_items, items, assignment.replicas}
+      )
+    end
+  end
+
+  defp do_put_projection_items({:error, _reason} = error, _session_id, _items, _runtime_lookup),
+    do: error
+
+  defp do_delete_projection_item({:ok, assignment}, session_id, item_id, runtime_lookup)
+       when is_binary(session_id) and session_id != "" and is_map(assignment) and
+              is_binary(item_id) and item_id != "" do
+    with {:ok, pid} <- ensure_runtime_loaded_from_lookup(session_id, runtime_lookup),
+         {:ok, current_pid} <- ensure_runtime_epoch_current(session_id, pid, assignment) do
+      call_runtime(
+        session_id,
+        current_pid,
+        {:delete_projection_item, item_id, assignment.replicas}
+      )
+    end
+  end
+
+  defp do_delete_projection_item(
+         {:error, _reason} = error,
+         _session_id,
+         _item_id,
+         _runtime_lookup
+       ),
+       do: error
+
   @spec ack_archived(String.t(), non_neg_integer()) ::
           {:ok, map()} | {:error, term()} | {:timeout, term()}
   def ack_archived(session_id, upto_seq)
@@ -147,7 +217,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
   def query_session_with_epoch(session_id)
       when is_binary(session_id) and session_id != "" do
     with {:ok, session} <- get_session(session_id) do
-      {:ok, %{session: session, epoch: Session.normalize_epoch_value(session.epoch)}}
+      {:ok, %{session: session, epoch: Events.normalize_epoch_value(session.epoch)}}
     end
   end
 
@@ -486,7 +556,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
       desired_role = desired_role(session_id, assignment)
 
       cond do
-        current_epoch > Session.normalize_epoch_value(session.epoch) or desired_role != role ->
+        current_epoch > Events.normalize_epoch_value(session.epoch) or desired_role != role ->
           restart_runtime_for_epoch(session_id, session, current_epoch)
 
         follower_refresh_needed?(session_id, role, desired_role, session) ->
@@ -564,14 +634,14 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp effective_epoch(session_id, %Session{} = session, nil)
        when is_binary(session_id) and session_id != "" do
-    SessionRouter.local_owner_epoch(session_id, Session.normalize_epoch_value(session.epoch))
+    SessionRouter.local_owner_epoch(session_id, Events.normalize_epoch_value(session.epoch))
   end
 
   defp effective_epoch(session_id, %Session{} = session, assignment)
        when is_binary(session_id) and session_id != "" do
     SessionRouter.local_owner_epoch(
       session_id,
-      Session.normalize_epoch_value(session.epoch),
+      Events.normalize_epoch_value(session.epoch),
       assignment: assignment
     )
   end
@@ -795,7 +865,7 @@ defmodule Starcite.DataPlane.SessionQuorum do
 
   defp session_with_epoch(%Session{} = session, epoch)
        when is_integer(epoch) and epoch >= 0 do
-    %Session{session | epoch: max(Session.normalize_epoch_value(session.epoch), epoch)}
+    %Session{session | epoch: max(Events.normalize_epoch_value(session.epoch), epoch)}
   end
 
   defp restart_runtime_from_local_session(session_id, %Session{} = session, target_epoch)
@@ -1039,8 +1109,8 @@ defmodule Starcite.DataPlane.SessionQuorum do
   end
 
   defp fresher_session?(%Session{} = incoming, %Session{} = current) do
-    incoming_epoch = Session.normalize_epoch_value(incoming.epoch)
-    current_epoch = Session.normalize_epoch_value(current.epoch)
+    incoming_epoch = Events.normalize_epoch_value(incoming.epoch)
+    current_epoch = Events.normalize_epoch_value(current.epoch)
 
     cond do
       incoming_epoch > current_epoch ->
@@ -1056,6 +1126,9 @@ defmodule Starcite.DataPlane.SessionQuorum do
         false
 
       incoming.archived_seq > current.archived_seq ->
+        true
+
+      incoming.projection_version > current.projection_version ->
         true
 
       true ->

@@ -42,7 +42,7 @@ Scopes:
 - `session:create` for `POST /v1/sessions`
 - `session:read` for `GET /v1/sessions`, `GET /v1/sessions/:id`, and socket subscriptions over `/v1/socket`
 - `session:append` for `POST /v1/sessions/:id/append`
-- `session:create` also covers `POST /v1/sessions/:id/archive` and `POST /v1/sessions/:id/unarchive`
+- `session:create` also covers `POST /v1/sessions/:id/projections`, `POST /v1/sessions/:id/archive`, and `POST /v1/sessions/:id/unarchive`
 
 Unauthorized requests fail with `401`.
 
@@ -115,6 +115,56 @@ Requires `session:append`. Session must match JWT `tenant_id`. If JWT has
   - `cursor` (`seq` of the appended event)
   - `committed_cursor` (current durable frontier as `seq`)
 
+### `POST /v1/sessions/:id/projections`
+
+Write one or more immutable projection item versions. Requires `session:create`.
+
+- The target session must already exist and the interval must refer to existing raw seqs
+- Request body accepts either one item directly or an `items` array
+- Required item fields: `item_id`, `version`, `from_seq`, `to_seq`, `payload`
+- Optional item fields: `metadata`, `schema`, `content_type`
+- `payload` is stored as provided and is opaque to Starcite
+- Projection writes are committed as first-class session state
+- The same `(item_id, version)` cannot be written twice with different content
+- The same `item_id` cannot appear more than once in a single batch
+- The latest version of one item cannot overlap the latest version of another item
+- Future reads and replay in the default `composed` view substitute the latest version of each covered interval immediately after the session commit succeeds
+
+### `GET /v1/sessions/:id/projections`
+
+List the latest stored version for each projection item. Requires `session:read`.
+
+- Response shape: `{ "items": [...] }`
+- Returns only the active latest version of each `item_id`
+- Items are sorted by `{from_seq, to_seq}`
+
+### `GET /v1/sessions/:id/projections/:item_id`
+
+Fetch the latest stored version for one projection item. Requires `session:read`.
+
+- Returns `404 projection_item_not_found` when the item does not exist
+
+### `GET /v1/sessions/:id/projections/:item_id/versions`
+
+List every stored version for one projection item. Requires `session:read`.
+
+- Response shape: `{ "items": [...] }`
+- Returns the committed version history in ascending version order
+
+### `GET /v1/sessions/:id/projections/:item_id/versions/:version`
+
+Fetch one stored projection item version. Requires `session:read`.
+
+- Returns `404 projection_item_version_not_found` when that version does not exist
+
+### `DELETE /v1/sessions/:id/projections/:item_id`
+
+Delete every stored version for one projection item. Requires `session:create`.
+
+- Deletes the entire version history for that `item_id`
+- Individual versions are immutable and cannot be deleted independently
+- Once delete succeeds, the item disappears from latest and version-history reads immediately
+
 ### `POST /v1/sessions/:id/archive`
 
 Archive one session. Requires `session:create`.
@@ -143,6 +193,8 @@ Restore one archived session to active list results. Requires `session:create`.
   mutations — if the session header changed since the caller last observed it,
   the update is rejected with `409` and `current_version`.
 - `tail` replay is ordered by `seq` and continues with live commits after replay.
+- tail/replay defaults to a `composed` view that substitutes the latest
+  projection items for covered seq ranges; `raw` is the explicit opt-out
 - Resume discontinuities are explicit via WebSocket `gap` frames (never silent).
 - Archiving is a visibility flag on the session catalog, not an event deletion path.
 - Default list results include only active sessions; archived sessions require an explicit filter or direct lookup by id.
@@ -175,5 +227,7 @@ Status codes:
 - `403` forbidden by scope/session/tenant policy
 - `404` session not found
 - `409` expected sequence, expected version, or producer conflicts
+- `409` also covers projection item version conflicts and overlapping latest projection items
+- `404` also covers missing projection items and missing projection item versions
 - `429` `event_store_backpressure`
 - `503` owner/routing unavailable, replication quorum unavailable, or routing failure

@@ -12,6 +12,7 @@ defmodule Starcite.Storage.SessionCatalog do
   alias Starcite.Auth.Principal
   alias Starcite.Session
   alias Starcite.Session.Header
+  alias Starcite.Session.Projections
   alias Starcite.Storage.SessionRecord
 
   @progress_batch_size 5_000
@@ -93,6 +94,8 @@ defmodule Starcite.Storage.SessionCatalog do
             creator_type: creator_type,
             metadata: metadata,
             archived_seq: 0,
+            projection_state: Projections.to_map(Projections.new()),
+            projection_version: 0,
             created_at: persisted_at,
             updated_at:
               updated_at |> DateTime.from_naive!("Etc/UTC") |> DateTime.truncate(:microsecond),
@@ -146,8 +149,12 @@ defmodule Starcite.Storage.SessionCatalog do
   def get_session(session_id) when is_binary(session_id) and session_id != "" do
     with {:ok, row} <- get_record(session_id),
          {:ok, header} <- row_to_header(session_id, row),
-         archived_seq when is_integer(archived_seq) and archived_seq >= 0 <- row.archived_seq do
-      {:ok, Session.hydrate(header, archived_seq)}
+         archived_seq when is_integer(archived_seq) and archived_seq >= 0 <- row.archived_seq,
+         projection_version
+         when is_integer(projection_version) and projection_version >= 0 <- row.projection_version,
+         {:ok, session} <-
+           Session.hydrate(header, archived_seq, row.projection_state, projection_version) do
+      {:ok, session}
     else
       {:error, _reason} = error -> error
       _other -> {:error, :session_catalog_unavailable}
@@ -214,6 +221,20 @@ defmodule Starcite.Storage.SessionCatalog do
 
   def get_archive_context(_session_id), do: {:error, :invalid_session_id}
 
+  @spec get_projection_version(String.t()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def get_projection_version(session_id) when is_binary(session_id) and session_id != "" do
+    with {:ok, row} <- get_record(session_id),
+         projection_version
+         when is_integer(projection_version) and projection_version >= 0 <- row.projection_version do
+      {:ok, projection_version}
+    else
+      {:error, _reason} = error -> error
+      _other -> {:error, :session_catalog_unavailable}
+    end
+  end
+
+  def get_projection_version(_session_id), do: {:error, :invalid_session_id}
+
   @spec archive_session(String.t()) :: {:ok, archive_update_result()} | {:error, term()}
   def archive_session(session_id) when is_binary(session_id) and session_id != "" do
     set_archive_state(session_id, true)
@@ -244,6 +265,46 @@ defmodule Starcite.Storage.SessionCatalog do
         end
     end)
   end
+
+  @spec put_projection_state(String.t(), Projections.t(), non_neg_integer()) ::
+          :ok | {:error, term()}
+  def put_projection_state(session_id, %Projections{} = projections, projection_version)
+      when is_binary(session_id) and session_id != "" and is_integer(projection_version) and
+             projection_version >= 0 do
+    projection_state = Projections.to_map(projections)
+
+    case Repo.transaction(fn ->
+           with {:ok, row} <- get_record_for_update(session_id) do
+             current_version = row.projection_version || 0
+
+             cond do
+               projection_version > current_version ->
+                 persist_projection_state_row(row, projection_state, projection_version)
+
+               projection_version == current_version and row.projection_state == projection_state ->
+                 :ok
+
+               projection_version == current_version ->
+                 Repo.rollback(
+                   {:projection_version_conflict, projection_version, current_version}
+                 )
+
+               true ->
+                 Repo.rollback({:stale_projection_version, projection_version, current_version})
+             end
+           else
+             {:error, reason} -> Repo.rollback(reason)
+           end
+         end) do
+      {:ok, :ok} -> :ok
+      {:error, reason} -> {:error, reason}
+    end
+  rescue
+    _ -> {:error, :session_catalog_unavailable}
+  end
+
+  def put_projection_state(_session_id, _projections, _projection_version),
+    do: {:error, :invalid_projection_item}
 
   @spec list_sessions(session_query()) :: {:ok, session_page()} | {:error, term()}
   def list_sessions(
@@ -366,6 +427,24 @@ defmodule Starcite.Storage.SessionCatalog do
   end
 
   defp get_record_for_update(_session_id), do: {:error, :session_catalog_unavailable}
+
+  defp persist_projection_state_row(
+         %SessionRecord{} = row,
+         projection_state,
+         projection_version
+       )
+       when is_map(projection_state) and is_integer(projection_version) and
+              projection_version >= 0 do
+    case Repo.update(
+           Ecto.Changeset.change(row,
+             projection_state: projection_state,
+             projection_version: projection_version
+           )
+         ) do
+      {:ok, %SessionRecord{}} -> :ok
+      {:error, _changeset} -> Repo.rollback(:session_catalog_unavailable)
+    end
+  end
 
   defp guard_expected_version(%SessionRecord{}, nil), do: :ok
 

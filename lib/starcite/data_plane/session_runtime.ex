@@ -13,6 +13,8 @@ defmodule Starcite.DataPlane.SessionRuntime do
   alias Starcite.Observability.Telemetry
   alias Starcite.Routing.SessionRouter
   alias Starcite.Session
+  alias Starcite.Session.Events
+  alias Starcite.Storage.SessionCatalog
 
   @registry Starcite.DataPlane.SessionRuntimeRegistry
   @min_batch_size Application.compile_env(:starcite, :session_log_batch_min_size, 8)
@@ -76,10 +78,11 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
     runtime_session =
       resolved_session
-      |> Session.normalize_epoch()
+      |> Events.normalize_epoch()
       |> apply_routing_epoch()
 
     role = role_for_session(runtime_session.id)
+    mirrored_projection_version = resolve_mirrored_projection_version(runtime_session)
 
     if start_reason == :hydrate do
       :ok = emit_lifecycle(runtime_session, role, "session.hydrating")
@@ -92,7 +95,7 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
     {:ok,
      %{
-       log: SessionLog.new(runtime_session, role, replicate_fun),
+       log: SessionLog.new(runtime_session, role, replicate_fun, mirrored_projection_version),
        idle_timeout_ms: idle_timeout_ms,
        idle_check_interval_ms: idle_check_interval_ms,
        last_activity_mono_ms: now_monotonic_ms(),
@@ -124,13 +127,27 @@ defmodule Starcite.DataPlane.SessionRuntime do
        when is_reference(idle_timer_ref) do
     data = %{data | idle_timer_ref: nil}
 
-    if should_freeze?(data) do
-      :ok = emit_lifecycle(data, "session.freezing")
-      :ok = Telemetry.session_freeze(session_id(data), tenant_id(data), :ok, :idle_timeout)
-      :ok = emit_lifecycle(data, "session.frozen")
-      {:stop, :normal}
-    else
-      process_runtime_batch(rest, schedule_idle_tick(data), actions)
+    case maybe_repair_projection_mirror(data) do
+      {:ok, repaired_data} ->
+        if should_freeze?(repaired_data) do
+          :ok = emit_lifecycle(repaired_data, "session.freezing")
+
+          :ok =
+            Telemetry.session_freeze(
+              session_id(repaired_data),
+              tenant_id(repaired_data),
+              :ok,
+              :idle_timeout
+            )
+
+          :ok = emit_lifecycle(repaired_data, "session.frozen")
+          {:stop, :normal}
+        else
+          process_runtime_batch(rest, schedule_idle_tick(repaired_data), actions)
+        end
+
+      {:error, repaired_data} ->
+        process_runtime_batch(rest, schedule_idle_tick(repaired_data), actions)
     end
   end
 
@@ -172,8 +189,8 @@ defmodule Starcite.DataPlane.SessionRuntime do
 
   defp apply_routing_epoch(%Session{id: session_id} = session)
        when is_binary(session_id) and session_id != "" do
-    normalized_session = Session.normalize_epoch(session)
-    fallback_epoch = Session.normalize_epoch_value(normalized_session.epoch)
+    normalized_session = Events.normalize_epoch(session)
+    fallback_epoch = Events.normalize_epoch_value(normalized_session.epoch)
     routing_epoch = SessionRouter.local_owner_epoch(session_id, fallback_epoch)
     %Session{normalized_session | epoch: routing_epoch}
   end
@@ -200,6 +217,8 @@ defmodule Starcite.DataPlane.SessionRuntime do
   defp activity_message?(:fetch_cursor_snapshot), do: true
   defp activity_message?({:append_event, _input, _expected_seq, _replicas}), do: true
   defp activity_message?({:append_events, _inputs, _expected_seq, _replicas}), do: true
+  defp activity_message?({:put_projection_items, _items, _replicas}), do: true
+  defp activity_message?({:delete_projection_item, _item_id, _replicas}), do: true
   defp activity_message?(_message), do: false
 
   defp should_freeze?(%{
@@ -212,12 +231,24 @@ defmodule Starcite.DataPlane.SessionRuntime do
     session = SessionLog.session(log)
 
     role == :owner and
+      not SessionLog.projection_mirror_dirty?(log) and
       idle_elapsed_ms(last_activity_mono_ms) >= idle_timeout_ms and
       SessionRouter.ensure_local_owner(session.id) == :ok and
       session.last_seq == session.archived_seq
   end
 
   defp should_freeze?(_data), do: false
+
+  defp maybe_repair_projection_mirror(%{log: log} = data) do
+    if SessionLog.role(log) == :owner and SessionLog.projection_mirror_dirty?(log) do
+      case SessionLog.repair_projection_mirror(log) do
+        {:ok, next_log} -> {:ok, %{data | log: next_log}}
+        {:error, _reason, next_log} -> {:error, %{data | log: next_log}}
+      end
+    else
+      {:ok, data}
+    end
+  end
 
   defp emit_lifecycle(%Session{} = session, role, kind) when is_binary(kind) and kind != "" do
     emit_lifecycle(%{session_id: session.id, tenant_id: session.tenant_id, role: role}, kind)
@@ -282,6 +313,22 @@ defmodule Starcite.DataPlane.SessionRuntime do
     end
 
     :ok
+  end
+
+  defp resolve_mirrored_projection_version(%Session{
+         id: session_id,
+         projection_version: projection_version
+       })
+       when is_binary(session_id) and session_id != "" and is_integer(projection_version) and
+              projection_version >= 0 do
+    case SessionCatalog.get_projection_version(session_id) do
+      {:ok, catalog_version}
+      when is_integer(catalog_version) and catalog_version >= 0 ->
+        min(catalog_version, projection_version)
+
+      _other ->
+        0
+    end
   end
 
   defp session_id(%{log: log}), do: SessionLog.session(log).id
